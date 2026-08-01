@@ -36,7 +36,7 @@ function harness(outputs: string[], outcome?: AgentResult["outcome"], errorDetai
     bus,
     pool,
     new GitHubAdapter(undefined, undefined),
-    { async resolvePlanGate() { return { approved: true, feedback: "" }; } },
+    { async resolvePlanGate() { return { approved: true, feedback: "" }; }, async resolveBudgetGate() { return null; } },
     repo
   );
   return { repo, store, controller, events, specs, calls };
@@ -45,16 +45,26 @@ function harness(outputs: string[], outcome?: AgentResult["outcome"], errorDetai
 const CONFIG = RunConfig.parse({});
 const attemptsDir = (repo: string, runId: string) => path.join(repo, ".harness", runId);
 
+/** A well-formed phase-A answer, so phase B is the thing under test. */
+const DOCS = "<prd>\n# PRD\n</prd>\n<conventions>\nuse vitest\n</conventions>";
+const dagJson = (dependsOn: string[] = []) =>
+  "```json\n" +
+  JSON.stringify({
+    epics: [{ id: "epic-e", title: "E", summary: "s" }],
+    tasks: [{ id: "task-a", epicId: "epic-e", title: "A", spec: "s", acceptanceCriteria: ["x"], dependsOn, touchedPaths: [], estimatedSize: "S" }],
+  }) +
+  "\n```";
+
 describe("planning failure diagnostics", () => {
   it("names the reason in the thrown error instead of a bare 'planning failed'", async () => {
-    const { controller } = harness(["I could not complete this task."]);
+    const { controller } = harness([DOCS, "I could not complete this task."]);
     await expect(controller.startRun("do a thing", CONFIG)).rejects.toThrow(
-      /planner attempts rejected — the plan JSON could not be read: no JSON object found/
+      /planner attempts rejected — the breakdown JSON could not be read: no JSON object found/
     );
   });
 
   it("records the reason on the run so `status` and the dashboard can show it", async () => {
-    const { controller, store } = harness(["no json here"]);
+    const { controller, store } = harness([DOCS, "no json here"]);
     await controller.startRun("do a thing", CONFIG).catch(() => undefined);
     const runId = (store.db.prepare("SELECT id FROM runs").get() as { id: string }).id;
     expect(store.getRun(runId)!.state).toBe("FAILED");
@@ -66,90 +76,132 @@ describe("planning failure diagnostics", () => {
   });
 
   it("persists every rejected attempt verbatim for post-mortem", async () => {
-    const { controller, repo, store } = harness(["garbage one", "garbage two", "garbage three"]);
+    const { controller, repo, store } = harness([DOCS, "garbage one", "garbage two", "garbage three"]);
     await controller.startRun("do a thing", CONFIG).catch(() => undefined);
     const runId = (store.db.prepare("SELECT id FROM runs").get() as { id: string }).id;
     const dir = attemptsDir(repo, runId);
+    // Both planning phases leave their raw output behind, named for the phase.
     expect(readdirSync(dir).sort()).toEqual([
-      "planner-attempt-1.txt",
-      "planner-attempt-2.txt",
-      "planner-attempt-3.txt",
+      "planner-attempt-dag-1.txt",
+      "planner-attempt-dag-2.txt",
+      "planner-attempt-dag-3.txt",
+      "planner-attempt-docs-1.txt",
     ]);
-    expect(readFileSync(path.join(dir, "planner-attempt-2.txt"), "utf8")).toBe("garbage two");
+    expect(readFileSync(path.join(dir, "planner-attempt-dag-2.txt"), "utf8")).toBe("garbage two");
   });
 
   it("emits a plan_attempt_failed event per rejection, not just at the end", async () => {
-    const { controller, events } = harness(["nope"]);
+    const { controller, events } = harness([DOCS, "nope"]);
     await controller.startRun("do a thing", CONFIG).catch(() => undefined);
     const failures = events.filter((e) => e.type === "run.plan_attempt_failed");
     expect(failures).toHaveLength(3);
   });
 
   it("tells the planner what was wrong with its previous attempt", async () => {
-    const { controller, specs } = harness(["nope"]);
+    const { controller, specs } = harness([DOCS, "nope"]);
     await controller.startRun("do a thing", CONFIG).catch(() => undefined);
-    expect(specs[0]!.prompt).not.toMatch(/rejected/);
-    expect(specs[1]!.prompt).toMatch(/rejected: the plan JSON could not be read/);
+    expect(specs[1]!.prompt).not.toMatch(/rejected/);
+    expect(specs[2]!.prompt).toMatch(/rejected: the breakdown JSON could not be read/);
   });
 
-  it("does not pay to re-survey the repository on a retry", async () => {
-    const { controller, specs } = harness(["I analysed the repo but forgot the JSON."]);
+  it("surveys the repository exactly once, however many times the DAG is rejected", async () => {
+    const { controller, specs } = harness([DOCS, "I thought about it but forgot the JSON."]);
     await controller.startRun("do a thing", CONFIG).catch(() => undefined);
 
+    // Phase A is the only call that may read anything.
     expect(specs[0]!.tools).toEqual(["Read", "Glob", "Grep"]);
     expect(specs[0]!.maxTurns).toBe(40);
-    for (const retry of specs.slice(1)) {
+    for (const later of specs.slice(1)) {
       // `tools: []` genuinely removes the built-ins; `allowedTools` only auto-approves.
-      expect(retry.tools).toEqual([]);
-      expect(retry.maxTurns).toBeLessThanOrEqual(4); // and no room to wander
-      expect(retry.prompt).toContain("I analysed the repo but forgot the JSON.");
-      expect(retry.prompt).toMatch(/do not read it again/);
+      expect(later.tools).toEqual([]);
+      expect(later.maxTurns).toBeLessThanOrEqual(4); // and no room to wander
     }
+    // A retry repairs the previous JSON rather than re-deriving the decomposition.
+    expect(specs[2]!.prompt).toContain("I thought about it but forgot the JSON.");
+    expect(specs[2]!.prompt).toMatch(/do not read it again/);
   });
 
-  it("falls back to a full survey when the previous attempt returned nothing to repair", async () => {
-    const { controller, specs } = harness([""]);
+  it("restates the PRD when the previous attempt returned nothing to repair", async () => {
+    const { controller, specs } = harness([DOCS, ""]);
     await controller.startRun("do a thing", CONFIG).catch(() => undefined);
-    expect(specs[1]!.tools).toEqual(["Read", "Glob", "Grep"]);
+    // Nothing to hand back, so the retry gets the documents again, not an empty quote.
+    expect(specs[2]!.prompt).toContain("# PRD");
   });
 
   it("surfaces an abnormal session end alongside the parse failure", async () => {
-    const { controller } = harness(["truncated…"], "error", "error_max_turns");
+    const { controller } = harness([DOCS], "error", "error_max_turns");
     await expect(controller.startRun("do a thing", CONFIG)).rejects.toThrow(
       /session also ended abnormally: error_max_turns/
     );
   });
 
   it("reports a DAG violation as such rather than as a parse failure", async () => {
-    const plan = JSON.stringify({
-      prdMarkdown: "# PRD",
-      conventionsMarkdown: "c",
-      epics: [{ id: "epic-e", title: "E", summary: "s" }],
-      tasks: [
-        { id: "task-a", epicId: "epic-e", title: "A", spec: "s", acceptanceCriteria: ["x"], dependsOn: ["ghost"], touchedPaths: [], estimatedSize: "S" },
-      ],
-    });
-    const { controller } = harness([`\`\`\`json\n${plan}\n\`\`\``]);
+    const { controller } = harness([DOCS, dagJson(["ghost"])]);
     await expect(controller.startRun("do a thing", CONFIG)).rejects.toThrow(/not a valid DAG/);
   });
 
-  it("accepts a plan whose PRD embeds json fences — the case that failed in production", async () => {
+  it("accepts a PRD that embeds json fences — the case that failed in production", async () => {
     const prd = ["# PRD", "```json", '{"posts":[]}', "```"].join("\n");
-    const plan = JSON.stringify({
-      prdMarkdown: prd,
-      conventionsMarkdown: "use vitest",
-      epics: [{ id: "epic-e", title: "E", summary: "s" }],
-      tasks: [
-        { id: "task-a", epicId: "epic-e", title: "A", spec: "s", acceptanceCriteria: ["x"], dependsOn: [], touchedPaths: [], estimatedSize: "S" },
-      ],
-    });
-    const { controller, repo, store, calls } = harness([`\`\`\`json\n${plan}\n\`\`\``]);
+    const docs = `<prd>\n${prd}\n</prd>\n<conventions>\nuse vitest\n</conventions>`;
+    const { controller, repo, store, calls } = harness([docs, dagJson()]);
     await controller.startRun("do a thing", CONFIG).catch(() => undefined);
     const runId = (store.db.prepare("SELECT id FROM runs").get() as { id: string }).id;
 
-    expect(calls()).toBe(1); // accepted first time — no retry, no wasted Opus call
+    expect(calls()).toBe(2); // accepted first time in both phases — no wasted Opus call
     expect(store.listTasks(runId).map((t) => t.id)).toEqual(["task-a"]);
+    // Markdown never round-trips through a JSON string, so a fence inside it is inert.
     expect(readFileSync(path.join(attemptsDir(repo, runId), "PRD.md"), "utf8")).toBe(prd);
+  });
+});
+
+describe("planner output truncation", () => {
+  // The failure that killed a real run: a plan too long for one message comes back
+  // as unparseable text, indistinguishable from bad JSON unless it is looked for.
+  const CUT_OFF = "API Error: Claude's response exceeded the 32000 output token maximum.";
+
+  it("splits planning in two so neither half has to carry the other", async () => {
+    const { controller, specs } = harness([DOCS, dagJson()]);
+    await controller.startRun("do a thing", CONFIG).catch(() => undefined);
+    // Phase A emits markdown, not JSON — no PRD is ever escaped into the DAG object.
+    expect(specs[0]!.systemPrompt).toMatch(/<prd>/);
+    expect(specs[0]!.systemPrompt).not.toMatch(/prdMarkdown/);
+    expect(specs[1]!.systemPrompt).toMatch(/"epics"/);
+    expect(specs[1]!.systemPrompt).not.toMatch(/prdMarkdown/);
+  });
+
+  it("names truncation as the reason when the documents are cut off", async () => {
+    const { controller } = harness([CUT_OFF]);
+    await expect(controller.startRun("do a thing", CONFIG)).rejects.toThrow(
+      /ran past the output-token limit and were cut off/
+    );
+  });
+
+  it("names truncation as the reason when the DAG is cut off", async () => {
+    const { controller } = harness([DOCS, CUT_OFF]);
+    await expect(controller.startRun("do a thing", CONFIG)).rejects.toThrow(
+      /ran past the output-token limit and was cut off mid-JSON/
+    );
+  });
+
+  it("asks for a shorter breakdown on retry, not the same one again", async () => {
+    const { controller, specs } = harness([DOCS, CUT_OFF]);
+    await controller.startRun("do a thing", CONFIG).catch(() => undefined);
+    expect(specs[2]!.prompt).toMatch(/Emit the breakdown again, SHORTER/);
+    // The instruction that guarantees a repeat truncation must be absent.
+    expect(specs[2]!.prompt).not.toMatch(/Do not abbreviate/);
+  });
+
+  it("still tells a merely malformed breakdown to re-emit in full", async () => {
+    const { controller, specs } = harness([DOCS, "here is my analysis, no json though"]);
+    await controller.startRun("do a thing", CONFIG).catch(() => undefined);
+    expect(specs[2]!.prompt).toMatch(/Do not abbreviate/);
+    expect(specs[2]!.prompt).not.toMatch(/SHORTER/);
+  });
+
+  it("raises the planner's output ceiling above the default that truncated it", async () => {
+    const { controller, specs } = harness(["nope"]);
+    await controller.startRun("do a thing", CONFIG).catch(() => undefined);
+    expect(specs[0]!.maxOutputTokens).toBeGreaterThan(32_000);
   });
 });
 

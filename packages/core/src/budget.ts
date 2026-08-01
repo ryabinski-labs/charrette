@@ -26,8 +26,15 @@ export function costUsd(model: string, usage: { inputTokens: number; outputToken
   );
 }
 
+/**
+ * Thrown only once the operator has been asked and declined to raise the cap —
+ * reaching a cap on its own opens a budget gate instead (RunController.enforce).
+ */
 export class BudgetExceeded extends Error {
-  constructor(public scope: "run" | "task", public spent: number, public cap: number) {
-    super(`${scope} budget exceeded: $${spent.toFixed(2)} >= $${cap.toFixed(2)}`);
+  constructor(public scope: "run" | "task", public spent: number, public cap: number, public runId?: string) {
+    super(
+      `${scope} budget exceeded: $${spent.toFixed(2)} >= $${cap.toFixed(2)}` +
+        (runId ? ` — run parked. Raise the cap and pick it up with: harness resume ${runId}` : "")
+    );
   }
 }

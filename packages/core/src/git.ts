@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import path from "node:path";
 
@@ -21,9 +22,24 @@ export async function git(cwd: string, args: string[], opts: { serialize?: boole
 export interface WorktreeInfo {
   path: string;
   branch: string;
+  /** False when the worktree already existed (resume) — its deps are already seeded. */
+  created: boolean;
 }
 
 export class WorktreeManager {
+  /**
+   * The integration worktree, memoized per run. The exists-check and the
+   * `worktree add` must act as one unit: with parallel workers two tasks can
+   * finish together, both see the worktree missing, and the second add throws.
+   */
+  private integrationReady = new Map<string, Promise<string>>();
+  /**
+   * Merges are a check-merge-abort *sequence* of git calls; the per-call repo
+   * lock alone would let two concurrent merges interleave (B's merge landing
+   * between A's failed merge and A's abort wedges the worktree on MERGE_HEAD).
+   */
+  private mergeLock: Promise<unknown> = Promise.resolve();
+
   constructor(private repoPath: string) {}
 
   worktreeRoot(): string {
@@ -49,15 +65,17 @@ export class WorktreeManager {
   async ensureWorktree(runId: string, taskId: string): Promise<WorktreeInfo> {
     const branch = this.branchName(runId, taskId);
     const wtPath = path.join(this.worktreeRoot(), runId, taskId);
-    const existing = await git(this.repoPath, ["worktree", "list", "--porcelain"], { serialize: true });
-    if (existing.includes(`worktree ${wtPath}`)) return { path: wtPath, branch };
+    // The filesystem, not `git worktree list` — the list prints canonical paths
+    // (/private/var vs /var on macOS), so the string comparison missed existing
+    // worktrees and the re-add failed on "branch already checked out".
+    if (existsSync(wtPath)) return { path: wtPath, branch, created: false };
     const branchExists = await git(this.repoPath, ["branch", "--list", branch], { serialize: true });
     if (branchExists) {
       await git(this.repoPath, ["worktree", "add", wtPath, branch], { serialize: true });
     } else {
       await git(this.repoPath, ["worktree", "add", "-b", branch, wtPath, this.integrationBranch(runId)], { serialize: true });
     }
-    return { path: wtPath, branch };
+    return { path: wtPath, branch, created: true };
   }
 
   async removeWorktree(runId: string, taskId: string): Promise<void> {
@@ -69,26 +87,48 @@ export class WorktreeManager {
     await git(this.repoPath, ["worktree", "prune"], { serialize: true }).catch(() => undefined);
   }
 
+  /** The integration branch checked out on disk — where merges land and the validator reads. */
+  async ensureIntegrationWorktree(runId: string): Promise<string> {
+    let ready = this.integrationReady.get(runId);
+    if (!ready) {
+      ready = (async () => {
+        const wtPath = path.join(this.worktreeRoot(), runId, "__integration__");
+        // The filesystem, not `git worktree list`: the list prints canonical paths,
+        // and on macOS /var is a symlink to /private/var — the string comparison
+        // missed an existing worktree and the second add failed on it.
+        if (!existsSync(wtPath)) {
+          await git(this.repoPath, ["worktree", "add", wtPath, this.integrationBranch(runId)], { serialize: true });
+        }
+        return wtPath;
+      })();
+      this.integrationReady.set(runId, ready);
+      // A failed add must not poison every later merge with the same rejection.
+      ready.catch(() => this.integrationReady.delete(runId));
+    }
+    return ready;
+  }
+
   /**
    * Continuous integration (PRD §11.1): merge an accepted task branch into the run's
    * integration branch. Returns conflict file list on failure instead of throwing.
+   * One merge sequence at a time (see mergeLock).
    */
   async mergeTaskBranch(runId: string, taskId: string): Promise<{ ok: true; sha: string } | { ok: false; conflicts: string[] }> {
-    const branch = this.branchName(runId, taskId);
-    const integration = this.integrationBranch(runId);
-    const wtPath = path.join(this.worktreeRoot(), runId, "__integration__");
-    const existing = await git(this.repoPath, ["worktree", "list", "--porcelain"], { serialize: true });
-    if (!existing.includes(`worktree ${wtPath}`)) {
-      await git(this.repoPath, ["worktree", "add", wtPath, integration], { serialize: true });
-    }
-    try {
-      await git(wtPath, ["merge", "--no-ff", "--no-edit", branch], { serialize: true });
-      const sha = await git(wtPath, ["rev-parse", "HEAD"], { serialize: true });
-      return { ok: true, sha };
-    } catch {
-      const status = await git(wtPath, ["diff", "--name-only", "--diff-filter=U"], { serialize: true }).catch(() => "");
-      await git(wtPath, ["merge", "--abort"], { serialize: true }).catch(() => undefined);
-      return { ok: false, conflicts: status.split("\n").filter(Boolean) };
-    }
+    const run = async (): Promise<{ ok: true; sha: string } | { ok: false; conflicts: string[] }> => {
+      const branch = this.branchName(runId, taskId);
+      const wtPath = await this.ensureIntegrationWorktree(runId);
+      try {
+        await git(wtPath, ["merge", "--no-ff", "--no-edit", branch], { serialize: true });
+        const sha = await git(wtPath, ["rev-parse", "HEAD"], { serialize: true });
+        return { ok: true, sha };
+      } catch {
+        const status = await git(wtPath, ["diff", "--name-only", "--diff-filter=U"], { serialize: true }).catch(() => "");
+        await git(wtPath, ["merge", "--abort"], { serialize: true }).catch(() => undefined);
+        return { ok: false, conflicts: status.split("\n").filter(Boolean) };
+      }
+    };
+    const next = this.mergeLock.then(run, run);
+    this.mergeLock = next.catch(() => undefined);
+    return next;
   }
 }

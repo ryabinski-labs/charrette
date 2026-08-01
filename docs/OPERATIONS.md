@@ -38,8 +38,12 @@ what you typed
    ↓     deterministic checks   your test/lint commands — cheap, run before QA
    ↓     QA agent (Sonnet)      adversarial review against acceptance criteria
    ↓       ↳ FAIL → back to the worker with a must-fix list (max 3 iterations)
+   ↓       ↳ at the cap → GATE — the harness asks YOU, and your answer restarts
+   ↓                      the worker with fresh iterations (or parks the task)
    ↓     merge into harness/<runId>/main      ← this is what unblocks dependents
-   ↓     open a PR for the task branch
+   ↓  validator agent (Sonnet)  judges the merged whole against your original
+   ↓                            intent — the last step before any PR exists
+   ↓  open one PR per merged task
    ↓  GATE 2 — you merge the PRs on GitHub
 ```
 
@@ -54,6 +58,42 @@ Three rules that shape everything:
    accepted — so a worker building on top of another task actually sees that code
    in its worktree.
 
+The third rule has a consequence worth knowing before your first run: a task the
+harness cannot finish parks as `NEEDS_HUMAN`, and everything downstream of it can
+then never become ready. Those tasks are cancelled unattempted, and the run ends
+with fewer PRs than the plan had tasks — or with none at all. That is the design
+working, not a fault, but it means **`PR_REVIEW` is where the harness stops, not
+proof that it succeeded.** Read what it produced, which the closing line and
+`harness status` both spell out.
+
+Before a task parks, though, the harness asks you first. Hitting a cap opens a
+**task-escalation gate** — in the terminal, or as an amber panel (and a desktop
+notification) on the dashboard — showing what failed and why. One sentence from
+you ("the tests need DynamoDB running — `podman compose up -d` first", "skip
+that flaky check", "you misread the spec: do X") restarts the worker with your
+words and a fresh iteration budget. Leaving it blank, or clicking *Park it*,
+parks the task exactly as before. Most cap hits are an environment or intent
+problem only you can resolve; the gate is how you resolve it without losing the
+run.
+
+Two more things happen between the last task and `PR_REVIEW`. First, a
+**validator agent** reads the integration branch whole and judges it against
+your original assignment — did the sum of the merged tasks deliver what you
+asked for, not merely pass their own acceptance criteria? Its verdict (and each
+gap it finds) goes into the closing report and the run's events. Second, only
+after that verdict is the pull request opened — by default **one rollup PR for
+the whole run**, from the integration branch, listing every merged task (one
+`--no-ff` merge commit each) with the validator's verdict in the body, so a
+reviewer never sees a PR the harness has not finished judging. A FAIL verdict
+does not withhold the PR — the harness never merges, and human review is
+exactly where the gap list belongs — but it is printed first, above it.
+
+Why a rollup and not one PR per task: task branches are cut from the
+integration branch, so each carries every merge that landed before it — by the
+last task, its "own" PR is nearly the whole run's diff again. Set
+`"prMode": "per-task"` in `harness.config.json` if you want the old behaviour
+anyway; `harness regroup` converts an already-published per-task run.
+
 State lives in an event-sourced SQLite database. Every run is resumable; completed
 tasks never re-execute and are never re-paid for.
 
@@ -67,7 +107,8 @@ tasks never re-execute and are never re-paid for.
 | **pnpm ≥ 9** | workspace monorepo | `pnpm -v` |
 | **git ≥ 2.30** | worktrees | `git --version` |
 | Anthropic credentials | the agents | see [§4](#4-authentication) |
-| GitHub token *(optional)* | issues + PRs | see [§4](#4-authentication) |
+| `gh` *(or a GitHub token)* | issues + PRs | `gh auth status`, see [§4](#4-authentication) |
+| `podman`, `adb`/`emulator`, `aws` *(optional)* | offered to worker + QA agents when present | the `tools` line in the run banner |
 
 Node 22 or 23 will print `ExperimentalWarning: SQLite is an experimental feature`.
 That is expected and harmless.
@@ -158,13 +199,22 @@ mid-task. This is recoverable — `harness resume <runId>` continues from the la
 completed task, and nothing already finished is re-executed or re-paid — but
 expect it on large runs and plan to resume.
 
-### GitHub (optional but recommended)
+### GitHub (recommended)
 
-Without a token the harness runs **local-only**: it still plans, builds, QAs, and
+Credentials are resolved in this order, and the run banner tells you which one
+won:
+
+1. `GITHUB_TOKEN` + `HARNESS_GITHUB_REPO` from the environment.
+2. **The `gh` CLI**, if it is authenticated (`gh auth status`). The token comes
+   from `gh auth token` and the `owner/repo` slug from `gh repo view`, run in the
+   target repo. Nothing to export — if you already use `gh`, GitHub mode is on.
+
+With neither, the harness runs **local-only**: it still plans, builds, QAs, and
 merges into the local integration branch, but files no issues and opens no PRs.
+The banner says `github  off — …` when that happens, with the reason.
 
-To enable GitHub mode, create a **fine-grained** personal access token scoped to
-the single target repository with these repository permissions:
+To use a token instead of `gh`, create a **fine-grained** personal access token
+scoped to the single target repository with these repository permissions:
 
 | Permission | Access | Used for |
 |---|---|---|
@@ -180,8 +230,9 @@ export GITHUB_TOKEN=github_pat_...
 export HARNESS_GITHUB_REPO=owner/repo      # must match the target repo's origin
 ```
 
-> The token is read from the environment by the CLI process only. It is never
-> placed in an agent's context, prompt, or tool result.
+> However it is obtained, the token lives in the CLI process only. It is never
+> placed in an agent's context, prompt, or tool result. Note that a worker with
+> Bash could run `gh auth token` itself — see [§14](#14-operating-safely).
 
 ---
 
@@ -293,7 +344,11 @@ What you will see:
    rejection feedback** and it replans.
 5. Tasks execute serially, streaming agent logs, tool calls, and cost.
 6. Each accepted task merges into `harness/<runId>/main` and gets a PR.
-7. The run ends in `PR_REVIEW`. You review and merge on GitHub.
+7. The run ends in `PR_REVIEW` and prints what it actually produced — every pull
+   request as a URL, plus anything parked or cancelled. `PR_REVIEW` means *the
+   harness is finished*, not *it succeeded*: a run whose early tasks all park
+   cancels everything downstream and ends there having opened nothing. The
+   closing line distinguishes the two; read it before going to GitHub.
 
 Local-only first run (no GitHub, no dashboard, no conversation) is a good smoke
 test:
@@ -323,7 +378,8 @@ pass it and the harness takes it as final.
 | `--task-cap <usd>` | `10` | hard ceiling per task |
 | `--check <cmd...>` | auto-detected | deterministic commands run in the worktree before QA; repeatable |
 | `--no-checks` | — | run none, even if detected |
-| `--dashboard` / `--no-dashboard` | **on** | serve the monitor on `127.0.0.1:4777` and resolve Gate 1 there, or fall back to the terminal |
+| `--dashboard` / `--no-dashboard` | **on** | serve the monitor on `127.0.0.1` and resolve Gate 1 there, or fall back to the terminal |
+| `--port <n>` | first free port from `4777` | pin the dashboard port; a pinned port that is busy is an error rather than a silent move |
 | `--chat` / `--no-chat` | on when no assignment is given | interview you with an intake agent before planning |
 
 Exit leaves the run in a resumable state whatever happens.
@@ -375,10 +431,11 @@ harness init --force    # overwrite an existing one
 Materializes the defaults into a committable config file so the whole team gets
 them. Refuses to clobber an existing file without `--force`.
 
-### `harness resume <runId>`
+### `harness resume [runId]`
 
 ```bash
-harness resume 3f9a2c11
+harness resume            # the newest run with something left to do
+harness resume 3f9a2c11   # a specific one
 ```
 
 Prunes stale worktrees, reloads state from SQLite, and drives the run forward from
@@ -386,14 +443,49 @@ exactly where it stopped. Tasks already `MERGED` are skipped, and nothing alread
 paid for is paid for again. Takes the same `--dashboard` / `--no-dashboard` flags
 as `run`.
 
+A *finished* run still resumes when it has recoverable work. Each `NEEDS_HUMAN`
+task opens its escalation gate now — your answer revives it with a fresh
+iteration budget and puts its "unreachable" `CANCELLED` dependents back in the
+queue; declining (or an empty answer) leaves it parked. A `CANCELLED` task whose
+blockers have **since merged** (revived in an earlier session, say) is requeued
+without any gate — the work it was waiting for exists now. Merged tasks whose
+pull requests never opened get them retried, and a run from before base-branch
+capture has its base branch repaired from the repo's current branch first. A
+reopened run re-runs the intent validator only if something new merged since the
+last verdict. Fix the environment before you resume — start the service the
+checks need, correct the checks in `harness.config.json` — or your answer buys
+iterations that fail the same way.
+
+### `harness regroup [runId]`
+
+```bash
+harness regroup           # the newest run with pull requests
+harness regroup 3f9a2c11  # a specific one
+```
+
+Replaces a run's per-task pull requests with the single rollup PR. The rollup
+opens first, then each superseded PR is closed with a comment pointing at it —
+there is never a moment with no PR open. PRs a human already merged or closed
+are left exactly as they are, and GitHub shrinks the rollup's diff to whatever
+the base branch is still missing. Also flips the run's `prMode` to `single`, so
+later resumes publish the same way. No agents, no tokens.
+
 ### `harness status`
 
 ```bash
 harness status
+harness status --all      # finished runs too
 ```
 
-Prints every open run with its state, spend, and per-task states, QA iteration
-counts, and PR numbers. Read-only, free, no agents spawned.
+Prints each run with its state, spend, per-task states, QA iteration counts, and
+every pull request it opened as a full clickable URL. Read-only, free, no agents
+spawned.
+
+Open runs are shown by default — and if none are open, the most recent finished
+run is, because a run that has just ended is exactly when you need to know what
+it produced. `--all` prints the lot. When a run reached `INTEGRATING` or
+`PR_REVIEW` without opening a single PR, the output says so in those words rather
+than omitting the line and leaving you to conclude the list failed to print.
 
 ---
 
@@ -449,8 +541,11 @@ Run configuration is a zod-validated `RunConfig`
 | `budget.taskCapUsd` | `10` | `--task-cap` | ✅ | |
 | `skillsDirs` | `~/.claude/skills`, `~/skills` | — | ✅ | |
 | `deterministicChecks` | auto-detected | `--check`, `--no-checks` | ✅ | shell strings, run via `sh -c` in the worktree |
-| `githubRepo` | unset | — | ✅ | `HARNESS_GITHUB_REPO` takes precedence when set |
+| `githubRepo` | `gh repo view` in the target repo | — | ✅ | `HARNESS_GITHUB_REPO` takes precedence when set |
+| `prMode` | `single` | — | ✅ | `single` = one rollup PR for the whole run; `per-task` = one PR per task (they overlap — task branches stack on the integration branch) |
+| `externalTools` | everything detected on PATH | — | ✅ | allowlist of CLIs named to worker/QA agents (`gh`, `aws`, `podman`, `docker`, `adb`, `emulator`, `xcrun`, `maestro`); `[]` advertises none |
 | *(not in RunConfig)* `dashboard` | `true` | `--dashboard`, `--no-dashboard` | ✅ | CLI-only concern |
+| *(not in RunConfig)* `dashboardPort` | first free port from `4777` | `--port` | ✅ | pin it per repo when you want a stable bookmark |
 | *(not in RunConfig)* `chat` | on when no assignment is given | `--chat`, `--no-chat` | ✅ | set `false` to make a repo always plan directly |
 
 For anything beyond this — a custom gate handler, embedding the harness in
@@ -484,8 +579,8 @@ for CI of the harness itself, not for real work.
 |---|---|---|
 | `CLAUDE_CODE_OAUTH_TOKEN` | one of these | Claude Pro/Max subscription credential |
 | `ANTHROPIC_API_KEY` | one of these | Anthropic API credential; **wins if both are set** |
-| `GITHUB_TOKEN` | no | enables issues + PRs |
-| `HARNESS_GITHUB_REPO` | with token | `owner/repo` |
+| `GITHUB_TOKEN` | no | enables issues + PRs; falls back to `gh auth token` |
+| `HARNESS_GITHUB_REPO` | no | `owner/repo`; falls back to `gh repo view` |
 
 ---
 
@@ -497,7 +592,8 @@ Inside the **target repo**:
 |---|---|
 | `.harness/harness.db` | event log + materialized run/task/usage state (SQLite, WAL) |
 | `.harness/<runId>/BRIEF.md` | the brief the intake conversation produced — what the planner was actually given |
-| `.harness/<runId>/planner-attempt-N.txt` | the raw output of any rejected planning attempt, kept verbatim for post-mortem |
+| `.harness/<runId>/planner-attempt-docs-N.txt` | raw output of planning phase A (PRD + conventions), kept verbatim for post-mortem |
+| `.harness/<runId>/planner-attempt-dag-N.txt` | raw output of planning phase B (the task DAG), same |
 | `.harness/<runId>/PRD.md` | the PRD the planner produced — the thing you approve |
 | `.harness/<runId>/CONVENTIONS.md` | conventions injected into every worker's system prompt |
 | `.harness/<runId>/plan.json` | full plan incl. task DAG; SHA-256 of this is the approved `planHash` |
@@ -508,6 +604,13 @@ Git objects in the **target repo**:
 |---|---|
 | `harness/<runId>/main` | integration branch, cut from `HEAD` at run start; every accepted task merges here |
 | `harness/<runId>/<taskId>` | one branch per task, cut from the integration branch *at dispatch time* |
+
+Both are pushed to `origin` when GitHub is configured; nothing else ever is
+(SEC-5). Each component PR is opened **from** its task branch **into the branch
+the run started from** — not into the integration branch, which already contains
+the task by the time the PR is opened and would leave the PR empty. The branch is
+recorded as `baseBranch` in the run's config, so a resume targets the same one
+even if you have since checked out something else.
 
 Worktrees, in the **sibling directory** `<repo>-wt/`:
 
@@ -532,8 +635,12 @@ record of what has been paid for and completed.
 
 ## 10. The dashboard
 
-On by default; `--no-dashboard` runs headless. It binds **127.0.0.1 only** on
-port `4777`.
+On by default; `--no-dashboard` runs headless. It binds **127.0.0.1 only**, on
+the first free port from `4777` upward — one harness per repo means several
+dashboards at once, so a busy port moves to the next one rather than killing the
+run. The banner prints the port that was actually taken. `--port <n>` (or
+`dashboardPort` in the config) pins it; a pinned port that is busy is an error,
+because quietly moving would send you to another run's dashboard.
 
 - **Auth:** a fresh 128-bit token per process, delivered in the URL *fragment*.
   Fragments are never sent to the server or logged in proxies; the page reads it
@@ -552,6 +659,11 @@ The layout is built around one question — *what is happening right now, and do
 need to step in?* — so the activity feed owns most of the window and everything
 else sits in a fixed sidebar.
 
+- **Title** — the repository folder the agents are working in, e.g. `harness
+  billing-app`, and the same name in the browser tab (`billing-app · Harness`).
+  One harness per repo means several dashboards on adjacent ports at once, and
+  the folder is the only part of a run you can say out loud. The run id stays in
+  the state pill beside it because that is the handle `harness resume` takes.
 - **Activity** — the event stream, capped at 2000 lines. Every line is attributed
   to the agent that caused it and says what actually happened: `worker  read
   src/server.ts`, `planner  grep onRequest|preHandler in src`, `qa  $ pnpm test`,
@@ -562,10 +674,29 @@ else sits in a fixed sidebar.
   you back. GitHub lines link to the issue or PR.
 - **Now** — one card per running agent: role, model, elapsed time, turn count,
   and the last thing it did. This is the panel to watch when a task feels stuck.
-- **Tasks** — a card per task with its state, dependencies, QA iteration count,
-  injected skills, and linked issue/PR numbers. Before the plan exists the panel
+- **Tasks** — grouped into **Needs you**, **In progress**, **Done**, **Queued**
+  and **Cancelled**, in that order, each with a count and each collapsible; the
+  bar under the heading shows done / in flight / blocked as a share of the plan.
+  A flat list of thirty task cards answers no question you actually have; the
+  groups answer *what landed*, *what is stuck on me*, and *how far in are we*.
+  Done cards carry a green rule and a check, and **Done** counts `ACCEPTED`
+  alongside `MERGED` — accepted work has passed QA and is waiting only on the
+  integrator. Each card opens to the spec and the acceptance criteria QA signed
+  off against ("what it did"), which is the honest answer to what a task
+  delivered; what you open stays open across the background refresh. A card also
+  carries its state, dependencies, QA iteration count, injected skills, and
+  linked issue/PR numbers. Before the plan exists the panel
   explains which phase you are in rather than sitting empty. Issue and PR numbers
-  link straight to GitHub when `HARNESS_GITHUB_REPO` (or `githubRepo`) is set.
+  link straight to GitHub: the slug comes from `HARNESS_GITHUB_REPO`, then the
+  run's `githubRepo`, and failing both from the repo's `origin` remote — so a run
+  started before the slug was recorded still links its issues instead of printing
+  a dead `issue #28`. Only `github.com` remotes are linked; a GitHub Enterprise
+  remote gets plain text, because a link to the wrong host is worse than none.
+- **Pull requests** — every PR the run has opened, as a link, with the task title
+  beside it. The one thing you want at the end of a run is the list of things to
+  review, and hunting for it across thirty task cards is not that. When there are
+  none it says so — and once the run is over, "none" is the answer, not a
+  loading state.
 - **Run** — repo path, integration branch, elapsed, resolved checks and caps, and
   the full assignment the planner received (the intake brief, if you used one).
 - **Cost meter** — spend against the run cap, with a bar that turns amber past
@@ -574,6 +705,49 @@ else sits in a fixed sidebar.
   wonder why a long planner run reads `$0.00`.
 - **Gate 1** — when the plan needs approval it takes over the full width above
   everything else, because it is blocking the run.
+- **Budget cap reached** — the same treatment when a cap trips ([§12](#12-budget-control)).
+  The suggested new cap is pre-filled, and a value you are typing survives the
+  background refresh. An agent is paused waiting on this panel, so a rejected cap
+  reports the error rather than quietly leaving the run stuck.
+- **A task hit its cap** — the task-escalation gate, same amber treatment. One
+  card per waiting task: what failed (the QA reasons or the failing check
+  output), the branch its work is on, and a textarea. *Send & continue* hands
+  your words to the worker with a fresh iteration budget; *Park it for later*
+  parks the task as `NEEDS_HUMAN` exactly as an unanswered gate would. The list
+  only re-renders when the set of waiting tasks changes, so a half-typed answer
+  survives the background refresh. With notifications on, each gate fires a
+  desktop notification — this is precisely the "needs you" moment the Notify
+  button exists for. An empty answer is rejected rather than treated as
+  guidance: a misclick must not spend three more iterations on no information.
+
+### Being told when it is over
+
+A run takes tens of minutes. You are meant to walk away from it, so the harness
+tells you when it stops needing to be left alone. Two channels, because neither
+one alone is reliable:
+
+- **The terminal.** The CLI rings the bell and raises a desktop notification when
+  a run finishes or dies — `osascript` on macOS, `notify-send` on Linux. Both are
+  best-effort and neither is awaited: a machine with no notifier must never fail a
+  run that already succeeded. This channel always fires, including over SSH (the
+  bell) and after the dashboard has already shut down.
+- **The dashboard.** Press **Notify me** in the header to grant permission, and
+  the page raises a browser notification on the six states worth interrupting you
+  for: `PR_REVIEW` (done), `FAILED`, `ABORTED`, `PAUSED`, `BUDGET_HOLD` and
+  `PLAN_REVIEW`. The last three are the ones that pay for themselves — the run has
+  stopped and will not move again until you act. Permission is requested from your
+  click, never on page load, and the choice is remembered.
+
+  The tab title changes too (`billing-app · done`, `billing-app · waiting`), so a
+  background tab is readable without notifications at all. Only transitions that
+  happen while the page is open count: the stream replays a run's whole history on
+  connect, and without that rule the page would announce a gate you resolved an
+  hour ago, again on every reconnect.
+
+The CLI stops the dashboard the moment a run ends, well inside the 100 ms window
+the event stream normally coalesces on, so terminal transitions are flushed to the
+browser synchronously rather than on the timer. Without that the one event you
+most wanted was the one guaranteed to be lost.
 
 The page is a single self-contained HTML file with no build step
 ([`packages/dashboard/src/page.ts`](../packages/dashboard/src/page.ts)). All
@@ -587,9 +761,6 @@ GATE=1 node packages/dashboard/preview.mjs   # …with the plan gate open
 ```
 
 Sharing the URL shares the token. Treat it as a password for the run.
-
-To change the port today, construct `new Dashboard(store, bus, { port })` in
-`apps/cli/src/main.ts`; there is no flag yet.
 
 ---
 
@@ -635,17 +806,54 @@ claude mcp add harness-skills -- node ~/Documents/projects/harness/packages/skil
 Every agent turn is priced from the SDK's reported token usage — input, output,
 cache reads at 0.1×, cache writes at 1.25× — and appended to a ledger in SQLite.
 
-- The cap is checked **before each turn and on every streamed message**. When the
-  ceiling is hit, the session's `AbortController` fires immediately; you do not
-  pay for the rest of the turn.
-- Run cap exceeded → the run stops in a resumable state. Raise the cap and
-  `resume`.
-- Task cap exceeded → that task stops; other tasks are unaffected.
+- The cap is checked **before each turn and on every streamed message**.
+- **A cap is a checkpoint, not a wall.** Reaching one opens a *budget gate*: the
+  agent that tripped it is paused mid-session and you are asked whether to raise
+  the cap. Raise it and that same agent carries on from where it stopped — the
+  half-finished task is not thrown away. Decline and the run parks.
 - **Unknown model IDs are priced at the most expensive tier.** The estimate is
   never below reality.
 
 `harness status` prints spend per run at any time; the dashboard meter shows it
 live against the cap.
+
+### The budget gate
+
+In the terminal:
+
+```
+===== BUDGET =====
+The run cap of $8.00 was reached: $8.50 spent.
+The agent is paused, not cancelled — raising the cap continues it.
+New run cap in USD? [enter = $16.50 / s = stop and park the run]
+```
+
+On the dashboard the same choice appears as an amber panel above the board, with
+the suggested cap pre-filled.
+
+- **Enter / "Raise cap & continue"** — the new cap is written to the run's config
+  in SQLite, so a later `resume` runs under the cap you agreed to rather than
+  tripping on the old one immediately.
+- **A cap at or below what is already spent is refused**, in the terminal and over
+  the API. It would trip again on the very next check.
+- **"s" / "Stop & park the run"** — the run moves to `BUDGET_HOLD` and the process
+  exits with `run parked. Raise the cap and pick it up with: harness resume <id>`.
+  Nothing is lost: committed worker output stays on its branch.
+- Resuming from `BUDGET_HOLD` under the *same* cap simply re-opens the gate, so
+  you get asked again rather than failing.
+- A task cap trips the same way and names the task; the run total is shown too, so
+  you can tell "this one task is expensive" from "the whole run is".
+
+Both gates are the operator's decision, and the run blocks until you answer. For
+an unattended run, set caps you are willing to have the run stop at, and check on
+it — there is no auto-raise.
+
+One caveat on "paused, not cancelled": the harness stops reading from the agent's
+stream while it waits for you, but it cannot promise the SDK session survives an
+arbitrarily long wait. Answer within a few minutes and the agent continues; leave
+it overnight and the session may die, in which case the worker is respawned
+against its own committed git history — the same recovery path as any crash, so
+work is still not lost.
 
 Sizing guidance, from the PRD's pre-benchmark model — **verify these against your
 own first runs before trusting them**:
@@ -679,7 +887,9 @@ harness resume <runId>
 | Task in `NEEDS_HUMAN`, reason `worker crash cap` | 3 sessions died | inspect the branch — partial work is committed and preserved |
 | Tasks `CANCELLED`, reason `unreachable` | their dependencies parked, so they can never become ready | expected fallout; fix the blocking task and start a new run |
 | Run `FAILED` at planning | planner produced invalid JSON/DAG 3× | the assignment is probably ambiguous — rewrite it more concretely |
-| `BudgetExceeded` | cap hit | raise the cap, `resume` |
+| Run `FAILED` at planning, reason `cut off mid-JSON` | the plan was longer than one message allows, 3× | the assignment covers too much — split it, or name a narrower scope |
+| Run in `BUDGET_HOLD` | a cap was reached and you declined to raise it | `harness resume <runId>` re-opens the gate; raise it there |
+| `BudgetExceeded` | cap reached and declined | raise the cap, `resume` |
 
 Rejecting at Gate 1 is not a failure: your feedback text goes straight back into
 the planner's next attempt, and it replans. Rejecting is much cheaper than
@@ -702,6 +912,25 @@ honest posture is:
   it — which, without a sandbox, is your user account.
 - Prefer a fine-grained GitHub token scoped to one repository. If it leaks, one
   repo is exposed, not your account.
+
+**Workers inherit your PATH, and therefore your CLIs.** `gh`, `aws`, `podman`,
+`adb`, `emulator`, `xcrun` and `maestro` are detected at run start and named in
+the worker and QA system prompts, each with the rule that governs it — `gh` is
+read-only and must never open a PR; `aws` is read-only unless the task names the
+resource. The banner lists what was offered.
+
+This is a prompt-level rule, not a sandbox. A worker with Bash could always have
+reached these binaries; telling it they exist makes it *use* them, which is the
+point for QA (real containers, a booted emulator) and the risk for anything
+holding live credentials. Two consequences worth internalising:
+
+- An agent that can run `aws` can, in principle, touch real infrastructure. Set
+  `"externalTools"` in `harness.config.json` to an allowlist — e.g.
+  `["gh", "podman"]` — for repos that should never see your cloud credentials,
+  or `[]` to advertise nothing.
+- An agent that can run `gh auth token` can read your GitHub token. Secret
+  isolation covers the harness's own plumbing, not what a shell command can
+  fetch for itself. This was true before the toolbelt existed.
 
 What *is* enforced today:
 
@@ -727,6 +956,24 @@ Full threat model: PRD §12.
 
 ## 15. Troubleshooting
 
+**Every task parks with `iteration cap hit on deterministic checks`**
+Almost always the checks cannot pass in a *fresh worktree*, whatever the workers
+do. The three ways this has actually happened: the test suite needs a service
+that is not running (`podman compose up -d` first); the checks point at a
+package the run's tasks never touch (checks ran `web/` while the work was in
+`mobile/`) and that package has no `node_modules` in a fresh worktree; or the
+suite was already red on the base branch before the run started. Verify with the
+exact configured command in a clean worktree of the base branch — not in your
+main checkout, which has state a worktree does not inherit. When the escalation
+gate asks, the fix is one answer: say what to start or skip, and the run
+continues.
+
+**The run is sitting still and nothing is spending**
+Look for an amber panel: a gate is open and an agent is paused on your answer —
+plan approval, a budget cap, or a task at its iteration cap. A gate never times
+out; unanswered, it waits indefinitely. In a terminal run the same question is
+sitting on stdin.
+
 **`harness: command not found`**
 The symlink target directory is not on your PATH. See [§3](#3-install) — with the
 default `pnpm link-cli` location, add `export PATH="$HOME/.local/bin:$PATH"` to
@@ -735,17 +982,106 @@ your shell profile.
 **`... is not inside a git repository`**
 You are outside the target repo. `cd` into it, or pass `--repo <path>`.
 
-**`3 planner attempts rejected — …`**
-The message names which of the three failure modes happened — the JSON could not
-be read, the plan did not match the required shape, or the plan was not a valid
-DAG — and points at `.harness/<runId>/planner-attempt-N.txt`, which holds each
-rejected attempt verbatim. Read attempt 1 first: if the analysis looks right and
-only the output was malformed, the assignment is fine and it is worth re-running.
+**`N planner attempts rejected — …`**
+Planning runs in two phases, and the message says which one failed.
 
-Only the first attempt surveys the repository. Retries are given the previous
-output with no tools and a 4-turn budget, because a rejected plan is nearly always
-a formatting failure rather than a thinking failure — re-surveying three times is
-what once turned a single failed planning phase into $3.34.
+*Phase A* surveys the repository and writes the PRD and the conventions document
+as plain markdown between `<prd>` and `<conventions>` tags. Two attempts; raw
+output in `.harness/<runId>/planner-attempt-docs-N.txt`.
+
+*Phase B* turns that prose into the epic/task DAG as JSON, with no tools at all —
+the survey already happened and its output is quoted back. Three attempts; raw
+output in `.harness/<runId>/planner-attempt-dag-N.txt`. The message names which of
+the three failure modes happened: the JSON could not be read, it did not match the
+required shape, or it was not a valid DAG.
+
+Read attempt 1 first. If the analysis looks right and only the output was
+malformed, the assignment is fine and it is worth re-running. Only phase A ever
+surveys the repository; phase B retries repair the previous JSON with a 4-turn
+budget, because a rejected DAG is nearly always a formatting failure rather than a
+thinking failure — re-deriving the decomposition three times is what once turned a
+single failed planning phase into $3.34.
+
+**`ran past the output-token limit and was cut off`**
+A message that hits the output ceiling comes back as unparseable text, which looks
+exactly like bad JSON unless you check for it.
+
+The split above is the fix. A PRD, a conventions doc and every task spec
+JSON-escaped into one object does not fit in one message for any real repository —
+and escaping thousands of words of markdown into a JSON string is itself most of
+the cost. Emitted separately, each half fits comfortably.
+
+Do not count on raising the ceiling instead. `CLAUDE_CODE_MAX_OUTPUT_TOKENS` is
+requested at 64k, but the SDK clamps it against a per-model table matched by
+substring, and a model the installed SDK predates falls through to **32k** no
+matter what you ask for. Check with:
+
+```bash
+node -e 'console.log(require("@anthropic-ai/claude-agent-sdk/package.json").version)'
+```
+
+If a phase still truncates on all its attempts, the assignment is too broad: name
+a narrower scope, or split it across runs. "Review everything and fix all the
+issues" is the shape that does this.
+
+**`No commits between harness/<runId>/main and harness/<runId>/<taskId>`**
+Fixed — but if you see it, you are on a build from before component PRs were
+based on the run's start branch. The integrator merges each accepted task into the
+integration branch *and then* opens its PR, so a PR based on the integration
+branch has no commits of its own and GitHub rejects it with a 422. Rebuild
+(`pnpm -r build`) and start a fresh run; a run already in flight keeps the old
+behaviour.
+
+A genuinely empty task branch — a task that produced no diff — is no longer an
+error either. It is reported on the activity log as *"no commits that `<base>` does
+not already have"* and the run carries on.
+
+**A PR failed to open, but the task says `MERGED`**
+That is intended. The merge is the work; the PR is how you see it. A GitHub
+outage, an expired token or a rejected push no longer unwinds an accepted, merged
+task — the failure is logged as *"merged locally, but the pull request could not
+be opened"* and the run continues. The commits are on `harness/<runId>/<taskId>`
+and in `harness/<runId>/main`; open the PR by hand, or re-run once the cause is
+fixed and the idempotency check will find the branch rather than duplicating it.
+
+**`issue #28` on a task card is plain text, not a link**
+The dashboard could not work out which repository the number belongs to. It tries
+`HARNESS_GITHUB_REPO`, then the run's stored `githubRepo`, then the `origin`
+remote — so this now means the repo has no `origin`, or `origin` is not on
+`github.com` (a GitHub Enterprise remote is deliberately not linked, because a
+link to the wrong host is worse than no link). Set `HARNESS_GITHUB_REPO=owner/repo`
+to force it. Note the issue itself is fine either way; only the link is missing.
+
+**The run ended in `PR_REVIEW` but there are no pull requests**
+`PR_REVIEW` means the harness has stopped, not that it succeeded. If the closing
+line reads `no pull requests opened`, nothing was pushed and there is nothing on
+GitHub to look for. The usual cause is a foundation task parking: everything that
+depends on it, directly or through another task, becomes unreachable and is
+cancelled without being attempted. The closing line names each parked task, why
+it stopped, its issue, the branch its work is on, and how many tasks were queued
+behind it; `harness status` prints the same after the fact. Two earlier builds
+printed `PRs opened; human review on GitHub` unconditionally here — that message
+was wrong, not a sign that the PRs went missing.
+
+**`harness resume` says there is nothing to resume**
+The run is already in a terminal state (`PR_REVIEW`, `FAILED`, `ABORTED`) and no
+state machine will move it again. Resume is for a run interrupted mid-flight. A
+parked task's work is committed on its own `harness/<runId>/<taskId>` branch —
+take it forward by hand, or start a fresh run now that you know what stalled.
+
+**A task is `NEEDS_HUMAN` and the card does not say why**
+It should: the reason is written to the task when it parks, and the dashboard
+falls back to the transition event for runs recorded before that was stored. If
+it is still blank, the activity feed has the QA verdicts and the check output —
+filter to *state* to find the transition, then read backwards from it.
+
+**The run finished and nothing told me**
+Check the header button reads **Notifying**, not *Notify me* — permission is only
+requested when you click it, and browsers scope the grant per port, so a dashboard
+that moved from `4777` to `4778` needs the grant again. The terminal is the
+fallback that always fires; if even the bell is silent, your terminal has the
+audible bell turned off. `notify-send` on Linux needs a notification daemon
+running, which a bare SSH session does not have.
 
 **The intake agent asks too many questions, or the wrong ones**
 Give it more to work with: a two-sentence seed with the constraint you care about
@@ -779,6 +1115,12 @@ binaries for current Node and was removed deliberately.
 **`tsc: command not found` during build**
 Run `pnpm install` at the repo root, not inside a package.
 
+**`listen EADDRINUSE: address already in use 127.0.0.1:4777`**
+Fixed — the dashboard now takes the next free port. If you still see it, you
+pinned a busy port with `--port`; drop the flag or choose another. Note that this
+error used to kill the run *before* the intake prompt appeared, which looked like
+the conversation being missing rather than a port clash.
+
 **Dashboard loads but the board says "auth failed"**
 You opened the URL without the `#token` fragment. Copy the full line the CLI
 printed. The token changes every process — an old bookmark will not work.
@@ -788,10 +1130,12 @@ Check the run ID is open (`harness status`). The stream only tails events for
 runs returned by `/api/state`.
 
 **No issues or PRs appear**
-`GITHUB_TOKEN` or `HARNESS_GITHUB_REPO` is unset, the token lacks Issues/PR write,
-or the target repo's `origin` is a different repository. The harness degrades to
-local-only silently by design — check `harness status` for merged tasks with no
-PR number.
+Check the `github` line in the run banner first — it names the credential source,
+or says `off` with the reason. Either `gh` is not authenticated and no
+`GITHUB_TOKEN` is set, the repo has no GitHub remote, or the token lacks
+Issues/PR write. `gh auth login` is usually the whole fix. The run itself
+degrades to local-only rather than failing, so also check `harness status` for
+merged tasks with no PR number.
 
 **PR creation fails with "base branch not found"**
 The integration branch push failed — usually a token missing Contents write.

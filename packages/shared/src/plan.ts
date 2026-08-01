@@ -29,6 +29,17 @@ export const Plan = z.object({
 });
 export type Plan = z.infer<typeof Plan>;
 
+/**
+ * The DAG half of a plan, emitted on its own.
+ *
+ * The prose and the DAG are produced by two separate planner calls because
+ * together they do not fit in one message: a PRD is thousands of words, and
+ * JSON-escaping it into the same object that carries every task spec is what
+ * pushes the emission past the output-token ceiling. Split, each half is small.
+ */
+export const PlanBreakdown = Plan.pick({ epics: true, tasks: true });
+export type PlanBreakdown = z.infer<typeof PlanBreakdown>;
+
 /** Validate DAG shape: unique ids, no dangling deps, no cycles. Returns error strings (empty = valid). */
 export function validatePlanDag(plan: Plan): string[] {
   const errors: string[] = [];

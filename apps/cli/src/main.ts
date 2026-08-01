@@ -4,17 +4,47 @@ import { createInterface } from "node:readline/promises";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { RunConfig } from "@harness/shared";
-import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store } from "@harness/core";
+import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, detectToolbelt, originSlug } from "@harness/core";
 import { Dashboard } from "@harness/dashboard";
+import { promptForNewCap } from "./budget.js";
 import {
   CONFIG_FILENAME,
   DEFAULT_SKILLS_DIRS,
   detectChecks,
   expandHome,
   loadFileConfig,
+  resolveGitHub,
   resolveRepoRoot,
 } from "./defaults.js";
 import { TerminalChat } from "./chat.js";
+import { notifyDone } from "./notify.js";
+
+/**
+ * Start the dashboard for a run, or nothing when it is turned off. Kept in one
+ * place so `run` and `resume` cannot drift apart on port handling.
+ */
+function makeDashboardFactory(want: boolean, port: number | undefined): {
+  gateOverride?: (bus: Bus, store: Store) => GateHandler;
+  connect: (controller: RunController) => void;
+  start: () => Promise<string | null>;
+  stop: () => Promise<void>;
+} {
+  if (!want) return { connect: () => undefined, start: async () => null, stop: async () => undefined };
+  let dash: Dashboard | undefined;
+  return {
+    gateOverride: (bus, store) => {
+      dash = new Dashboard(store, bus, { port });
+      return dash;
+    },
+    // The dashboard is born inside makeController, before the controller exists;
+    // feedback flows the other way (browser → controller), so it is wired after.
+    connect: (controller) => dash?.attach(controller),
+    start: () => dash!.start(),
+    stop: async () => {
+      if (dash) await dash.stop();
+    },
+  };
+}
 
 function makeController(repoPath: string, gateOverride?: (bus: Bus, store: Store) => GateHandler): { controller: RunController; store: Store; bus: Bus } {
   const stateDir = path.join(repoPath, ".harness");
@@ -39,10 +69,14 @@ function makeController(repoPath: string, gateOverride?: (bus: Bus, store: Store
       process.stdout.write(`  $ ${event.costUsd.toFixed(3)} (${event.model})\n`);
     } else if (event.type === "task.qa_verdict") {
       process.stdout.write(`  QA[${event.taskId}] iteration ${event.iteration}: ${event.verdict}\n`);
+    } else if (event.type === "task.feedback") {
+      process.stdout.write(`  ✉ your feedback → ${event.taskId} (${event.delivery})\n`);
     }
   });
   const pool = new AgentPool(store, bus);
-  const github = new GitHubAdapter(process.env.GITHUB_TOKEN, process.env.HARNESS_GITHUB_REPO);
+  // The token comes from the environment or from `gh`, and stays in this process.
+  const gh = resolveGitHub(repoPath, loadFileConfig(repoPath).config.githubRepo);
+  const github = new GitHubAdapter(gh.token, gh.slug);
   const terminalGates: GateHandler = {
     async resolvePlanGate(prd, summary) {
       process.stdout.write(`\n===== GENERATED PRD =====\n${prd}\n\n===== TASK BREAKDOWN =====\n${summary}\n\n`);
@@ -52,9 +86,102 @@ function makeController(repoPath: string, gateOverride?: (bus: Bus, store: Store
       if (answer.toLowerCase() === "y") return { approved: true, feedback: "" };
       return { approved: false, feedback: answer || "rejected without feedback" };
     },
+    resolveBudgetGate: (gate) => promptForNewCap(gate),
+    // Gate: task-escalation. A task at its cap is one answer away from either a
+    // fresh set of iterations or a parked branch — so ask, in the same terminal
+    // that has been narrating the failures the operator is about to explain.
+    async resolveTaskGate(gate) {
+      process.stdout.write(
+        `\n===== TASK NEEDS YOU =====\n` +
+          `${gate.title} (${gate.taskId})\n` +
+          `${gate.why.split("\n")[0]}\n` +
+          (gate.branch ? `Its work so far is on ${gate.branch}\n` : "") +
+          (gate.worktreePath ? `Worktree: ${gate.worktreePath}\n` : "") +
+          (gate.recommendation ? `Suggested answer: ${gate.recommendation}\n` : "") +
+          `Answer it and the worker continues with your words and a fresh iteration budget.\n`
+      );
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      const answer = (
+        await rl.question(
+          gate.recommendation
+            ? "Your guidance [y = send the suggested answer / enter = park the task] "
+            : "Your guidance [enter = park the task and move on] "
+        )
+      ).trim();
+      rl.close();
+      if (gate.recommendation && answer.toLowerCase() === "y") return gate.recommendation;
+      return answer || null;
+    },
   };
   const gates = gateOverride ? gateOverride(bus, store) : terminalGates;
   return { controller: new RunController(store, bus, pool, github, gates, repoPath), store, bus };
+}
+
+/**
+ * The last thing the operator reads. It used to say "Review PRs on GitHub" whatever
+ * happened — including for a run whose foundation tasks all parked, which opens no
+ * pull request at all and sends them hunting for work that was never pushed.
+ *
+ * Every pull request is printed as a full URL, because "PR #118" is not something
+ * you can click, and a run of thirty tasks is not something you want to page
+ * through on GitHub to find the four that landed.
+ */
+async function reportOutcome(
+  controller: RunController,
+  repoPath: string,
+  runId: string,
+  opts: { notify?: boolean } = {}
+): Promise<void> {
+  const out = controller.outcome(runId);
+  const slug = (await originSlug(repoPath).catch(() => null)) ?? loadFileConfig(repoPath).config.githubRepo;
+  const link = (kind: "pull" | "issues", n: number) => (slug ? `https://github.com/${slug}/${kind}/${n}` : `#${n}`);
+  const lines = [`\nRun ${runId} finished — ${out.line}.`];
+
+  // The validator's verdict comes first: it is the answer to "did this do what
+  // I asked?", which outranks the list of artifacts that tried to.
+  if (out.intent) {
+    if (out.intent.verdict === "PASS") {
+      lines.push("", `  Intent check: PASS — ${out.intent.summary.replace(/\s+/g, " ").slice(0, 240)}`);
+    } else {
+      lines.push("", `  Intent check: FAIL — the merged result does not fully deliver what you asked for:`);
+      for (const gap of out.intent.gaps) lines.push(`    - ${gap.replace(/\s+/g, " ").slice(0, 240)}`);
+      if (out.intent.summary) lines.push(`    ${out.intent.summary.replace(/\s+/g, " ").slice(0, 240)}`);
+    }
+  }
+
+  if (out.prs.length) {
+    lines.push("", "  Open for review (the harness never merges — that part is yours):");
+    for (const pr of out.prs) lines.push(`    ${link("pull", pr.number)}  ${pr.title}`);
+  }
+
+  if (out.parked.length) {
+    lines.push("", `  Parked, waiting on you (${out.parked.length}):`);
+    for (const t of out.parked) {
+      lines.push(`    ${t.title}`);
+      if (t.issue) lines.push(`      ${link("issues", t.issue)}`);
+      if (t.why) lines.push(`      why: ${t.why.replace(/\s+/g, " ").slice(0, 300)}`);
+      if (t.branch) lines.push(`      its work is on ${t.branch}`);
+      if (t.blocking.length) lines.push(`      ${t.blocking.length} other task(s) were waiting on it`);
+    }
+  }
+
+  // "Cancelled" reads like a decision someone made. It is not: these tasks were
+  // never attempted, because the DAG gave them no legal start.
+  if (out.cancelled) {
+    lines.push(
+      "",
+      `  ${out.cancelled} task(s) never started: each depends, directly or through another`,
+      "  task, on something parked above, so there was never a legal point at which to",
+      "  begin it. No tokens were spent on them. A finished run does not reopen — take",
+      "  the parked work forward on its branch, or start a fresh run once you know why",
+      "  it stalled."
+    );
+  }
+
+  lines.push("", `  Full picture: harness status --repo ${repoPath}`);
+  process.stdout.write(`${lines.join("\n")}\n`);
+  // Re-reading a finished run is not an event worth a desktop notification.
+  if (opts.notify !== false) notifyDone(`${path.basename(repoPath)} — run done`, `${runId}: ${out.line}.`);
 }
 
 const DEFAULT_RUN_CAP = 30;
@@ -67,6 +194,7 @@ interface RunOpts {
   check?: string[];
   checks: boolean;
   dashboard?: boolean;
+  port?: string;
   chat?: boolean;
 }
 
@@ -74,6 +202,8 @@ interface Resolved {
   repo: string;
   config: RunConfig;
   dashboard: boolean;
+  /** undefined = take the first free port, so several repos can run at once. */
+  dashboardPort: number | undefined;
   chat: boolean;
   banner: string[];
 }
@@ -81,6 +211,12 @@ interface Resolved {
 function positive(value: string, flag: string): number {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) throw new Error(`${flag} must be a positive number, got "${value}"`);
+  return n;
+}
+
+function port(value: string): number {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) throw new Error(`--port must be 1-65535, got "${value}"`);
   return n;
 }
 
@@ -130,7 +266,25 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
   const skillsDirs = (file.skillsDirs ?? DEFAULT_SKILLS_DIRS).map(expandHome);
   banner.push(`skills     ${skillsDirs.join(" · ")}   (${file.skillsDirs ? via : "defaults"})`);
 
+  const github = resolveGitHub(repo, file.githubRepo);
+  banner.push(github.slug ? `github     ${github.slug}   (${github.source})` : `github     ${github.source}`);
+  if (github.slug) {
+    banner.push(
+      (file.prMode ?? "single") === "single"
+        ? `prs        one rollup PR for the whole run   (${file.prMode ? via : "default"})`
+        : `prs        one PR per task   (${via})`
+    );
+  }
+
+  const toolbelt = detectToolbelt(file.externalTools);
+  banner.push(
+    toolbelt.length > 0
+      ? `tools      ${toolbelt.map((t) => t.name).join(" · ")}   (offered to worker + QA agents)`
+      : `tools      none detected on PATH`
+  );
+
   const dashboard = fromCli("dashboard") ? opts.dashboard === true : file.dashboard ?? true;
+  const dashboardPort = fromCli("port") ? port(opts.port!) : file.dashboardPort;
   // An assignment on the command line is taken as final; without one, the intake
   // agent is the only way the operator gets to say what they want.
   const chat = fromCli("chat") ? opts.chat === true : file.chat ?? assignment === undefined;
@@ -148,11 +302,14 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
     models: file.models,
     budget: { runCapUsd, taskCapUsd },
     skillsDirs,
-    githubRepo: file.githubRepo,
+    // Persist the resolved slug so the dashboard can link issues and PRs on a resume.
+    githubRepo: github.slug ?? file.githubRepo,
+    prMode: file.prMode,
     deterministicChecks: checks,
+    externalTools: file.externalTools,
   });
   if (filePath) banner.push(`config     ${CONFIG_FILENAME}`);
-  return { repo, config, dashboard, chat, banner };
+  return { repo, config, dashboard, dashboardPort, chat, banner };
 }
 
 const program = new Command();
@@ -169,19 +326,16 @@ program
   .option("--no-checks", "run no deterministic checks")
   .option("--dashboard", "serve the monitoring dashboard and resolve gates there (default)")
   .option("--no-dashboard", "run headless; resolve gates in this terminal")
+  .option("--port <n>", "pin the dashboard port (default: the first free port from 4777)")
   .option("--chat", "talk the assignment through with an intake agent first (default when no assignment is given)")
   .option("--no-chat", "skip the conversation; plan directly from the assignment")
   .action(async (assignment: string | undefined, opts: RunOpts, cmd: Command) => {
-    const { repo, config, dashboard: wantDashboard, chat: wantChat, banner } = resolveRun(cmd, opts, assignment);
-    let dash: Dashboard | undefined;
-    const { controller } = makeController(repo, wantDashboard
-      ? (bus, store) => {
-          dash = new Dashboard(store, bus);
-          return dash;
-        }
-      : undefined);
-    if (dash) {
-      const url = await dash.start();
+    const { repo, config, dashboard: wantDashboard, dashboardPort, chat: wantChat, banner } = resolveRun(cmd, opts, assignment);
+    const dash = makeDashboardFactory(wantDashboard, dashboardPort);
+    const { controller } = makeController(repo, dash.gateOverride);
+    dash.connect(controller);
+    const url = await dash.start();
+    if (url) {
       banner.push(`dashboard  ${url}   (the fragment is your auth token)`);
     } else {
       banner.push("dashboard  off — the plan gate will be resolved in this terminal");
@@ -192,55 +346,141 @@ program
     const seed = assignment ?? (await chat!.promptSeed(wantChat));
     try {
       const runId = await controller.startRun(seed, config, wantChat ? chat : undefined);
-      process.stdout.write(`\nRun ${runId} complete. Review PRs on GitHub (the harness never merges).\n`);
+      await reportOutcome(controller, repo, runId);
+    } catch (e) {
+      notifyDone(`${path.basename(repo)} — run stopped`, e instanceof Error ? e.message : String(e));
+      throw e;
     } finally {
       chat?.close();
-      if (dash) await dash.stop();
+      await dash.stop();
     }
   });
 
 program
   .command("resume")
-  .description("continue an interrupted run; completed tasks never re-execute")
-  .argument("<runId>")
+  .description("continue the last run (or a given one); completed tasks never re-execute, parked tasks ask you")
+  .argument("[runId]", "run to resume (default: the newest run with something left to do)")
   .option("-r, --repo <path>", "target repo (default: the git repo containing the cwd)", process.cwd())
   .option("--dashboard", "serve the monitoring dashboard and resolve gates there (default)")
   .option("--no-dashboard", "run headless; resolve gates in this terminal")
-  .action(async (runId: string, opts: { repo: string; dashboard?: boolean }, cmd: Command) => {
+  .option("--port <n>", "pin the dashboard port (default: the first free port from 4777)")
+  .action(async (runIdArg: string | undefined, opts: { repo: string; dashboard?: boolean; port?: string }, cmd: Command) => {
     const repo = resolveRepoRoot(opts.repo);
-    const wantDashboard = cmd.getOptionValueSource("dashboard") === "cli"
-      ? opts.dashboard === true
-      : loadFileConfig(repo).config.dashboard ?? true;
-    let dash: Dashboard | undefined;
-    const { controller } = makeController(repo, wantDashboard
-      ? (bus, store) => {
-          dash = new Dashboard(store, bus);
-          return dash;
-        }
-      : undefined);
-    if (dash) {
-      const url = await dash.start();
-      process.stdout.write(`Dashboard: ${url}\n(keep the fragment — it is your auth token)\n`);
+    const file = loadFileConfig(repo).config;
+    const fromCli = (name: string) => cmd.getOptionValueSource(name) === "cli";
+    const wantDashboard = fromCli("dashboard") ? opts.dashboard === true : file.dashboard ?? true;
+    const dash = makeDashboardFactory(wantDashboard, fromCli("port") ? port(opts.port!) : file.dashboardPort);
+    const { controller, store } = makeController(repo, dash.gateOverride);
+    dash.connect(controller);
+    // Resumable = interrupted mid-run, or finished with parked tasks, cancelled
+    // tasks whose blockers have since merged, or merged work whose PRs never
+    // opened. FAILED and ABORTED runs stay closed.
+    const resumable = (id: string, state: string) =>
+      !["FAILED", "ABORTED"].includes(state) && (state !== "PR_REVIEW" || controller.hasRecoverableWork(id));
+    let runId = runIdArg;
+    if (!runId) {
+      const pick = store.listRuns().find((r) => resumable(r.id, r.state));
+      if (!pick) {
+        process.stdout.write("No run to resume: every run in this repo either finished cleanly or failed before producing work.\n");
+        return;
+      }
+      runId = pick.id;
+      process.stdout.write(`Resuming run ${runId} [${pick.state}] — ${pick.assignment.slice(0, 80).replace(/\n.*/s, "")}\n`);
     }
-    await controller.resume(runId);
-    if (dash) await dash.stop();
+    const existing = store.getRun(runId);
+    if (existing && !resumable(runId, existing.state)) {
+      process.stdout.write(`Run ${runId} already finished (${existing.state}); there is nothing to resume.\n`);
+      await reportOutcome(controller, repo, runId, { notify: false });
+      return;
+    }
+    // The run's checks are frozen in its config; the file is the operator's
+    // current declaration. A run whose checks were the problem — `cd web && …`
+    // for tasks living in mobile/ — resumes with the corrected ones.
+    if (existing && file.deterministicChecks && JSON.stringify(file.deterministicChecks) !== JSON.stringify(existing.config.deterministicChecks)) {
+      store.patchRunConfig(runId, { deterministicChecks: file.deterministicChecks });
+      process.stdout.write(`Checks updated from ${CONFIG_FILENAME}:\n${file.deterministicChecks.map((c) => `  $ ${c}`).join("\n")}\n`);
+    }
+    if (existing && file.prMode && file.prMode !== existing.config.prMode) {
+      store.patchRunConfig(runId, { prMode: file.prMode });
+      process.stdout.write(`PR mode updated from ${CONFIG_FILENAME}: ${file.prMode}\n`);
+    }
+    const url = await dash.start();
+    if (url) process.stdout.write(`Dashboard: ${url}\n(keep the fragment — it is your auth token)\n`);
+    try {
+      await controller.resume(runId);
+      await reportOutcome(controller, repo, runId);
+    } catch (e) {
+      notifyDone(`${path.basename(repo)} — run stopped`, e instanceof Error ? e.message : String(e));
+      throw e;
+    } finally {
+      await dash.stop();
+    }
+  });
+
+program
+  .command("regroup")
+  .description("replace a run's per-task pull requests with one rollup PR carrying the whole diff")
+  .argument("[runId]", "run to regroup (default: the newest run with pull requests)")
+  .option("-r, --repo <path>", "target repo (default: the git repo containing the cwd)", process.cwd())
+  .action(async (runIdArg: string | undefined, opts: { repo: string }) => {
+    const repo = resolveRepoRoot(opts.repo);
+    const { controller, store } = makeController(repo);
+    const runId = runIdArg ?? store.listRuns().find((r) => store.listTasks(r.id).some((t) => t.prNumber !== null))?.id;
+    if (!runId) {
+      process.stdout.write("No run with pull requests to regroup.\n");
+      return;
+    }
+    const res = await controller.regroupPrs(runId);
+    if (!res) {
+      process.stdout.write(`Run ${runId} has nothing to roll up: no merged work, or no commits the base branch does not already have.\n`);
+      return;
+    }
+    process.stdout.write(`Rollup PR: ${res.pr.url}\n`);
+    process.stdout.write(
+      res.closed.length
+        ? `Closed ${res.closed.length} superseded pull request${res.closed.length === 1 ? "" : "s"}: ${res.closed.map((n) => `#${n}`).join(", ")}\n`
+        : "No per-task pull requests needed closing.\n"
+    );
   });
 
 program
   .command("status")
-  .description("show open runs, task states and spend")
+  .description("show runs, task states, pull requests and spend")
   .option("-r, --repo <path>", "target repo (default: the git repo containing the cwd)", process.cwd())
-  .action((opts: { repo: string }) => {
-    const { store } = makeController(resolveRepoRoot(opts.repo));
-    const runs = store.listOpenRuns();
+  .option("--all", "include finished runs (default: the open ones plus the last finished)", false)
+  .action(async (opts: { repo: string; all: boolean }) => {
+    const repo = resolveRepoRoot(opts.repo);
+    const { store } = makeController(repo);
+    const all = store.listRuns();
+    const open = all.filter((r) => !["PR_REVIEW", "FAILED", "ABORTED"].includes(r.state));
+    // A finished run still holds the answer to "what did it actually produce?", so
+    // the most recent one is shown even without --all. Nothing at all is printed
+    // only when the repo has genuinely never been run.
+    const runs = opts.all ? all : open.length ? open : all.slice(0, 1);
     if (runs.length === 0) {
-      process.stdout.write("No open runs.\n");
+      process.stdout.write("No runs yet.\n");
       return;
     }
+    const slug = (await originSlug(repo).catch(() => null)) ?? loadFileConfig(repo).config.githubRepo;
     for (const run of runs) {
       process.stdout.write(`run ${run.id} [${run.state}] $${store.spentUsd(run.id).toFixed(2)} — ${run.assignment.slice(0, 60)}\n`);
-      for (const t of store.listTasks(run.id)) {
+      const tasks = store.listTasks(run.id);
+      for (const t of tasks) {
         process.stdout.write(`  ${t.id} [${t.state}] qa=${t.qaIterations}${t.prNumber ? ` PR#${t.prNumber}` : ""}\n`);
+      }
+      // A rollup PR is shared by every merged task; list it once, not per task.
+      const byPr = new Map<number, string[]>();
+      for (const t of tasks) {
+        if (t.prNumber !== null) byPr.set(t.prNumber, [...(byPr.get(t.prNumber) ?? []), t.title]);
+      }
+      if (byPr.size) {
+        process.stdout.write("  pull requests:\n");
+        for (const [n, titles] of byPr) {
+          const url = slug ? `https://github.com/${slug}/pull/${n}` : `PR #${n}`;
+          process.stdout.write(`    ${url}  ${titles.length === 1 ? titles[0] : `${titles.length} tasks (rollup)`}\n`);
+        }
+      } else if (["INTEGRATING", "PR_REVIEW"].includes(run.state)) {
+        process.stdout.write("  pull requests: none — no task got far enough to open one.\n");
       }
     }
   });

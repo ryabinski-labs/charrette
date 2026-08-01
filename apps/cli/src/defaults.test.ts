@@ -1,8 +1,8 @@
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
-import { detectChecks, loadFileConfig, resolveRepoRoot } from "./defaults.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { detectChecks, loadFileConfig, resolveGitHub, resolveRepoRoot } from "./defaults.js";
 
 function tmpRepo(files: Record<string, string> = {}, withGit = true): string {
   const dir = mkdtempSync(path.join(os.tmpdir(), "harness-cli-"));
@@ -96,5 +96,55 @@ describe("detectChecks in monorepo layouts", () => {
     mkdirSync(path.join(repo, "frontend"));
     writeFileSync(path.join(repo, "frontend", "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
     expect(detectChecks(repo).checks).toEqual([]);
+  });
+});
+
+describe("resolveGitHub", () => {
+  const saved = { token: process.env.GITHUB_TOKEN, repo: process.env.HARNESS_GITHUB_REPO };
+  afterEach(() => {
+    for (const [k, v] of [["GITHUB_TOKEN", saved.token], ["HARNESS_GITHUB_REPO", saved.repo]] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  it("takes the environment when it is set, without shelling out to gh", () => {
+    process.env.GITHUB_TOKEN = "ghp_from_env";
+    process.env.HARNESS_GITHUB_REPO = "acme/widgets";
+    const gh = resolveGitHub(tmpRepo(), undefined);
+    expect(gh).toEqual({
+      token: "ghp_from_env",
+      slug: "acme/widgets",
+      source: "GITHUB_TOKEN + HARNESS_GITHUB_REPO",
+    });
+  });
+
+  it("names both sources when the token and the slug come from different places", () => {
+    process.env.GITHUB_TOKEN = "ghp_from_env";
+    delete process.env.HARNESS_GITHUB_REPO;
+    const gh = resolveGitHub(tmpRepo(), "acme/widgets");
+    expect(gh.slug).toBe("acme/widgets");
+    expect(gh.source).toBe("GITHUB_TOKEN + harness.config.json");
+  });
+
+  it("withholds the slug when there is no token, so the adapter stays disabled", () => {
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.HARNESS_GITHUB_REPO;
+    // A directory that is not a GitHub checkout: `gh repo view` cannot answer.
+    const gh = resolveGitHub(tmpRepo(), undefined);
+    if (!gh.token) {
+      expect(gh.slug).toBeUndefined();
+      expect(gh.source).toMatch(/^off — /);
+    } else {
+      // gh is logged in on this machine; the token is real but the repo is not.
+      expect(gh.slug).toBeUndefined();
+      expect(gh.source).toBe("off — no GitHub remote found for this repo");
+    }
+  });
+
+  it("never puts the token in the provenance string", () => {
+    process.env.GITHUB_TOKEN = "ghp_supersecret";
+    process.env.HARNESS_GITHUB_REPO = "acme/widgets";
+    expect(resolveGitHub(tmpRepo(), undefined).source).not.toContain("ghp_supersecret");
   });
 });

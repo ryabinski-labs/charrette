@@ -23,7 +23,7 @@ export interface IntakeRequest {
   repoPath: string;
   config: RunConfig;
   ui: IntakeUi;
-  budgetCheck: () => void;
+  budgetCheck: () => void | Promise<void>;
 }
 
 const ASK_TOOL = "mcp__harness_intake__ask_user";

@@ -83,7 +83,7 @@ export interface TaskRow {
   prNumber: number | null;
   qaIterations: number;
   respawns: number;
-  assignedSkills: { name: string; sha256: string; mode: "full" | "reference" }[];
+  assignedSkills: { name: string; sha256: string; mode: "full" | "reference"; role?: "worker" | "qa" }[];
   errorSummary: string | null;
 }
 
@@ -107,6 +107,7 @@ export class InvalidTransition extends Error {}
  */
 export class Store {
   readonly db: DatabaseSync;
+  private appendListeners = new Set<(e: { seq: number; event: HarnessEvent }) => void>();
 
   constructor(dbPath: string) {
     this.db = new DatabaseSync(dbPath);
@@ -127,12 +128,22 @@ export class Store {
     }
   }
 
+  /**
+   * Notified after an event is durably committed. The Bus registers here so that
+   * transitions written straight through the store — every run and task state
+   * change — reach live subscribers too, not only the events table.
+   */
+  onAppend(fn: (e: { seq: number; event: HarnessEvent }) => void): () => void {
+    this.appendListeners.add(fn);
+    return () => void this.appendListeners.delete(fn);
+  }
+
   appendEvent(ev: HarnessEvent, materialize?: () => void): number {
     const parsed = HarnessEvent.parse(ev);
     const insert = this.db.prepare(
       "INSERT INTO events (runId, taskId, sessionId, type, payload, ts) VALUES (?, ?, ?, ?, ?, ?)"
     );
-    return this.txn(() => {
+    const seq = this.txn(() => {
       const anyEv = parsed as Record<string, unknown>;
       const info = insert.run(
         parsed.runId,
@@ -145,6 +156,16 @@ export class Store {
       materialize?.();
       return Number(info.lastInsertRowid);
     });
+    // After the commit: a subscriber that reads the store must not see stale state,
+    // and a throwing subscriber must not roll back a transition that happened.
+    for (const fn of this.appendListeners) {
+      try {
+        fn({ seq, event: parsed });
+      } catch {
+        /* a broken subscriber is not the writer's problem */
+      }
+    }
+    return seq;
   }
 
   createRun(row: Omit<RunRow, "createdAt" | "updatedAt">): void {
@@ -165,6 +186,54 @@ export class Store {
     const r = this.db.prepare("SELECT * FROM runs WHERE id = ?").get(id) as Record<string, unknown> | undefined;
     if (!r) return undefined;
     return { ...(r as object), config: RunConfig.parse(JSON.parse(r.config as string)) } as RunRow;
+  }
+
+  /**
+   * Why a task last entered the state it is in.
+   *
+   * The reason is written into the transition event and nowhere else, so a task
+   * that parked at the QA cap has the QA's own words on record while its row shows
+   * nothing at all. Reading it back is what lets "3 tasks need you" be followed by
+   * three sentences saying what each of them is waiting for.
+   */
+  taskStateReason(runId: string, taskId: string): string {
+    const row = this.db
+      .prepare(
+        "SELECT payload FROM events WHERE runId = ? AND taskId = ? AND type = 'task.state_changed' ORDER BY seq DESC LIMIT 1"
+      )
+      .get(runId, taskId) as { payload: string } | undefined;
+    if (!row) return "";
+    const parsed = JSON.parse(row.payload) as { reason?: string };
+    return parsed.reason ?? "";
+  }
+
+  /** The validator's judgment of the run, or null when validation never completed. */
+  intentVerdict(runId: string): { verdict: "PASS" | "FAIL"; gaps: string[]; summary: string } | null {
+    const row = this.db
+      .prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.intent_verdict' ORDER BY seq DESC LIMIT 1")
+      .get(runId) as { payload: string } | undefined;
+    if (!row) return null;
+    const parsed = JSON.parse(row.payload) as { verdict: "PASS" | "FAIL"; gaps?: string[]; summary?: string };
+    return { verdict: parsed.verdict, gaps: parsed.gaps ?? [], summary: parsed.summary ?? "" };
+  }
+
+  /** Sequence number of the newest event of `type` for the run, or 0 if none. */
+  lastEventSeq(runId: string, type: string): number {
+    const row = this.db.prepare("SELECT MAX(seq) s FROM events WHERE runId = ? AND type = ?").get(runId, type) as { s: number | null };
+    return row.s ?? 0;
+  }
+
+  /**
+   * Every run, newest first — including the finished ones.
+   *
+   * `listOpenRuns` is what the dashboard drives itself from, so a run that ends
+   * disappears from it by design. That left `harness status` printing "No open
+   * runs" for a repo whose last run parked three tasks and opened no pull request,
+   * which is the moment the operator most needs to be told what happened.
+   */
+  listRuns(): RunRow[] {
+    const rows = this.db.prepare("SELECT id FROM runs ORDER BY createdAt DESC").all() as { id: string }[];
+    return rows.map((r) => this.getRun(r.id)!);
   }
 
   listOpenRuns(): RunRow[] {
@@ -197,6 +266,31 @@ export class Store {
     return this.db
       .prepare("SELECT id, taskId, role, model, state, startedAt, endedAt, turns, costUsd FROM sessions WHERE runId = ? ORDER BY startedAt")
       .all(runId) as unknown as SessionRow[];
+  }
+
+  /**
+   * Replace the run's caps. Only a resolved budget gate calls this, and it is
+   * persisted rather than held in memory so `harness resume` continues under the
+   * cap the operator agreed to instead of tripping again immediately.
+   */
+  setRunBudget(runId: string, budget: RunConfig["budget"]): void {
+    const run = this.getRun(runId);
+    if (!run) throw new Error(`unknown run ${runId}`);
+    const config = { ...run.config, budget };
+    this.db.prepare("UPDATE runs SET config = ?, updatedAt = ? WHERE id = ?").run(JSON.stringify(config), Date.now(), runId);
+  }
+
+  /**
+   * Patch the run's frozen config — the escape hatch `resume` uses to repair a
+   * run whose recorded environment was the problem: a base branch from before
+   * capture existed (no PRs could ever open), or deterministic checks pointing
+   * at the wrong package (no worker could ever pass them).
+   */
+  patchRunConfig(runId: string, patch: Partial<RunConfig>): void {
+    const run = this.getRun(runId);
+    if (!run) throw new Error(`unknown run ${runId}`);
+    const config = RunConfig.parse({ ...run.config, ...patch });
+    this.db.prepare("UPDATE runs SET config = ?, updatedAt = ? WHERE id = ?").run(JSON.stringify(config), Date.now(), runId);
   }
 
   setRunPlan(runId: string, prdPath: string, planHash: string): void {
@@ -260,6 +354,18 @@ export class Store {
     }
     if (!sets.length) return;
     this.db.prepare(`UPDATE tasks SET ${sets.join(", ")} WHERE runId = ? AND id = ?`).run(...vals, runId, taskId);
+  }
+
+  /**
+   * Mark every session still "running" as interrupted. Sessions live and die
+   * with the single harness process, so at process start a "running" row can
+   * only be the residue of a crash or a kill — and left alone it haunts the
+   * dashboard as a live agent whose heartbeat froze hours ago.
+   */
+  sweepDeadSessions(): number {
+    return Number(
+      this.db.prepare("UPDATE sessions SET state = 'interrupted', endedAt = ? WHERE state = 'running'").run(Date.now()).changes
+    );
   }
 
   recordUsage(row: { runId: string; taskId?: string; sessionId: string; model: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; costUsd: number }): void {

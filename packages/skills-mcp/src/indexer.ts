@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
+import { readFileSync, readdirSync, realpathSync, statSync, existsSync } from "node:fs";
 import path from "node:path";
 
 export interface IndexedSkill {
@@ -26,12 +26,19 @@ function parseFrontmatter(text: string): { name?: string; description?: string; 
 /** Index SKILL.md files from the given directories (each subdir holding a SKILL.md). */
 export function indexSkills(dirs: string[]): IndexedSkill[] {
   const skills: IndexedSkill[] = [];
+  // Dirs and skills are deduped by realpath: ~/skills is commonly a symlink to
+  // ~/.claude/skills, and both ship in the default config — without this every
+  // skill indexes twice and duplicates crowd the top-k match slots.
+  const seen = new Set<string>();
   for (const dir of dirs) {
     if (!existsSync(dir)) continue;
     for (const entry of readdirSync(dir)) {
       const skillPath = path.join(dir, entry, "SKILL.md");
       try {
         if (!statSync(path.join(dir, entry)).isDirectory() || !existsSync(skillPath)) continue;
+        const real = realpathSync(skillPath);
+        if (seen.has(real)) continue;
+        seen.add(real);
         const raw = readFileSync(skillPath, "utf8");
         const { name, description, body } = parseFrontmatter(raw);
         skills.push({

@@ -28,7 +28,7 @@ export const TaskState = z.enum([
 ]);
 export type TaskState = z.infer<typeof TaskState>;
 
-export const AgentRole = z.enum(["intake", "planner", "worker", "qa", "integrator"]);
+export const AgentRole = z.enum(["intake", "planner", "worker", "qa", "integrator", "validator", "advisor"]);
 export type AgentRole = z.infer<typeof AgentRole>;
 
 export const SessionState = z.enum(["running", "done", "interrupted", "killed"]);
@@ -48,7 +48,10 @@ export const RUN_TRANSITIONS: Record<RunState, RunState[]> = {
   PLAN_REVIEW: ["EXECUTING", "PLANNING", "ABORTED"],
   EXECUTING: ["INTEGRATING", "PAUSED", "BUDGET_HOLD", "FAILED", "ABORTED"],
   INTEGRATING: ["PR_REVIEW", "PAUSED", "BUDGET_HOLD", "FAILED", "ABORTED"],
-  PR_REVIEW: [],
+  // A finished run is not a dead run: `resume` reopens it when tasks parked
+  // (back to EXECUTING via the escalation gate) or merged work never got its
+  // pull requests (back to INTEGRATING to retry them).
+  PR_REVIEW: ["EXECUTING", "INTEGRATING"],
   PAUSED: ["INTAKE", "PLANNING", "EXECUTING", "INTEGRATING", "ABORTED"],
   BUDGET_HOLD: ["EXECUTING", "INTEGRATING", "ABORTED"],
   FAILED: [],
@@ -57,12 +60,18 @@ export const RUN_TRANSITIONS: Record<RunState, RunState[]> = {
 
 export const TASK_TRANSITIONS: Record<TaskState, TaskState[]> = {
   PENDING: ["READY", "CANCELLED"],
-  READY: ["WORKING", "CANCELLED"],
+  // READY -> NEEDS_HUMAN: dispatch itself can fail (worktree creation, say)
+  // before any worker starts; that parks like any other crash.
+  READY: ["WORKING", "NEEDS_HUMAN", "CANCELLED"],
+  // WORKING/QA/QA_FAILED -> READY: a task found mid-flight when no agent can be
+  // running it (the previous harness process died) is requeued, not abandoned.
   WORKING: ["QA", "READY", "NEEDS_HUMAN", "CANCELLED"],
-  QA: ["ACCEPTED", "QA_FAILED", "NEEDS_HUMAN", "CANCELLED"],
-  QA_FAILED: ["WORKING", "NEEDS_HUMAN", "CANCELLED"],
+  QA: ["ACCEPTED", "QA_FAILED", "READY", "NEEDS_HUMAN", "CANCELLED"],
+  QA_FAILED: ["WORKING", "READY", "NEEDS_HUMAN", "CANCELLED"],
   ACCEPTED: ["MERGED", "NEEDS_HUMAN"],
   MERGED: [],
   NEEDS_HUMAN: ["READY", "ACCEPTED", "CANCELLED"],
-  CANCELLED: [],
+  // "unreachable: dependencies parked" stops being true the moment the operator
+  // revives the dependency — resume puts these back in the queue.
+  CANCELLED: ["PENDING"],
 };

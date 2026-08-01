@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { query, type Options } from "@anthropic-ai/claude-agent-sdk";
+import { query, type Options, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { AgentRole } from "@harness/shared";
 import { Bus } from "./bus.js";
 import { Store } from "./store.js";
 import { costUsd } from "./budget.js";
+import { rtkHooks } from "./rtk.js";
 
 export interface AgentSpec {
   runId: string;
@@ -26,12 +27,32 @@ export interface AgentSpec {
   /** In-process MCP servers (SDK `tool()` definitions) exposed to this agent only. */
   mcpServers?: Options["mcpServers"];
   maxTurns?: number;
-  /** Called before/while streaming; throw BudgetExceeded to abort the session. */
-  budgetCheck?: () => void;
+  /**
+   * SDK session id to resume (AgentResult.sdkSessionId of an earlier session).
+   * A worker re-dispatched after a QA rejection re-attaches to its own
+   * conversation — everything it learned about the repo is still in context —
+   * instead of cold-starting and re-exploring from zero. Only ever set for
+   * sessions that ended cleanly; a crashed session's transcript is not trusted.
+   */
+  resume?: string;
+  /**
+   * Per-message output ceiling. The planner emits its whole plan in one message
+   * and the default (32k) truncates it mid-JSON, which no amount of retrying
+   * fixes. Passed to the session as CLAUDE_CODE_MAX_OUTPUT_TOKENS.
+   */
+  maxOutputTokens?: number;
+  /**
+   * Called before/while streaming. May block: a cap reached mid-session asks the
+   * operator whether to raise it, and the session waits rather than dying with a
+   * half-finished task. Throws BudgetExceeded to abort.
+   */
+  budgetCheck?: () => void | Promise<void>;
 }
 
 export interface AgentResult {
   sessionId: string;
+  /** The SDK's own session id — the handle a later spec.resume re-attaches to. */
+  sdkSessionId?: string;
   resultText: string;
   costUsd: number;
   turns: number;
@@ -41,11 +62,98 @@ export interface AgentResult {
 }
 
 /**
+ * A session that has said nothing for this long is hung, not thinking: the
+ * longest legitimate silence is a single long tool call, and those are bounded
+ * at 10 minutes. Aborting hands the task to the existing crash/respawn path —
+ * measured cost of not doing this: one wedged QA session stalled a whole run
+ * for 62 minutes until the operator noticed.
+ */
+const STALL_ABORT_MS = 15 * 60 * 1000;
+
+/**
+ * The session's stdin, held open so the operator can speak mid-flight. The
+ * initial prompt goes out immediately; anything push()ed afterwards becomes a
+ * real user message in the live session. The stream closes itself on the first
+ * result that finds nothing left to deliver — for the common session that
+ * nobody talks to, that is the first result, exactly the old behavior.
+ */
+export class PromptStream {
+  private queue: SDKUserMessage[] = [];
+  private wake: (() => void) | undefined;
+  private closed = false;
+
+  constructor(private first: string) {}
+
+  private message(text: string): SDKUserMessage {
+    return { type: "user", message: { role: "user", content: text }, parent_tool_use_id: null, session_id: "" };
+  }
+
+  /** Queue a message for the live session. False once the stream has closed. */
+  push(text: string): boolean {
+    if (this.closed) return false;
+    this.queue.push(this.message(text));
+    this.wake?.();
+    return true;
+  }
+
+  /**
+   * A result message arrived. Close unless something is still waiting to be
+   * delivered. Counting replies instead deadlocks: two messages handed to the
+   * CLI together get folded into one answer, so a reply-per-message ledger
+   * never balances and the session hangs open forever after its last result.
+   * Closing early is safe — a message already delivered still gets answered,
+   * and a push() from now on is queued for the task's next session instead.
+   */
+  settle(): void {
+    if (this.queue.length === 0) this.close();
+  }
+
+  close(): void {
+    this.closed = true;
+    this.wake?.();
+  }
+
+  async *stream(): AsyncGenerator<SDKUserMessage> {
+    yield this.message(this.first);
+    for (;;) {
+      if (this.queue.length) {
+        yield this.queue.shift()!;
+        continue;
+      }
+      if (this.closed) return;
+      await new Promise<void>((resolve) => {
+        this.wake = resolve;
+      });
+      this.wake = undefined;
+    }
+  }
+}
+
+/**
  * Thin wrapper over the Claude Agent SDK: one query() session per agent,
  * streams messages onto the bus, books usage into the ledger (PRD §11.1 Agent Pool).
  */
 export class AgentPool {
   constructor(private store: Store, private bus: Bus) {}
+
+  /**
+   * Live sessions accepting mid-flight operator feedback. Task agents key as
+   * `runId/taskId`; run-level agents (intake, planner, validator, …) have no
+   * task and key as `runId/@role`.
+   */
+  private live = new Map<string, { sessionId: string; role: AgentRole; stream: PromptStream }>();
+
+  /**
+   * Push operator feedback into the session currently working the target — a
+   * task id or an `@role` handle. Returns what it reached, or null when nothing
+   * there is listening — the caller queues the feedback (tasks) or reports the
+   * agent gone (run-level).
+   */
+  inject(runId: string, target: string, text: string): { sessionId: string; role: AgentRole } | null {
+    const hit = this.live.get(`${runId}/${target}`);
+    if (!hit || !hit.stream.push(text)) return null;
+    return { sessionId: hit.sessionId, role: hit.role };
+  }
 
   async run(spec: AgentSpec): Promise<AgentResult> {
     const sessionId = spec.sessionId ?? randomUUID();
@@ -56,30 +164,68 @@ export class AgentPool {
       .run(sessionId, spec.runId, spec.taskId ?? null, spec.role, spec.model, "running", now);
     this.bus.publish({ type: "agent.spawned", runId: spec.runId, taskId: spec.taskId, sessionId, role: spec.role, model: spec.model, ts: now });
 
+    // The CLI's dying words. "Claude Code process exited with code 1" alone is
+    // undiagnosable — the actual error only ever appears on the subprocess's
+    // stderr, which is otherwise dropped.
+    let stderrTail = "";
     const options: Options = {
       model: spec.model,
       cwd: spec.cwd,
       systemPrompt: spec.systemPrompt,
       maxTurns: spec.maxTurns ?? 100,
+      stderr: (data) => {
+        stderrTail = (stderrTail + data).slice(-2000);
+      },
       permissionMode: "bypassPermissions",
       tools: spec.tools,
       allowedTools: spec.allowedTools,
       disallowedTools: spec.disallowedTools,
       mcpServers: spec.mcpServers,
+      resume: spec.resume,
       abortController: abort,
       // Do not inherit the operator's filesystem settings/skills into worker context.
       settingSources: [],
+      // …which also strips the operator's token-compression hook, so re-add it
+      // programmatically: Bash commands route through rtk when it's installed.
+      hooks: rtkHooks(),
+      // `env` replaces the inherited environment wholesale, so spread rather than
+      // set: workers reach gh/aws/podman through PATH (see toolbelt.ts).
+      ...(spec.maxOutputTokens
+        ? { env: { ...process.env, CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(spec.maxOutputTokens) } }
+        : {}),
     };
 
+    // Streaming input instead of a one-shot prompt string, so the operator can
+    // drop a message into the running session (see inject()). A session nobody
+    // talks to closes its stream on the first result — behavior is unchanged.
+    const stream = new PromptStream(spec.prompt);
+    // The advisor drafts a gate answer the operator is about to see anyway —
+    // feedback to it would race its own output, so it stays unaddressable.
+    const liveKey = spec.role === "advisor" ? null : `${spec.runId}/${spec.taskId ?? `@${spec.role}`}`;
+    if (liveKey) this.live.set(liveKey, { sessionId, role: spec.role, stream });
+
     let resultText = "";
+    let sdkSessionId: string | undefined;
     let turns = 0;
     let cost = 0;
     let killedByBudget = false;
     let abnormal = "";
+    // Watchdog for a wedged subprocess: no message for STALL_ABORT_MS → abort.
+    let lastMessageAt = Date.now();
+    let stalledMinutes = 0;
+    const stallTimer = setInterval(() => {
+      if (Date.now() - lastMessageAt > STALL_ABORT_MS) {
+        stalledMinutes = Math.round((Date.now() - lastMessageAt) / 60_000);
+        abort.abort();
+      }
+    }, 30_000);
     try {
-      for await (const message of query({ prompt: spec.prompt, options })) {
+      for await (const message of query({ prompt: stream.stream(), options })) {
+        lastMessageAt = Date.now();
+        const sid = (message as { session_id?: string }).session_id;
+        if (sid) sdkSessionId = sid;
         try {
-          spec.budgetCheck?.();
+          await spec.budgetCheck?.();
         } catch (e) {
           abort.abort();
           killedByBudget = true;
@@ -119,20 +265,33 @@ export class AgentPool {
             cacheReadTokens: m.usage?.cache_read_input_tokens ?? 0,
             cacheWriteTokens: m.usage?.cache_creation_input_tokens ?? 0,
           };
-          cost = m.total_cost_usd ?? costUsd(spec.model, usage);
-          this.store.recordUsage({ runId: spec.runId, taskId: spec.taskId, sessionId, model: spec.model, ...usage, costUsd: cost });
-          this.bus.publish({ type: "agent.usage", runId: spec.runId, taskId: spec.taskId, sessionId, model: spec.model, ...usage, costUsd: cost, ts: Date.now() });
+          // Probed on SDK 0.1.77: `usage` is per-turn but `total_cost_usd` is
+          // session-cumulative, so tokens book as they come and cost books the
+          // difference — an injected-feedback session must not double-bill.
+          const costDelta = m.total_cost_usd !== undefined ? Math.max(0, m.total_cost_usd - cost) : costUsd(spec.model, usage);
+          cost = m.total_cost_usd ?? cost + costDelta;
+          this.store.recordUsage({ runId: spec.runId, taskId: spec.taskId, sessionId, model: spec.model, ...usage, costUsd: costDelta });
+          this.bus.publish({ type: "agent.usage", runId: spec.runId, taskId: spec.taskId, sessionId, model: spec.model, ...usage, costUsd: costDelta, ts: Date.now() });
+          stream.settle();
         }
       }
     } catch (e) {
       if (!killedByBudget) {
-        this.endSession(spec, sessionId, turns, cost, "interrupted", String(e));
+        const stallNote = stalledMinutes ? `session watchdog: no output for ${stalledMinutes} minutes, aborted as hung. ` : "";
+        const detail = stallNote + (stderrTail ? `${String(e)}\nstderr: ${stderrTail.trim().slice(-800)}` : String(e));
+        this.endSession(spec, sessionId, turns, cost, "interrupted", detail);
+        throw new Error(detail, { cause: e });
       }
       throw e;
+    } finally {
+      clearInterval(stallTimer);
+      stream.close();
+      if (liveKey && this.live.get(liveKey)?.stream === stream) this.live.delete(liveKey);
     }
     this.endSession(spec, sessionId, turns, cost, abnormal ? "error" : "done", abnormal);
     return {
       sessionId,
+      sdkSessionId,
       resultText,
       costUsd: cost,
       turns,

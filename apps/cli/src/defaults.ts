@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -134,12 +135,78 @@ export const FileConfig = z
       .optional(),
     skillsDirs: z.array(z.string()).optional(),
     githubRepo: z.string().optional(),
+    prMode: z.enum(["single", "per-task"]).optional(),
     deterministicChecks: z.array(z.string()).optional(),
+    externalTools: z.array(z.string()).optional(),
     dashboard: z.boolean().optional(),
+    dashboardPort: z.number().int().min(1).max(65535).optional(),
     chat: z.boolean().optional(),
   })
   .strict();
 export type FileConfig = z.infer<typeof FileConfig>;
+
+export interface ResolvedGitHub {
+  /** Undefined leaves the adapter disabled: the run stays local, no issues, no PRs. */
+  token?: string;
+  /** `owner/repo`. */
+  slug?: string;
+  /** Human-readable provenance for the run banner. Never contains the token. */
+  source: string;
+}
+
+/** Run a `gh` subcommand for its stdout, or undefined if gh is missing/unauthenticated. */
+function gh(cwd: string, args: string[]): string | undefined {
+  try {
+    const out = execFileSync("gh", args, {
+      cwd,
+      encoding: "utf8",
+      timeout: 10_000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return out || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const githubCache = new Map<string, ResolvedGitHub>();
+
+/**
+ * Where the harness gets its GitHub credentials, in order: the environment, then
+ * the already-authenticated `gh` CLI. Most machines have `gh` logged in, and
+ * requiring GITHUB_TOKEN on top of that is the difference between a run that
+ * opens PRs and one that silently does not.
+ *
+ * The token lives in this process only — it goes to the adapter, never into an
+ * agent prompt, a log line, or the banner (SEC: no secrets in agent context).
+ */
+export function resolveGitHub(repo: string, configuredSlug: string | undefined): ResolvedGitHub {
+  const envToken = process.env.GITHUB_TOKEN || undefined;
+  const envSlug = process.env.HARNESS_GITHUB_REPO || undefined;
+  // Keyed on the environment too: `gh auth token` is a subprocess worth caching,
+  // but a caller that changes the environment must not get a stale answer back.
+  const cacheKey = [repo, configuredSlug, envToken ? "env-token" : "", envSlug].join(" ");
+  const cached = githubCache.get(cacheKey);
+  if (cached) return cached;
+
+  const token = envToken ?? gh(repo, ["auth", "token"]);
+  const slug =
+    envSlug ?? configuredSlug ?? gh(repo, ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"]);
+
+  let source: string;
+  if (!token) {
+    source = "off — no GITHUB_TOKEN and `gh auth login` has not been run";
+  } else if (!slug) {
+    source = "off — no GitHub remote found for this repo";
+  } else {
+    const tokenFrom = envToken ? "GITHUB_TOKEN" : "gh cli";
+    const slugFrom = envSlug ? "HARNESS_GITHUB_REPO" : configuredSlug ? CONFIG_FILENAME : "gh cli";
+    source = tokenFrom === slugFrom ? tokenFrom : `${tokenFrom} + ${slugFrom}`;
+  }
+  const resolved: ResolvedGitHub = { token, slug: token && slug ? slug : undefined, source };
+  githubCache.set(cacheKey, resolved);
+  return resolved;
+}
 
 export function loadFileConfig(repo: string): { config: FileConfig; path: string | null } {
   const file = path.join(repo, CONFIG_FILENAME);

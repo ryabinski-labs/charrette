@@ -11,12 +11,14 @@ export class Bus {
 
   constructor(private store: Store) {
     this.emitter.setMaxListeners(100);
+    // Every append is emitted, however it got there. State transitions go straight
+    // through the store rather than through publish(), and before this they were
+    // recorded but never seen live — no `▶ state` lines, no dashboard update.
+    this.store.onAppend((e) => this.emitter.emit("event", e));
   }
 
   publish(ev: HarnessEvent, materialize?: () => void): number {
-    const seq = this.store.appendEvent(ev, materialize);
-    this.emitter.emit("event", { seq, event: ev });
-    return seq;
+    return this.store.appendEvent(ev, materialize);
   }
 
   subscribe(fn: (e: { seq: number; event: HarnessEvent }) => void): () => void {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { RunConfig } from "@harness/shared";
+import { Bus } from "./bus.js";
 import { InvalidTransition, Store } from "./store.js";
 import { costUsd } from "./budget.js";
 
@@ -75,6 +76,52 @@ describe("Store run lifecycle", () => {
     store.recordUsage({ runId: "run1", sessionId: "s2", model: "claude-opus-5", inputTokens: 1000, outputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 2.5 });
     expect(store.spentUsd("run1")).toBeCloseTo(4.0);
     expect(store.spentUsd("run1", "a")).toBeCloseTo(1.5);
+  });
+});
+
+describe("live event delivery", () => {
+  it("emits state transitions to subscribers, not only to the events table", () => {
+    // Transitions go straight through the store rather than through Bus.publish.
+    // Until the store notified listeners, nothing live ever saw a state change:
+    // no `▶ state` lines in the terminal, no dashboard update between polls.
+    const store = makeStore();
+    const seen: string[] = [];
+    const bus = new Bus(store);
+    bus.subscribe(({ event }) => seen.push(event.type));
+    makeRun(store);
+    store.transitionRun("run1", "PLANNING");
+    expect(seen).toEqual(["run.created", "run.state_changed"]);
+  });
+
+  it("delivers a seq that matches the persisted row, so an SSE cursor is not skewed", () => {
+    const store = makeStore();
+    const bus = new Bus(store);
+    const seqs: number[] = [];
+    bus.subscribe(({ seq }) => seqs.push(seq));
+    makeRun(store);
+    store.transitionRun("run1", "PLANNING");
+    expect(seqs).toEqual(store.eventsSince("run1", 0, 10).map((e) => e.seq));
+  });
+
+  it("does not let a throwing subscriber roll back the transition it is reporting", () => {
+    const store = makeStore();
+    const bus = new Bus(store);
+    bus.subscribe(() => {
+      throw new Error("subscriber blew up");
+    });
+    makeRun(store);
+    expect(() => store.transitionRun("run1", "PLANNING")).not.toThrow();
+    expect(store.getRun("run1")!.state).toBe("PLANNING");
+  });
+
+  it("raises a cap in place without disturbing the rest of the run config", () => {
+    const store = makeStore();
+    makeRun(store);
+    const before = store.getRun("run1")!.config;
+    store.setRunBudget("run1", { runCapUsd: 99, taskCapUsd: before.budget.taskCapUsd });
+    const after = store.getRun("run1")!.config;
+    expect(after.budget.runCapUsd).toBe(99);
+    expect({ ...after, budget: undefined }).toEqual({ ...before, budget: undefined });
   });
 });
 

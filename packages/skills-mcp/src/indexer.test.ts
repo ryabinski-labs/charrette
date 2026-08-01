@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -43,5 +43,15 @@ describe("skills indexer", () => {
 
   it("ignores missing directories", () => {
     expect(indexSkills(["/nonexistent/path"])).toEqual([]);
+  });
+
+  it("indexes each skill once when the configured dirs alias the same location", () => {
+    // The real-world default: ~/skills is a symlink to ~/.claude/skills and
+    // both are in skillsDirs — every skill used to index twice.
+    const dir = fixtureDir();
+    const link = path.join(mkdtempSync(path.join(os.tmpdir(), "skills-alias-")), "skills");
+    symlinkSync(dir, link);
+    const skills = indexSkills([dir, link]);
+    expect(skills.map((s) => s.name).sort()).toEqual(["qa-agent", "stripe-setup"]);
   });
 });
