@@ -11,6 +11,7 @@ import { runIntake, type IntakeUi } from "./intake.js";
 import { AgentPool } from "./pool.js";
 import {
   extractJson,
+  plannerRepairPrompt,
   plannerSystemPrompt,
   qaSystemPrompt,
   qaTaskPrompt,
@@ -131,29 +132,86 @@ export class RunController {
 
   private async plan(runId: string, feedback: string): Promise<Plan> {
     const run = this.store.getRun(runId)!;
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    const dir = path.join(this.repoPath, ".harness", runId);
+    const attempts = 3;
+    let lastReason = "the planner produced no output";
+    let lastPath = "";
+
+    let lastOutput = "";
+
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      // Only the first attempt pays for a repository survey. A rejected plan is a
+      // formatting problem, so later attempts repair the previous output with no
+      // tools and a tight turn budget — re-surveying three times is what made one
+      // failed planning phase cost $3.34.
+      const repair = attempt > 1 && lastOutput.length > 0;
       const result = await this.pool.run({
         runId,
         role: "planner",
         model: run.config.models.planner,
         systemPrompt: plannerSystemPrompt(),
-        prompt: `Assignment:\n${run.assignment}\n${feedback ? `\nOperator feedback on the previous plan:\n${feedback}` : ""}\n\nSurvey the repository at your working directory (read key files, do NOT dump whole trees into context), then produce the plan JSON.`,
+        prompt: repair
+          ? plannerRepairPrompt(lastOutput, lastReason)
+          : `Assignment:\n${run.assignment}\n${feedback ? `\nOperator feedback on the previous plan:\n${feedback}` : ""}\n\nSurvey the repository at your working directory (read key files, do NOT dump whole trees into context), then produce the plan JSON.`,
         cwd: this.repoPath,
-        allowedTools: ["Read", "Glob", "Grep"],
-        maxTurns: 40,
+        allowedTools: repair ? [] : ["Read", "Glob", "Grep"],
+        maxTurns: repair ? 4 : 40,
         budgetCheck: () => this.checkBudget(runId),
       });
+      lastOutput = result.resultText;
+      // Always keep the raw output: an unusable plan is expensive, and diagnosing
+      // it from a one-line error is impossible.
+      lastPath = this.saveAttempt(dir, attempt, result.resultText);
+
+      // Three distinct failures with three distinct fixes — never collapse them
+      // into one message.
+      let raw: unknown;
       try {
-        const plan = Plan.parse(extractJson(result.resultText));
-        const errors = validatePlanDag(plan);
-        if (errors.length === 0) return plan;
-        feedback = `Your previous plan failed DAG validation:\n${errors.join("\n")}`;
+        raw = extractJson(result.resultText);
+        const parsed = Plan.safeParse(raw);
+        if (parsed.success) {
+          const errors = validatePlanDag(parsed.data);
+          if (errors.length === 0) return parsed.data;
+          lastReason = `the plan is not a valid DAG: ${errors.join("; ")}`;
+        } else {
+          const issues = parsed.error.issues
+            .slice(0, 5)
+            .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+            .join("; ");
+          lastReason = `the plan does not match the required shape: ${issues}`;
+        }
       } catch (e) {
-        feedback = `Your previous output failed schema validation: ${String(e).slice(0, 500)}`;
+        lastReason = `the plan JSON could not be read: ${(e instanceof Error ? e.message : String(e)).slice(0, 300)}`;
       }
+      if (result.outcome !== "done" && result.errorDetail) {
+        lastReason += ` (the session also ended abnormally: ${result.errorDetail})`;
+      }
+      this.bus.publish({
+        type: "run.plan_attempt_failed",
+        runId,
+        attempt,
+        reason: lastReason,
+        rawPath: lastPath,
+        ts: Date.now(),
+      });
+      feedback = `Your previous attempt was rejected: ${lastReason}\nRe-emit the complete plan JSON object. Do not abbreviate it.`;
     }
-    this.store.transitionRun(runId, "FAILED", "planner could not produce a valid plan after 3 attempts");
-    throw new Error("planning failed");
+
+    const detail = `${attempts} planner attempts rejected — ${lastReason}. Raw output: ${lastPath}`;
+    this.store.transitionRun(runId, "FAILED", detail);
+    throw new Error(detail);
+  }
+
+  /** Persist one planner attempt verbatim; returns the path for the error message. */
+  private saveAttempt(dir: string, attempt: number, text: string): string {
+    const file = path.join(dir, `planner-attempt-${attempt}.txt`);
+    try {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(file, text);
+    } catch {
+      return "(could not be written)";
+    }
+    return file;
   }
 
   private persistPlan(runId: string, plan: Plan): void {

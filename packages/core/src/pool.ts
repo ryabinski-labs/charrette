@@ -30,6 +30,8 @@ export interface AgentResult {
   costUsd: number;
   turns: number;
   outcome: "done" | "error" | "killed";
+  /** Set when the SDK ended the session abnormally (max turns, max budget, …). */
+  errorDetail?: string;
 }
 
 /**
@@ -66,6 +68,7 @@ export class AgentPool {
     let turns = 0;
     let cost = 0;
     let killedByBudget = false;
+    let abnormal = "";
     try {
       for await (const message of query({ prompt: spec.prompt, options })) {
         try {
@@ -91,11 +94,18 @@ export class AgentPool {
           this.store.db.prepare("UPDATE sessions SET turns = ?, lastHeartbeatAt = ? WHERE id = ?").run(turns, Date.now(), sessionId);
         } else if (message.type === "result") {
           const m = message as {
+            subtype?: string;
+            errors?: string[];
             result?: string;
             total_cost_usd?: number;
             usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
           };
           resultText = m.result ?? "";
+          // `error_max_turns` and friends still yield a result message; without this
+          // a truncated session is indistinguishable from a clean one.
+          if (m.subtype && m.subtype !== "success") {
+            abnormal = m.subtype + (m.errors?.length ? `: ${m.errors.join("; ")}` : "");
+          }
           const usage = {
             inputTokens: m.usage?.input_tokens ?? 0,
             outputTokens: m.usage?.output_tokens ?? 0,
@@ -113,8 +123,15 @@ export class AgentPool {
       }
       throw e;
     }
-    this.endSession(spec, sessionId, turns, cost, "done", "");
-    return { sessionId, resultText, costUsd: cost, turns, outcome: "done" };
+    this.endSession(spec, sessionId, turns, cost, abnormal ? "error" : "done", abnormal);
+    return {
+      sessionId,
+      resultText,
+      costUsd: cost,
+      turns,
+      outcome: abnormal ? "error" : "done",
+      errorDetail: abnormal || undefined,
+    };
   }
 
   private endSession(spec: AgentSpec, sessionId: string, turns: number, cost: number, state: string, detail: string): void {

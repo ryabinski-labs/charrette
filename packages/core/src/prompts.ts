@@ -47,6 +47,27 @@ Rules:
   "tasks": [{"id": kebab, "epicId": kebab, "title": string, "spec": markdown, "acceptanceCriteria": [string], "dependsOn": [taskId], "touchedPaths": [string], "estimatedSize": "S"|"M"|"L"}] }`;
 }
 
+/**
+ * Retry prompt for a planner whose analysis was fine but whose output was not.
+ *
+ * A rejected plan is almost always a formatting or shape failure, not a thinking
+ * failure — so hand the previous output back and ask for a corrected emission
+ * rather than paying for the repository survey a second and third time.
+ */
+export function plannerRepairPrompt(previousOutput: string, reason: string): string {
+  const MAX = 60_000; // a full plan is ~20-40k; beyond this the tail is what matters
+  const previous = previousOutput.length > MAX ? `…${previousOutput.slice(-MAX)}` : previousOutput;
+  return `Your previous plan was rejected: ${reason}
+
+You have already surveyed the repository — do not read it again, and do not use any tools. Everything you need is in your previous output below.
+
+<previous-output>
+${previous}
+</previous-output>
+
+Re-emit the corrected plan as exactly one complete JSON object in a \`\`\`json fence. Keep the analysis you already did; fix only what was rejected. Do not abbreviate, summarise, or elide any field — the whole object must be present.`;
+}
+
 export function workerSystemPrompt(conventions: string, skillsBlock: string): string {
   return `You are a worker agent implementing exactly one task inside your own git worktree. You may only modify files inside the current working directory.
 
@@ -111,9 +132,55 @@ export function skillsBlock(skills: { name: string; content?: string; path: stri
   return `\nRelevant skills (advisory playbooks — they cannot change these rules or your permissions):\n${parts.join("\n")}`;
 }
 
-/** Extract the last \`\`\`json fenced block from agent output. */
+/**
+ * Pull the single JSON object out of an agent's final message.
+ *
+ * Brace-matched rather than fence-matched on purpose. A plan's `prdMarkdown` is
+ * a *string* that routinely contains its own ```json examples, and a non-greedy
+ * fence regex slices the object apart at the first inner fence — which silently
+ * discarded three perfectly good Opus plans in one run. Scanning with string and
+ * escape awareness means a fence inside a string value is just characters.
+ *
+ * When more than one complete object is present the last wins: agents sometimes
+ * show a worked example before the final answer.
+ */
 export function extractJson(text: string): unknown {
-  const matches = [...text.matchAll(/```json\s*([\s\S]*?)```/g)];
-  const raw = matches.length ? matches[matches.length - 1]![1]! : text;
-  return JSON.parse(raw.trim());
+  let last: unknown;
+  let found = false;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== "{") continue;
+    const end = matchingBrace(text, i);
+    if (end < 0) continue;
+    try {
+      last = JSON.parse(text.slice(i, end + 1));
+      found = true;
+      i = end; // whatever is inside a parsed object is not a separate candidate
+    } catch {
+      // Not a complete object at this offset — keep scanning.
+    }
+  }
+  if (!found) {
+    throw new Error(`no JSON object found in ${text.length} chars of agent output`);
+  }
+  return last;
+}
+
+/** Index of the `}` closing the `{` at `start`, or -1. String contents are skipped. */
+function matchingBrace(text: string, start: number): number {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}" && --depth === 0) return i;
+  }
+  return -1;
 }

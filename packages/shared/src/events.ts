@@ -9,6 +9,7 @@ export const HarnessEvent = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("run.gate_opened"), gateId: z.string(), kind: GateKind, payload: z.unknown() }),
   z.object({ ...base, type: z.literal("run.gate_resolved"), gateId: z.string(), kind: GateKind, resolution: GateState, feedback: z.string().default("") }),
   z.object({ ...base, type: z.literal("run.budget_updated"), spentUsd: z.number(), capUsd: z.number() }),
+  z.object({ ...base, type: z.literal("run.plan_attempt_failed"), attempt: z.number().int(), reason: z.string(), rawPath: z.string() }),
   z.object({ ...base, type: z.literal("intake.question"), sessionId: z.string(), question: z.string(), options: z.array(z.string()).default([]) }),
   z.object({ ...base, type: z.literal("intake.answered"), sessionId: z.string(), question: z.string(), answer: z.string() }),
   z.object({ ...base, type: z.literal("intake.brief_ready"), goal: z.string(), decisions: z.number().int() }),

@@ -273,6 +273,8 @@ function describe(ev) {
     case "agent.ended":
       return [ev.outcome === "done" ? "state" : "bad", role || "agent",
         "finished (" + ev.outcome + ")" + (ev.detail ? " " + clip(ev.detail, 140) : "")];
+    case "run.plan_attempt_failed":
+      return ["bad", "planner", "attempt " + ev.attempt + " rejected \\u2014 " + ev.reason + "  (raw: " + ev.rawPath + ")"];
     case "intake.question":
       return ["say", "intake", "Q: " + clip(ev.question, 220) +
         (ev.options && ev.options.length ? "   [" + ev.options.join(" | ") + "]" : "")];

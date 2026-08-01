@@ -81,7 +81,7 @@ git clone git@github.com:ryabinski-labs/harness.git
 cd harness
 pnpm install
 pnpm build          # compiles all packages to dist/
-pnpm test           # 37 unit tests, no API calls, no network
+pnpm test           # 58 unit tests, no API calls, no network
 ```
 
 ### Put `harness` on your PATH
@@ -497,6 +497,7 @@ Inside the **target repo**:
 |---|---|
 | `.harness/harness.db` | event log + materialized run/task/usage state (SQLite, WAL) |
 | `.harness/<runId>/BRIEF.md` | the brief the intake conversation produced — what the planner was actually given |
+| `.harness/<runId>/planner-attempt-N.txt` | the raw output of any rejected planning attempt, kept verbatim for post-mortem |
 | `.harness/<runId>/PRD.md` | the PRD the planner produced — the thing you approve |
 | `.harness/<runId>/CONVENTIONS.md` | conventions injected into every worker's system prompt |
 | `.harness/<runId>/plan.json` | full plan incl. task DAG; SHA-256 of this is the approved `planHash` |
@@ -729,6 +730,18 @@ your shell profile.
 
 **`... is not inside a git repository`**
 You are outside the target repo. `cd` into it, or pass `--repo <path>`.
+
+**`3 planner attempts rejected — …`**
+The message names which of the three failure modes happened — the JSON could not
+be read, the plan did not match the required shape, or the plan was not a valid
+DAG — and points at `.harness/<runId>/planner-attempt-N.txt`, which holds each
+rejected attempt verbatim. Read attempt 1 first: if the analysis looks right and
+only the output was malformed, the assignment is fine and it is worth re-running.
+
+Only the first attempt surveys the repository. Retries are given the previous
+output with no tools and a 4-turn budget, because a rejected plan is nearly always
+a formatting failure rather than a thinking failure — re-surveying three times is
+what once turned a single failed planning phase into $3.34.
 
 **The intake agent asks too many questions, or the wrong ones**
 Give it more to work with: a two-sentence seed with the constraint you care about
