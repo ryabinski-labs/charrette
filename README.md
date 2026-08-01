@@ -4,7 +4,8 @@
 
 Harness is a multi-agent development orchestrator built on the [Claude Agent SDK](https://docs.anthropic.com/en/api/agent-sdk). A planner agent turns a one-paragraph assignment into a PRD and a task DAG; you approve the plan (Gate 1); worker agents implement tasks in isolated git worktrees with locally-discovered skills injected per task; adversarial QA agents verify against acceptance criteria (max 3 iterations); accepted branches merge continuously into a run branch and each component ships as a PR linked to its GitHub issue. You merge the PRs — the harness never does (Gate 2).
 
-Full product spec: [PRD.md](./PRD.md).
+- **[docs/OPERATIONS.md](./docs/OPERATIONS.md)** — install, configure, run, observe, recover. Start here.
+- **[PRD.md](./PRD.md)** — the full product spec: architecture, threat model, performance budget, phasing.
 
 ## Status
 
@@ -45,6 +46,8 @@ node apps/cli/dist/main.js status --repo ~/code/my-app
 ```
 
 The dashboard URL is printed at start; the URL fragment is your auth token.
+
+Full configuration reference, recovery playbook, and troubleshooting: [docs/OPERATIONS.md](./docs/OPERATIONS.md).
 
 ## Monorepo layout
 
