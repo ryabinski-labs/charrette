@@ -63,17 +63,38 @@ const NODE_SCRIPTS = ["typecheck", "type-check", "lint", "test"];
  * gives QA a hard signal. Only conventional, non-destructive commands are
  * inferred; anything else must be passed explicitly with --check.
  */
+/**
+ * Where a Node project commonly lives when the repo root is not one — a repo with
+ * `frontend/` and `backend/` still has real checks, and reporting `none` there
+ * silently leaves QA with no hard signal.
+ */
+const SUBPROJECT_DIRS = ["frontend", "backend", "client", "server", "web", "api", "app", "src"];
+
+/** Node scripts worth running in `dir` (relative to the repo), or [] if none. */
+function nodeScriptsIn(repo: string, dir: string): { checks: string[]; pm: string } {
+  const root = path.join(repo, dir);
+  const scripts = readJson(path.join(root, "package.json"))?.scripts;
+  if (!scripts || typeof scripts !== "object") return { checks: [], pm: "" };
+  const table = scripts as Record<string, unknown>;
+  const present = NODE_SCRIPTS.filter((s) => typeof table[s] === "string");
+  // `typecheck` and `type-check` are the same intent — never run both.
+  const picked = present.filter((s) => !(s === "type-check" && present.includes("typecheck")));
+  if (picked.length === 0) return { checks: [], pm: "" };
+  // Prefer the lockfile next to the manifest, falling back to the repo root's.
+  const pm = packageManager(existsSync(path.join(root, "pnpm-lock.yaml")) || existsSync(path.join(root, "yarn.lock")) ? root : repo);
+  const prefix = dir ? `cd ${dir} && ` : "";
+  return { checks: picked.map((s) => `${prefix}${pm} run ${s}`), pm };
+}
+
 export function detectChecks(repo: string): DetectedChecks {
-  const pkg = readJson(path.join(repo, "package.json"));
-  const scripts = pkg?.scripts;
-  if (scripts && typeof scripts === "object") {
-    const table = scripts as Record<string, unknown>;
-    const present = NODE_SCRIPTS.filter((s) => typeof table[s] === "string");
-    // `typecheck` and `type-check` are the same intent — never run both.
-    const picked = present.filter((s) => !(s === "type-check" && present.includes("typecheck")));
-    if (picked.length > 0) {
-      const pm = packageManager(repo);
-      return { checks: picked.map((s) => `${pm} run ${s}`), source: `package.json scripts via ${pm}` };
+  const root = nodeScriptsIn(repo, "");
+  if (root.checks.length > 0) {
+    return { checks: root.checks, source: `package.json scripts via ${root.pm}` };
+  }
+  for (const dir of SUBPROJECT_DIRS) {
+    const sub = nodeScriptsIn(repo, dir);
+    if (sub.checks.length > 0) {
+      return { checks: sub.checks, source: `${dir}/package.json scripts via ${sub.pm}` };
     }
   }
   if (existsSync(path.join(repo, "Cargo.toml"))) {

@@ -68,3 +68,33 @@ describe("loadFileConfig", () => {
     expect(() => loadFileConfig(repo)).toThrow(/not valid JSON/);
   });
 });
+
+describe("detectChecks in monorepo layouts", () => {
+  it("finds checks in frontend/ when the repo root has no package.json", () => {
+    const repo = tmpRepo();
+    mkdirSync(path.join(repo, "frontend"));
+    writeFileSync(
+      path.join(repo, "frontend", "package.json"),
+      JSON.stringify({ scripts: { dev: "vite", build: "vite build", typecheck: "vue-tsc" } })
+    );
+    writeFileSync(path.join(repo, "frontend", "pnpm-lock.yaml"), "");
+    const { checks, source } = detectChecks(repo);
+    expect(checks).toEqual(["cd frontend && pnpm run typecheck"]);
+    expect(source).toMatch(/frontend\/package\.json/);
+  });
+
+  it("prefers the repo root over a subdirectory", () => {
+    const repo = tmpRepo();
+    writeFileSync(path.join(repo, "package.json"), JSON.stringify({ scripts: { test: "vitest" } }));
+    mkdirSync(path.join(repo, "frontend"));
+    writeFileSync(path.join(repo, "frontend", "package.json"), JSON.stringify({ scripts: { lint: "eslint" } }));
+    expect(detectChecks(repo).checks).toEqual(["npm run test"]);
+  });
+
+  it("still reports none when a subdirectory has no useful scripts", () => {
+    const repo = tmpRepo();
+    mkdirSync(path.join(repo, "frontend"));
+    writeFileSync(path.join(repo, "frontend", "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+    expect(detectChecks(repo).checks).toEqual([]);
+  });
+});
