@@ -4,7 +4,7 @@ import { createInterface } from "node:readline/promises";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { RunConfig } from "@harness/shared";
-import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, detectToolbelt, originSlug } from "@harness/core";
+import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, detectToolbelt, ensureIgnored, originSlug } from "@harness/core";
 import { Dashboard } from "@harness/dashboard";
 import { promptForNewCap } from "./budget.js";
 import {
@@ -49,6 +49,9 @@ function makeDashboardFactory(want: boolean, port: number | undefined): {
 function makeController(repoPath: string, gateOverride?: (bus: Bus, store: Store) => GateHandler): { controller: RunController; store: Store; bus: Bus } {
   const stateDir = path.join(repoPath, ".harness");
   mkdirSync(stateDir, { recursive: true });
+  // Every run and resume passes through here, so this is the one place the state
+  // directory is known to exist before anything writes to it.
+  if (ensureIgnored(repoPath, ".harness/")) process.stdout.write("  added .harness/ to .gitignore (harness run state, not source)\n");
   const store = new Store(path.join(stateDir, "harness.db"));
   const bus = new Bus(store);
   // The intake agent owns the terminal while it is talking to the operator, so
