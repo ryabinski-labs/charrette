@@ -15,6 +15,12 @@ export interface AgentSpec {
   systemPrompt: string;
   prompt: string;
   cwd: string;
+  /**
+   * The built-in tools that *exist* for this agent. `allowedTools` only
+   * auto-approves; under bypassPermissions it restricts nothing, so read-only
+   * roles must be constrained here. `[]` removes every built-in tool.
+   */
+  tools?: Options["tools"];
   allowedTools?: string[];
   disallowedTools?: string[];
   /** In-process MCP servers (SDK `tool()` definitions) exposed to this agent only. */
@@ -56,6 +62,7 @@ export class AgentPool {
       systemPrompt: spec.systemPrompt,
       maxTurns: spec.maxTurns ?? 100,
       permissionMode: "bypassPermissions",
+      tools: spec.tools,
       allowedTools: spec.allowedTools,
       disallowedTools: spec.disallowedTools,
       mcpServers: spec.mcpServers,

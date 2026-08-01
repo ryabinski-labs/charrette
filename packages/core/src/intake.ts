@@ -109,6 +109,8 @@ export async function runIntake(pool: AgentPool, bus: Bus, req: IntakeRequest): 
         `Survey the repository at your working directory, then ask what you need to. ` +
         `Finish with the brief JSON once they approve it.`,
       cwd: req.repoPath,
+      // The intake agent talks to a human about a repo it may only read.
+      tools: ["Read", "Glob", "Grep"],
       allowedTools: ["Read", "Glob", "Grep", ASK_TOOL],
       mcpServers: { harness_intake: createSdkMcpServer({ name: "harness_intake", tools: [askUser] }) },
       maxTurns: 60,

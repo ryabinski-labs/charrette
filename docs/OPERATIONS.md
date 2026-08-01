@@ -715,7 +715,11 @@ What *is* enforced today:
 | Dashboard | loopback bind, bearer token, `Origin`/`Host` validation on writes |
 | Plan integrity | the approved plan is hashed; execution consumes that exact version |
 | Web access | `WebSearch` disallowed for workers and QA |
-| Intake reach | the intake agent gets `Read`/`Glob`/`Grep` and its `ask_user` tool only — it cannot edit, run commands, or reach the network |
+| Read-only roles | intake and the planner are given `tools: ["Read","Glob","Grep"]`, which removes `Bash`/`Edit`/`Write` from their tool set entirely; a planner retry gets `tools: []` |
+
+> The SDK's `allowedTools` is an **auto-approve** list, not a restriction — under
+> `permissionMode: "bypassPermissions"` it confines nothing. `tools` is the option
+> that removes built-ins. Any new read-only role must set `tools`.
 
 Full threat model: PRD §12.
 

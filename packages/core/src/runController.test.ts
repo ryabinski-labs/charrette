@@ -96,10 +96,11 @@ describe("planning failure diagnostics", () => {
     const { controller, specs } = harness(["I analysed the repo but forgot the JSON."]);
     await controller.startRun("do a thing", CONFIG).catch(() => undefined);
 
-    expect(specs[0]!.allowedTools).toEqual(["Read", "Glob", "Grep"]);
+    expect(specs[0]!.tools).toEqual(["Read", "Glob", "Grep"]);
     expect(specs[0]!.maxTurns).toBe(40);
     for (const retry of specs.slice(1)) {
-      expect(retry.allowedTools).toEqual([]);       // no survey tools at all
+      // `tools: []` genuinely removes the built-ins; `allowedTools` only auto-approves.
+      expect(retry.tools).toEqual([]);
       expect(retry.maxTurns).toBeLessThanOrEqual(4); // and no room to wander
       expect(retry.prompt).toContain("I analysed the repo but forgot the JSON.");
       expect(retry.prompt).toMatch(/do not read it again/);
@@ -109,7 +110,7 @@ describe("planning failure diagnostics", () => {
   it("falls back to a full survey when the previous attempt returned nothing to repair", async () => {
     const { controller, specs } = harness([""]);
     await controller.startRun("do a thing", CONFIG).catch(() => undefined);
-    expect(specs[1]!.allowedTools).toEqual(["Read", "Glob", "Grep"]);
+    expect(specs[1]!.tools).toEqual(["Read", "Glob", "Grep"]);
   });
 
   it("surfaces an abnormal session end alongside the parse failure", async () => {
@@ -149,5 +150,16 @@ describe("planning failure diagnostics", () => {
     expect(calls()).toBe(1); // accepted first time — no retry, no wasted Opus call
     expect(store.listTasks(runId).map((t) => t.id)).toEqual(["task-a"]);
     expect(readFileSync(path.join(attemptsDir(repo, runId), "PRD.md"), "utf8")).toBe(prd);
+  });
+});
+
+describe("agent confinement", () => {
+  it("gives the planner read-only tools — allowedTools alone does not restrict", async () => {
+    const { controller, specs } = harness(["nope"]);
+    await controller.startRun("do a thing", CONFIG).catch(() => undefined);
+    expect(specs[0]!.tools).toEqual(["Read", "Glob", "Grep"]);
+    for (const t of ["Bash", "Edit", "Write"]) {
+      expect(specs[0]!.tools).not.toContain(t);
+    }
   });
 });

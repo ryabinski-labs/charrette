@@ -154,6 +154,8 @@ export class RunController {
           ? plannerRepairPrompt(lastOutput, lastReason)
           : `Assignment:\n${run.assignment}\n${feedback ? `\nOperator feedback on the previous plan:\n${feedback}` : ""}\n\nSurvey the repository at your working directory (read key files, do NOT dump whole trees into context), then produce the plan JSON.`,
         cwd: this.repoPath,
+        // Planning is read-only, and a repair has nothing left to read.
+        tools: repair ? [] : ["Read", "Glob", "Grep"],
         allowedTools: repair ? [] : ["Read", "Glob", "Grep"],
         maxTurns: repair ? 4 : 40,
         budgetCheck: () => this.checkBudget(runId),
