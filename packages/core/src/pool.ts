@@ -70,6 +70,16 @@ export interface AgentResult {
  */
 const STALL_ABORT_MS = 15 * 60 * 1000;
 
+/** The SDK's own default, named so the wrap-up trigger and the option agree. */
+const DEFAULT_MAX_TURNS = 100;
+
+/**
+ * How far into its turn budget a session is asked to wrap up. Low enough that
+ * the agent has room to write the answer, high enough that sessions which were
+ * going to finish on their own never see the message at all.
+ */
+const WRAP_UP_AT = 0.8;
+
 /**
  * The session's stdin, held open so the operator can speak mid-flight. The
  * initial prompt goes out immediately; anything push()ed afterwards becomes a
@@ -168,11 +178,16 @@ export class AgentPool {
     // undiagnosable — the actual error only ever appears on the subprocess's
     // stderr, which is otherwise dropped.
     let stderrTail = "";
+    const turnCap = spec.maxTurns ?? DEFAULT_MAX_TURNS;
+    // Our counter runs ahead of the SDK's own turn accounting (a validator
+    // capped at 60 read 66 here), so a fraction of the cap is the honest
+    // trigger — it is reached no later than the SDK's ceiling, never after.
+    const wrapUpAt = Math.max(1, Math.floor(turnCap * WRAP_UP_AT));
     const options: Options = {
       model: spec.model,
       cwd: spec.cwd,
       systemPrompt: spec.systemPrompt,
-      maxTurns: spec.maxTurns ?? 100,
+      maxTurns: turnCap,
       stderr: (data) => {
         stderrTail = (stderrTail + data).slice(-2000);
       },
@@ -234,6 +249,31 @@ export class AgentPool {
         }
         if (message.type === "assistant") {
           turns++;
+          // Ask for the answer before the ceiling takes it away.
+          //
+          // Sessions that die at maxTurns are the expensive ones — they die
+          // having done the most work — and every one of them is a total loss:
+          // no verdict, no summary, and a re-dispatch that starts over. Across
+          // two runs that was ~$68 of discarded sessions, with QA deaths
+          // clustered at 91-112 turns against a cap of 90.
+          //
+          // A message queued here is delivered because `settle()` only closes
+          // the stream when nothing is waiting, so the agent gets one more
+          // exchange to say what it found. A session that finishes early never
+          // reaches this and is untouched.
+          if (turns === wrapUpAt) {
+            stream.push(
+              `[HARNESS] You are near this session's turn limit and will be cut off shortly. Stop investigating now and give your final answer immediately, in exactly the output format you were asked for. Report what you have actually established so far and say plainly what you did not get to — a partial answer in the right format is usable, and being cut off mid-investigation is not. If you have already given your final answer, ignore this message.`
+            );
+            this.bus.publish({
+              type: "agent.log",
+              runId: spec.runId,
+              taskId: spec.taskId,
+              sessionId,
+              text: `approaching the turn limit (${turns}/${turnCap}) — asked for a final answer now`,
+              ts: Date.now(),
+            });
+          }
           const content = (message as { message?: { content?: unknown } }).message?.content;
           if (Array.isArray(content)) {
             for (const block of content) {
@@ -257,7 +297,13 @@ export class AgentPool {
           // `error_max_turns` and friends still yield a result message; without this
           // a truncated session is indistinguishable from a clean one.
           if (m.subtype && m.subtype !== "success") {
-            abnormal = m.subtype + (m.errors?.length ? `: ${m.errors.join("; ")}` : "");
+            // Say which wall it hit in words. `error_max_turns` next to a reply
+            // count that reads higher than the cap looks like the cap was not
+            // enforced; the two are simply counted differently, and an operator
+            // deciding whether to raise qaMaxTurns needs to know it was the
+            // turn ceiling and not a crash.
+            const named = m.subtype === "error_max_turns" ? `error_max_turns (hit the turn ceiling of ${turnCap})` : m.subtype;
+            abnormal = named + (m.errors?.length ? `: ${m.errors.join("; ")}` : "");
           }
           const usage = {
             inputTokens: m.usage?.input_tokens ?? 0,
@@ -301,8 +347,15 @@ export class AgentPool {
   }
 
   private endSession(spec: AgentSpec, sessionId: string, turns: number, cost: number, state: string, detail: string): void {
+    // `cost` only advances when a result message arrives, so a session that
+    // died mid-stream books zero however much it spent — 13 interrupted
+    // sessions in one run showed $0.00 against $16.02 of ledger rows, and the
+    // sessions table came out a third short of the ledger for the whole run.
+    // The ledger is the one that pays, so let it settle the bill.
     this.store.db
-      .prepare("UPDATE sessions SET state = ?, endedAt = ?, turns = ?, costUsd = ? WHERE id = ?")
+      .prepare(
+        "UPDATE sessions SET state = ?, endedAt = ?, turns = ?, costUsd = MAX(?, (SELECT COALESCE(SUM(costUsd),0) FROM ledger WHERE ledger.sessionId = sessions.id)) WHERE id = ?"
+      )
       .run(state, Date.now(), turns, cost, sessionId);
     this.bus.publish({
       type: "agent.ended",

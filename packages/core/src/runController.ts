@@ -10,7 +10,7 @@ import { seedWorktreeDeps } from "./deps.js";
 import { git, WorktreeManager } from "./git.js";
 import { GitHubAdapter, type PrRef } from "./github.js";
 import { runIntake, type IntakeUi } from "./intake.js";
-import { AgentPool } from "./pool.js";
+import { AgentPool, type AgentResult } from "./pool.js";
 import {
   advisorPrompt,
   advisorSystemPrompt,
@@ -33,7 +33,7 @@ import {
 } from "./prompts.js";
 import { runDeterministicChecks } from "./qa.js";
 import { detectToolbelt, toolbeltBlock } from "./toolbelt.js";
-import { Store, TaskRow } from "./store.js";
+import { Store, TaskRow, type RunRow } from "./store.js";
 
 const FULL_TEXT_SKILL_TOKEN_LIMIT = 1500; // PERF-4
 const MAX_FULL_TEXT_SKILLS = 2;
@@ -1039,6 +1039,40 @@ export class RunController {
     }
   }
 
+  /**
+   * Resume a QA session that finished without writing its verdict JSON, and ask
+   * for nothing but the verdict.
+   *
+   * Null when there is no session to resume, when the retry also fails, or when
+   * it still will not answer in the required shape — every one of which leaves
+   * the caller's existing FAIL exactly where it was. Budget stops are the one
+   * thing that must still propagate: a run over its cap does not get to spend
+   * two more turns being polite about it.
+   */
+  private async reaskVerdict(runId: string, taskId: string, qa: AgentResult, run: RunRow, cwd: string): Promise<QaVerdict | null> {
+    if (!qa.sdkSessionId) return null;
+    try {
+      const retry = await this.pool.run({
+        runId,
+        taskId,
+        role: "qa",
+        model: run.config.models.qa,
+        systemPrompt: "You are finishing a verification you have already done. Answer with JSON and nothing else.",
+        prompt:
+          "Your previous message did not contain the verdict JSON this task requires. Do not investigate anything further and do not change your judgment — just state the conclusion you already reached, as exactly one JSON object inside a ```json fence:\n" +
+          '{"verdict":"PASS","notes":string}\nor\n{"verdict":"FAIL","reasons":[string],"mustFix":[string]}',
+        cwd,
+        resume: qa.sdkSessionId,
+        maxTurns: 2,
+        budgetCheck: () => this.checkBudget(runId, taskId),
+      });
+      return QaVerdict.parse(extractJson(retry.resultText));
+    } catch (e) {
+      if (e instanceof BudgetExceeded) throw e;
+      return null;
+    }
+  }
+
   /** Every task that cannot run until `taskId` does — directly or through another. */
   private dependents(tasks: { id: string; dependsOn: string[] }[], taskId: string): string[] {
     const blocked = new Set([taskId]);
@@ -1534,9 +1568,18 @@ export class RunController {
         verdict = QaVerdict.parse(extractJson(qa.resultText));
       } catch {
         // Reached only when the session ended cleanly and still wrote something
-        // that is not a verdict — a QA agent that ignored its output contract,
-        // which is a real finding about the run and does count as an iteration.
-        verdict = { verdict: "FAIL", reasons: ["QA finished but wrote no valid verdict JSON"], mustFix: ["re-run"] };
+        // that is not a verdict — a QA agent that ignored its output contract.
+        //
+        // The verification itself happened; only the formatting is missing, and
+        // the whole investigation is still sitting in that session's context.
+        // Ask it for the JSON alone before throwing the work away: two turns
+        // against a warm cache, versus booking a FAIL that sends the worker
+        // back to fix nothing and spends an iteration of the cap doing it.
+        verdict = (await this.reaskVerdict(runId, taskId, qa, run, wt.path)) ?? {
+          verdict: "FAIL",
+          reasons: ["QA finished but wrote no valid verdict JSON, and could not produce one when asked again"],
+          mustFix: ["re-run"],
+        };
       }
       const iterations = this.store.getTask(runId, taskId)!.qaIterations + 1;
       this.store.updateTask(runId, taskId, { qaIterations: iterations });

@@ -458,7 +458,15 @@ export class Store {
    */
   sweepDeadSessions(): number {
     return Number(
-      this.db.prepare("UPDATE sessions SET state = 'interrupted', endedAt = ? WHERE state = 'running'").run(Date.now()).changes
+      this.db
+        .prepare(
+          // Settle the bill from the ledger on the way out. A session the last
+          // process left running never reached endSession, so without this its
+          // row claims it cost nothing at all — and every one of these died
+          // mid-flight, which is where the expensive sessions die.
+          "UPDATE sessions SET state = 'interrupted', endedAt = ?, costUsd = MAX(costUsd, (SELECT COALESCE(SUM(costUsd),0) FROM ledger WHERE ledger.sessionId = sessions.id)) WHERE state = 'running'"
+        )
+        .run(Date.now()).changes
     );
   }
 

@@ -569,7 +569,11 @@ function renderNow() {
     const body = el("div", "body");
     const head = el("div");
     head.append(el("span", "who r-" + s.role, s.role + (s.taskId ? " \\u00b7 " + s.taskId : "")));
-    head.append(el("span", "meta", "  " + dur(Date.now() - s.startedAt) + " \\u00b7 " + s.turns + " turns"));
+    // "replies", not "turns": this counts assistant messages, which runs ahead
+    // of the SDK's own turn accounting that qaMaxTurns is measured in (a
+    // validator capped at 60 ended showing 66). Calling both of them "turns"
+    // invites tuning the cap against a number in a different scale.
+    head.append(el("span", "meta", "  " + dur(Date.now() - s.startedAt) + " \\u00b7 " + s.turns + " replies"));
     body.append(head);
     body.append(el("div", "meta", s.model));
     body.append(el("div", "doing", lastAction[s.id] || "thinking\\u2026"));
