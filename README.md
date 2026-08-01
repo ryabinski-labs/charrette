@@ -2,7 +2,7 @@
 
 **Assignment in → reviewed pull requests out.**
 
-Harness is a multi-agent development orchestrator built on the [Claude Agent SDK](https://docs.anthropic.com/en/api/agent-sdk). A planner agent turns a one-paragraph assignment into a PRD and a task DAG; you approve the plan (Gate 1); worker agents implement tasks in isolated git worktrees with locally-discovered skills injected per task; adversarial QA agents verify against acceptance criteria (max 3 iterations); accepted branches merge continuously into a run branch and each component ships as a PR linked to its GitHub issue. You merge the PRs — the harness never does (Gate 2).
+Harness is a multi-agent development orchestrator built on the [Claude Agent SDK](https://docs.anthropic.com/en/api/agent-sdk). An intake agent reads your repo and interviews you until the assignment is unambiguous; a planner agent turns the agreed brief into a PRD and a task DAG; you approve the plan (Gate 1); worker agents implement tasks in isolated git worktrees with locally-discovered skills injected per task; adversarial QA agents verify against acceptance criteria (max 3 iterations); accepted branches merge continuously into a run branch and each component ships as a PR linked to its GitHub issue. You merge the PRs — the harness never does (Gate 2).
 
 - **[docs/OPERATIONS.md](./docs/OPERATIONS.md)** — install, configure, run, observe, recover. Start here.
 - **[PRD.md](./PRD.md)** — the full product spec: architecture, threat model, performance budget, phasing.
@@ -11,13 +11,14 @@ Harness is a multi-agent development orchestrator built on the [Claude Agent SDK
 
 Pre-release walking skeleton (v0.0 per the PRD phasing) plus the v0.1 dashboard backend:
 
+- ✅ Intake agent: repo-grounded clarifying questions with options and a recommendation → agreed brief
 - ✅ Planner → PRD + validated task DAG → plan approval gate (terminal or dashboard)
 - ✅ Worker → deterministic checks → QA agent loop with iteration caps
 - ✅ Continuous integration into `harness/<runId>/main`, idempotent GitHub issues + PRs
 - ✅ Event-sourced SQLite state (`node:sqlite`, zero native deps), crash-resume
 - ✅ Budget caps enforced before every agent turn; live cost ledger
 - ✅ Skills discovery: lexical SKILL.md matching with SHA-256 provenance (also exposed as a stdio MCP server)
-- ✅ Localhost dashboard: SSE live events, task board, cost meter, gate approval (127.0.0.1-only, bearer token, Origin/Host checks)
+- ✅ Localhost dashboard: live activity feed (what each agent is reading, editing, running), task board, cost meter, gate approval (127.0.0.1-only, bearer token, Origin/Host checks)
 - ⬜ Parallel workers, plan editing UI, OS sandboxing, semantic skill matching — see PRD §7
 
 ## Requirements
@@ -35,24 +36,48 @@ pnpm install && pnpm build
 pnpm link-cli        # symlinks `harness` into ~/.local/bin
 
 cd ~/code/my-app     # the repo you want built
-harness run "Add rate limiting to the API"
+harness run
 ```
 
-That is the whole command. The target repo, the deterministic checks, the budget
-caps and the dashboard all resolve to safe defaults, and the run banner prints
-what each one resolved to — and where it came from — before anything is spent:
+That is the whole command — no assignment, no flags. The target repo, the
+deterministic checks, the budget caps and the dashboard all resolve to safe
+defaults, and the banner prints what each resolved to, and why, before anything
+is spent:
 
 ```
   repo       /Users/you/code/my-app
   checks     pnpm run typecheck · pnpm run lint · pnpm run test   (auto-detected from package.json scripts via pnpm)
   budget     run $30 · task $10   (defaults)
+  intake     conversation before planning   (default)
   dashboard  http://127.0.0.1:4777/#a1b2…   (the fragment is your auth token)
 ```
+
+Then it asks what to build — and keeps asking until the answer is buildable:
+
+```
+> add rate limiting to the API
+
+● package.json pins fastify 5 and there is no middleware directory, so this is
+  a new layer rather than an edit to an existing one.
+
+  Where should the limit be enforced?
+  1. Fastify plugin, in-process (recommended) — no new infra, and the deploy
+     config shows a single instance
+  2. Redis-backed — survives horizontal scaling, adds a dependency
+  3. Reverse proxy — no app changes, but no per-user keys
+  [1-3, enter = 1, or type your own answer]
+> 1
+```
+
+Answer with a number, press enter for the recommendation, or type anything else
+— free text always beats the options. The agreed brief, not your first sentence,
+is what the planner receives.
 
 Override any of it per run, or commit `harness.config.json` for per-repo defaults:
 
 ```bash
-harness run "Add rate limiting" --check "npm test" --run-cap 50 --no-dashboard
+harness run "Add rate limiting"            # an assignment on the CLI skips the conversation
+harness run --check "npm test" --run-cap 50 --no-dashboard
 harness init                 # write harness.config.json with the resolved defaults
 harness resume <runId>       # continue after any interruption; nothing re-executes
 harness status               # run/task states, QA iterations, spend
@@ -65,10 +90,10 @@ Full configuration reference, recovery playbook, and troubleshooting: [docs/OPER
 | Package | What |
 |---|---|
 | `packages/shared` | zod contracts: states, events, plan schema, config |
-| `packages/core` | store, event bus, budget, git/worktrees, agent pool, run controller, GitHub adapter |
+| `packages/core` | store, event bus, budget, git/worktrees, agent pool, intake conversation, run controller, GitHub adapter |
 | `packages/skills-mcp` | SKILL.md indexer + stdio MCP server (`search_skills`, `describe_skill`) |
 | `packages/dashboard` | Fastify backend + single-file SPA (SSE via fetch-stream) |
-| `apps/cli` | `harness run / resume / status / init`, repo-root and default resolution |
+| `apps/cli` | `harness run / resume / status / init`, terminal intake chat, repo-root and default resolution |
 
 ## Security model (v0 summary)
 

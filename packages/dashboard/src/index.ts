@@ -8,6 +8,17 @@ export interface DashboardOptions {
 }
 
 /**
+ * The repo the issue/PR numbers belong to, so the UI can link straight to them.
+ * Env wins over config, matching how GitHubAdapter is constructed by the CLI.
+ * Returns null unless it really looks like `owner/repo` — a half-set value should
+ * produce no link rather than a broken one.
+ */
+function githubSlug(configured: string | undefined): string | null {
+  const slug = process.env.HARNESS_GITHUB_REPO ?? configured;
+  return slug && /^[\w.-]+\/[\w.-]+$/.test(slug) ? slug : null;
+}
+
+/**
  * Localhost dashboard backend (PRD §11.1, SEC-10..13):
  * - binds 127.0.0.1 only
  * - per-run 128-bit bearer token, header-only (SSE consumed via fetch-stream, not EventSource)
@@ -45,6 +56,8 @@ export class Dashboard implements GateHandler {
         ...run,
         spentUsd: this.store.spentUsd(run.id),
         tasks: this.store.listTasks(run.id),
+        sessions: this.store.listSessions(run.id),
+        githubRepo: githubSlug(run.config.githubRepo),
       }));
       return { runs, planGate: this.planPayload };
     });

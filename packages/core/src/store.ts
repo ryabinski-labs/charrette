@@ -87,6 +87,18 @@ export interface TaskRow {
   errorSummary: string | null;
 }
 
+export interface SessionRow {
+  id: string;
+  taskId: string | null;
+  role: string;
+  model: string;
+  state: string;
+  startedAt: number;
+  endedAt: number | null;
+  turns: number;
+  costUsd: number;
+}
+
 export class InvalidTransition extends Error {}
 
 /**
@@ -174,6 +186,17 @@ export class Store {
         this.db.prepare("UPDATE runs SET state = ?, updatedAt = ? WHERE id = ?").run(to, Date.now(), runId);
       }
     );
+  }
+
+  /** Replace the assignment — used once, when intake turns a seed into a brief. */
+  setRunAssignment(runId: string, assignment: string): void {
+    this.db.prepare("UPDATE runs SET assignment = ?, updatedAt = ? WHERE id = ?").run(assignment, Date.now(), runId);
+  }
+
+  listSessions(runId: string): SessionRow[] {
+    return this.db
+      .prepare("SELECT id, taskId, role, model, state, startedAt, endedAt, turns, costUsd FROM sessions WHERE runId = ? ORDER BY startedAt")
+      .all(runId) as unknown as SessionRow[];
   }
 
   setRunPlan(runId: string, prdPath: string, planHash: string): void {

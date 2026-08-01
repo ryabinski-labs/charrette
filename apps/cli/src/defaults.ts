@@ -98,6 +98,7 @@ export const FileConfig = z
     taskWallClockMinutes: z.number().int().min(5).optional(),
     models: z
       .object({
+        intake: z.string().optional(),
         planner: z.string().optional(),
         worker: z.string().optional(),
         qa: z.string().optional(),
@@ -114,6 +115,7 @@ export const FileConfig = z
     githubRepo: z.string().optional(),
     deterministicChecks: z.array(z.string()).optional(),
     dashboard: z.boolean().optional(),
+    chat: z.boolean().optional(),
   })
   .strict();
 export type FileConfig = z.infer<typeof FileConfig>;

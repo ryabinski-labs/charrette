@@ -14,13 +14,22 @@ import {
   loadFileConfig,
   resolveRepoRoot,
 } from "./defaults.js";
+import { TerminalChat } from "./chat.js";
 
 function makeController(repoPath: string, gateOverride?: (bus: Bus, store: Store) => GateHandler): { controller: RunController; store: Store; bus: Bus } {
   const stateDir = path.join(repoPath, ".harness");
   mkdirSync(stateDir, { recursive: true });
   const store = new Store(path.join(stateDir, "harness.db"));
   const bus = new Bus(store);
+  // The intake agent owns the terminal while it is talking to the operator, so
+  // its own log/tool traffic must not interleave with the conversation.
+  const intakeSessions = new Set<string>();
   bus.subscribe(({ event }) => {
+    if (event.type === "agent.spawned" && event.role === "intake") {
+      intakeSessions.add(event.sessionId);
+      return;
+    }
+    if ("sessionId" in event && typeof event.sessionId === "string" && intakeSessions.has(event.sessionId)) return;
     if (event.type === "agent.log") {
       process.stdout.write(`  [${event.taskId ?? "run"}] ${event.text.split("\n")[0]!.slice(0, 120)}\n`);
     } else if (event.type === "run.state_changed" || event.type === "task.state_changed") {
@@ -58,12 +67,14 @@ interface RunOpts {
   check?: string[];
   checks: boolean;
   dashboard?: boolean;
+  chat?: boolean;
 }
 
 interface Resolved {
   repo: string;
   config: RunConfig;
   dashboard: boolean;
+  chat: boolean;
   banner: string[];
 }
 
@@ -78,7 +89,7 @@ function positive(value: string, flag: string): number {
  * built-in default. Every resolved value is reported in the banner so a bare
  * `harness run` is never silently doing something surprising.
  */
-function resolveRun(cmd: Command, opts: RunOpts): Resolved {
+function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined): Resolved {
   const repo = resolveRepoRoot(opts.repo);
   const { config: file, path: filePath } = loadFileConfig(repo);
   const fromCli = (name: string): boolean => cmd.getOptionValueSource(name) === "cli";
@@ -120,6 +131,14 @@ function resolveRun(cmd: Command, opts: RunOpts): Resolved {
   banner.push(`skills     ${skillsDirs.join(" · ")}   (${file.skillsDirs ? via : "defaults"})`);
 
   const dashboard = fromCli("dashboard") ? opts.dashboard === true : file.dashboard ?? true;
+  // An assignment on the command line is taken as final; without one, the intake
+  // agent is the only way the operator gets to say what they want.
+  const chat = fromCli("chat") ? opts.chat === true : file.chat ?? assignment === undefined;
+  banner.push(
+    chat
+      ? `intake     conversation before planning   (${fromCli("chat") ? "--chat" : file.chat !== undefined ? via : "default"})`
+      : `intake     off — planning directly from the assignment`
+  );
 
   const config = RunConfig.parse({
     maxParallelWorkers: file.maxParallelWorkers,
@@ -133,7 +152,7 @@ function resolveRun(cmd: Command, opts: RunOpts): Resolved {
     deterministicChecks: checks,
   });
   if (filePath) banner.push(`config     ${CONFIG_FILENAME}`);
-  return { repo, config, dashboard, banner };
+  return { repo, config, dashboard, chat, banner };
 }
 
 const program = new Command();
@@ -142,7 +161,7 @@ program.name("harness").description("Multi-agent development harness: assignment
 program
   .command("run")
   .description("plan and build an assignment in the current repo")
-  .argument("<assignment>", "what to build")
+  .argument("[assignment]", "what to build; omit to describe it in a conversation")
   .option("-r, --repo <path>", "target repo (default: the git repo containing the cwd)", process.cwd())
   .option("--run-cap <usd>", "run budget cap in USD", String(DEFAULT_RUN_CAP))
   .option("--task-cap <usd>", "task budget cap in USD", String(DEFAULT_TASK_CAP))
@@ -150,8 +169,10 @@ program
   .option("--no-checks", "run no deterministic checks")
   .option("--dashboard", "serve the monitoring dashboard and resolve gates there (default)")
   .option("--no-dashboard", "run headless; resolve gates in this terminal")
-  .action(async (assignment: string, opts: RunOpts, cmd: Command) => {
-    const { repo, config, dashboard: wantDashboard, banner } = resolveRun(cmd, opts);
+  .option("--chat", "talk the assignment through with an intake agent first (default when no assignment is given)")
+  .option("--no-chat", "skip the conversation; plan directly from the assignment")
+  .action(async (assignment: string | undefined, opts: RunOpts, cmd: Command) => {
+    const { repo, config, dashboard: wantDashboard, chat: wantChat, banner } = resolveRun(cmd, opts, assignment);
     let dash: Dashboard | undefined;
     const { controller } = makeController(repo, wantDashboard
       ? (bus, store) => {
@@ -165,10 +186,17 @@ program
     } else {
       banner.push("dashboard  off — the plan gate will be resolved in this terminal");
     }
-    process.stdout.write(`\n${banner.map((l) => `  ${l}`).join("\n")}\n\n`);
-    const runId = await controller.startRun(assignment, config);
-    process.stdout.write(`\nRun ${runId} complete. Review PRs on GitHub (the harness never merges).\n`);
-    if (dash) await dash.stop();
+    process.stdout.write(`\n${banner.map((l) => `  ${l}`).join("\n")}\n`);
+
+    const chat = wantChat || assignment === undefined ? new TerminalChat() : undefined;
+    const seed = assignment ?? (await chat!.promptSeed(wantChat));
+    try {
+      const runId = await controller.startRun(seed, config, wantChat ? chat : undefined);
+      process.stdout.write(`\nRun ${runId} complete. Review PRs on GitHub (the harness never merges).\n`);
+    } finally {
+      chat?.close();
+      if (dash) await dash.stop();
+    }
   });
 
 program

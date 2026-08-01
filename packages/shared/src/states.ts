@@ -2,6 +2,7 @@ import { z } from "zod";
 
 export const RunState = z.enum([
   "CREATED",
+  "INTAKE",
   "PLANNING",
   "PLAN_REVIEW",
   "EXECUTING",
@@ -27,7 +28,7 @@ export const TaskState = z.enum([
 ]);
 export type TaskState = z.infer<typeof TaskState>;
 
-export const AgentRole = z.enum(["planner", "worker", "qa", "integrator"]);
+export const AgentRole = z.enum(["intake", "planner", "worker", "qa", "integrator"]);
 export type AgentRole = z.infer<typeof AgentRole>;
 
 export const SessionState = z.enum(["running", "done", "interrupted", "killed"]);
@@ -41,13 +42,14 @@ export type GateState = z.infer<typeof GateState>;
 
 /** Legal run-state transitions; the orchestrator core is the only writer. */
 export const RUN_TRANSITIONS: Record<RunState, RunState[]> = {
-  CREATED: ["PLANNING", "ABORTED"],
+  CREATED: ["INTAKE", "PLANNING", "ABORTED"],
+  INTAKE: ["PLANNING", "FAILED", "PAUSED", "ABORTED"],
   PLANNING: ["PLAN_REVIEW", "FAILED", "PAUSED", "ABORTED"],
   PLAN_REVIEW: ["EXECUTING", "PLANNING", "ABORTED"],
   EXECUTING: ["INTEGRATING", "PAUSED", "BUDGET_HOLD", "FAILED", "ABORTED"],
   INTEGRATING: ["PR_REVIEW", "PAUSED", "BUDGET_HOLD", "FAILED", "ABORTED"],
   PR_REVIEW: [],
-  PAUSED: ["PLANNING", "EXECUTING", "INTEGRATING", "ABORTED"],
+  PAUSED: ["INTAKE", "PLANNING", "EXECUTING", "INTEGRATING", "ABORTED"],
   BUDGET_HOLD: ["EXECUTING", "INTEGRATING", "ABORTED"],
   FAILED: [],
   ABORTED: [],

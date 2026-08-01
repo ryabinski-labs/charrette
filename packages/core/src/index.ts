@@ -3,6 +3,7 @@ export * from "./bus.js";
 export * from "./budget.js";
 export * from "./git.js";
 export * from "./github.js";
+export * from "./intake.js";
 export * from "./pool.js";
 export * from "./prompts.js";
 export * from "./qa.js";

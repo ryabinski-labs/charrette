@@ -24,10 +24,12 @@ For *why* it is built this way, read [PRD.md](../PRD.md); this document is the *
 
 ## 1. Mental model
 
-You give the harness **one paragraph** and a **target repository**. It runs this loop:
+You give the harness **a sentence** and a **target repository**. It runs this loop:
 
 ```
-assignment
+what you typed
+   ↓  intake agent (Opus)       reads the repo, then interviews you until the
+   ↓                            assignment is unambiguous → agreed brief
    ↓  planner agent (Opus)      reads the repo, writes a PRD + a task DAG
    ↓  GATE 1 — you approve      terminal prompt or dashboard button
    ↓  GitHub issues filed       one issue per task (optional)
@@ -41,11 +43,14 @@ assignment
    ↓  GATE 2 — you merge the PRs on GitHub
 ```
 
-Two rules that shape everything:
+Three rules that shape everything:
 
-1. **The harness never merges a PR into your branches.** There is no code path that
+1. **Ambiguity is resolved with you before anything gets built.** The intake agent
+   asks rather than guesses. Its questions carry options and a recommendation, and
+   your answers become a brief the planner treats as settled.
+2. **The harness never merges a PR into your branches.** There is no code path that
    can. Merging is your decision, always.
-2. **A task becomes ready only when every dependency is `MERGED`**, not merely
+3. **A task becomes ready only when every dependency is `MERGED`**, not merely
    accepted — so a worker building on top of another task actually sees that code
    in its worktree.
 
@@ -76,7 +81,7 @@ git clone git@github.com:ryabinski-labs/harness.git
 cd harness
 pnpm install
 pnpm build          # compiles all packages to dist/
-pnpm test           # 24 unit tests, no API calls, no network
+pnpm test           # 37 unit tests, no API calls, no network
 ```
 
 ### Put `harness` on your PATH
@@ -218,23 +223,56 @@ measure your *QA first-pass rate* and *cost per merged PR*, not to ship a featur
 
 ```bash
 cd ~/code/my-app
-harness run "Add a /healthz endpoint that returns build SHA and uptime, with a unit test"
+harness run
 ```
 
-That is the whole command. No flags are required — the harness resolves the
-target repo, the checks, the budget, and the dashboard for you, and prints
-exactly what it resolved before spending anything:
+That is the whole command — no assignment on the command line, no flags. The
+harness resolves the target repo, the checks, the budget, and the dashboard for
+you, and prints exactly what it resolved before spending anything:
 
 ```
   repo       /Users/you/code/my-app
   checks     pnpm run typecheck · pnpm run lint · pnpm run test   (auto-detected from package.json scripts via pnpm)
   budget     run $30 · task $10   (defaults)
   skills     /Users/you/.claude/skills · /Users/you/skills   (defaults)
+  intake     conversation before planning   (default)
   dashboard  http://127.0.0.1:4777/#a1b2…   (the fragment is your auth token)
 ```
 
-Read that banner before answering the gate. If `checks` says `none`, QA has no
+Read that banner before answering anything. If `checks` says `none`, QA has no
 hard signal and you should add one with `--check`.
+
+Then it asks what to build, and keeps asking until the assignment is unambiguous:
+
+```
+What should the harness build?
+  A sentence is enough — the intake agent will ask about the rest.
+  Finish with a blank line.
+
+> add rate limiting to the API
+
+● package.json pins fastify 5 and there is no middleware directory, so this is
+  a new layer rather than an edit to an existing one.
+
+  Where should the limit be enforced?
+  1. Fastify plugin, in-process (recommended) — no new infra, and the deploy
+     config shows a single instance
+  2. Redis-backed — survives horizontal scaling, adds a dependency
+  3. Reverse proxy — no app changes, but no per-user keys
+  [1-3, enter = 1, or type your own answer]
+> 1
+```
+
+Answer with a number, press enter to take the recommendation, or type anything
+else — free text always wins over the options, including "no, do it this way
+instead". When the agent has enough, it shows you the brief for approval; only
+then does the planner start.
+
+Skip the conversation entirely by putting the assignment on the command line:
+
+```bash
+harness run "Add a /healthz endpoint that returns build SHA and uptime, with a unit test"
+```
 
 For a first run, tighten the budget:
 
@@ -246,19 +284,22 @@ What you will see:
 
 1. The dashboard URL from the banner — open it. **The fragment after `#` is the
    auth token**; without it the page loads but every API call 401s.
-2. The planner surveys the repo (read-only tools) and emits a plan.
-3. **Gate 1.** In the dashboard: the generated PRD, the task list, an *Approve*
+2. The intake conversation, in the terminal. The dashboard shows the questions
+   and your answers in the activity feed, but you answer in the terminal.
+3. The planner surveys the repo (read-only tools) and emits a plan.
+4. **Gate 1.** In the dashboard: the generated PRD, the task list, an *Approve*
    button and a rejection textarea. In the terminal (`--no-dashboard`): the PRD
    is printed and `y` approves; **any other text is sent back to the planner as
    rejection feedback** and it replans.
-4. Tasks execute serially, streaming agent logs, tool calls, and cost.
-5. Each accepted task merges into `harness/<runId>/main` and gets a PR.
-6. The run ends in `PR_REVIEW`. You review and merge on GitHub.
+5. Tasks execute serially, streaming agent logs, tool calls, and cost.
+6. Each accepted task merges into `harness/<runId>/main` and gets a PR.
+7. The run ends in `PR_REVIEW`. You review and merge on GitHub.
 
-Local-only first run (no GitHub, no dashboard) is a good smoke test:
+Local-only first run (no GitHub, no dashboard, no conversation) is a good smoke
+test:
 
 ```bash
-harness run "Add a CONTRIBUTING.md" --run-cap 3 --no-dashboard
+harness run "Add a CONTRIBUTING.md" --run-cap 3 --no-dashboard --no-chat
 git log --oneline harness/<runId>/main
 ```
 
@@ -270,7 +311,10 @@ Every command defaults `--repo` to **the git repository containing your current
 directory**, found by walking up for `.git` — so subdirectories work too. Outside
 a repository you get an actionable error rather than a confusing one.
 
-### `harness run <assignment>`
+### `harness run [assignment]`
+
+The assignment is optional. Omit it and the harness asks you in a conversation;
+pass it and the harness takes it as final.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -280,8 +324,30 @@ a repository you get an actionable error rather than a confusing one.
 | `--check <cmd...>` | auto-detected | deterministic commands run in the worktree before QA; repeatable |
 | `--no-checks` | — | run none, even if detected |
 | `--dashboard` / `--no-dashboard` | **on** | serve the monitor on `127.0.0.1:4777` and resolve Gate 1 there, or fall back to the terminal |
+| `--chat` / `--no-chat` | on when no assignment is given | interview you with an intake agent before planning |
 
 Exit leaves the run in a resumable state whatever happens.
+
+#### The intake conversation
+
+The intake agent surveys the repository first, then asks — one question at a
+time, at most six — about the things where two answers would produce different
+code: scope boundaries, where a change belongs, behaviour at the edges,
+compatibility, and what you explicitly do *not* want. It is instructed never to
+ask what the repo already answers, and to mark exactly one option as recommended
+with a reason.
+
+You can always answer in free text instead of picking an option; that answer wins
+over any recommendation. When the agent is satisfied it shows you a draft brief
+and only proceeds once you approve it.
+
+The brief is written to `.harness/<runId>/BRIEF.md` and becomes the run's
+assignment — so `harness status`, the dashboard, and the planner all see the
+agreed version, not the sentence you started with. Interrupting mid-conversation
+loses it: a resume plans from the assignment on record instead of re-interviewing.
+
+Intake runs on the same ledger and budget cap as the rest of the run. It is a
+cheap phase (one Opus session, read-only tools), but it is not free.
 
 #### How checks are detected
 
@@ -354,6 +420,7 @@ typo surfaces immediately.
   "budget": { "runCapUsd": 50, "taskCapUsd": 12 },
   "deterministicChecks": ["pnpm test", "pnpm lint"],
   "dashboard": true,
+  "chat": true,
   "skillsDirs": ["~/.claude/skills", "~/skills"],
   "qaIterationCap": 3,
   "models": { "planner": "claude-opus-5", "worker": "claude-sonnet-5" }
@@ -373,6 +440,7 @@ Run configuration is a zod-validated `RunConfig`
 | `qaIterationCap` | `3` | — | ✅ | worker↔QA round trips before a task is parked as `NEEDS_HUMAN` |
 | `workerRespawnCap` | `3` | — | ✅ | crashed-session restarts before parking; the replacement gets a "read your own git log and continue" note |
 | `taskWallClockMinutes` | `45` | — | ✅ | reserved for the v0.1 watchdog |
+| `models.intake` | `claude-opus-5` | — | ✅ | this one talks to you; question quality is the whole value |
 | `models.planner` | `claude-opus-5` | — | ✅ | planning quality dominates run cost efficiency |
 | `models.worker` | `claude-sonnet-5` | — | ✅ | |
 | `models.qa` | `claude-sonnet-5` | — | ✅ | |
@@ -383,6 +451,7 @@ Run configuration is a zod-validated `RunConfig`
 | `deterministicChecks` | auto-detected | `--check`, `--no-checks` | ✅ | shell strings, run via `sh -c` in the worktree |
 | `githubRepo` | unset | — | ✅ | `HARNESS_GITHUB_REPO` takes precedence when set |
 | *(not in RunConfig)* `dashboard` | `true` | `--dashboard`, `--no-dashboard` | ✅ | CLI-only concern |
+| *(not in RunConfig)* `chat` | on when no assignment is given | `--chat`, `--no-chat` | ✅ | set `false` to make a repo always plan directly |
 
 For anything beyond this — a custom gate handler, embedding the harness in
 another program — drive the controller directly:
@@ -427,6 +496,7 @@ Inside the **target repo**:
 | Path | Contents |
 |---|---|
 | `.harness/harness.db` | event log + materialized run/task/usage state (SQLite, WAL) |
+| `.harness/<runId>/BRIEF.md` | the brief the intake conversation produced — what the planner was actually given |
 | `.harness/<runId>/PRD.md` | the PRD the planner produced — the thing you approve |
 | `.harness/<runId>/CONVENTIONS.md` | conventions injected into every worker's system prompt |
 | `.harness/<runId>/plan.json` | full plan incl. task DAG; SHA-256 of this is the approved `planHash` |
@@ -475,8 +545,45 @@ port `4777`.
   the event sequence number, so reconnecting replays from where you left off
   rather than losing history.
 
-The page shows the task board (colour-coded by state), a live event log capped at
-2000 lines, the running cost meter against the cap, and the Gate 1 panel.
+### What the page shows
+
+The layout is built around one question — *what is happening right now, and do I
+need to step in?* — so the activity feed owns most of the window and everything
+else sits in a fixed sidebar.
+
+- **Activity** — the event stream, capped at 2000 lines. Every line is attributed
+  to the agent that caused it and says what actually happened: `worker  read
+  src/server.ts`, `planner  grep onRequest|preHandler in src`, `qa  $ pnpm test`,
+  `token-bucket  QA iteration 1: PASS — …`. Paths are shown relative to the repo.
+  Five toggles (agent output, tool calls, state, cost, git) filter by category —
+  turning off *tool calls* leaves you with just the narrative. The feed follows
+  the tail until you scroll up, then offers **Jump to latest** instead of yanking
+  you back. GitHub lines link to the issue or PR.
+- **Now** — one card per running agent: role, model, elapsed time, turn count,
+  and the last thing it did. This is the panel to watch when a task feels stuck.
+- **Tasks** — a card per task with its state, dependencies, QA iteration count,
+  injected skills, and linked issue/PR numbers. Before the plan exists the panel
+  explains which phase you are in rather than sitting empty. Issue and PR numbers
+  link straight to GitHub when `HARNESS_GITHUB_REPO` (or `githubRepo`) is set.
+- **Run** — repo path, integration branch, elapsed, resolved checks and caps, and
+  the full assignment the planner received (the intake brief, if you used one).
+- **Cost meter** — spend against the run cap, with a bar that turns amber past
+  60% and red past 85%. It only moves when a session *ends*, because that is when
+  usage is booked; the note under the meter says so rather than leaving you to
+  wonder why a long planner run reads `$0.00`.
+- **Gate 1** — when the plan needs approval it takes over the full width above
+  everything else, because it is blocking the run.
+
+The page is a single self-contained HTML file with no build step
+([`packages/dashboard/src/page.ts`](../packages/dashboard/src/page.ts)). All
+dynamic text is inserted with `textContent`, never `innerHTML` — agent output and
+repository contents are untrusted input. `packages/dashboard/preview.mjs` serves
+it against a seeded fake run for UI work without spending tokens:
+
+```bash
+pnpm --filter @harness/dashboard build && node packages/dashboard/preview.mjs
+GATE=1 node packages/dashboard/preview.mjs   # …with the plan gate open
+```
 
 Sharing the URL shares the token. Treat it as a password for the run.
 
@@ -607,6 +714,7 @@ What *is* enforced today:
 | Dashboard | loopback bind, bearer token, `Origin`/`Host` validation on writes |
 | Plan integrity | the approved plan is hashed; execution consumes that exact version |
 | Web access | `WebSearch` disallowed for workers and QA |
+| Intake reach | the intake agent gets `Read`/`Glob`/`Grep` and its `ask_user` tool only — it cannot edit, run commands, or reach the network |
 
 Full threat model: PRD §12.
 
@@ -621,6 +729,18 @@ your shell profile.
 
 **`... is not inside a git repository`**
 You are outside the target repo. `cd` into it, or pass `--repo <path>`.
+
+**The intake agent asks too many questions, or the wrong ones**
+Give it more to work with: a two-sentence seed with the constraint you care about
+beats a three-word one. To skip the conversation for a run, pass the assignment on
+the command line; to skip it for a repo, set `"chat": false` in
+`harness.config.json`. The brief it produced is in `.harness/<runId>/BRIEF.md` —
+worth reading if the plan came out wrong, since that file is what the planner saw.
+
+**The conversation was interrupted**
+The brief lives only in the agent's session, so `harness resume` cannot continue
+it — the run moves to planning using the assignment on record (your original
+seed). If the conversation mattered, abandon the run and start a new one.
 
 **`harness.config.json is invalid: Unrecognized key(s)`**
 A typo, or a key that belongs one level deeper (`runCapUsd` lives under
@@ -681,11 +801,11 @@ pnpm typecheck      # no-emit typecheck
 
 | Package | Responsibility |
 |---|---|
-| `packages/shared` | zod contracts: run/task states + legal transitions, event union, plan schema and DAG validation, `RunConfig` |
-| `packages/core` | store (event-sourced SQLite), bus, budget/pricing, git + worktrees, agent pool, prompts, QA checks, run controller, GitHub adapter |
+| `packages/shared` | zod contracts: run/task states + legal transitions, event union, plan schema and DAG validation, intake `Brief`, `RunConfig` |
+| `packages/core` | store (event-sourced SQLite), bus, budget/pricing, git + worktrees, agent pool, prompts, intake conversation, QA checks, run controller, GitHub adapter |
 | `packages/skills-mcp` | `SKILL.md` indexer, lexical matcher, provenance hashing, stdio MCP server |
-| `packages/dashboard` | Fastify backend + single-file SPA |
-| `apps/cli` | `harness run / resume / status / init`, plus repo-root resolution, check detection, and config-file layering (`defaults.ts`) |
+| `packages/dashboard` | Fastify backend + single-file SPA, plus `preview.mjs` for UI work against a seeded run |
+| `apps/cli` | `harness run / resume / status / init`, terminal intake chat (`chat.ts`), repo-root resolution, check detection, and config-file layering (`defaults.ts`) |
 
 Conventions worth keeping:
 
@@ -697,4 +817,9 @@ Conventions worth keeping:
   git's index lock is global and parallel worktree operations corrupt it.
 - **GitHub writes are idempotent** via an HTML-comment marker in the body, so
   replay after a crash never duplicates an issue or PR.
+- **The dashboard never uses `innerHTML` for dynamic text.** Agent output and
+  repository contents are untrusted; everything goes through `textContent`.
+- **Anything the operator answers is asked through a transport interface**
+  (`IntakeUi`, `GateHandler`) rather than by calling readline from core — that is
+  what lets the terminal and the dashboard implement the same conversation.
 - Tests are pure: no network, no API keys, `:memory:` databases.

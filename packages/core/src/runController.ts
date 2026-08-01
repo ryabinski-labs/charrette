@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { Plan, QaVerdict, RunConfig, TaskState, validatePlanDag } from "@harness/shared";
+import { Plan, QaVerdict, RunConfig, TaskState, briefToAssignment, validatePlanDag } from "@harness/shared";
 import { indexSkills, matchSkills, verifyHash, type IndexedSkill } from "@harness/skills-mcp";
 import { Bus } from "./bus.js";
 import { BudgetExceeded } from "./budget.js";
 import { git, WorktreeManager } from "./git.js";
 import { GitHubAdapter } from "./github.js";
+import { runIntake, type IntakeUi } from "./intake.js";
 import { AgentPool } from "./pool.js";
 import {
   extractJson,
@@ -42,7 +43,12 @@ export class RunController {
     this.wt = new WorktreeManager(repoPath);
   }
 
-  async startRun(assignment: string, config: RunConfig): Promise<string> {
+  /**
+   * Start a run. With an `intake` transport the assignment is treated as a seed:
+   * the intake agent interviews the operator and the resulting brief replaces it
+   * before the planner ever sees it.
+   */
+  async startRun(assignment: string, config: RunConfig, intake?: IntakeUi): Promise<string> {
     const runId = randomUUID().slice(0, 8);
     this.store.createRun({
       id: runId,
@@ -54,8 +60,29 @@ export class RunController {
       integrationBranch: this.wt.integrationBranch(runId),
       config,
     });
+    if (intake) await this.intake(runId, assignment, intake);
     await this.drive(runId);
     return runId;
+  }
+
+  /** Gate 0: turn the seed into an agreed brief, on the run's ledger and budget. */
+  private async intake(runId: string, seed: string, ui: IntakeUi): Promise<void> {
+    this.store.transitionRun(runId, "INTAKE");
+    const run = this.store.getRun(runId)!;
+    const brief = await runIntake(this.pool, this.bus, {
+      runId,
+      seed,
+      repoPath: this.repoPath,
+      config: run.config,
+      ui,
+      budgetCheck: () => this.checkBudget(runId),
+    });
+    const assignment = briefToAssignment(brief);
+    const dir = path.join(this.repoPath, ".harness", runId);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "BRIEF.md"), `${assignment}\n`);
+    this.store.setRunAssignment(runId, assignment);
+    this.store.transitionRun(runId, "PLANNING", "brief agreed");
   }
 
   async resume(runId: string): Promise<void> {
@@ -69,6 +96,11 @@ export class RunController {
     if (!run) throw new Error(`unknown run ${runId}`);
     if (run.state === "CREATED") {
       this.store.transitionRun(runId, "PLANNING");
+      run = this.store.getRun(runId)!;
+    } else if (run.state === "INTAKE") {
+      // Resumed while a conversation was open: the brief is gone, so plan from
+      // whatever assignment is on record rather than re-interviewing.
+      this.store.transitionRun(runId, "PLANNING", "resumed mid-intake");
       run = this.store.getRun(runId)!;
     }
     let planFeedback = "";

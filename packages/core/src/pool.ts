@@ -8,6 +8,8 @@ import { costUsd } from "./budget.js";
 export interface AgentSpec {
   runId: string;
   taskId?: string;
+  /** Pre-allocate the session id when the caller needs it before the run starts. */
+  sessionId?: string;
   role: AgentRole;
   model: string;
   systemPrompt: string;
@@ -15,6 +17,8 @@ export interface AgentSpec {
   cwd: string;
   allowedTools?: string[];
   disallowedTools?: string[];
+  /** In-process MCP servers (SDK `tool()` definitions) exposed to this agent only. */
+  mcpServers?: Options["mcpServers"];
   maxTurns?: number;
   /** Called before/while streaming; throw BudgetExceeded to abort the session. */
   budgetCheck?: () => void;
@@ -36,7 +40,7 @@ export class AgentPool {
   constructor(private store: Store, private bus: Bus) {}
 
   async run(spec: AgentSpec): Promise<AgentResult> {
-    const sessionId = randomUUID();
+    const sessionId = spec.sessionId ?? randomUUID();
     const abort = new AbortController();
     const now = Date.now();
     this.store.db
@@ -52,6 +56,7 @@ export class AgentPool {
       permissionMode: "bypassPermissions",
       allowedTools: spec.allowedTools,
       disallowedTools: spec.disallowedTools,
+      mcpServers: spec.mcpServers,
       abortController: abort,
       // Do not inherit the operator's filesystem settings/skills into worker context.
       settingSources: [],

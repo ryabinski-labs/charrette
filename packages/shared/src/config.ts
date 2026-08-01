@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export const ModelRouting = z.object({
+  intake: z.string().default("claude-opus-5"),
   planner: z.string().default("claude-opus-5"),
   worker: z.string().default("claude-sonnet-5"),
   qa: z.string().default("claude-sonnet-5"),
