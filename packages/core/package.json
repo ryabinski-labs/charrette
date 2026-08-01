@@ -1,0 +1,25 @@
+{
+  "name": "@harness/core",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@harness/shared": "workspace:*",
+    "@anthropic-ai/claude-agent-sdk": "^0.1.0",
+    "better-sqlite3": "^11.0.0",
+    "octokit": "^4.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0"
+  }
+}

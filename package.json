@@ -1,0 +1,20 @@
+{
+  "name": "harness-monorepo",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Multi-agent development harness: assignment in, reviewed PRs out",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0",
+    "@types/node": "^22.0.0"
+  }
+}
