@@ -53,6 +53,17 @@ CREATE TABLE IF NOT EXISTS gates (
   id TEXT PRIMARY KEY, runId TEXT NOT NULL, kind TEXT NOT NULL,
   state TEXT NOT NULL, payload TEXT NOT NULL, resolvedAt INTEGER, feedback TEXT
 );
+CREATE TABLE IF NOT EXISTS feedback (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  runId TEXT NOT NULL, taskId TEXT NOT NULL,
+  source TEXT NOT NULL, sourceId TEXT,
+  text TEXT NOT NULL, ts INTEGER NOT NULL, deliveredAt INTEGER
+);
+-- SQLite treats NULLs as distinct in a unique index, so operator notes (no
+-- sourceId) never collide with each other while a GitHub comment can only ever
+-- be queued once, however many times the issue is polled.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_feedback_source ON feedback(runId, taskId, source, sourceId);
+CREATE INDEX IF NOT EXISTS idx_feedback_pending ON feedback(runId, taskId, deliveredAt);
 `;
 
 export interface RunRow {
@@ -214,6 +225,48 @@ export class Store {
     if (!row) return "";
     const parsed = JSON.parse(row.payload) as { reason?: string };
     return parsed.reason ?? "";
+  }
+
+  /**
+   * Queue a note for the next agent dispatched on a task.
+   *
+   * This lived in a Map on the controller, which meant a note queued for a task
+   * nobody was working on died with the process. That is precisely the case
+   * where queuing matters: a parked task is only revived on a later `resume`,
+   * in a later process, and the operator's answer has to still be there when it
+   * is. The row survives; `drainFeedback` consumes it exactly once.
+   *
+   * `sourceId` deduplicates notes the harness reads from somewhere else — a
+   * GitHub issue comment is queued the first time it is seen and ignored on
+   * every later poll. Returns whether a row was actually written.
+   */
+  queueFeedback(runId: string, taskId: string, text: string, source: "operator" | "issue" = "operator", sourceId?: string): boolean {
+    const info = this.db
+      .prepare("INSERT OR IGNORE INTO feedback (runId, taskId, source, sourceId, text, ts) VALUES (?,?,?,?,?,?)")
+      .run(runId, taskId, source, sourceId ?? null, text, Date.now());
+    return info.changes > 0;
+  }
+
+  /** Take every undelivered note for a task, oldest first, and mark it delivered. */
+  drainFeedback(runId: string, taskId: string): string {
+    return this.txn(() => {
+      const rows = this.db
+        .prepare("SELECT id, text FROM feedback WHERE runId = ? AND taskId = ? AND deliveredAt IS NULL ORDER BY id")
+        .all(runId, taskId) as { id: number; text: string }[];
+      if (!rows.length) return "";
+      const now = Date.now();
+      const mark = this.db.prepare("UPDATE feedback SET deliveredAt = ? WHERE id = ?");
+      for (const r of rows) mark.run(now, r.id);
+      return rows.map((r) => r.text).join("\n\n");
+    });
+  }
+
+  /** How many notes are waiting on a task — what the dashboard promises is coming. */
+  pendingFeedbackCount(runId: string, taskId: string): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS n FROM feedback WHERE runId = ? AND taskId = ? AND deliveredAt IS NULL")
+      .get(runId, taskId) as { n: number };
+    return row.n;
   }
 
   /** The validator's judgment of the run, or null when validation never completed. */

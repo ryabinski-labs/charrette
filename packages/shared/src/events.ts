@@ -21,7 +21,7 @@ export const HarnessEvent = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("task.gate_resolved"), taskId: z.string(), parked: z.boolean(), guidance: z.string().default("") }),
   // Unprompted operator feedback on a task mid-run: "live" went straight into the
   // running session; "queued" waits for the next agent dispatched on the task.
-  z.object({ ...base, type: z.literal("task.feedback"), taskId: z.string(), text: z.string(), delivery: z.enum(["live", "queued"]) }),
+  z.object({ ...base, type: z.literal("task.feedback"), taskId: z.string(), text: z.string(), delivery: z.enum(["live", "queued", "revived"]) }),
   // The validator's answer to "did the merged result do what the operator asked?",
   // recorded before any pull request is opened.
   z.object({ ...base, type: z.literal("run.intent_verdict"), verdict: z.enum(["PASS", "FAIL"]), gaps: z.array(z.string()).default([]), summary: z.string().default("") }),

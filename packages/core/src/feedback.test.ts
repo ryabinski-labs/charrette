@@ -200,6 +200,109 @@ describe("mid-flight operator feedback", () => {
   });
 });
 
+describe("feedback that outlives the process", () => {
+  /** A run parked on one task, built directly — the states sendFeedback branches on. */
+  function parkedRun(store: Store): string {
+    const runId = "run-1";
+    store.createRun({ id: runId, repoPath: "/tmp/x", assignment: "do a thing", state: "PLANNING", prdPath: null, planHash: null, integrationBranch: "harness/run-1/main", config: RunConfig.parse({ deterministicChecks: [] }) });
+    store.insertTasks(runId, [{ id: "epic-e", title: "E" }], [
+      { id: "task-a", epicId: "epic-e", title: "A", spec: "s", acceptanceCriteria: ["x"], dependsOn: [], state: "PENDING", branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null },
+    ]);
+    store.transitionRun(runId, "PLAN_REVIEW");
+    store.transitionRun(runId, "EXECUTING");
+    store.transitionTask(runId, "task-a", "READY");
+    store.transitionTask(runId, "task-a", "NEEDS_HUMAN", "QA rejected it 3 times");
+    store.updateTask(runId, "task-a", { qaIterations: 3, errorSummary: "QA rejected it 3 times" });
+    return runId;
+  }
+
+  it("survives a restart — the queue is a table, not a Map on the controller", () => {
+    // The billing-app case: a note queued for a parked task is only read on a
+    // later resume, in a later process. In memory it never got there.
+    const dir = mkdtempSync(path.join(tmpdir(), "harness-fbdb-"));
+    const file = path.join(dir, "harness.db");
+    const first = new Store(file);
+    first.queueFeedback("run-1", "task-a", "the failing check needs the service running");
+    first.db.close();
+
+    const second = new Store(file);
+    expect(second.pendingFeedbackCount("run-1", "task-a")).toBe(1);
+    expect(second.drainFeedback("run-1", "task-a")).toContain("needs the service running");
+    // Consumed exactly once: a note replayed into every later prompt is noise.
+    expect(second.drainFeedback("run-1", "task-a")).toBe("");
+  });
+
+  it("queues the same issue comment once however often the issue is polled", () => {
+    const store = new Store(":memory:");
+    expect(store.queueFeedback("run-1", "task-a", "AC5 is right, fix the IPv6 case", "issue", "9001")).toBe(true);
+    expect(store.queueFeedback("run-1", "task-a", "AC5 is right, fix the IPv6 case", "issue", "9001")).toBe(false);
+    // Operator notes carry no source id, so identical ones still both land.
+    expect(store.queueFeedback("run-1", "task-a", "same words twice")).toBe(true);
+    expect(store.queueFeedback("run-1", "task-a", "same words twice")).toBe(true);
+    expect(store.pendingFeedbackCount("run-1", "task-a")).toBe(3);
+  });
+
+  it("answering a parked task reopens it while the run is still executing", () => {
+    const { pool } = watchedPool({});
+    const store = new Store(":memory:");
+    const controller = new RunController(store, new Bus(store), pool, noGithub, approveAll, repo());
+    const runId = parkedRun(store);
+
+    expect(controller.sendFeedback(runId, "task-a", "the suite was red before the run — skip it")).toBe("revived");
+    const task = store.getTask(runId, "task-a")!;
+    // Revived on the operator's terms: the scheduler takes READY tasks first,
+    // and the answer buys a fresh set of iterations rather than one more try.
+    expect(task.state).toBe("READY");
+    expect(task.qaIterations).toBe(0);
+    expect(task.errorSummary).toBeNull();
+    expect(store.drainFeedback(runId, "task-a")).toContain("skip it");
+  });
+
+  it("still only queues once the scheduler has stopped watching", () => {
+    const { pool } = watchedPool({});
+    const store = new Store(":memory:");
+    const controller = new RunController(store, new Bus(store), pool, noGithub, approveAll, repo());
+    const runId = parkedRun(store);
+    store.transitionRun(runId, "INTEGRATING");
+    store.transitionRun(runId, "PR_REVIEW");
+
+    // Nothing is dispatching, so flipping the task to READY would strand it.
+    // The note waits for `reopen` on the next resume — and now it gets there.
+    expect(controller.sendFeedback(runId, "task-a", "answered after the run finished")).toBe("queued");
+    expect(store.getTask(runId, "task-a")!.state).toBe("NEEDS_HUMAN");
+    expect(store.pendingFeedbackCount(runId, "task-a")).toBe(1);
+  });
+
+  it("reads comments on the task's issue into the worker's briefing", async () => {
+    const polls: number[] = [];
+    const comments = [{ id: 9001, author: "cigan", body: "the IPv6 gap QA found is real — fix isSafeWebhookUrl" }];
+    const github = {
+      enabled: true,
+      async ensureIssue() {
+        return { number: 52, url: "https://example.invalid/52" };
+      },
+      async ensurePR() {
+        return null;
+      },
+      async issueComments(n: number) {
+        polls.push(n);
+        return comments;
+      },
+    } as unknown as GitHubAdapter;
+
+    const { pool, workerPrompts } = watchedPool({ qaVerdicts: ['{"verdict":"FAIL","reasons":["still broken"],"mustFix":["fix it"]}'] });
+    const store = new Store(":memory:");
+    const controller = new RunController(store, new Bus(store), pool, github, approveAll, repo());
+    await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], qaIterationCap: 3 }));
+
+    expect(polls).toEqual([52, 52]); // polled per iteration, cheaply
+    expect(workerPrompts[0]).toContain("isSafeWebhookUrl");
+    expect(workerPrompts[0]).toContain("cigan commented on issue #52");
+    // Read twice, said once: the second dispatch must not repeat it.
+    expect(workerPrompts[1]).not.toContain("isSafeWebhookUrl");
+  });
+});
+
 describe("PromptStream", () => {
   const tick = () => new Promise<void>((r) => setImmediate(r));
 

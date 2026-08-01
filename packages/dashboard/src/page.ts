@@ -436,7 +436,7 @@ function describe(ev) {
     case "intake.answered":
       return ["you", "you", clip(ev.answer, 220)];
     case "task.feedback":
-      return ["you", "you", "\\u2192 " + ev.taskId + (ev.delivery === "live" ? " (live)" : " (queued)") + ": " + clip(ev.text, 220)];
+      return ["you", "you", "\\u2192 " + ev.taskId + " (" + ev.delivery + "): " + clip(ev.text, 220)];
     case "intake.brief_ready":
       return ["state", "intake", "brief agreed (" + ev.decisions + " decisions): " + clip(ev.goal, 120)];
     case "git.worktree_created":
@@ -632,7 +632,9 @@ async function sendFeedback(e) {
     $("fb-text").value = "";
     note.textContent = body.delivery === "live"
       ? "Delivered \\u2014 the running agent sees it as its next message."
-      : "Queued \\u2014 the next agent on this task starts with it.";
+      : body.delivery === "revived"
+      ? "Reopened \\u2014 this task was parked; your note is the guidance the next worker starts from."
+      : "Queued \\u2014 the next agent on this task starts with it, including after a resume.";
   } else {
     note.textContent = body.error || "could not send feedback";
   }

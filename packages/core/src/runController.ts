@@ -407,7 +407,7 @@ export class RunController {
         role: "validator",
         model: run.config.models.qa,
         systemPrompt: validatorSystemPrompt(toolbeltBlock(detectToolbelt(run.config.externalTools))),
-        prompt: validatorPrompt(run.assignment, this.planPrd(runId), taskLines, diffStat.slice(0, 3000)),
+        prompt: validatorPrompt(run.assignment, this.planPrd(runId), taskLines, diffStat.slice(0, 3000), run.config.deterministicChecks),
         cwd: wtPath,
         disallowedTools: ["WebSearch"],
         maxTurns: 60,
@@ -951,9 +951,6 @@ export class RunController {
   /** Operator guidance for tasks revived by `reopen`, consumed by the first worker dispatch. */
   private revivalGuidance = new Map<string, string>();
 
-  /** Feedback that missed a live session, waiting for the next agent on its task. */
-  private pendingFeedback = new Map<string, string[]>();
-
   /**
    * Unprompted operator feedback mid-run ("skip the e2e suite, it was red
    * before you started"). The target is a task id or an `@role` handle for a
@@ -962,8 +959,16 @@ export class RunController {
    * dispatched on the task. Run-level agents have no "next dispatch" to queue
    * for, so their feedback only lands while they are running — otherwise this
    * throws. Also throws for unknown or finished tasks.
+   *
+   * A parked task has no next dispatch either, unless something arranges one.
+   * "queued" on a NEEDS_HUMAN task used to mean "nobody will read this until
+   * you reopen the task on some later resume" while reading exactly like
+   * feedback to a task with a worker seconds away. An operator answering a
+   * parked task is answering the escalation gate whether or not the gate is
+   * still open, so while the run is still executing that answer revives the
+   * task on the spot — which is what `reopen` would have done with it later.
    */
-  sendFeedback(runId: string, target: string, text: string): "live" | "queued" {
+  sendFeedback(runId: string, target: string, text: string): "live" | "queued" | "revived" {
     const trimmed = text.trim().slice(0, 4000);
     if (!trimmed) throw new Error("feedback is empty");
     if (target.startsWith("@")) {
@@ -979,21 +984,59 @@ export class RunController {
     }
     // Fakes in tests stand in for the pool without an inject(), hence the `?.`.
     const hit = this.pool.inject?.(runId, target, operatorFeedbackMessage(trimmed));
-    if (!hit) {
-      const key = `${runId}/${target}`;
-      this.pendingFeedback.set(key, [...(this.pendingFeedback.get(key) ?? []), trimmed]);
+    if (!hit) this.store.queueFeedback(runId, target, trimmed);
+    // Only while the scheduler is still looping: it re-lists tasks on every
+    // dispatch and takes READY ones first, so a revived task is picked up
+    // within one worker slot. After EXECUTING nothing is watching, and the
+    // note waits in the queue for `reopen` on the next resume — where it now
+    // survives to be read, which is the whole point of persisting it.
+    const revived = !hit && task.state === "NEEDS_HUMAN" && this.store.getRun(runId)?.state === "EXECUTING";
+    if (revived) {
+      this.store.updateTask(runId, target, { qaIterations: 0, respawns: 0, errorSummary: null });
+      this.store.transitionTask(runId, target, "READY", "reopened by the operator's feedback");
     }
-    const delivery = hit ? ("live" as const) : ("queued" as const);
+    const delivery = hit ? ("live" as const) : revived ? ("revived" as const) : ("queued" as const);
     this.bus.publish({ type: "task.feedback", runId, taskId: target, text: trimmed, delivery, ts: Date.now() });
     return delivery;
   }
 
-  private drainFeedback(runId: string, taskId: string): string {
-    const key = `${runId}/${taskId}`;
-    const notes = this.pendingFeedback.get(key);
-    if (!notes?.length) return "";
-    this.pendingFeedback.delete(key);
-    return notes.join("\n\n");
+  /**
+   * Fold new comments on a task's GitHub issue into its feedback queue.
+   *
+   * An operator who reads "QA rejected this three times" on issue #52 answers
+   * it there — that is what the issue is for. Every one of those answers used
+   * to go nowhere, because the harness only ever wrote to GitHub. Each comment
+   * is queued once, keyed by its comment id, so re-polling on every iteration
+   * costs one request and never repeats itself into the prompt.
+   *
+   * Never fatal: GitHub being unreachable must not park a task that is
+   * otherwise ready to run.
+   */
+  private async ingestIssueComments(runId: string, taskId: string): Promise<void> {
+    const task = this.store.getTask(runId, taskId);
+    if (!task?.githubIssueNumber || !this.github.enabled) return;
+    try {
+      // `?.` for the same reason as everywhere else here: test fakes stand in
+      // for the adapter and implement only the methods they care about.
+      const comments = (await this.github.issueComments?.(task.githubIssueNumber)) ?? [];
+      let queued = 0;
+      for (const c of comments) {
+        const text = `${c.author} commented on issue #${task.githubIssueNumber}:\n${c.body.slice(0, 4000)}`;
+        if (this.store.queueFeedback(runId, taskId, text, "issue", String(c.id))) queued++;
+      }
+      if (queued) {
+        this.bus.publish({
+          type: "task.feedback",
+          runId,
+          taskId,
+          text: `${queued} new comment${queued === 1 ? "" : "s"} on issue #${task.githubIssueNumber}`,
+          delivery: "queued",
+          ts: Date.now(),
+        });
+      }
+    } catch {
+      /* an unreachable GitHub is not a reason to hold up the task */
+    }
   }
 
   /** Every task that cannot run until `taskId` does — directly or through another. */
@@ -1377,9 +1420,13 @@ export class RunController {
           `The operator reviewed why this task is taking so long and says — follow it over anything that contradicts it:\n${guidance}` +
           (qaFeedback ? `\n\nThe pending feedback from the previous iteration still applies:\n${qaFeedback}` : "");
       }
+      // The issue thread is the other place an operator answers a task, and
+      // until now it was the one place nobody read. Polled here rather than on
+      // a timer: this is the moment the answer can still change what happens.
+      await this.ingestIssueComments(runId, taskId);
       // Operator feedback that arrived while no session was live on this task —
       // the task was queued, or between sessions — joins the worker's briefing.
-      const queuedFeedback = this.drainFeedback(runId, taskId);
+      const queuedFeedback = this.store.drainFeedback(runId, taskId);
       if (queuedFeedback) {
         qaFeedback =
           (qaFeedback ? `${qaFeedback}\n\n` : "") +
@@ -1444,7 +1491,7 @@ export class RunController {
           role: "qa",
           model: run.config.models.qa,
           systemPrompt: qaSystemPrompt(toolbelt, skillsBlock(qaSkills)),
-          prompt: qaTaskPrompt(task, workerSummary.slice(0, 4000), diffStat.slice(0, 2000), this.drainFeedback(runId, taskId) || undefined),
+          prompt: qaTaskPrompt(task, workerSummary.slice(0, 4000), diffStat.slice(0, 2000), this.store.drainFeedback(runId, taskId) || undefined),
           cwd: wt.path,
           disallowedTools: ["WebSearch"],
           maxTurns: qaTurns,
@@ -1498,7 +1545,7 @@ export class RunController {
       if (verdict.verdict === "PASS") {
         // Feedback that landed after QA already judged must not be merged away
         // unread — it buys the operator one more worker iteration instead.
-        const late = this.drainFeedback(runId, taskId);
+        const late = this.store.drainFeedback(runId, taskId);
         if (late) {
           this.store.transitionTask(runId, taskId, "QA_FAILED", "operator feedback arrived after the PASS");
           this.store.transitionTask(runId, taskId, "WORKING", "re-dispatched with the operator's feedback");
