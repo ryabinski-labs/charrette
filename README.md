@@ -23,29 +23,40 @@ Pre-release walking skeleton (v0.0 per the PRD phasing) plus the v0.1 dashboard 
 ## Requirements
 
 - Node ≥ 22 (uses built-in `node:sqlite`), pnpm
-- `ANTHROPIC_API_KEY` (used by the Claude Agent SDK)
+- Anthropic credentials, resolved by the Agent SDK from the environment:
+  `CLAUDE_CODE_OAUTH_TOKEN` (Claude Pro/Max — run `claude setup-token`) or
+  `ANTHROPIC_API_KEY`
 - Optional: `GITHUB_TOKEN` (fine-grained, single repo: contents/issues/PRs write) + `HARNESS_GITHUB_REPO=owner/repo`
 
 ## Usage
 
 ```bash
 pnpm install && pnpm build
+pnpm link-cli        # symlinks `harness` into ~/.local/bin
 
-# start a run against a target repo, with the dashboard
-node apps/cli/dist/main.js run "Add rate limiting to the API" \
-  --repo ~/code/my-app \
-  --check "npm test" --check "npm run lint" \
-  --run-cap 30 --task-cap 10 \
-  --dashboard
-
-# resume after any interruption — completed tasks never re-execute
-node apps/cli/dist/main.js resume <runId> --repo ~/code/my-app
-
-# inspect run/task states and spend
-node apps/cli/dist/main.js status --repo ~/code/my-app
+cd ~/code/my-app     # the repo you want built
+harness run "Add rate limiting to the API"
 ```
 
-The dashboard URL is printed at start; the URL fragment is your auth token.
+That is the whole command. The target repo, the deterministic checks, the budget
+caps and the dashboard all resolve to safe defaults, and the run banner prints
+what each one resolved to — and where it came from — before anything is spent:
+
+```
+  repo       /Users/you/code/my-app
+  checks     pnpm run typecheck · pnpm run lint · pnpm run test   (auto-detected from package.json scripts via pnpm)
+  budget     run $30 · task $10   (defaults)
+  dashboard  http://127.0.0.1:4777/#a1b2…   (the fragment is your auth token)
+```
+
+Override any of it per run, or commit `harness.config.json` for per-repo defaults:
+
+```bash
+harness run "Add rate limiting" --check "npm test" --run-cap 50 --no-dashboard
+harness init                 # write harness.config.json with the resolved defaults
+harness resume <runId>       # continue after any interruption; nothing re-executes
+harness status               # run/task states, QA iterations, spend
+```
 
 Full configuration reference, recovery playbook, and troubleshooting: [docs/OPERATIONS.md](./docs/OPERATIONS.md).
 
@@ -57,7 +68,7 @@ Full configuration reference, recovery playbook, and troubleshooting: [docs/OPER
 | `packages/core` | store, event bus, budget, git/worktrees, agent pool, run controller, GitHub adapter |
 | `packages/skills-mcp` | SKILL.md indexer + stdio MCP server (`search_skills`, `describe_skill`) |
 | `packages/dashboard` | Fastify backend + single-file SPA (SSE via fetch-stream) |
-| `apps/cli` | `harness run / resume / status` |
+| `apps/cli` | `harness run / resume / status / init`, repo-root and default resolution |
 
 ## Security model (v0 summary)
 

@@ -76,17 +76,39 @@ git clone git@github.com:ryabinski-labs/harness.git
 cd harness
 pnpm install
 pnpm build          # compiles all packages to dist/
-pnpm test           # 15 unit tests, no API calls, no network
+pnpm test           # 24 unit tests, no API calls, no network
 ```
 
-The CLI entrypoint after building is `apps/cli/dist/main.js`. To get a global
-`harness` command:
+### Put `harness` on your PATH
+
+The build emits an executable `apps/cli/dist/main.js`. Symlink it into a
+directory already on your PATH:
 
 ```bash
-cd apps/cli && pnpm link --global    # optional
+pnpm link-cli       # ln -s apps/cli/dist/main.js ~/.local/bin/harness
+harness --help
 ```
 
-All examples below use the explicit path so they work without linking.
+If `harness: command not found`, `~/.local/bin` is not on your PATH. Add it:
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && exec zsh
+```
+
+Prefer a different location? Any directory on your PATH works — the target must
+stay in place, because the symlink resolves back into this repo's
+`node_modules`:
+
+```bash
+ln -sf "$PWD/apps/cli/dist/main.js" /usr/local/bin/harness
+```
+
+`pnpm link --global` also works, but only after `pnpm setup` has configured a
+global bin directory; the symlink above needs no setup.
+
+Rebuilding (`pnpm build`) updates the linked command in place — no re-linking.
+Every example below uses `harness`; if you skipped linking, substitute
+`node apps/cli/dist/main.js`.
 
 ---
 
@@ -94,21 +116,42 @@ All examples below use the explicit path so they work without linking.
 
 ### Anthropic (required)
 
-The Claude Agent SDK resolves credentials the same way the Claude Code CLI does.
+The harness never handles Anthropic credentials itself — there is no API-key
+code path anywhere in it. It calls the Claude Agent SDK's `query()`, and the SDK
+resolves credentials from the environment exactly as the Claude Code CLI does.
 Pick one:
 
 ```bash
-# Option A — API key (billed per token to your API account)
-export ANTHROPIC_API_KEY=sk-ant-...
-
-# Option B — Claude Code subscription token
+# Option A — Claude Pro/Max subscription (no API account needed)
 claude setup-token            # prints a long-lived OAuth token
 export CLAUDE_CODE_OAUTH_TOKEN=...
+
+# Option B — API key, billed per token to your Anthropic API account
+export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-If both are set, `ANTHROPIC_API_KEY` wins. Agents inherit **nothing** from your
-personal Claude Code settings — the pool sets `settingSources: []` deliberately,
-so your global `CLAUDE.md`, hooks, and MCP servers never leak into worker context.
+Put the chosen line in your shell profile so background and scheduled runs
+inherit it. If both are set, **`ANTHROPIC_API_KEY` wins** — unset it if you
+intend to run on a subscription.
+
+Agents inherit **nothing** from your personal Claude Code settings: the pool sets
+`settingSources: []` deliberately, so your global `CLAUDE.md`, hooks, and MCP
+servers never leak into worker context. That switch governs *settings*, not
+credentials, so authentication still resolves normally.
+
+### Running on a subscription: two consequences
+
+**The budget caps become a volume proxy, not a spend limit.** The ledger prices
+tokens at API list rates ([§12](#12-budget-control)). On a subscription you are
+not billed per token, so `--run-cap 30` means "stop after roughly $30 *worth* of
+tokens", not "$30 will leave your account". It is still the right runaway guard;
+just don't read the dashboard cost meter as money.
+
+**Rate limits become the binding constraint.** A run fans planner, worker, and QA
+agents against your 5-hour and weekly limits. Hitting a limit kills the agent
+mid-task. This is recoverable — `harness resume <runId>` continues from the last
+completed task, and nothing already finished is re-executed or re-paid — but
+expect it on large runs and plan to resume.
 
 ### GitHub (optional but recommended)
 
@@ -146,9 +189,9 @@ Checklist:
 1. **It is a git repository** with at least one commit.
 2. **The working tree is clean.** The integration branch is cut from `HEAD`.
 3. **`origin` points at `HARNESS_GITHUB_REPO`** if you are using GitHub mode.
-4. **It has working check commands.** Pass them with `--check`; they run inside
-   each worktree before any QA tokens are spent. Cheap and specific beats broad:
-   `--check "pnpm test" --check "pnpm lint"`.
+4. **It has working check commands.** These run inside each worktree before any
+   QA tokens are spent. The harness auto-detects them (see below); override with
+   `--check "pnpm test" --check "pnpm lint"`. Cheap and specific beats broad.
 5. **Branch protection on the default branch** is a good idea. The harness only
    ever pushes `harness/<runId>/*`, but protection makes that guarantee enforced
    by GitHub rather than by trust.
@@ -157,6 +200,9 @@ Checklist:
    ```gitignore
    .harness/
    ```
+
+   `harness.config.json` ([§8](#8-configuration-reference)) is meant to be
+   **committed** — it is per-repo defaults your whole team shares.
 
 Sibling directory note: worktrees are created **next to** the repo, in
 `<repo>-wt/`. If your repo is `~/code/my-app`, the harness creates
@@ -171,24 +217,38 @@ Start with something small and verifiable — the point of the first run is to
 measure your *QA first-pass rate* and *cost per merged PR*, not to ship a feature.
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+cd ~/code/my-app
+harness run "Add a /healthz endpoint that returns build SHA and uptime, with a unit test"
+```
 
-node ~/Documents/projects/harness/apps/cli/dist/main.js run \
-  "Add a /healthz endpoint that returns build SHA and uptime, with a unit test" \
-  --repo ~/code/my-app \
-  --check "npm test" \
-  --run-cap 10 \
-  --task-cap 4 \
-  --dashboard
+That is the whole command. No flags are required — the harness resolves the
+target repo, the checks, the budget, and the dashboard for you, and prints
+exactly what it resolved before spending anything:
+
+```
+  repo       /Users/you/code/my-app
+  checks     pnpm run typecheck · pnpm run lint · pnpm run test   (auto-detected from package.json scripts via pnpm)
+  budget     run $30 · task $10   (defaults)
+  skills     /Users/you/.claude/skills · /Users/you/skills   (defaults)
+  dashboard  http://127.0.0.1:4777/#a1b2…   (the fragment is your auth token)
+```
+
+Read that banner before answering the gate. If `checks` says `none`, QA has no
+hard signal and you should add one with `--check`.
+
+For a first run, tighten the budget:
+
+```bash
+harness run "Add a /healthz endpoint…" --run-cap 10 --task-cap 4
 ```
 
 What you will see:
 
-1. `Dashboard: http://127.0.0.1:4777/#<token>` — open it. **The fragment after
-   `#` is the auth token**; without it the page loads but every API call 401s.
+1. The dashboard URL from the banner — open it. **The fragment after `#` is the
+   auth token**; without it the page loads but every API call 401s.
 2. The planner surveys the repo (read-only tools) and emits a plan.
 3. **Gate 1.** In the dashboard: the generated PRD, the task list, an *Approve*
-   button and a rejection textarea. In the terminal (no `--dashboard`): the PRD
+   button and a rejection textarea. In the terminal (`--no-dashboard`): the PRD
    is printed and `y` approves; **any other text is sent back to the planner as
    rejection feedback** and it replans.
 4. Tasks execute serially, streaming agent logs, tool calls, and cost.
@@ -198,40 +258,72 @@ What you will see:
 Local-only first run (no GitHub, no dashboard) is a good smoke test:
 
 ```bash
-node apps/cli/dist/main.js run "Add a CONTRIBUTING.md" --repo ~/code/my-app --run-cap 3
-git -C ~/code/my-app log --oneline harness/<runId>/main
+harness run "Add a CONTRIBUTING.md" --run-cap 3 --no-dashboard
+git log --oneline harness/<runId>/main
 ```
 
 ---
 
 ## 7. CLI reference
 
+Every command defaults `--repo` to **the git repository containing your current
+directory**, found by walking up for `.git` — so subdirectories work too. Outside
+a repository you get an actionable error rather than a confusing one.
+
 ### `harness run <assignment>`
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `-r, --repo <path>` | `cwd` | target repository |
+| `-r, --repo <path>` | enclosing git root | target repository |
 | `--run-cap <usd>` | `30` | hard ceiling for the whole run |
 | `--task-cap <usd>` | `10` | hard ceiling per task |
-| `--check <cmd...>` | none | deterministic commands run in the worktree before QA; repeatable |
-| `--dashboard` | off | serve the monitor on `127.0.0.1:4777` and resolve Gate 1 there |
+| `--check <cmd...>` | auto-detected | deterministic commands run in the worktree before QA; repeatable |
+| `--no-checks` | — | run none, even if detected |
+| `--dashboard` / `--no-dashboard` | **on** | serve the monitor on `127.0.0.1:4777` and resolve Gate 1 there, or fall back to the terminal |
 
 Exit leaves the run in a resumable state whatever happens.
+
+#### How checks are detected
+
+When you pass no `--check`, the harness reads the target repo and infers
+conventional, non-destructive commands:
+
+| Repo contains | Detected checks |
+|---|---|
+| `package.json` with `typecheck`/`type-check`, `lint`, `test` scripts | those scripts, run via the lockfile's package manager (`pnpm`/`yarn`/`bun`/`npm`) |
+| `Cargo.toml` | `cargo test`, `cargo clippy -- -D warnings` |
+| `go.mod` | `go build ./...`, `go test ./...` |
+| none of the above | nothing — the banner says so |
+
+Only those. Anything project-specific (integration suites, Python, Make targets)
+needs an explicit `--check` or a `harness.config.json`. Detection never runs
+`build` for Node projects — it is slow and usually redundant with `typecheck`.
+
+### `harness init`
+
+```bash
+harness init            # writes harness.config.json with the resolved defaults
+harness init --force    # overwrite an existing one
+```
+
+Materializes the defaults into a committable config file so the whole team gets
+them. Refuses to clobber an existing file without `--force`.
 
 ### `harness resume <runId>`
 
 ```bash
-node apps/cli/dist/main.js resume 3f9a2c11 --repo ~/code/my-app
+harness resume 3f9a2c11
 ```
 
 Prunes stale worktrees, reloads state from SQLite, and drives the run forward from
-exactly where it stopped. Tasks already `MERGED` are skipped. Uses the terminal
-gate handler (no `--dashboard` flag on resume yet — see [§8](#8-configuration-reference)).
+exactly where it stopped. Tasks already `MERGED` are skipped, and nothing already
+paid for is paid for again. Takes the same `--dashboard` / `--no-dashboard` flags
+as `run`.
 
 ### `harness status`
 
 ```bash
-node apps/cli/dist/main.js status --repo ~/code/my-app
+harness status
 ```
 
 Prints every open run with its state, spend, and per-task states, QA iteration
@@ -241,29 +333,59 @@ counts, and PR numbers. Read-only, free, no agents spawned.
 
 ## 8. Configuration reference
 
+Settings are layered, highest priority first:
+
+1. **CLI flag** — `--run-cap 50`
+2. **`harness.config.json`** at the target repo root
+3. **Auto-detection** — checks only ([§7](#7-cli-reference))
+4. **Built-in default**
+
+Whatever wins is printed in the run banner with its source, so a bare
+`harness run` is never silently doing something you didn't intend.
+
+### `harness.config.json`
+
+Written by `harness init`, committed alongside the code it configures. Every key
+is optional; unknown keys are a **hard error** rather than a silent no-op, so a
+typo surfaces immediately.
+
+```json
+{
+  "budget": { "runCapUsd": 50, "taskCapUsd": 12 },
+  "deterministicChecks": ["pnpm test", "pnpm lint"],
+  "dashboard": true,
+  "skillsDirs": ["~/.claude/skills", "~/skills"],
+  "qaIterationCap": 3,
+  "models": { "planner": "claude-opus-5", "worker": "claude-sonnet-5" }
+}
+```
+
+`~` is expanded in `skillsDirs`, so the file stays portable across machines.
+
+### Every field
+
 Run configuration is a zod-validated `RunConfig`
-([`packages/shared/src/config.ts`](../packages/shared/src/config.ts)). The CLI
-exposes the fields you change per run; the rest are code-level defaults today.
+([`packages/shared/src/config.ts`](../packages/shared/src/config.ts)).
 
-| Field | Default | CLI flag | Notes |
-|---|---|---|---|
-| `maxParallelWorkers` | `1` | — | v0.0 is serial by design. The scheduler is already a ready-queue over the DAG, so raising this is the v0.1 change, not a rewrite. |
-| `qaIterationCap` | `3` | — | worker↔QA round trips before a task is parked as `NEEDS_HUMAN` |
-| `workerRespawnCap` | `3` | — | crashed-session restarts before parking; the replacement gets a "read your own git log and continue" note |
-| `taskWallClockMinutes` | `45` | — | reserved for the v0.1 watchdog |
-| `models.planner` | `claude-opus-5` | — | planning quality dominates run cost efficiency |
-| `models.worker` | `claude-sonnet-5` | — | |
-| `models.qa` | `claude-sonnet-5` | — | |
-| `models.integrator` | `claude-sonnet-5` | — | |
-| `budget.runCapUsd` | `30` | `--run-cap` | checked **before every agent turn** |
-| `budget.taskCapUsd` | `10` | `--task-cap` | |
-| `skillsDirs` | `~/.claude/skills`, `~/skills` | — | set by the CLI |
-| `deterministicChecks` | `[]` | `--check` | shell strings, run via `sh -c` in the worktree |
-| `githubRepo` | unset | — | the CLI uses `HARNESS_GITHUB_REPO` instead |
+| Field | Default | CLI flag | Config file | Notes |
+|---|---|---|---|---|
+| `maxParallelWorkers` | `1` | — | ✅ | v0.0 is serial by design. The scheduler is already a ready-queue over the DAG, so raising this is the v0.1 change, not a rewrite. |
+| `qaIterationCap` | `3` | — | ✅ | worker↔QA round trips before a task is parked as `NEEDS_HUMAN` |
+| `workerRespawnCap` | `3` | — | ✅ | crashed-session restarts before parking; the replacement gets a "read your own git log and continue" note |
+| `taskWallClockMinutes` | `45` | — | ✅ | reserved for the v0.1 watchdog |
+| `models.planner` | `claude-opus-5` | — | ✅ | planning quality dominates run cost efficiency |
+| `models.worker` | `claude-sonnet-5` | — | ✅ | |
+| `models.qa` | `claude-sonnet-5` | — | ✅ | |
+| `models.integrator` | `claude-sonnet-5` | — | ✅ | |
+| `budget.runCapUsd` | `30` | `--run-cap` | ✅ | checked **before every agent turn** |
+| `budget.taskCapUsd` | `10` | `--task-cap` | ✅ | |
+| `skillsDirs` | `~/.claude/skills`, `~/skills` | — | ✅ | |
+| `deterministicChecks` | auto-detected | `--check`, `--no-checks` | ✅ | shell strings, run via `sh -c` in the worktree |
+| `githubRepo` | unset | — | ✅ | `HARNESS_GITHUB_REPO` takes precedence when set |
+| *(not in RunConfig)* `dashboard` | `true` | `--dashboard`, `--no-dashboard` | ✅ | CLI-only concern |
 
-To change a code-level default, edit `defaultConfig()` in
-[`apps/cli/src/main.ts`](../apps/cli/src/main.ts) and rebuild, or drive the
-controller directly:
+For anything beyond this — a custom gate handler, embedding the harness in
+another program — drive the controller directly:
 
 ```ts
 import { AgentPool, Bus, GitHubAdapter, RunController, Store } from "@harness/core";
@@ -291,8 +413,8 @@ for CI of the harness itself, not for real work.
 
 | Variable | Required | Meaning |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | one of these | Anthropic API credential |
-| `CLAUDE_CODE_OAUTH_TOKEN` | one of these | Claude Code subscription credential |
+| `CLAUDE_CODE_OAUTH_TOKEN` | one of these | Claude Pro/Max subscription credential |
+| `ANTHROPIC_API_KEY` | one of these | Anthropic API credential; **wins if both are set** |
 | `GITHUB_TOKEN` | no | enables issues + PRs |
 | `HARNESS_GITHUB_REPO` | with token | `owner/repo` |
 
@@ -339,7 +461,8 @@ record of what has been paid for and completed.
 
 ## 10. The dashboard
 
-Start it with `--dashboard`. It binds **127.0.0.1 only** on port `4777`.
+On by default; `--no-dashboard` runs headless. It binds **127.0.0.1 only** on
+port `4777`.
 
 - **Auth:** a fresh 128-bit token per process, delivered in the URL *fragment*.
   Fragments are never sent to the server or logged in proxies; the page reads it
@@ -437,8 +560,8 @@ so *anything* — Ctrl-C, crash, laptop sleep, budget abort — leaves a consist
 resumable run.
 
 ```bash
-node apps/cli/dist/main.js status --repo ~/code/my-app     # find the runId and where it stopped
-node apps/cli/dist/main.js resume <runId> --repo ~/code/my-app
+harness status            # find the runId and where it stopped
+harness resume <runId>
 ```
 
 | Symptom | What happened | What to do |
@@ -490,6 +613,24 @@ Full threat model: PRD §12.
 ---
 
 ## 15. Troubleshooting
+
+**`harness: command not found`**
+The symlink target directory is not on your PATH. See [§3](#3-install) — with the
+default `pnpm link-cli` location, add `export PATH="$HOME/.local/bin:$PATH"` to
+your shell profile.
+
+**`... is not inside a git repository`**
+You are outside the target repo. `cd` into it, or pass `--repo <path>`.
+
+**`harness.config.json is invalid: Unrecognized key(s)`**
+A typo, or a key that belongs one level deeper (`runCapUsd` lives under
+`budget`). The schema is strict on purpose — see [§8](#8-configuration-reference)
+for the exact shape, or regenerate with `harness init --force`.
+
+**The banner says `checks none`**
+Auto-detection found no conventional test/lint scripts, so QA has no hard signal
+and will rely entirely on the agent reading the diff. Add `--check "<cmd>"` or a
+`deterministicChecks` entry in `harness.config.json`.
 
 **`ExperimentalWarning: SQLite is an experimental feature`**
 Expected on Node 22/23. Silence with `NODE_OPTIONS=--no-warnings`.
@@ -544,7 +685,7 @@ pnpm typecheck      # no-emit typecheck
 | `packages/core` | store (event-sourced SQLite), bus, budget/pricing, git + worktrees, agent pool, prompts, QA checks, run controller, GitHub adapter |
 | `packages/skills-mcp` | `SKILL.md` indexer, lexical matcher, provenance hashing, stdio MCP server |
 | `packages/dashboard` | Fastify backend + single-file SPA |
-| `apps/cli` | `harness run / resume / status` |
+| `apps/cli` | `harness run / resume / status / init`, plus repo-root resolution, check detection, and config-file layering (`defaults.ts`) |
 
 Conventions worth keeping:
 

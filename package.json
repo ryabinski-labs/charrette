@@ -9,6 +9,7 @@
   },
   "scripts": {
     "build": "pnpm -r build",
+    "link-cli": "mkdir -p \"$HOME/.local/bin\" && ln -sf \"$PWD/apps/cli/dist/main.js\" \"$HOME/.local/bin/harness\" && echo \"linked $HOME/.local/bin/harness -> $PWD/apps/cli/dist/main.js\"",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck"
   },
