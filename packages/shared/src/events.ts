@@ -25,6 +25,37 @@ export const HarnessEvent = z.discriminatedUnion("type", [
   // The validator's answer to "did the merged result do what the operator asked?",
   // recorded before any pull request is opened.
   z.object({ ...base, type: z.literal("run.intent_verdict"), verdict: z.enum(["PASS", "FAIL"]), gaps: z.array(z.string()).default([]), summary: z.string().default("") }),
+  // What the repo's own CI said about the pull request the run opened. The
+  // deterministic checks run in a worktree on one task's branch; this is the
+  // first thing that judges the merged whole the way the repo actually judges it.
+  z.object({
+    ...base,
+    type: z.literal("run.ci_status"),
+    prNumber: z.number().int(),
+    state: z.enum(["passing", "failing", "pending", "none"]),
+    failing: z.array(z.string()).default([]),
+    total: z.number().int().default(0),
+  }),
+  // What the deploy triggered by the human's merge did. The CI status judged the
+  // pull request; this judges the merge commit on the base branch — the first
+  // thing that reflects whether the change actually reached anyone.
+  z.object({
+    ...base,
+    type: z.literal("run.deploy_status"),
+    sha: z.string(),
+    state: z.enum(["passing", "failing", "pending", "none"]),
+    failing: z.array(z.string()).default([]),
+    total: z.number().int().default(0),
+  }),
+  // The verdict of an agent that went and looked at production itself.
+  z.object({
+    ...base,
+    type: z.literal("run.prod_verdict"),
+    url: z.string(),
+    verdict: z.enum(["PASS", "FAIL"]),
+    findings: z.array(z.string()).default([]),
+    summary: z.string().default(""),
+  }),
   z.object({ ...base, type: z.literal("agent.spawned"), sessionId: z.string(), taskId: z.string().optional(), role: AgentRole, model: z.string() }),
   z.object({ ...base, type: z.literal("agent.log"), sessionId: z.string(), taskId: z.string().optional(), text: z.string() }),
   z.object({ ...base, type: z.literal("agent.tool_use"), sessionId: z.string(), taskId: z.string().optional(), tool: z.string(), summary: z.string() }),

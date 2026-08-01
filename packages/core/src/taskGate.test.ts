@@ -54,6 +54,34 @@ function rejectingPool() {
   return { pool: pool as unknown as AgentPool, workerPrompts };
 }
 
+/** Planner plans; the worker commits; every QA session dies at its turn ceiling. */
+function truncatingQaPool() {
+  let planning = 0;
+  const workerPrompts: string[] = [];
+  const qaSpecs: AgentSpec[] = [];
+  const pool = {
+    async run(spec: AgentSpec): Promise<AgentResult> {
+      if (spec.role === "planner") {
+        return { sessionId: "sp", resultText: planning++ === 0 ? DOCS : DAG, costUsd: 0, turns: 1, outcome: "done" };
+      }
+      if (spec.role === "worker") {
+        workerPrompts.push(spec.prompt);
+        writeFileSync(path.join(spec.cwd, "feature.txt"), `attempt ${workerPrompts.length}\n`);
+        gitIn(spec.cwd, "add", "-A");
+        gitIn(spec.cwd, "commit", "-m", "wip");
+        return { sessionId: "sw", resultText: "worker done", costUsd: 0, turns: 1, outcome: "done" };
+      }
+      if (spec.role === "qa") {
+        qaSpecs.push(spec);
+        // What the SDK actually hands back: a result message, no verdict in it.
+        return { sessionId: "sq", resultText: "Let me check the audio session…", costUsd: 0, turns: spec.maxTurns ?? 0, outcome: "error", errorDetail: "error_max_turns" };
+      }
+      return { sessionId: "sx", resultText: '{"verdict":"PASS","summary":"n/a"}', costUsd: 0, turns: 1, outcome: "done" };
+    },
+  };
+  return { pool: pool as unknown as AgentPool, workerPrompts, qaSpecs };
+}
+
 const noGithub = { enabled: false } as unknown as GitHubAdapter;
 
 function gates(onTaskGate?: (why: string) => Promise<string | null>): GateHandler {
@@ -160,6 +188,57 @@ describe("the task-escalation gate", () => {
     expect(events.some((e) => e.type === "task.gate_opened")).toBe(false);
     // Nothing merged, so the validator has nothing to judge and spends nothing.
     expect(events.some((e) => e.type === "run.intent_verdict")).toBe(false);
+  });
+
+  it("does not blame the worker for a QA session that never returned a verdict", async () => {
+    // The failure this fixes: three QA sessions died at their turn ceiling, each
+    // was booked as a FAIL ("QA output unparseable"), and the task parked after
+    // sending the worker back three times to fix code nobody had judged.
+    const { pool, workerPrompts, qaSpecs } = truncatingQaPool();
+    const asked: string[] = [];
+    const { store, runId } = await run(gates(async (why) => { asked.push(why); return null; }), pool);
+
+    // The verdict counter never moves: a truncated session judged nothing.
+    expect(store.getTask(runId, "task-a")!.qaIterations).toBe(0);
+    expect(store.eventsSince(runId, 0).map((e) => e.event).some((e) => e.type === "task.qa_verdict")).toBe(false);
+    // It is still bounded — by the respawn cap, which is what it is for.
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toMatch(/QA ended without a verdict 3 times/);
+    expect(asked[0]).not.toMatch(/rejected/);
+    expect(store.getTask(runId, "task-a")!.state).toBe("NEEDS_HUMAN");
+
+    // And the worker is told the truth: nothing was found wrong with its work.
+    expect(workerPrompts).toHaveLength(3);
+    expect(workerPrompts[1]).toContain("ended without a verdict");
+    expect(workerPrompts[1]).toContain("never judged");
+
+    // Replaying a truncated verification at the same ceiling truncates it again.
+    expect(qaSpecs.map((s) => s.maxTurns)).toEqual([90, 135, 203]);
+  });
+
+  it("still counts a QA session that finished and wrote something that is not a verdict", async () => {
+    // The other half: an agent that ignored its output contract is a real finding
+    // about the run, and must keep costing an iteration rather than looping free.
+    let planning = 0;
+    const pool = {
+      async run(spec: AgentSpec): Promise<AgentResult> {
+        let resultText = "";
+        if (spec.role === "planner") resultText = planning++ === 0 ? DOCS : DAG;
+        else if (spec.role === "worker") {
+          writeFileSync(path.join(spec.cwd, "feature.txt"), "work\n");
+          gitIn(spec.cwd, "add", "-A");
+          gitIn(spec.cwd, "commit", "-m", "wip");
+          resultText = "worker done";
+        } else if (spec.role === "qa") resultText = "Looks good to me!";
+        else resultText = '{"verdict":"PASS","summary":"n/a"}';
+        return { sessionId: `s${Math.random()}`, resultText, costUsd: 0, turns: 1, outcome: "done" };
+      },
+    } as unknown as AgentPool;
+
+    const asked: string[] = [];
+    const { store, runId } = await run(gates(async (why) => { asked.push(why); return null; }), pool);
+    expect(store.getTask(runId, "task-a")!.qaIterations).toBe(1);
+    expect(asked[0]).toMatch(/QA rejected it 1 times \(the cap\): QA finished but wrote no valid verdict JSON/);
   });
 
   it("treats a blank answer as parking, not as guidance", async () => {

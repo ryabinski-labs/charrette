@@ -111,7 +111,16 @@ export class Store {
 
   constructor(dbPath: string) {
     this.db = new DatabaseSync(dbPath);
-    if (dbPath !== ":memory:") this.db.exec("PRAGMA journal_mode = WAL");
+    if (dbPath !== ":memory:") {
+      this.db.exec("PRAGMA journal_mode = WAL");
+      // A live run holds this database open for hours, and `status`, `regroup`
+      // and the dashboard all write to it from their own processes. WAL lets
+      // them read concurrently but still serializes writers, and without a
+      // timeout the loser gets SQLITE_BUSY immediately rather than waiting the
+      // few milliseconds the other writer needs — which, in `regroup`, can mean
+      // a pull request that exists on GitHub and not in the run's history.
+      this.db.exec("PRAGMA busy_timeout = 5000");
+    }
     this.db.exec(SCHEMA);
   }
 
@@ -218,6 +227,36 @@ export class Store {
   }
 
   /** Sequence number of the newest event of `type` for the run, or 0 if none. */
+  /** The last thing the repo's CI said about this run's pull request. */
+  ciStatus(runId: string): { prNumber: number; state: "passing" | "failing" | "pending" | "none"; failing: string[]; total: number } | null {
+    const row = this.db
+      .prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.ci_status' ORDER BY seq DESC LIMIT 1")
+      .get(runId) as { payload: string } | undefined;
+    if (!row) return null;
+    const p = JSON.parse(row.payload) as { prNumber: number; state: "passing" | "failing" | "pending" | "none"; failing?: string[]; total?: number };
+    return { prNumber: p.prNumber, state: p.state, failing: p.failing ?? [], total: p.total ?? 0 };
+  }
+
+  /** What the deploy triggered by the human's merge did. */
+  deployStatus(runId: string): { sha: string; state: "passing" | "failing" | "pending" | "none"; failing: string[]; total: number } | null {
+    const row = this.db
+      .prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.deploy_status' ORDER BY seq DESC LIMIT 1")
+      .get(runId) as { payload: string } | undefined;
+    if (!row) return null;
+    const p = JSON.parse(row.payload) as { sha: string; state: "passing" | "failing" | "pending" | "none"; failing?: string[]; total?: number };
+    return { sha: p.sha, state: p.state, failing: p.failing ?? [], total: p.total ?? 0 };
+  }
+
+  /** What an agent found when it went and looked at production. */
+  prodVerdict(runId: string): { url: string; verdict: "PASS" | "FAIL"; findings: string[]; summary: string } | null {
+    const row = this.db
+      .prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.prod_verdict' ORDER BY seq DESC LIMIT 1")
+      .get(runId) as { payload: string } | undefined;
+    if (!row) return null;
+    const p = JSON.parse(row.payload) as { url: string; verdict: "PASS" | "FAIL"; findings?: string[]; summary?: string };
+    return { url: p.url, verdict: p.verdict, findings: p.findings ?? [], summary: p.summary ?? "" };
+  }
+
   lastEventSeq(runId: string, type: string): number {
     const row = this.db.prepare("SELECT MAX(seq) s FROM events WHERE runId = ? AND type = ?").get(runId, type) as { s: number | null };
     return row.s ?? 0;
@@ -238,7 +277,9 @@ export class Store {
 
   listOpenRuns(): RunRow[] {
     const rows = this.db
-      .prepare("SELECT id FROM runs WHERE state NOT IN ('PR_REVIEW','FAILED','ABORTED')")
+      // VERIFYING is deliberately absent from this list: the merge is in, but a
+      // red deploy or a production that disagrees is still the operator's move.
+      .prepare("SELECT id FROM runs WHERE state NOT IN ('PR_REVIEW','DONE','FAILED','ABORTED')")
       .all() as { id: string }[];
     return rows.map((r) => this.getRun(r.id)!)
   }

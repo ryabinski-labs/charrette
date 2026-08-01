@@ -116,6 +116,7 @@ export const FileConfig = z
   .object({
     maxParallelWorkers: z.number().int().min(1).max(16).optional(),
     qaIterationCap: z.number().int().min(1).max(3).optional(),
+    qaMaxTurns: z.number().int().min(20).max(300).optional(),
     workerRespawnCap: z.number().int().min(1).max(3).optional(),
     taskWallClockMinutes: z.number().int().min(5).optional(),
     models: z
@@ -137,6 +138,10 @@ export const FileConfig = z
     githubRepo: z.string().optional(),
     prMode: z.enum(["single", "per-task"]).optional(),
     deterministicChecks: z.array(z.string()).optional(),
+    waitForChecks: z.boolean().optional(),
+    checkTimeoutMinutes: z.number().int().min(1).max(120).optional(),
+    prodUrl: z.string().optional(),
+    deployTimeoutMinutes: z.number().int().min(1).max(240).optional(),
     externalTools: z.array(z.string()).optional(),
     dashboard: z.boolean().optional(),
     dashboardPort: z.number().int().min(1).max(65535).optional(),

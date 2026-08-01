@@ -85,11 +85,11 @@ export const PAGE_HTML = `<!doctype html>
           border-radius:20px; border:1px solid color-mix(in srgb, currentColor 55%, transparent);
           background:color-mix(in srgb, currentColor 9%, transparent);
           white-space:nowrap; font-family:var(--mono); }
-  .s-MERGED,.s-ACCEPTED,.s-PR_REVIEW { color:var(--green); }
-  .s-WORKING,.s-QA,.s-EXECUTING,.s-INTEGRATING,.s-PLANNING,.s-INTAKE { color:var(--amber); }
-  .s-NEEDS_HUMAN,.s-QA_FAILED,.s-FAILED { color:var(--red); }
+  .s-MERGED,.s-ACCEPTED,.s-PR_REVIEW,.s-DONE { color:var(--green); }
+  .s-WORKING,.s-QA,.s-EXECUTING,.s-INTEGRATING,.s-PLANNING,.s-INTAKE,.s-VERIFYING { color:var(--amber); }
+  .s-NEEDS_HUMAN,.s-QA_FAILED,.s-FAILED,.s-BUDGET_HOLD { color:var(--red); }
   .s-PLAN_REVIEW { color:var(--blue); }
-  .s-PENDING,.s-READY,.s-CREATED,.s-CANCELLED,.s-PAUSED { color:var(--dim); }
+  .s-PENDING,.s-READY,.s-CREATED,.s-CANCELLED,.s-PAUSED,.s-ABORTED { color:var(--dim); }
 
   .agent { display:flex; gap:.55rem; align-items:flex-start; padding:.5rem 0; border-top:1px solid var(--line); }
   .agent:first-child { border-top:0; padding-top:0; }
@@ -792,7 +792,7 @@ function renderPrs() {
   const rows = [];
   let ended = false;
   for (const run of runs) {
-    ended = ended || run.state === "PR_REVIEW" || run.state === "INTEGRATING";
+    ended = ended || ["PR_REVIEW", "INTEGRATING", "VERIFYING", "DONE"].includes(run.state);
     for (const t of run.tasks) if (t.prNumber) rows.push({ t, run });
   }
   $("prcount").textContent = rows.length ? String(rows.length) : "";
@@ -862,6 +862,10 @@ function renderRunInfo() {
  */
 const NOTIFY = {
   PR_REVIEW:   ["done", "Every accepted task is merged and its pull request is open for review."],
+  // Merged, but the cycle did not close: the deploy went red, or production
+  // disagreed. Both need the operator, and neither is visible from the repo.
+  VERIFYING:   ["waiting", "The pull request is merged, but the deploy or the production check has not passed. The activity feed has the reason."],
+  DONE:        ["done", "Merged, deployed, and verified against production."],
   FAILED:      ["failed", "The run stopped on an error. The activity feed has the reason."],
   ABORTED:     ["aborted", "The run was cancelled."],
   PAUSED:      ["paused", "The run is parked and will not continue on its own."],

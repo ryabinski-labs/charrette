@@ -61,7 +61,20 @@ describe("parallel scheduler", () => {
           active++;
           peak = Math.max(peak, active);
           workedOrder.push(spec.taskId!);
-          await new Promise((r) => setTimeout(r, 60));
+          // Hold the three independent workers until all three are in flight,
+          // rather than sleeping and hoping they overlap. A fixed sleep makes the
+          // overlap a property of machine load: with a busy event loop the first
+          // worker's timer fires and its git commands finish before the third is
+          // even dispatched, and the scheduler fails a test about the scheduler
+          // for reasons that have nothing to do with it. task-d depends on the
+          // other three, so it runs alone and must not wait for company.
+          if (spec.taskId !== "task-d") {
+            // Comfortably under the test's own timeout, so a scheduler that fails
+            // to parallelise fails on `peak` with a readable assertion rather than
+            // as an inscrutable timeout.
+            const deadline = Date.now() + 3_000;
+            while (active < 3 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5));
+          }
           writeFileSync(path.join(spec.cwd, `${spec.taskId}.txt`), "done\n");
           gitIn(spec.cwd, "add", "-A");
           gitIn(spec.cwd, "commit", "-m", `wip ${spec.taskId}`);
@@ -81,10 +94,11 @@ describe("parallel scheduler", () => {
 
     const summary = store.listTasks(runId).map((t) => `${t.id}=${t.state}${t.errorSummary ? `(${t.errorSummary})` : ""}`).join(" ");
     expect(summary).toBe("task-a=MERGED task-b=MERGED task-c=MERGED task-d=MERGED");
-    // The three independent tasks really overlapped; only the dependent one had to wait.
-    expect(peak).toBeGreaterThanOrEqual(2);
+    // The three independent tasks really overlapped — all three at once, which is
+    // the cap — and only the dependent one had to wait.
+    expect(peak).toBe(3);
     expect(workedOrder[3]).toBe("task-d");
-  });
+  }, 20_000);
 
   it("keeps one-at-a-time execution when maxParallelWorkers is 1", async () => {
     let planning = 0;

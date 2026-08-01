@@ -149,6 +149,39 @@ async function reportOutcome(
     }
   }
 
+  // What the repo and the world said, in the order they said it. A green CI over
+  // a red deploy, or a green deploy over a production that disagrees, are the two
+  // shapes of "merged but not actually done" — both belong above the artifacts.
+  if (out.ci && out.ci.state !== "none") {
+    lines.push(
+      "",
+      out.ci.state === "passing"
+        ? `  CI: green on ${link("pull", out.ci.prNumber)}`
+        : out.ci.state === "failing"
+          ? `  CI: RED on ${link("pull", out.ci.prNumber)} — ${out.ci.failing.join(", ")}`
+          : `  CI: still running on ${link("pull", out.ci.prNumber)} (${out.ci.total} check(s))`
+    );
+  }
+  if (out.deploy && out.deploy.state !== "none") {
+    lines.push(
+      out.deploy.state === "passing"
+        ? `  Deploy: green on ${out.deploy.sha.slice(0, 7)} — the change is live`
+        : out.deploy.state === "failing"
+          ? `  Deploy: RED on ${out.deploy.sha.slice(0, 7)} — ${out.deploy.failing.join(", ")}. It is merged but NOT live.`
+          : `  Deploy: still running on ${out.deploy.sha.slice(0, 7)}`
+    );
+  }
+  if (out.prod) {
+    if (out.prod.verdict === "PASS") {
+      lines.push(`  Production: verified at ${out.prod.url} — ${out.prod.summary.replace(/\s+/g, " ").slice(0, 240)}`);
+    } else {
+      lines.push("", `  Production check: FAIL at ${out.prod.url} — the deployed system does not do what you asked:`);
+      for (const f of out.prod.findings) lines.push(`    - ${f.replace(/\s+/g, " ").slice(0, 240)}`);
+      if (out.prod.summary) lines.push(`    ${out.prod.summary.replace(/\s+/g, " ").slice(0, 240)}`);
+      lines.push("    Fix it, then `harness resume` to re-check — the run stays open until production agrees.");
+    }
+  }
+
   if (out.prs.length) {
     lines.push("", "  Open for review (the harness never merges — that part is yours):");
     for (const pr of out.prs) lines.push(`    ${link("pull", pr.number)}  ${pr.title}`);
@@ -297,6 +330,7 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
   const config = RunConfig.parse({
     maxParallelWorkers: file.maxParallelWorkers,
     qaIterationCap: file.qaIterationCap,
+    qaMaxTurns: file.qaMaxTurns,
     workerRespawnCap: file.workerRespawnCap,
     taskWallClockMinutes: file.taskWallClockMinutes,
     models: file.models,
@@ -306,6 +340,10 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
     githubRepo: github.slug ?? file.githubRepo,
     prMode: file.prMode,
     deterministicChecks: checks,
+    waitForChecks: file.waitForChecks,
+    checkTimeoutMinutes: file.checkTimeoutMinutes,
+    prodUrl: file.prodUrl,
+    deployTimeoutMinutes: file.deployTimeoutMinutes,
     externalTools: file.externalTools,
   });
   if (filePath) banner.push(`config     ${CONFIG_FILENAME}`);
@@ -332,7 +370,22 @@ program
   .action(async (assignment: string | undefined, opts: RunOpts, cmd: Command) => {
     const { repo, config, dashboard: wantDashboard, dashboardPort, chat: wantChat, banner } = resolveRun(cmd, opts, assignment);
     const dash = makeDashboardFactory(wantDashboard, dashboardPort);
-    const { controller } = makeController(repo, dash.gateOverride);
+    const { controller, store } = makeController(repo, dash.gateOverride);
+    // A new run forks from the base branch as it is right now. Another run whose
+    // work is merged locally but not yet in that base is invisible to it — so the
+    // two plan against different trees, build the same thing twice, and the second
+    // pull request lands in conflicts against the first. Nothing else warns.
+    // VERIFYING and DONE runs are already merged, so they are in the base this
+    // run forks from and pose no staleness risk.
+    const unlanded = store.listRuns().filter((r) => !["DONE", "VERIFYING", "FAILED", "ABORTED"].includes(r.state));
+    if (unlanded.length) {
+      banner.push(
+        `WARNING    ${unlanded.length} run${unlanded.length === 1 ? " is" : "s are"} still open in this repo: ${unlanded
+          .map((r) => `${r.id} (${r.state})`)
+          .join(", ")}`,
+        "           this run forks from the base branch as it is now, so their unmerged work is invisible to it"
+      );
+    }
     dash.connect(controller);
     const url = await dash.start();
     if (url) {
@@ -375,8 +428,12 @@ program
     // Resumable = interrupted mid-run, or finished with parked tasks, cancelled
     // tasks whose blockers have since merged, or merged work whose PRs never
     // opened. FAILED and ABORTED runs stay closed.
+    // A run whose pull request is merged is resumable even with no task work
+    // left: the deploy and the production check are what remain, and re-entering
+    // verification is exactly how a fixed deploy gets noticed.
     const resumable = (id: string, state: string) =>
-      !["FAILED", "ABORTED"].includes(state) && (state !== "PR_REVIEW" || controller.hasRecoverableWork(id));
+      !["FAILED", "ABORTED", "DONE"].includes(state) &&
+      (state !== "PR_REVIEW" || controller.hasRecoverableWork(id) || controller.awaitingVerification(id));
     let runId = runIdArg;
     if (!runId) {
       const pick = store.listRuns().find((r) => resumable(r.id, r.state));
@@ -410,6 +467,24 @@ program
     if (existing && file.maxParallelWorkers && file.maxParallelWorkers !== existing.config.maxParallelWorkers) {
       store.patchRunConfig(runId, { maxParallelWorkers: file.maxParallelWorkers });
       process.stdout.write(`Parallel workers updated from ${CONFIG_FILENAME}: ${existing.config.maxParallelWorkers} → ${file.maxParallelWorkers}\n`);
+    }
+    // Runs started before the CI wait existed default to true on resume, which
+    // is the safe direction: they end by asking the repo instead of assuming.
+    if (existing && file.waitForChecks !== undefined && file.waitForChecks !== existing.config.waitForChecks) {
+      store.patchRunConfig(runId, { waitForChecks: file.waitForChecks });
+      process.stdout.write(`Wait for CI updated from ${CONFIG_FILENAME}: ${file.waitForChecks}\n`);
+    }
+    // A run that parked tasks because QA kept running out of turns is the run
+    // most likely to be resumed with a bigger ceiling — that has to reach it.
+    if (existing && file.qaMaxTurns && file.qaMaxTurns !== existing.config.qaMaxTurns) {
+      store.patchRunConfig(runId, { qaMaxTurns: file.qaMaxTurns });
+      process.stdout.write(`QA turn ceiling updated from ${CONFIG_FILENAME}: ${existing.config.qaMaxTurns} → ${file.qaMaxTurns}\n`);
+    }
+    // Setting prodUrl on a run that already finished is what extends it past the
+    // pull request: the next resume follows the deploy and checks production.
+    if (existing && file.prodUrl !== undefined && file.prodUrl !== existing.config.prodUrl) {
+      store.patchRunConfig(runId, { prodUrl: file.prodUrl });
+      process.stdout.write(`Production URL updated from ${CONFIG_FILENAME}: ${file.prodUrl || "(none)"}\n`);
     }
     const url = await dash.start();
     if (url) process.stdout.write(`Dashboard: ${url}\n(keep the fragment — it is your auth token)\n`);
@@ -459,7 +534,9 @@ program
     const repo = resolveRepoRoot(opts.repo);
     const { store } = makeController(repo);
     const all = store.listRuns();
-    const open = all.filter((r) => !["PR_REVIEW", "FAILED", "ABORTED"].includes(r.state));
+    // VERIFYING counts as open: the pull request is merged but the cycle has not
+    // closed, and that is precisely the run the operator needs to see.
+    const open = all.filter((r) => !["PR_REVIEW", "DONE", "FAILED", "ABORTED"].includes(r.state));
     // A finished run still holds the answer to "what did it actually produce?", so
     // the most recent one is shown even without --all. Nothing at all is printed
     // only when the repo has genuinely never been run.
@@ -471,6 +548,10 @@ program
     const slug = (await originSlug(repo).catch(() => null)) ?? loadFileConfig(repo).config.githubRepo;
     for (const run of runs) {
       process.stdout.write(`run ${run.id} [${run.state}] $${store.spentUsd(run.id).toFixed(2)} — ${run.assignment.slice(0, 60)}\n`);
+      const dep = store.deployStatus(run.id);
+      if (dep && dep.state !== "none") process.stdout.write(`  deploy ${dep.sha.slice(0, 7)}: ${dep.state}${dep.failing.length ? ` — ${dep.failing.join(", ")}` : ""}\n`);
+      const prod = store.prodVerdict(run.id);
+      if (prod) process.stdout.write(`  production ${prod.url}: ${prod.verdict}${prod.findings.length ? ` — ${prod.findings.length} finding(s)` : ""}\n`);
       const tasks = store.listTasks(run.id);
       for (const t of tasks) {
         process.stdout.write(`  ${t.id} [${t.state}] qa=${t.qaIterations}${t.prNumber ? ` PR#${t.prNumber}` : ""}\n`);

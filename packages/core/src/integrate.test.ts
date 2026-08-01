@@ -38,11 +38,14 @@ function repoWithOrigin(): { repo: string; origin: string } {
 }
 
 /** Plans, then has the worker commit real code, then passes QA. */
-function buildingPool(commit: boolean, validatorOut?: string) {
+function buildingPool(commit: boolean, validatorOut?: string, prodOut?: string) {
   const outputs = [DOCS, DAG, "worker done", '{"verdict":"PASS"}'];
   let i = 0;
   const pool = {
     async run(spec: AgentSpec): Promise<AgentResult> {
+      if (spec.role === "prod") {
+        return { sessionId: "sp", resultText: prodOut ?? '{"verdict":"PASS","summary":"live and correct"}', costUsd: 0, turns: 1, outcome: "done" };
+      }
       if (spec.role === "validator" && validatorOut) {
         return { sessionId: "sv", resultText: validatorOut, costUsd: 0, turns: 1, outcome: "done" };
       }
@@ -60,7 +63,11 @@ function buildingPool(commit: boolean, validatorOut?: string) {
 }
 
 /** Stands in for GitHub: records what it was asked for, or fails on demand. */
-function fakeGitHub(onPr: (args: { head: string; base: string }) => { number: number; url: string; fresh?: boolean } | null) {
+function fakeGitHub(
+  onPr: (args: { head: string; base: string }) => { number: number; url: string; fresh?: boolean } | null,
+  checks?: { state: "passing" | "failing" | "pending" | "none"; failing: string[]; total: number },
+  merge?: { sha: string | null; deploy: { state: "passing" | "failing" | "pending" | "none"; failing: string[]; total: number } | null }
+) {
   const prs: { head: string; base: string }[] = [];
   const prBodies: string[] = [];
   const closedPrs: number[] = [];
@@ -78,11 +85,51 @@ function fakeGitHub(onPr: (args: { head: string; base: string }) => { number: nu
       closedPrs.push(prNumber);
       return true;
     },
+    ...(checks ? { async prChecks() { return checks; } } : {}),
+    ...(merge
+      ? {
+          async mergedSha() {
+            return merge.sha;
+          },
+          async checksForRef() {
+            return merge.deploy;
+          },
+        }
+      : {}),
   };
   return { adapter: adapter as unknown as GitHubAdapter, prs, prBodies, closedPrs };
 }
 
-async function build(github: GitHubAdapter, commit = true, validatorOut?: string, prMode: "single" | "per-task" = "single") {
+/** Plans, commits, then has QA reject every iteration until the task parks. */
+function parkingPool() {
+  const outputs = [DOCS, DAG];
+  let i = 0;
+  const pool = {
+    async run(spec: AgentSpec): Promise<AgentResult> {
+      if (spec.role === "qa") {
+        return { sessionId: "sq", resultText: '{"verdict":"FAIL","reasons":["no tests"],"mustFix":["add tests"]}', costUsd: 0, turns: 1, outcome: "done" };
+      }
+      if (spec.role === "worker") {
+        writeFileSync(path.join(spec.cwd, "feature.txt"), `attempt ${i}\n`);
+        gitIn(spec.cwd, "add", "-A");
+        gitIn(spec.cwd, "commit", "-m", "feat: task-a");
+        return { sessionId: `sw${i++}`, resultText: "worker done", costUsd: 0, turns: 1, outcome: "done" };
+      }
+      return { sessionId: `s${i}`, resultText: outputs[Math.min(i++, outputs.length - 1)]!, costUsd: 0, turns: 1, outcome: "done" };
+    },
+  };
+  return pool as unknown as AgentPool;
+}
+
+async function build(
+  github: GitHubAdapter,
+  commit = true,
+  validatorOut?: string,
+  prMode: "single" | "per-task" = "single",
+  pool?: AgentPool,
+  checkTimeoutMinutes = 20,
+  extra?: { prodUrl?: string; prodOut?: string }
+) {
   const { repo } = repoWithOrigin();
   const store = new Store(":memory:");
   const bus = new Bus(store);
@@ -90,7 +137,7 @@ async function build(github: GitHubAdapter, commit = true, validatorOut?: string
   bus.subscribe(({ event }) => {
     if (event.type === "agent.log") logs.push(event.text);
   });
-  const controller = new RunController(store, bus, buildingPool(commit, validatorOut), github, {
+  const controller = new RunController(store, bus, pool ?? buildingPool(commit, validatorOut, extra?.prodOut), github, {
     async resolvePlanGate() {
       return { approved: true, feedback: "" };
     },
@@ -98,7 +145,10 @@ async function build(github: GitHubAdapter, commit = true, validatorOut?: string
       return null;
     },
   }, repo);
-  const runId = await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], prMode }));
+  const runId = await controller.startRun(
+    "do a thing",
+    RunConfig.parse({ deterministicChecks: [], prMode, checkTimeoutMinutes, deployTimeoutMinutes: 1, prodUrl: extra?.prodUrl ?? "" })
+  );
   return { store, runId, logs, repo, controller };
 }
 
@@ -180,6 +230,43 @@ describe("what the run says it produced", () => {
     expect(reason(store, runId)).not.toMatch(/PRs opened/);
   });
 
+  it("says the branch is red when the repo's own CI fails it", async () => {
+    // The deterministic checks are green in the worktree by construction here —
+    // that is exactly the blind spot. They ran on one task's branch in isolation
+    // and never saw the merged whole, the workflow, or a base that had moved.
+    const { adapter } = fakeGitHub(() => ({ number: 7, url: "u" }), { state: "failing", failing: ["Deploy", "CI / build"], total: 3 });
+    const { store, runId, logs } = await build(adapter);
+
+    expect(store.ciStatus(runId)).toMatchObject({ prNumber: 7, state: "failing", failing: ["Deploy", "CI / build"] });
+    expect(reason(store, runId)).toBe("1 pull request open for review; CI red (Deploy, CI / build); intent check passed");
+    expect(logs.join("\n")).toMatch(/CI is red on #7: Deploy, CI \/ build/);
+  });
+
+  it("says CI is green when it passes, and stays quiet when the repo has none", async () => {
+    const green = fakeGitHub(() => ({ number: 7, url: "u" }), { state: "passing", failing: [], total: 4 });
+    expect(reason(...(await build(green.adapter).then((b) => [b.store, b.runId] as const)))).toBe(
+      "1 pull request open for review; CI green; intent check passed"
+    );
+    // A repo with no CI at all must not gain a phantom "CI" clause. It still
+    // spends the grace polls first, in case CI simply had not been queued yet.
+    const none = fakeGitHub(() => ({ number: 7, url: "u" }), { state: "none", failing: [], total: 0 });
+    const b = await build(none.adapter, true, undefined, "single", undefined, 1);
+    expect(reason(b.store, b.runId)).toBe("1 pull request open for review; intent check passed");
+  }, 20_000);
+
+  it("says why no pull request exists when nothing was merged", async () => {
+    // The reported symptom: billing-app and sendant each parked their one running
+    // task, cancelled every dependent, and flipped to PR_REVIEW. `openRunPr`
+    // returns null on `!merged.length` without publishing anything, so the event
+    // feed showed a run that finished and produced no pull request and no reason.
+    const { adapter, prs } = fakeGitHub(() => ({ number: 11, url: "u" }));
+    const { store, runId, logs } = await build(adapter, true, undefined, "single", parkingPool());
+
+    expect(store.getTask(runId, "task-a")!.state).toBe("NEEDS_HUMAN");
+    expect(prs).toEqual([]);
+    expect(logs.join("\n")).toMatch(/no pull request opened: no task reached MERGED.*1 task parked/);
+  });
+
   it("reports what is parked and what was abandoned", async () => {
     const { adapter } = fakeGitHub(() => null);
     const { store, runId, controller } = await build(adapter, false);
@@ -210,6 +297,78 @@ describe("what the run says it produced", () => {
     store.transitionTask(runId, "e", "WORKING");
     store.transitionTask(runId, "e", "NEEDS_HUMAN", "iteration cap hit on deterministic checks");
     expect(controller.outcome(runId).parked[0]!.why).toBe("iteration cap hit on deterministic checks");
+  });
+});
+
+describe("closing the cycle in production", () => {
+  const state = (store: Store, runId: string) => store.getRun(runId)!.state;
+
+  it("follows the merge to the deploy and checks production, then calls the run DONE", async () => {
+    const { adapter } = fakeGitHub(() => ({ number: 7, url: "u" }), { state: "passing", failing: [], total: 2 }, {
+      sha: "deadbeef",
+      deploy: { state: "passing", failing: [], total: 1 },
+    });
+    const { store, runId } = await build(adapter, true, undefined, "single", undefined, 20, { prodUrl: "https://example.invalid" });
+
+    expect(store.deployStatus(runId)).toMatchObject({ sha: "deadbeef", state: "passing" });
+    expect(store.prodVerdict(runId)).toMatchObject({ verdict: "PASS", url: "https://example.invalid" });
+    expect(state(store, runId)).toBe("DONE");
+  });
+
+  it("stays in VERIFYING when the merge deployed red, and never asks production", async () => {
+    // marrymath: the pull request merged, the deploy failed on a step nothing in
+    // the repo could have caught, and the change never reached a single user.
+    const { adapter } = fakeGitHub(() => ({ number: 7, url: "u" }), { state: "passing", failing: [], total: 2 }, {
+      sha: "deadbeef",
+      deploy: { state: "failing", failing: ["Deploy"], total: 2 },
+    });
+    const { store, runId, logs } = await build(adapter, true, undefined, "single", undefined, 20, { prodUrl: "https://example.invalid" });
+
+    expect(store.deployStatus(runId)).toMatchObject({ state: "failing", failing: ["Deploy"] });
+    // Asking production about a deploy that never happened would have produced a
+    // verdict about the *old* code — worse than no verdict at all.
+    expect(store.prodVerdict(runId)).toBeNull();
+    expect(state(store, runId)).toBe("VERIFYING");
+    expect(logs.join("\n")).toMatch(/deployed red: Deploy — the change is merged but not live/);
+  });
+
+  it("stays in VERIFYING when production disagrees, and says what it found", async () => {
+    const { adapter } = fakeGitHub(() => ({ number: 7, url: "u" }), { state: "passing", failing: [], total: 2 }, {
+      sha: "deadbeef",
+      deploy: { state: "passing", failing: [], total: 1 },
+    });
+    const { store, runId, controller } = await build(adapter, true, undefined, "single", undefined, 20, {
+      prodUrl: "https://example.invalid",
+      prodOut: '{"verdict":"FAIL","summary":"still the old page","findings":["/blog/ still returns the frozen SPA snapshot"]}',
+    });
+
+    expect(store.prodVerdict(runId)).toMatchObject({ verdict: "FAIL", findings: ["/blog/ still returns the frozen SPA snapshot"] });
+    expect(state(store, runId)).toBe("VERIFYING");
+    expect(controller.outcome(runId).line).toContain("production check found 1 problem");
+    // The whole point of not calling it DONE: `resume` comes back here.
+    expect(controller.awaitingVerification(runId)).toBe(true);
+  });
+
+  it("ends at the pull request when no production URL is configured", async () => {
+    const { adapter } = fakeGitHub(() => ({ number: 7, url: "u" }), { state: "passing", failing: [], total: 2 }, {
+      sha: "deadbeef",
+      deploy: { state: "passing", failing: [], total: 1 },
+    });
+    const { store, runId, controller } = await build(adapter);
+
+    expect(state(store, runId)).toBe("PR_REVIEW");
+    expect(store.prodVerdict(runId)).toBeNull();
+    expect(controller.awaitingVerification(runId)).toBe(false);
+  });
+
+  it("stops at the pull request while the human has not merged", async () => {
+    // No merge commit: the boundary the harness does not cross. Not a failure.
+    const { adapter } = fakeGitHub(() => ({ number: 7, url: "u" }), { state: "passing", failing: [], total: 2 }, { sha: null, deploy: null });
+    const { store, runId } = await build(adapter, true, undefined, "single", undefined, 20, { prodUrl: "https://example.invalid" });
+
+    expect(state(store, runId)).toBe("PR_REVIEW");
+    expect(store.deployStatus(runId)).toBeNull();
+    expect(store.prodVerdict(runId)).toBeNull();
   });
 });
 

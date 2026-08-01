@@ -8,6 +8,8 @@ export const ModelRouting = z.object({
   integrator: z.string().default("claude-sonnet-5"),
   /** Drafts the operator's answer when a task escalates (Gate: task-escalation). */
   advisor: z.string().default("claude-sonnet-5"),
+  /** Judges the deployed system against the assignment. The last word, so: Opus. */
+  prod: z.string().default("claude-opus-5"),
 });
 
 export const Budget = z.object({
@@ -21,6 +23,17 @@ export const RunConfig = z.object({
   // value is frozen in their config.
   maxParallelWorkers: z.number().int().min(1).max(16).default(3),
   qaIterationCap: z.number().int().min(1).max(3).default(3),
+  /**
+   * How many turns a QA session gets before the SDK cuts it off.
+   *
+   * A QA agent that runs out of turns never writes its verdict, and a task can
+   * only be judged by a QA session that finished. Sixty turns is plenty to read
+   * a diff and run `tsc && jest`; it is not enough where verifying means booting
+   * an emulator or building an image, so this is a per-repo knob. The retry also
+   * raises it on its own (see `dispatchTask`) — a ceiling that was too low once
+   * is too low twice.
+   */
+  qaMaxTurns: z.number().int().min(20).max(300).default(90),
   workerRespawnCap: z.number().int().min(1).max(3).default(3),
   taskWallClockMinutes: z.number().int().min(5).default(45),
   models: ModelRouting.default({}),
@@ -46,6 +59,28 @@ export const RunConfig = z.object({
    */
   prMode: z.enum(["single", "per-task"]).default("single"),
   deterministicChecks: z.array(z.string()).default([]),
+  /**
+   * Wait for the pull request's own checks before calling the run finished.
+   *
+   * The deterministic checks prove one task's worktree was green in isolation;
+   * the repo's CI is the only thing that judges the merged branch the way the
+   * repo does — including the conflicts and the workflow steps no worktree ever
+   * runs. A run that reports "1 pull request open for review" over a red branch
+   * has told the operator the opposite of the truth. Off skips the wait.
+   */
+  waitForChecks: z.boolean().default(true),
+  /** How long to wait for those checks before reporting them as still pending. */
+  checkTimeoutMinutes: z.number().int().min(1).max(120).default(20),
+  /**
+   * The live URL this repo deploys to. Set it and a run does not end at the
+   * pull request: once a human merges, the harness follows the deploy and sends
+   * an agent to check the running system against the original assignment.
+   *
+   * Empty (the default) keeps the old behaviour — the run ends at PR_REVIEW.
+   */
+  prodUrl: z.string().default(""),
+  /** How long to wait for the merge commit's deploy before giving up on it. */
+  deployTimeoutMinutes: z.number().int().min(1).max(240).default(30),
   /**
    * External CLIs (gh, aws, podman, adb, …) advertised to worker and QA agents.
    * Omit for everything found on PATH; `[]` to tell them about nothing.

@@ -260,6 +260,33 @@ ${diffStat}
 Judge whether what was merged, as a whole, delivers the intent. Tasks marked NEEDS_HUMAN or CANCELLED were not merged — if their absence leaves the intent unmet, that is a gap. Then give your verdict.`;
 }
 
+export function prodValidatorSystemPrompt(toolbelt = "", skills = ""): string {
+  return `You are a production validation agent. The change you are judging is already merged, deployed and live — you are the last check in the cycle, and the only one that has ever looked at the running system rather than at code.
+
+Judge the DEPLOYED system against the operator's original intent. Read-only: exercise the live system the way a user does — fetch pages, call public endpoints, follow the documented acceptance checks — but change nothing. Never POST, PUT, PATCH or DELETE against production, never mutate data, never touch infrastructure, and never send credentials anywhere. If a check cannot be run without mutating something, report it as unverified rather than running it.
+
+Prefer the evidence a user would have: what the live URL actually returns, what the page actually contains, what the endpoint actually answers. Code that looks correct in the repository is not evidence that production works — a correct change that never deployed, deployed partially, or deployed behind stale infrastructure is exactly the failure you exist to catch. Say what you observed, and distinguish it from what you inferred.
+${skills}${toolbelt}
+
+Your FINAL message must be exactly one JSON object inside a \`\`\`json fence:
+{"verdict":"PASS","summary":string}
+or
+{"verdict":"FAIL","summary":string,"findings":[string]}
+Each finding must name what the intent asked for, what production actually does instead, and the exact observation that shows it.`;
+}
+
+export function prodValidatorPrompt(assignment: string, prd: string, url: string, taskLines: string): string {
+  return `The operator's original intent:
+${assignment}
+
+${prd ? `The PRD the plan was built from:\n${prd.slice(0, 8000)}\n\n` : ""}What was built and merged:
+${taskLines}
+
+The live system: ${url}
+
+This change is deployed. Go and check the running system against that intent, using the PRD's own definition-of-done checks where it states any. Report what production actually does.`;
+}
+
 export function skillsBlock(skills: { name: string; content?: string; path: string }[]): string {
   if (!skills.length) return "";
   const parts = skills.map((s) =>

@@ -23,6 +23,8 @@ import {
   qaSystemPrompt,
   qaTaskPrompt,
   skillsBlock,
+  prodValidatorPrompt,
+  prodValidatorSystemPrompt,
   validatorPrompt,
   validatorSystemPrompt,
   workerResumePrompt,
@@ -47,6 +49,9 @@ const MAX_FULL_TEXT_SKILLS = 2;
 const ROLE_SKILL_LENS: Record<string, string> = {
   worker: "",
   qa: "QA quality assurance verify verification testing test end-to-end e2e regression review evidence security",
+  // Pulls the operator's own production-validation and QA playbooks in, so the
+  // live check is run the way they would run it rather than improvised.
+  prod: "production prod live deployed deployment validate validation smoke health monitoring uptime QA end-to-end e2e verify evidence release",
 };
 
 /**
@@ -61,6 +66,12 @@ const IntentVerdict = z.object({
   verdict: z.enum(["PASS", "FAIL"]),
   summary: z.string().default(""),
   gaps: z.array(z.string()).default([]),
+});
+/** The production validator's judgment of the deployed system against intent. */
+const ProdVerdict = z.object({
+  verdict: z.enum(["PASS", "FAIL"]),
+  summary: z.string().default(""),
+  findings: z.array(z.string()).default([]),
 });
 /**
  * Ask for the model's full output ceiling. Note this is a request, not a promise:
@@ -216,6 +227,23 @@ export class RunController {
   }
 
   /**
+   * Is this run waiting on the world rather than on itself?
+   *
+   * A run configured with a production URL is not finished when its pull request
+   * opens — it is finished when the merge deployed and production agreed. That
+   * makes a merged-but-unverified run resumable with no task work outstanding,
+   * which is what lets "I fixed the deploy, check again" be a `resume` rather
+   * than a whole new run.
+   */
+  awaitingVerification(runId: string): boolean {
+    const run = this.store.getRun(runId);
+    if (!run || !run.config.prodUrl || !this.github.enabled) return false;
+    if (run.state === "VERIFYING") return true;
+    if (run.state !== "PR_REVIEW") return false;
+    return this.rollupPr(runId) !== undefined;
+  }
+
+  /**
    * Tasks cancelled as "unreachable" whose blockers have since resolved: every
    * dependency is merged, or is itself in the returned set. This is the run
    * where a parked dependency was later revived and merged, but its cancelled
@@ -341,7 +369,16 @@ export class RunController {
       // pull requests open, so a reviewer arrives with the gap list in hand.
       await this.validateIntent(runId);
       await this.openPrs(runId);
+      await this.awaitChecks(runId);
       this.store.transitionRun(runId, "PR_REVIEW", this.outcome(runId).line);
+      run = this.store.getRun(runId)!;
+    }
+    // A merge that already happened — an eager human merging the rollup while
+    // the run was still finishing — is verified now rather than next resume.
+    if (run.state === "PR_REVIEW" || run.state === "VERIFYING") {
+      const closed = await this.verify(runId);
+      const now = this.store.getRun(runId)!;
+      if (closed && now.state === "VERIFYING") this.store.transitionRun(runId, "DONE", this.outcome(runId).line);
     }
   }
 
@@ -393,6 +430,23 @@ export class RunController {
    */
   private async openPrs(runId: string): Promise<void> {
     const run = this.store.getRun(runId)!;
+    // A run reaches INTEGRATING with nothing merged when its foundation tasks
+    // park: everything downstream is cancelled as unreachable and there is no
+    // diff to publish. Both paths below then return without opening anything —
+    // `openRunPr` on `!merged.length`, the per-task loop by never entering — and
+    // an integrator that says nothing here is indistinguishable from one whose
+    // push to GitHub failed. Say which it was.
+    const outcome = this.outcome(runId);
+    if (!outcome.merged) {
+      this.bus.publish({
+        type: "agent.log",
+        runId,
+        sessionId: "integrator",
+        text: `no pull request opened: no task reached MERGED, so the run has no diff to publish — ${outcome.parked.length} task${outcome.parked.length === 1 ? "" : "s"} parked, ${outcome.cancelled} never started`,
+        ts: Date.now(),
+      });
+      return;
+    }
     if (run.config.prMode === "single") {
       try {
         await this.openRunPr(runId);
@@ -421,6 +475,175 @@ export class RunController {
           ts: Date.now(),
         });
       }
+    }
+  }
+
+  /**
+   * Everything after the human's merge: did it deploy, and does the deployed
+   * thing do what was asked?
+   *
+   * A run that ends at PR_REVIEW has shipped nothing and knows nothing about the
+   * world. Every check before this one reads the repository — deterministic
+   * checks in a worktree, QA on a branch, the intent validator on the merged
+   * tree, CI on the pull request. All four can be green while production is
+   * untouched: a merge whose deploy failed, or one that deployed correct code
+   * on top of infrastructure that never got applied, looks identical from
+   * inside the repo. Only asking production tells them apart.
+   *
+   * Returns whether the cycle closed. The run stays in VERIFYING when it did
+   * not — a red deploy and a production that disagrees are both the operator's
+   * to act on, and `resume` re-enters here once they have.
+   */
+  private async verify(runId: string): Promise<boolean> {
+    const run = this.store.getRun(runId)!;
+    if (!run.config.prodUrl || !this.github.enabled) return false;
+    const prNumber = this.rollupPr(runId);
+    if (prNumber === undefined) return false;
+
+    // Nothing to verify until a human has merged: that is the boundary the
+    // harness does not cross, and waiting here for it is not the same as
+    // failing. The run simply stays where it is until the operator acts.
+    const sha = await this.github.mergedSha?.(prNumber).catch(() => null);
+    if (!sha) return false;
+    if (run.state === "PR_REVIEW") this.store.transitionRun(runId, "VERIFYING", `#${prNumber} merged — following the deploy`);
+
+    const deploy = await this.settleChecks(runId, (ref) => this.github.checksForRef?.(ref) ?? Promise.resolve(null), sha, run.config.deployTimeoutMinutes);
+    if (deploy) {
+      this.bus.publish({ type: "run.deploy_status", runId, sha, state: deploy.state, failing: deploy.failing, total: deploy.total, ts: Date.now() });
+      if (deploy.state === "failing") {
+        this.bus.publish({
+          type: "agent.log",
+          runId,
+          sessionId: "integrator",
+          text: `the merge deployed red: ${deploy.failing.join(", ")} — the change is merged but not live`,
+          ts: Date.now(),
+        });
+        return false;
+      }
+      // Still running, or a repo whose base branch has no workflows at all: in
+      // both cases nothing here can claim the change reached production.
+      if (deploy.state !== "passing") return false;
+    }
+    return await this.validateProd(runId, run.config.prodUrl);
+  }
+
+  /**
+   * Send an agent to look at the running system, and record what it found.
+   *
+   * The skills index carries the operator's own production-validation and QA
+   * playbooks; the "prod" lens is what pulls them in, so this agent checks
+   * production the way its operator would rather than the way a model guesses.
+   */
+  private async validateProd(runId: string, url: string): Promise<boolean> {
+    const run = this.store.getRun(runId)!;
+    const tasks = this.store.listTasks(runId);
+    const taskLines = tasks
+      .filter((t) => t.state === "MERGED")
+      .map((t) => `- ${t.title}: ${t.acceptanceCriteria.map((c) => c.slice(0, 160)).join(" | ")}`)
+      .join("\n");
+    try {
+      const skills = this.selectSkills(indexSkills(run.config.skillsDirs), "prod", {
+        title: "validate the deployed system in production",
+        spec: run.assignment,
+      } as TaskRow);
+      const result = await this.pool.run({
+        runId,
+        role: "prod",
+        model: run.config.models.prod,
+        systemPrompt: prodValidatorSystemPrompt(toolbeltBlock(detectToolbelt(run.config.externalTools)), skillsBlock(skills)),
+        prompt: prodValidatorPrompt(run.assignment, this.planPrd(runId), url, taskLines),
+        cwd: this.repoPath,
+        // Production is read through the network, not through the checkout, and
+        // an agent that can edit files here is one that can "fix" a live finding
+        // into a local diff nobody asked for.
+        allowedTools: ["Bash", "Read", "Glob", "Grep", "WebFetch"],
+        maxTurns: 80,
+        budgetCheck: () => this.checkBudget(runId),
+      });
+      const verdict = ProdVerdict.parse(extractJson(result.resultText));
+      this.bus.publish({ type: "run.prod_verdict", runId, url, verdict: verdict.verdict, findings: verdict.findings, summary: verdict.summary, ts: Date.now() });
+      return verdict.verdict === "PASS";
+    } catch (e) {
+      if (e instanceof BudgetExceeded) throw e;
+      // An unverified deploy is reportable; a run that claims to have verified
+      // one it never reached is not. Say which happened.
+      this.bus.publish({
+        type: "agent.log",
+        runId,
+        sessionId: "integrator",
+        text: `production validation did not complete: ${String(e).slice(0, 300)}`,
+        ts: Date.now(),
+      });
+      return false;
+    }
+  }
+
+  /** The pull request the most tasks point at — the one a human would merge. */
+  private rollupPr(runId: string): number | undefined {
+    const counts = new Map<number, number>();
+    for (const t of this.store.listTasks(runId)) if (t.prNumber !== null) counts.set(t.prNumber, (counts.get(t.prNumber) ?? 0) + 1);
+    return [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0]?.[0];
+  }
+
+  /**
+   * Poll one commit's checks until they stop being pending.
+   *
+   * A timeout is reported as whatever it last was — pending, never passing. The
+   * answer is "not known yet", and anything stronger is the failure this whole
+   * phase exists to prevent.
+   */
+  private async settleChecks<T>(
+    _runId: string,
+    read: (ref: T) => Promise<{ state: "passing" | "failing" | "pending" | "none"; failing: string[]; total: number } | null>,
+    ref: T,
+    timeoutMinutes: number
+  ): Promise<{ state: "passing" | "failing" | "pending" | "none"; failing: string[]; total: number } | null> {
+    const budgetMs = timeoutMinutes * 60_000;
+    const deadline = Date.now() + budgetMs;
+    const pollMs = Math.min(15_000, Math.max(250, Math.floor(budgetMs / 40)));
+    // CI has usually not been queued yet on a commit that is seconds old, so an
+    // immediate "none" is indistinguishable from a repo that has no CI at all.
+    let graceLeft = 4;
+    let checks = await read(ref).catch(() => null);
+    while (checks && Date.now() < deadline) {
+      if (checks.state === "none" && graceLeft > 0) graceLeft--;
+      else if (checks.state !== "pending") break;
+      await new Promise((r) => setTimeout(r, pollMs));
+      const next = await read(ref).catch(() => null);
+      if (!next) break;
+      checks = next;
+    }
+    return checks;
+  }
+
+  /**
+   * Wait for the repo's own CI on the pull request, and record what it said.
+   *
+   * `deterministicChecks` prove one task's worktree was green in isolation. They
+   * never see the merged branch, never run the repo's workflow, and cannot
+   * notice that the base moved underneath the run — so a run could report "1
+   * pull request open for review" over a branch whose CI was red, or that could
+   * not merge at all. This is the first and only step that asks the repo.
+   *
+   * A timeout is reported as pending, never as a pass: the answer is "not known
+   * yet", and saying anything stronger is the failure this exists to prevent.
+   */
+  private async awaitChecks(runId: string): Promise<void> {
+    const run = this.store.getRun(runId)!;
+    if (!run.config.waitForChecks || !this.github.enabled) return;
+    const prNumber = this.rollupPr(runId);
+    if (prNumber === undefined) return;
+    const checks = await this.settleChecks(runId, (n: number) => this.github.prChecks?.(n) ?? Promise.resolve(null), prNumber, run.config.checkTimeoutMinutes);
+    if (!checks) return;
+    this.bus.publish({ type: "run.ci_status", runId, prNumber, state: checks.state, failing: checks.failing, total: checks.total, ts: Date.now() });
+    if (checks.state === "failing") {
+      this.bus.publish({
+        type: "agent.log",
+        runId,
+        sessionId: "integrator",
+        text: `CI is red on #${prNumber}: ${checks.failing.join(", ")} — the merged branch does not pass the repo's own checks`,
+        ts: Date.now(),
+      });
     }
   }
 
@@ -548,6 +771,9 @@ export class RunController {
     cancelled: number;
     total: number;
     intent: { verdict: "PASS" | "FAIL"; gaps: string[]; summary: string } | null;
+    ci: { prNumber: number; state: "passing" | "failing" | "pending" | "none"; failing: string[]; total: number } | null;
+    deploy: { sha: string; state: "passing" | "failing" | "pending" | "none"; failing: string[]; total: number } | null;
+    prod: { url: string; verdict: "PASS" | "FAIL"; findings: string[]; summary: string } | null;
     line: string;
   } {
     const tasks = this.store.listTasks(runId);
@@ -588,10 +814,44 @@ export class RunController {
     if (cancelled) {
       parts.push(parked.length ? `${cancelled} never started, blocked behind them` : `${cancelled} never started`);
     }
+    // What the repo itself said about the branch. A red CI belongs next to the
+    // pull request count, not three screens down the event feed: "1 pull request
+    // open for review" over a branch that does not build is the wrong headline.
+    const ci = this.store.ciStatus(runId);
+    if (ci && ci.state !== "none") {
+      parts.push(
+        ci.state === "passing"
+          ? "CI green"
+          : ci.state === "failing"
+            ? `CI red (${ci.failing.slice(0, 3).join(", ")}${ci.failing.length > 3 ? `, +${ci.failing.length - 3} more` : ""})`
+            : "CI still running"
+      );
+    }
     // The validator's answer to the only question the operator actually asked.
     const intent = this.store.intentVerdict(runId);
     if (intent) parts.push(intent.verdict === "PASS" ? "intent check passed" : `intent check found ${intent.gaps.length || "unstated"} gap${intent.gaps.length === 1 ? "" : "s"}`);
-    return { prs, parked, merged: count("MERGED"), cancelled, total: tasks.length, intent, line: parts.join("; ") };
+    // Whether any of it reached anyone. This is the end of the cycle, so it goes
+    // last: the operator reads left to right and this is the part that decides
+    // whether the work is finished or merely merged.
+    const deploy = this.store.deployStatus(runId);
+    if (deploy && deploy.state !== "none") {
+      parts.push(
+        deploy.state === "passing"
+          ? "deployed"
+          : deploy.state === "failing"
+            ? `deploy red (${deploy.failing.slice(0, 3).join(", ")})`
+            : "deploy still running"
+      );
+    }
+    const prod = this.store.prodVerdict(runId);
+    if (prod) {
+      parts.push(
+        prod.verdict === "PASS"
+          ? "verified in production"
+          : `production check found ${prod.findings.length || "unstated"} problem${prod.findings.length === 1 ? "" : "s"}`
+      );
+    }
+    return { prs, parked, merged: count("MERGED"), cancelled, total: tasks.length, intent, ci, deploy, prod, line: parts.join("; ") };
   }
 
   /**
@@ -1096,6 +1356,9 @@ export class RunController {
     // instead of cold-starting. Cleared on crashes: a session that died
     // mid-stream left a transcript that cannot be trusted to replay.
     let workerSession: string | undefined;
+    // Raised when a QA session dies at its ceiling: retrying a truncated
+    // verification with the same budget truncates it again in the same place.
+    let qaTurns = run.config.qaMaxTurns;
     let startedAt = Date.now();
     for (;;) {
       task = this.store.getTask(runId, taskId)!;
@@ -1184,24 +1447,38 @@ export class RunController {
           prompt: qaTaskPrompt(task, workerSummary.slice(0, 4000), diffStat.slice(0, 2000), this.drainFeedback(runId, taskId) || undefined),
           cwd: wt.path,
           disallowedTools: ["WebSearch"],
-          maxTurns: 60,
+          maxTurns: qaTurns,
           budgetCheck: () => this.checkBudget(runId, taskId),
         });
+        // A session cut off at its turn ceiling still returns a result message —
+        // just not the JSON verdict. Parsing that books a FAIL against the
+        // iteration cap for work QA never actually judged, and three of those
+        // park a task nobody ever found fault with, after sending the worker
+        // back to fix nothing. A truncated QA is a missing verdict, not a bad
+        // one, so it belongs on the crash path with the rest of them.
+        if (qa.outcome === "error") {
+          throw new Error(`QA ended after ${qa.turns} turns without a verdict: ${qa.errorDetail ?? "unknown"}`);
+        }
       } catch (e) {
-        // A dead QA session says nothing about the work, which is still
-        // committed in the worktree — same treatment as a worker crash.
+        // A QA session that never returned a verdict says nothing about the
+        // work, which is still committed in the worktree — same treatment as a
+        // worker crash. Bounded by the same cap: a QA agent that cannot finish
+        // must not loop the task forever.
         if (e instanceof BudgetExceeded) throw e;
+        // The one failure whose remedy is known: it ran out of room, so give the
+        // next attempt more of it rather than replaying the same wall.
+        if (/max_turns/.test(String(e))) qaTurns = Math.min(300, Math.round(qaTurns * 1.5));
         const respawns = task.respawns + 1;
         this.store.updateTask(runId, taskId, { respawns, errorSummary: String(e).slice(0, 500) });
         if (respawns >= run.config.workerRespawnCap) {
-          const guidance = await this.askOrPark(runId, taskId, `the QA agent crashed ${respawns} times (the cap); last: ${String(e).slice(0, 200)}`);
+          const guidance = await this.askOrPark(runId, taskId, `QA ended without a verdict ${respawns} times (the cap); last: ${String(e).slice(0, 200)}`);
           if (guidance === null) return;
-          qaFeedback = `The QA agent kept crashing — the work itself may be fine — and the operator stepped in with guidance; follow it over anything that contradicts it:\n${guidance}`;
+          qaFeedback = `QA never delivered a verdict — the work itself may be fine, and was never judged — and the operator stepped in with guidance; follow it over anything that contradicts it:\n${guidance}`;
         } else {
-          qaFeedback = `The previous QA session crashed before delivering a verdict (${String(e).slice(0, 200)}) — the work itself may be fine. Inspect git log in this worktree, verify the committed work, and finish.`;
+          qaFeedback = `The previous QA session ended without a verdict (${String(e).slice(0, 200)}) — the work itself may be fine, and was never judged. Inspect git log in this worktree, verify the committed work, and finish. Leave the verification cheap to repeat: a deterministic check or a command recorded in the commit message beats a long manual investigation QA has to redo.`;
         }
-        this.store.transitionTask(runId, taskId, "QA_FAILED", "QA agent crashed before a verdict");
-        this.store.transitionTask(runId, taskId, "WORKING", "re-dispatched after the QA crash");
+        this.store.transitionTask(runId, taskId, "QA_FAILED", "QA ended without a verdict");
+        this.store.transitionTask(runId, taskId, "WORKING", "re-dispatched after QA returned no verdict");
         continue;
       }
 
@@ -1209,7 +1486,10 @@ export class RunController {
       try {
         verdict = QaVerdict.parse(extractJson(qa.resultText));
       } catch {
-        verdict = { verdict: "FAIL", reasons: ["QA output unparseable"], mustFix: ["re-run"] };
+        // Reached only when the session ended cleanly and still wrote something
+        // that is not a verdict — a QA agent that ignored its output contract,
+        // which is a real finding about the run and does count as an iteration.
+        verdict = { verdict: "FAIL", reasons: ["QA finished but wrote no valid verdict JSON"], mustFix: ["re-run"] };
       }
       const iterations = this.store.getTask(runId, taskId)!.qaIterations + 1;
       this.store.updateTask(runId, taskId, { qaIterations: iterations });

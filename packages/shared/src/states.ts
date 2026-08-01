@@ -8,6 +8,11 @@ export const RunState = z.enum([
   "EXECUTING",
   "INTEGRATING",
   "PR_REVIEW",
+  // The human merged the pull request. Everything past here is about the world
+  // rather than the repo: did the merge deploy, and does the deployed thing do
+  // what was asked? A run that stops at PR_REVIEW has shipped nothing.
+  "VERIFYING",
+  "DONE",
   "PAUSED",
   "BUDGET_HOLD",
   "FAILED",
@@ -28,7 +33,7 @@ export const TaskState = z.enum([
 ]);
 export type TaskState = z.infer<typeof TaskState>;
 
-export const AgentRole = z.enum(["intake", "planner", "worker", "qa", "integrator", "validator", "advisor"]);
+export const AgentRole = z.enum(["intake", "planner", "worker", "qa", "integrator", "validator", "advisor", "prod"]);
 export type AgentRole = z.infer<typeof AgentRole>;
 
 export const SessionState = z.enum(["running", "done", "interrupted", "killed"]);
@@ -51,7 +56,13 @@ export const RUN_TRANSITIONS: Record<RunState, RunState[]> = {
   // A finished run is not a dead run: `resume` reopens it when tasks parked
   // (back to EXECUTING via the escalation gate) or merged work never got its
   // pull requests (back to INTEGRATING to retry them).
-  PR_REVIEW: ["EXECUTING", "INTEGRATING"],
+  PR_REVIEW: ["EXECUTING", "INTEGRATING", "VERIFYING"],
+  // A run stays in VERIFYING while the deploy is red or production disagrees:
+  // both are states the operator has to act on, and neither is the harness's to
+  // guess at. `resume` re-enters verification, so fixing the deploy and running
+  // it again is what moves the run on — no new run, no lost history.
+  VERIFYING: ["DONE", "EXECUTING", "PAUSED", "FAILED", "ABORTED"],
+  DONE: [],
   PAUSED: ["INTAKE", "PLANNING", "EXECUTING", "INTEGRATING", "ABORTED"],
   BUDGET_HOLD: ["EXECUTING", "INTEGRATING", "ABORTED"],
   FAILED: [],
