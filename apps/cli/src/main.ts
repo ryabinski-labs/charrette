@@ -404,6 +404,13 @@ program
       store.patchRunConfig(runId, { prMode: file.prMode });
       process.stdout.write(`PR mode updated from ${CONFIG_FILENAME}: ${file.prMode}\n`);
     }
+    // Runs started before parallel dispatch existed carry a cap of 1 forever.
+    // The scheduler reads the cap when it starts executing, so patching here —
+    // before resume() — is what lets an old run finish with parallel workers.
+    if (existing && file.maxParallelWorkers && file.maxParallelWorkers !== existing.config.maxParallelWorkers) {
+      store.patchRunConfig(runId, { maxParallelWorkers: file.maxParallelWorkers });
+      process.stdout.write(`Parallel workers updated from ${CONFIG_FILENAME}: ${existing.config.maxParallelWorkers} → ${file.maxParallelWorkers}\n`);
+    }
     const url = await dash.start();
     if (url) process.stdout.write(`Dashboard: ${url}\n(keep the fragment — it is your auth token)\n`);
     try {
