@@ -2,6 +2,14 @@ import { Octokit } from "octokit";
 import { git } from "./git.js";
 
 /** A PR that exists on GitHub, whether this call opened it or a previous one did. */
+/** The repo's own verdict on a pull request's head commit. */
+export interface PrChecks {
+  state: "passing" | "failing" | "pending" | "none";
+  /** Names of the checks that failed, for the operator to go and read. */
+  failing: string[];
+  total: number;
+}
+
 export interface PrRef {
   number: number;
   url: string;
@@ -198,6 +206,76 @@ export class GitHubAdapter {
     if (!data) return null;
     if (data.merged_at) return "merged";
     return data.state === "open" ? (data.draft ? "draft" : "open") : "closed";
+  }
+
+  /**
+   * What the repo's own CI says about a pull request's head commit.
+   *
+   * Both surfaces are read: check runs (GitHub Actions, most apps) and the older
+   * commit statuses (many external CI providers still only write those). A repo
+   * that uses one and not the other would otherwise look like it has no CI at
+   * all, which reads as "nothing to wait for" rather than "not checked".
+   *
+   * `null` means GitHub is off or the pull request could not be read — that is
+   * not the same as "no checks", and callers must not treat it as a pass.
+   */
+  async prChecks(prNumber: number): Promise<PrChecks | null> {
+    if (!this.octokit) return null;
+    const pr = await this.octokit.rest.pulls
+      .get({ owner: this.owner, repo: this.repo, pull_number: prNumber })
+      .then((r) => r.data)
+      .catch(() => null);
+    if (!pr) return null;
+    return this.checksForRef(pr.head.sha);
+  }
+
+  /**
+   * The commit a merged pull request landed as, or `null` if it is not merged.
+   * That commit is where the base branch's own workflows run — the deploy the
+   * merge triggered — so it is what "did this actually ship?" is asked about.
+   */
+  async mergedSha(prNumber: number): Promise<string | null> {
+    if (!this.octokit) return null;
+    const data = await this.octokit.rest.pulls
+      .get({ owner: this.owner, repo: this.repo, pull_number: prNumber })
+      .then((r) => r.data)
+      .catch(() => null);
+    if (!data?.merged_at) return null;
+    return data.merge_commit_sha ?? null;
+  }
+
+  /** The combined verdict of every check and status attached to one commit. */
+  async checksForRef(ref: string): Promise<PrChecks | null> {
+    if (!this.octokit) return null;
+    const runs = await this.octokit
+      .paginate(this.octokit.rest.checks.listForRef, { owner: this.owner, repo: this.repo, ref, per_page: 100 })
+      .catch(() => [] as { name: string; status: string; conclusion: string | null }[]);
+    const combined = await this.octokit.rest.repos
+      .getCombinedStatusForRef({ owner: this.owner, repo: this.repo, ref })
+      .then((r) => r.data)
+      .catch(() => null);
+
+    // "cancelled" and "action_required" are failures for this purpose: neither
+    // is a green branch, and reporting them as pending would wait forever.
+    const BAD = new Set(["failure", "timed_out", "cancelled", "action_required", "startup_failure"]);
+    const failing: string[] = [];
+    let pending = 0;
+    let total = 0;
+    for (const c of runs) {
+      // Skipped and neutral checks are deliberate non-answers, not results.
+      if (c.status === "completed" && (c.conclusion === "skipped" || c.conclusion === "neutral")) continue;
+      total++;
+      if (c.status !== "completed") pending++;
+      else if (c.conclusion && BAD.has(c.conclusion)) failing.push(c.name);
+    }
+    for (const s of combined?.statuses ?? []) {
+      total++;
+      if (s.state === "pending") pending++;
+      else if (s.state === "failure" || s.state === "error") failing.push(s.context);
+    }
+    if (!total) return { state: "none", failing: [], total: 0 };
+    if (failing.length) return { state: "failing", failing, total };
+    return { state: pending ? "pending" : "passing", failing: [], total };
   }
 
   /**

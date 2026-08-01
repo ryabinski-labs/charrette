@@ -4,7 +4,7 @@ import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { RunConfig, TaskState } from "@harness/shared";
+import { RunConfig, RunState, TaskState } from "@harness/shared";
 import { Bus, Store } from "@harness/core";
 import { Dashboard } from "./index.js";
 import { PAGE_HTML } from "./page.js";
@@ -244,6 +244,17 @@ describe("the page itself", () => {
       expect(PAGE_HTML).toContain(s + ":");
     }
     expect(PAGE_HTML).toMatch(/Notification\.requestPermission\(\)/);
+  });
+
+  it("gives every run and task state a colour, so no pill renders as 'no status'", () => {
+    // The board is read at a glance by colour, and a state with no rule inherits
+    // the neutral pill — indistinguishable from PENDING. VERIFYING, BUDGET_HOLD
+    // and ABORTED all shipped that way: a run halted on the operator's budget
+    // decision looked exactly as urgent as one that had not started.
+    const coloured = new Set([...PAGE_HTML.matchAll(/\.s-([A-Z_]+)/g)].map((m) => m[1]!));
+    for (const state of [...RunState.options, ...TaskState.options]) {
+      expect(coloured, `${state} has no .s-${state} colour rule`).toContain(state);
+    }
   });
 
   it("sorts every task state into a group, so no finished task hides in 'Queued'", () => {

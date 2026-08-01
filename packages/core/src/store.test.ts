@@ -114,6 +114,46 @@ describe("live event delivery", () => {
     expect(store.getRun("run1")!.state).toBe("PLANNING");
   });
 
+  it("drops a finished run from the dashboard's list but keeps one still verifying", () => {
+    // The dashboard drives itself from listOpenRuns, so "open" has to mean "still
+    // wants the operator". VERIFYING does — a red deploy or a production that
+    // disagrees is waiting on them. DONE does not: it shipped, and a run that
+    // never leaves the board buries the ones that still need something.
+    const store = makeStore();
+    const seed = (id: string, state: string) =>
+      store.db
+        .prepare("INSERT INTO runs (id, repoPath, assignment, state, integrationBranch, config, createdAt, updatedAt) VALUES (?,?,?,?,?,?,?,?)")
+        .run(id, "/tmp/repo", "a", state, `harness/${id}/main`, JSON.stringify(RunConfig.parse({})), 0, 0);
+    for (const [id, state] of [["r-exec", "EXECUTING"], ["r-verify", "VERIFYING"], ["r-done", "DONE"], ["r-pr", "PR_REVIEW"], ["r-abort", "ABORTED"]]) {
+      seed(id!, state!);
+    }
+    expect(store.listOpenRuns().map((r) => r.id).sort()).toEqual(["r-exec", "r-verify"]);
+    // …and none of them are lost: `harness status --all` still reaches every one.
+    expect(store.listRuns()).toHaveLength(5);
+  });
+
+  it("backfills config fields that did not exist when the run was recorded", () => {
+    // Every long-lived run carries a config frozen at `harness run` time, and a
+    // resume reads it back months and several releases later. A field added
+    // since then must arrive as its default, not as undefined: `qaMaxTurns`
+    // reaches arithmetic (the retry raises it), where undefined becomes NaN and
+    // hands the SDK a nonsense turn ceiling instead of a low one.
+    const store = makeStore();
+    const legacy = RunConfig.parse({}) as Record<string, unknown>;
+    delete legacy.qaMaxTurns;
+    delete legacy.prodUrl;
+    delete legacy.waitForChecks;
+    store.db
+      .prepare("INSERT INTO runs (id, repoPath, assignment, state, integrationBranch, config, createdAt, updatedAt) VALUES (?,?,?,?,?,?,?,?)")
+      .run("old", "/tmp/repo", "a", "CREATED", "harness/old/main", JSON.stringify(legacy), 0, 0);
+
+    const config = store.getRun("old")!.config;
+    expect(config.qaMaxTurns).toBe(90);
+    expect(Number.isFinite(Math.round(config.qaMaxTurns * 1.5))).toBe(true);
+    expect(config.prodUrl).toBe("");
+    expect(config.waitForChecks).toBe(true);
+  });
+
   it("raises a cap in place without disturbing the rest of the run config", () => {
     const store = makeStore();
     makeRun(store);
