@@ -13,13 +13,14 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@harness/shared": "workspace:*",
     "@anthropic-ai/claude-agent-sdk": "^0.1.0",
-    "better-sqlite3": "^11.0.0",
+    "@harness/shared": "workspace:*",
+    "@harness/skills-mcp": "workspace:*",
     "octokit": "^4.0.0",
     "zod": "^3.23.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.0"
+    "typescript": "^5.5.0",
+    "vitest": "^3.2.7"
   }
 }
