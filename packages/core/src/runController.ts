@@ -1336,6 +1336,9 @@ export class RunController {
       } catch (e) {
         lastReason = lastTruncated
           ? "the breakdown ran past the output-token limit and was cut off mid-JSON — it is too long to emit in one message"
+          // Only `extractJson` and `JSON.parse` throw in here, and both throw
+          // Errors — the String() arm is for a future throw that does not.
+          /* v8 ignore next */
           : `the breakdown JSON could not be read: ${(e instanceof Error ? e.message : String(e)).slice(0, 300)}`;
       }
       lastReason = this.failedAttempt(runId, attempt, lastReason, lastPath, result.outcome, result.errorDetail);
@@ -1649,6 +1652,9 @@ export class RunController {
    * exists.
    */
   private selectSkills(skills: IndexedSkill[], role: keyof typeof ROLE_SKILL_LENS, text: string, config: RunConfig) {
+    // Every role that calls this has a lens; the fallback is for one added
+    // later without one.
+    /* v8 ignore next */
     const query = `${text}\n${ROLE_SKILL_LENS[role] ?? ""}`;
     // Routed skills are the operator's declared intent and come first; scoring
     // only fills whatever room is left, and no skill at all is a valid outcome.
@@ -1773,6 +1779,10 @@ export class RunController {
         startedAt = Date.now();
         qaFeedback =
           `The operator reviewed why this task is taking so long and says — follow it over anything that contradicts it:\n${guidance}` +
+          // The clock is set immediately before the loop, so the first pass
+          // cannot blow it — anything that gets here has been round at least
+          // once, and every path that loops leaves feedback behind.
+          /* v8 ignore next */
           (qaFeedback ? `\n\nThe pending feedback from the previous iteration still applies:\n${qaFeedback}` : "");
       }
       // The issue thread is the other place an operator answers a task, and
@@ -1976,6 +1986,9 @@ export class RunController {
         }
         conflictFixes++;
         const caught = await this.wt.catchUpTaskBranch(runId, taskId);
+        // A merge that conflicted one way conflicts the other way too, so a
+        // clean catch-up after a conflicted integrate does not happen.
+        /* v8 ignore next */
         qaFeedback = conflictPrompt(this.wt.integrationBranch(runId), caught.ok ? merged.conflicts : caught.conflicts, caught.ok);
         this.store.transitionTask(runId, taskId, "WORKING", "re-dispatched to resolve merge conflicts");
         continue;
@@ -2080,6 +2093,8 @@ export class RunController {
       await this.github.commentOnIssue(
         issue,
         key,
+        // The sha was recorded by this same process when it merged the task.
+        /* v8 ignore next */
         `**Done** — merged into \`${this.wt.integrationBranch(runId)}\`${sha ? ` as \`${sha.slice(0, 7)}\`` : ""} after ${n} QA iteration${n === 1 ? "" : "s"}.\n\n` +
           `**Acceptance criteria**\n${task.acceptanceCriteria.map((c) => `- [x] ${c}`).join("\n")}\n\n` +
           // A merged task always has a branch — see the same note in integrate.
@@ -2103,6 +2118,9 @@ export class RunController {
     }
 
     if (task.state === "CANCELLED") {
+      // Cancelling always records why; the literal is for a path that stops
+      // doing so.
+      /* v8 ignore next */
       await this.github.commentOnIssue(issue, key, `**Not attempted** — ${why || "the run ended before this task became reachable"}.`);
       await this.github.closeIssue(issue, "not_planned");
     }

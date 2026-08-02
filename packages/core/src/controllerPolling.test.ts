@@ -62,7 +62,8 @@ const dagJson = (ids: string[]) =>
 
 type Answer = string | ((spec: AgentSpec, nth: number) => string | Partial<AgentResult> | Error);
 
-function rolePool(answers: Partial<Record<string, Answer>>, bill = 0) {
+/** Bills only the named roles, so a cap can be made to trip inside one stage. */
+function rolePool(answers: Partial<Record<string, Answer>>, bill = 0, billOnly?: string[]) {
   const specs: AgentSpec[] = [];
   const counts: Record<string, number> = {};
   const ref = { store: null as Store | null };
@@ -70,7 +71,7 @@ function rolePool(answers: Partial<Record<string, Answer>>, bill = 0) {
     async run(spec: AgentSpec): Promise<AgentResult> {
       specs.push(spec);
       counts[spec.role] = (counts[spec.role] ?? 0) + 1;
-      if (bill && ref.store) {
+      if (bill && ref.store && (!billOnly || billOnly.includes(spec.role))) {
         ref.store.recordUsage({
           runId: spec.runId, taskId: spec.taskId, sessionId: `s${specs.length}`, model: spec.model,
           inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: bill,
@@ -218,7 +219,10 @@ describe("a budget stop inside the stages that catch everything", () => {
     // crosses it, after the validator has already been paid for.
     const { pool, ref } = rolePool(
       { planner: planner(["task-a"]), worker, qa: () => QA_PASS, validator: () => INTENT_PASS, prod: () => "" },
-      4
+      50,
+      // Only the production session costs anything, so the cap can only be
+      // crossed inside it — the point being that the stop comes back out.
+      ["prod"]
     );
     const { controller, store, events } = build({
       repoPath: dir, pool, github: adapter,
@@ -229,7 +233,7 @@ describe("a budget stop inside the stages that catch everything", () => {
     await expect(
       controller.startRun(
         "build a thing",
-        RunConfig.parse({ ...BASE, prodUrl: "https://app.example.com", deployTimeoutMinutes: 1, budget: { runCapUsd: 20, taskCapUsd: 1000 } })
+        RunConfig.parse({ ...BASE, prodUrl: "https://app.example.com", deployTimeoutMinutes: 1, budget: { runCapUsd: 40, taskCapUsd: 1000 } })
       )
     ).rejects.toThrow(/budget exceeded/);
 
@@ -243,7 +247,11 @@ describe("a budget stop inside the stages that catch everything", () => {
     const dir = repo();
     // QA never writes the JSON, so the re-ask runs — and it is the re-ask
     // session that crosses the cap.
-    const { pool, ref } = rolePool({ planner: planner(["task-a"]), worker, qa: () => "no verdict in this message" }, 4);
+    const { pool, ref } = rolePool(
+      { planner: planner(["task-a"]), worker, qa: () => "no verdict in this message" },
+      30,
+      ["qa"]
+    );
     const { controller, store } = build({
       repoPath: dir, pool,
       gates: { async resolveBudgetGate() { return null; } },
@@ -251,7 +259,7 @@ describe("a budget stop inside the stages that catch everything", () => {
     ref.store = store;
 
     await expect(
-      controller.startRun("build a thing", RunConfig.parse({ ...BASE, budget: { runCapUsd: 16, taskCapUsd: 1000 } }))
+      controller.startRun("build a thing", RunConfig.parse({ ...BASE, budget: { runCapUsd: 45, taskCapUsd: 1000 } }))
     ).rejects.toThrow(/budget exceeded/);
   });
 });
