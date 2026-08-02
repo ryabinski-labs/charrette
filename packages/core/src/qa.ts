@@ -25,8 +25,12 @@ export async function runDeterministicChecks(cwd: string, commands: string[]): P
         await execFileP("sh", ["-c", command], { cwd, maxBuffer: 16 * 1024 * 1024, timeout: 10 * 60 * 1000 });
         return null;
       } catch (e) {
+        // `??` was wrong here: execFileP attaches `stderr` as an empty string
+        // rather than leaving it undefined, so a check that failed without
+        // writing anything — `exit 1` in a script, a missing binary — never
+        // reached `message` and handed QA a failure with no explanation at all.
         const err = e as { stdout?: string; stderr?: string; message?: string };
-        const output = `${err.stdout ?? ""}\n${err.stderr ?? err.message ?? ""}`.trim();
+        const output = [err.stdout, err.stderr || err.message].filter(Boolean).join("\n").trim();
         return { command, output: output.slice(-4000) };
       }
     })

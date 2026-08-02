@@ -104,7 +104,10 @@ export function matchSkills(skills: IndexedSkill[], taskText: string, k = 3): { 
   for (const d of docs) {
     for (const t of new Set([...d.nameTerms, ...d.bodyTerms])) df.set(t, (df.get(t) ?? 0) + 1);
   }
-  const weight = (t: string) => idf(df.get(t) ?? 0, docs.length);
+  // `df` was built from exactly the terms this is ever called with, so the
+  // lookup cannot miss — a `?? 0` here would be an unreachable arm pretending
+  // to be a fallback.
+  const weight = (t: string) => idf(df.get(t)!, docs.length);
 
   const scored = docs.map(({ skill, nameTerms, bodyTerms }) => {
     let score = 0;
