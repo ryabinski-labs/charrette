@@ -34,11 +34,83 @@ export const RunConfig = z.object({
    * is too low twice.
    */
   qaMaxTurns: z.number().int().min(20).max(300).default(90),
+  /**
+   * How many turns a worker session gets before the SDK cuts it off.
+   *
+   * The same knob as `qaMaxTurns`, for the role that actually keeps hitting the
+   * wall: one run lost $65 across 17 worker sessions to `error_max_turns`
+   * against $14 across 8 QA sessions, and the worker's ceiling was hardcoded
+   * where QA's was configurable. A worker dies at the ceiling having done the
+   * most work of any session in the run, and the re-dispatch starts over.
+   * Raised on retry too — a ceiling that truncated once truncates twice.
+   */
+  workerMaxTurns: z.number().int().min(20).max(400).default(120),
   workerRespawnCap: z.number().int().min(1).max(3).default(3),
   taskWallClockMinutes: z.number().int().min(5).default(45),
   models: ModelRouting.default({}),
   budget: Budget.default({}),
   skillsDirs: z.array(z.string()).default([]),
+  /**
+   * Skills bound to a class of work, by name, ahead of any scoring.
+   *
+   * Lexical matching alone cannot decide this. Measured against a real 47-skill
+   * corpus and a 36-task payments plan, the top match for the sanctions-screening
+   * task was `testimonial-collector`, for card tokenization `branding-manager`,
+   * for a state machine `cartographer` — each scoring *above* every genuinely
+   * relevant skill, with and without idf weighting, matching on descriptions or
+   * on bodies. No threshold separates those, because the ranking itself is noise:
+   * a backend task has no lexical neighbour in a corpus of marketing and ops
+   * skills, so the matcher returns the nearest thing rather than nothing.
+   *
+   * So the operator says it outright. `when` is a case-insensitive regular
+   * expression tested against the task's title and spec; every named skill that
+   * exists in `skillsDirs` is injected, and scoring only fills what is left.
+   */
+  skillRouting: z
+    .array(z.object({ when: z.string(), skills: z.array(z.string()) }))
+    .default([
+      {
+        when: "\\b(architect(ure|ural)?|system design|data model|schema design|infrastructur\\w*|terraform|cloudformation|kubernetes|k8s|deployment topology|scalab\\w+|throughput|latency|capacity)\\b",
+        skills: ["architect", "security-engineer", "performance-engineer", "frontend-design"],
+      },
+      {
+        when: "\\b(ui|ux|frontend|front-end|dashboard|console|web page|landing|component|css|styling|layout|responsive|accessib\\w+|design system)\\b",
+        skills: ["frontend-design", "ui-ux-cx-engineer"],
+      },
+      {
+        when: "\\b(product|roadmap|prioriti\\w+|user stor(y|ies)|onboarding|activation|retention|churn|pricing|monetiz\\w+|scope|mvp|kpi|north star|funnel|success metric)\\b",
+        skills: ["product-manager"],
+      },
+      {
+        when: "\\b(marketing|campaign|brand(ing)?|copy(writing)?|messaging|positioning|seo|content strategy|newsletter|social media|launch|press|announcement)\\b",
+        skills: ["marketing-director", "branding-manager"],
+      },
+      {
+        when: "\\b(sales|selling|conversion|upsell|cross-sell|lead gen\\w*|crm|pipeline|quote|discount|paywall|trial|subscription tier|checkout funnel)\\b",
+        skills: ["online-sales-specialist"],
+      },
+      {
+        when: "\\b(focus group|persona panel|user research|customer interview|usability (test|study)|voice of (the )?customer|survey)\\b",
+        skills: ["persona-panel"],
+      },
+    ]),
+  /**
+   * Skills a role always carries, whatever the text says.
+   *
+   * `skillRouting` binds a skill to a *topic*; this binds one to a *job*. The
+   * distinction matters for the agents whose whole output is a product decision:
+   * the intake agent decides what gets built and the planner decides how it is
+   * cut up, and neither of those is reliably signalled by a keyword in the
+   * operator's one-line assignment. "Add rate limiting" contains no product
+   * vocabulary and is still a product decision.
+   *
+   * Keyed by role (`intake`, `planner`, `worker`, `qa`, `prod`). Named skills
+   * absent from `skillsDirs` are ignored, and these count against the same
+   * per-role cap as routed and scored skills.
+   */
+  roleSkills: z
+    .record(z.string(), z.array(z.string()))
+    .default({ intake: ["product-manager"], planner: ["product-manager"] }),
   githubRepo: z.string().optional(),
   /**
    * The branch the run started from. Component PRs target this, not the run's

@@ -104,6 +104,69 @@ describe("prState", () => {
   });
 });
 
+/** The adapter with only the issue surfaces stubbed. */
+function issueStub(overrides: { comments?: { body: string }[]; state?: string }) {
+  const adapter = new GitHubAdapter("token", "owner/repo");
+  const calls = { comments: [] as { body: string }[], updates: [] as { state?: string; state_reason?: string }[] };
+  const octokit = {
+    paginate: async () => overrides.comments ?? [],
+    rest: {
+      issues: {
+        listComments: () => {},
+        createComment: async (args: { body: string }) => {
+          calls.comments.push(args);
+          return { data: {} };
+        },
+        get: async () => ({ data: { state: overrides.state ?? "open" } }),
+        update: async (args: { state?: string; state_reason?: string }) => {
+          calls.updates.push(args);
+          return { data: {} };
+        },
+      },
+    },
+  };
+  (adapter as unknown as { octokit: unknown }).octokit = octokit;
+  return { adapter, calls };
+}
+
+describe("commenting the outcome onto an issue", () => {
+  it("writes the status once and marks it so the harness never reads it back as operator guidance", async () => {
+    const { adapter, calls } = issueStub({});
+    expect(await adapter.commentOnIssue(7, "run/task/MERGED", "Done")).toBe(true);
+    expect(calls.comments[0]!.body).toContain("Done");
+    expect(calls.comments[0]!.body).toContain("<!-- harness-status:run/task/MERGED -->");
+    // The read half filters on this marker; without it the run takes its own
+    // status update as an answer and hands it to the next worker.
+    expect(calls.comments[0]!.body).toContain("<!-- harness-comment -->");
+  });
+
+  it("stays silent on a replay that reaches the same state again", async () => {
+    const { adapter, calls } = issueStub({ comments: [{ body: "Done\n\n<!-- harness-status:run/task/MERGED -->" }] });
+    expect(await adapter.commentOnIssue(7, "run/task/MERGED", "Done")).toBe(false);
+    expect(calls.comments).toHaveLength(0);
+  });
+
+  it("still speaks for a different state on the same task", async () => {
+    const { adapter, calls } = issueStub({ comments: [{ body: "Parked\n\n<!-- harness-status:run/task/NEEDS_HUMAN -->" }] });
+    expect(await adapter.commentOnIssue(7, "run/task/MERGED", "Done")).toBe(true);
+    expect(calls.comments).toHaveLength(1);
+  });
+});
+
+describe("closeIssue", () => {
+  it("closes an open issue with the reason given", async () => {
+    const { adapter, calls } = issueStub({ state: "open" });
+    expect(await adapter.closeIssue(7, "not_planned")).toBe(true);
+    expect(calls.updates).toEqual([expect.objectContaining({ state: "closed", state_reason: "not_planned" })]);
+  });
+
+  it("leaves an already-closed issue alone — whoever closed it said something", async () => {
+    const { adapter, calls } = issueStub({ state: "closed" });
+    expect(await adapter.closeIssue(7, "not_planned")).toBe(false);
+    expect(calls.updates).toHaveLength(0);
+  });
+});
+
 describe("telling the draft 422 apart", () => {
   it("matches only the draft-unsupported message", () => {
     expect(isDraftUnsupportedError(err422("Draft pull requests are not supported in this repository."))).toBe(true);

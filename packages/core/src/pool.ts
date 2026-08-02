@@ -1,10 +1,102 @@
 import { randomUUID } from "node:crypto";
-import { query, type Options, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query, type HookInput, type HookJSONOutput, type Options, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { AgentRole } from "@harness/shared";
 import { Bus } from "./bus.js";
 import { Store } from "./store.js";
 import { costUsd } from "./budget.js";
+import { infraGuardHook } from "./infraGuard.js";
+import { reapUnder } from "./reaper.js";
 import { rtkHooks } from "./rtk.js";
+
+/**
+ * How long a Bash command may run before the CLI backgrounds it — and, because
+ * being backgrounded is fatal here, effectively how long a command may run at
+ * all. The stock 120s is under what `npm test` takes in a mid-sized repo. 30
+ * minutes covers test suites, installs and builds; a command that outruns even
+ * that is hung, and stalling one worker until its turn cap is the cheap failure
+ * next to killing the session outright.
+ */
+export const BASH_TIMEOUT_MS = 30 * 60 * 1000;
+
+/**
+ * A backgrounded shell kills the session it was started from, so keep shells in
+ * the foreground.
+ *
+ * When a backgrounded task finishes, the CLI enqueues its completion notice as a
+ * queued command with `mode: "task-notification"` — and the streaming-input main
+ * loop throws `only prompt commands are supported in streaming mode` for any
+ * queued command that is not a prompt. We are *always* in streaming mode: the
+ * prompt stream is held open so the operator can speak mid-flight. So a
+ * backgrounded shell is a delayed-action kill, fired whenever that command
+ * happens to exit — which is why the death never lands near the call that armed
+ * it. Run 40da9337: 8 of the 21 sessions that ended up with a tracked background
+ * task died this way, against 0 of the 138 without one, taking $19.22 and hours
+ * of committed work with them.
+ *
+ * There are two ways in, and the flag is the rare one. The CLI *also* backgrounds
+ * any command that outruns its timeout — `if (z.onTimeout && E) z.onTimeout(...)`,
+ * telemetry `tengu_bash_command_timeout_backgrounded` — where the default timeout
+ * is 120s and `E` excludes only a short denylist of first words, so essentially
+ * every command qualifies. That is the path that actually fired in 40da9337: not
+ * one of the run's 4357 Bash calls set `run_in_background`, and the session that
+ * armed the fuse after the fix shipped did it by running `npm test`, which takes
+ * longer than two minutes. So both doors get shut — the flag is denied outright,
+ * and the timeout is raised past anything a test suite or build plausibly needs
+ * (BASH_TIMEOUT_MS, applied to the session env and to explicit short requests).
+ *
+ * A plain `cmd > log 2>&1 &` inside one Bash call returns immediately and is
+ * untracked by the CLI, so it neither times out nor raises a notification —
+ * which is what the denial recommends.
+ */
+export function backgroundShellHook() {
+  return async (input: HookInput): Promise<HookJSONOutput> => {
+    if (input.hook_event_name !== "PreToolUse" || input.tool_name !== "Bash") return {};
+    const args = input.tool_input as { run_in_background?: unknown; timeout?: unknown };
+    if (args?.run_in_background === true) {
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason:
+            "Blocked: run_in_background kills this session. The CLI reports a finished background task through a channel this session cannot receive, and the session dies the moment the command exits — losing your uncommitted work, not just the command's output. Nothing you can do inside the session recovers it. Run the command in the foreground instead; if it is genuinely long-running, redirect it in a single call — `cmd > /tmp/out.log 2>&1 &` — and read the log with a later Bash call. That form is not tracked, raises no notification, and is safe.",
+        },
+      };
+    }
+    // An explicit `timeout` overrides the env default, so an agent asking for a
+    // short one re-opens the door the env just closed. Raise it rather than
+    // denying: the agent wanted a time limit, not a dead session, and a denial
+    // here would reject commands that are otherwise perfectly fine.
+    if (typeof args?.timeout === "number" && args.timeout < BASH_TIMEOUT_MS) {
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "allow",
+          permissionDecisionReason: `timeout raised to ${BASH_TIMEOUT_MS}ms; a Bash command that outruns its timeout is backgrounded, and a backgrounded command kills this session when it exits`,
+          updatedInput: { ...args, timeout: BASH_TIMEOUT_MS },
+        },
+      };
+    }
+    return {};
+  };
+}
+
+/**
+ * The PreToolUse hooks every agent session runs with.
+ *
+ * Order matters: the infra guard runs first so a denial is decided on the
+ * command the agent actually wrote, before rtk has a chance to rewrite it into
+ * something the matcher no longer recognises. And it is unconditional — rtk is
+ * optional and absent on most machines, so a guard assembled as "rtk's hooks
+ * plus mine" would be missing exactly where nobody was looking.
+ *
+ * Exported for the test that pins both properties: this is the whole of what
+ * stands between an agent under `bypassPermissions` and the operator's account.
+ */
+export function bashHooks(): Options["hooks"] {
+  const guard = { matcher: "Bash", hooks: [infraGuardHook(), backgroundShellHook()] };
+  const rtk = rtkHooks()?.PreToolUse ?? [];
+  return { PreToolUse: [guard, ...rtk] };
+}
 
 export interface AgentSpec {
   runId: string;
@@ -42,6 +134,20 @@ export interface AgentSpec {
    */
   maxOutputTokens?: number;
   /**
+   * Extra environment for the session and everything it spawns — the per-task
+   * compose project and port block (see isolation.ts). Merged over the inherited
+   * environment, under the harness's own settings, which are not negotiable.
+   */
+  env?: Record<string, string>;
+  /**
+   * Kill whatever is still running in `cwd` when the session ends.
+   *
+   * Only ever set for a task worktree, which belongs to one task at a time and
+   * holds nothing of the operator's. Never for the repo itself: a sweep there
+   * would be a sweep of the machine the operator is working on.
+   */
+  reapOnEnd?: boolean;
+  /**
    * Called before/while streaming. May block: a cap reached mid-session asks the
    * operator whether to raise it, and the session waits rather than dying with a
    * half-finished task. Throws BudgetExceeded to abort.
@@ -63,12 +169,20 @@ export interface AgentResult {
 
 /**
  * A session that has said nothing for this long is hung, not thinking: the
- * longest legitimate silence is a single long tool call, and those are bounded
- * at 10 minutes. Aborting hands the task to the existing crash/respawn path —
- * measured cost of not doing this: one wedged QA session stalled a whole run
- * for 62 minutes until the operator noticed.
+ * longest legitimate silence is a single long tool call, and the longest of
+ * those is a Bash command, bounded by BASH_TIMEOUT_MS. Aborting hands the task
+ * to the existing crash/respawn path — measured cost of not doing this: one
+ * wedged QA session stalled a whole run for 62 minutes until the operator
+ * noticed.
+ *
+ * Derived from BASH_TIMEOUT_MS rather than set by hand: at a flat 15 minutes it
+ * sat *below* the 30-minute Bash timeout, so any test suite or install that ran
+ * past 15 minutes killed its own session while the command was still legitimately
+ * running — the watchdog fired on work, not on a wedge. The grace covers the SDK
+ * turnaround between a tool result and the next message.
  */
-const STALL_ABORT_MS = 15 * 60 * 1000;
+const STALL_GRACE_MS = 5 * 60 * 1000;
+const STALL_ABORT_MS = BASH_TIMEOUT_MS + STALL_GRACE_MS;
 
 /** The SDK's own default, named so the wrap-up trigger and the option agree. */
 const DEFAULT_MAX_TURNS = 100;
@@ -201,13 +315,27 @@ export class AgentPool {
       // Do not inherit the operator's filesystem settings/skills into worker context.
       settingSources: [],
       // …which also strips the operator's token-compression hook, so re-add it
-      // programmatically: Bash commands route through rtk when it's installed.
-      hooks: rtkHooks(),
+      // programmatically: Bash commands route through rtk when it's installed —
+      // alongside the guard that stops an agent applying real infrastructure,
+      // which under bypassPermissions is the only thing standing between a
+      // `terraform destroy` an agent writes and the operator's account.
+      hooks: bashHooks(),
       // `env` replaces the inherited environment wholesale, so spread rather than
       // set: workers reach gh/aws/podman through PATH (see toolbelt.ts).
-      ...(spec.maxOutputTokens
-        ? { env: { ...process.env, CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(spec.maxOutputTokens) } }
-        : {}),
+      env: {
+        ...process.env,
+        // Caller-supplied first — the per-task compose project and port block —
+        // so the harness's own settings below stay non-negotiable and a spec
+        // cannot hand an agent back the two-minute Bash timeout.
+        ...spec.env,
+        // The CLI backgrounds any command that outruns its timeout, and a
+        // backgrounded command kills this session when it exits — see
+        // backgroundShellHook. The stock 120s default reaches that outcome on an
+        // ordinary `npm test`, so raise the floor for every session.
+        BASH_DEFAULT_TIMEOUT_MS: String(BASH_TIMEOUT_MS),
+        BASH_MAX_TIMEOUT_MS: String(BASH_TIMEOUT_MS),
+        ...(spec.maxOutputTokens ? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(spec.maxOutputTokens) } : {}),
+      },
     };
 
     // Streaming input instead of a one-shot prompt string, so the operator can
@@ -225,6 +353,30 @@ export class AgentPool {
     let cost = 0;
     let killedByBudget = false;
     let abnormal = "";
+    // Tokens seen on assistant messages since the last `result` booked the bill.
+    //
+    // Usage and cost only ever arrive on a `result` message, so a session killed
+    // before one — aborted by the watchdog, or gone with the whole process —
+    // used to book nothing at all. In one run that was 16 of 20 interrupted
+    // sessions with no ledger row between them: real money the budget gate could
+    // not see, spent on turns that were also thrown away. This accumulates what
+    // those turns consumed so the interrupted path has something true to book.
+    let unbooked = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    /**
+     * Settle those turns before the session row is written, so `endSession`
+     * still sees the whole ledger. The cost is derived from the tokens rather
+     * than reported by the SDK — an estimate, but one the budget gate can see,
+     * which beats the zero it was charging for a session that ran for an hour.
+     * A no-op once a `result` has settled the bill.
+     */
+    const bookUnbooked = () => {
+      if (Object.values(unbooked).reduce((a, b) => a + b, 0) === 0) return;
+      const estimate = costUsd(spec.model, unbooked);
+      cost += estimate;
+      this.store.recordUsage({ runId: spec.runId, taskId: spec.taskId, sessionId, model: spec.model, ...unbooked, costUsd: estimate });
+      this.bus.publish({ type: "agent.usage", runId: spec.runId, taskId: spec.taskId, sessionId, model: spec.model, ...unbooked, costUsd: estimate, ts: Date.now() });
+      unbooked = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    };
     // Watchdog for a wedged subprocess: no message for STALL_ABORT_MS → abort.
     let lastMessageAt = Date.now();
     let stalledMinutes = 0;
@@ -244,11 +396,19 @@ export class AgentPool {
         } catch (e) {
           abort.abort();
           killedByBudget = true;
+          bookUnbooked();
           this.endSession(spec, sessionId, turns, cost, "killed", String(e));
           throw e;
         }
         if (message.type === "assistant") {
           turns++;
+          const u = (message as { message?: { usage?: Record<string, number | undefined> } }).message?.usage;
+          if (u) {
+            unbooked.inputTokens += u.input_tokens ?? 0;
+            unbooked.outputTokens += u.output_tokens ?? 0;
+            unbooked.cacheReadTokens += u.cache_read_input_tokens ?? 0;
+            unbooked.cacheWriteTokens += u.cache_creation_input_tokens ?? 0;
+          }
           // Ask for the answer before the ceiling takes it away.
           //
           // Sessions that die at maxTurns are the expensive ones — they die
@@ -318,10 +478,15 @@ export class AgentPool {
           cost = m.total_cost_usd ?? cost + costDelta;
           this.store.recordUsage({ runId: spec.runId, taskId: spec.taskId, sessionId, model: spec.model, ...usage, costUsd: costDelta });
           this.bus.publish({ type: "agent.usage", runId: spec.runId, taskId: spec.taskId, sessionId, model: spec.model, ...usage, costUsd: costDelta, ts: Date.now() });
+          // The bill is settled to here; anything counted before this result is
+          // paid for and must not be booked a second time on the way out.
+          unbooked = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
           stream.settle();
         }
       }
     } catch (e) {
+      // No result message is coming for the turns since the last one.
+      bookUnbooked();
       if (!killedByBudget) {
         const stallNote = stalledMinutes ? `session watchdog: no output for ${stalledMinutes} minutes, aborted as hung. ` : "";
         const detail = stallNote + (stderrTail ? `${String(e)}\nstderr: ${stderrTail.trim().slice(-800)}` : String(e));
@@ -333,6 +498,7 @@ export class AgentPool {
       clearInterval(stallTimer);
       stream.close();
       if (liveKey && this.live.get(liveKey)?.stream === stream) this.live.delete(liveKey);
+      await this.reap(spec, sessionId);
     }
     this.endSession(spec, sessionId, turns, cost, abnormal ? "error" : "done", abnormal);
     return {
@@ -346,15 +512,56 @@ export class AgentPool {
     };
   }
 
+  /**
+   * Kill whatever the session left running in its worktree.
+   *
+   * Runs on every exit — clean, crashed, aborted, budget-killed — because the
+   * orphans that mattered came from exactly the sessions that did not end
+   * cleanly. Best-effort and unawaited by anything that reports a result: a
+   * sweep is a tidy-up, and a task whose code is already committed must not
+   * fail on it.
+   */
+  private async reap(spec: AgentSpec, sessionId: string): Promise<void> {
+    if (!spec.reapOnEnd) return;
+    try {
+      const reaped = await reapUnder(spec.cwd);
+      if (!reaped.length) return;
+      this.bus.publish({
+        type: "agent.log",
+        runId: spec.runId,
+        taskId: spec.taskId,
+        sessionId,
+        text:
+          `killed ${reaped.length} process${reaped.length === 1 ? "" : "es"} left running in this worktree: ` +
+          reaped.map((r) => `${r.pid} ${r.command.slice(0, 60)} (${r.signal})`).join("; "),
+        ts: Date.now(),
+      });
+    } catch {
+      // Nothing a sweep can fail at is worth failing a session over.
+    }
+  }
+
   private endSession(spec: AgentSpec, sessionId: string, turns: number, cost: number, state: string, detail: string): void {
     // `cost` only advances when a result message arrives, so a session that
     // died mid-stream books zero however much it spent — 13 interrupted
     // sessions in one run showed $0.00 against $16.02 of ledger rows, and the
     // sessions table came out a third short of the ledger for the whole run.
     // The ledger is the one that pays, so let it settle the bill.
+    //
+    // The token columns settle from the ledger for the same reason, and because
+    // they were never written at all: every sessions row in every run so far
+    // reads zero tokens, so "which sessions burned the most and returned the
+    // least" — the question behind a quarter of a run's spend going to sessions
+    // that died late — could only be answered by replaying the event log.
     this.store.db
       .prepare(
-        "UPDATE sessions SET state = ?, endedAt = ?, turns = ?, costUsd = MAX(?, (SELECT COALESCE(SUM(costUsd),0) FROM ledger WHERE ledger.sessionId = sessions.id)) WHERE id = ?"
+        `UPDATE sessions SET state = ?, endedAt = ?, turns = ?,
+           costUsd = MAX(?, (SELECT COALESCE(SUM(costUsd),0) FROM ledger WHERE ledger.sessionId = sessions.id)),
+           inputTokens = (SELECT COALESCE(SUM(inputTokens),0) FROM ledger WHERE ledger.sessionId = sessions.id),
+           outputTokens = (SELECT COALESCE(SUM(outputTokens),0) FROM ledger WHERE ledger.sessionId = sessions.id),
+           cacheReadTokens = (SELECT COALESCE(SUM(cacheReadTokens),0) FROM ledger WHERE ledger.sessionId = sessions.id),
+           cacheWriteTokens = (SELECT COALESCE(SUM(cacheWriteTokens),0) FROM ledger WHERE ledger.sessionId = sessions.id)
+         WHERE id = ?`
       )
       .run(state, Date.now(), turns, cost, sessionId);
     this.bus.publish({

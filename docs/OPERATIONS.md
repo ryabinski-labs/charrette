@@ -582,6 +582,17 @@ for CI of the harness itself, not for real work.
 | `GITHUB_TOKEN` | no | enables issues + PRs; falls back to `gh auth token` |
 | `HARNESS_GITHUB_REPO` | no | `owner/repo`; falls back to `gh repo view` |
 
+The harness also *sets* variables in every task agent's environment. They are not
+yours to configure — they are how a task is told what part of the machine it owns:
+
+| Variable | Meaning |
+|---|---|
+| `COMPOSE_PROJECT_NAME` | `harness-<taskId>-<runhash>`, so `docker compose` / `podman compose` acts only on that task's own stack |
+| `HARNESS_PORT_BASE` / `HARNESS_PORT_END` | the 16 host ports the task may bind; derived from the run and task ids, in 20000–28191 (never the ephemeral range) |
+
+See **Worktrees are not machine isolation** under §14 for what this does and does
+not protect against.
+
 ---
 
 ## 9. What the harness writes where
@@ -912,6 +923,40 @@ honest posture is:
   it — which, without a sandbox, is your user account.
 - Prefer a fine-grained GitHub token scoped to one repository. If it leaks, one
   repo is exposed, not your account.
+
+**`maxParallelWorkers` counts agents, not tasks.** A task sitting at an
+escalation gate waiting for your answer holds no agent, so it does not occupy a
+worker slot — the run dispatches something else and comes back to it when you
+answer. One consequence worth knowing: answering a gate resumes that task
+immediately rather than queueing it, so for a few seconds the run can be one
+worker over the cap for each gate you answer at once.
+
+**Worktrees are not machine isolation.** Each task gets its own checkout, its own
+branch and its own dependency install. It does *not* get its own network stack or
+its own container daemon, and three workers running at once share both. Two
+mitigations are in place, and neither is a sandbox:
+
+- Every task session carries a `COMPOSE_PROJECT_NAME` of its own, so an agent
+  running `compose up`, `restart` or `down` acts on its own containers. Before
+  this, every worktree shipped the same compose file and therefore the same
+  default project name, and one agent restarting "its" database restarted the
+  one every other in-flight task was testing against.
+- Every task is given a block of 16 host ports (`HARNESS_PORT_BASE`…`HARNESS_PORT_END`)
+  and told in its prompt that the rest of the machine belongs to somebody else.
+
+An agent can still ignore both and bind port 8000 anyway. If you are running
+several tasks that each need a database, check that the repo's compose file reads
+its host ports from the environment rather than hardcoding them — a hardcoded
+shared port is the one failure mode this cannot fix, and it shows up as tests
+failing in one task because of what another task did.
+
+**Agents leave processes behind, and the harness kills them.** A session that
+ends — cleanly, at its turn cap, or killed — leaves whatever it backgrounded
+still running. The harness sweeps its own worktree at the end of every session,
+and sweeps the whole run's worktree tree at start and resume. The sweep kills only
+processes whose working directory is inside the run's worktrees *and* which have
+no controlling terminal, so **a shell you opened yourself in a worktree is left
+alone** — but a script you started from that shell and detached is not.
 
 **Workers inherit your PATH, and therefore your CLIs.** `gh`, `aws`, `podman`,
 `adb`, `emulator`, `xcrun` and `maestro` are detected at run start and named in

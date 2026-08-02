@@ -124,3 +124,147 @@ describe("role-aware skill injection", () => {
     expect(injections.map((e) => e.role).sort()).toEqual(["qa", "worker"]);
   });
 });
+
+/**
+ * Scoring cannot be trusted to find these — measured against a real corpus, the
+ * top lexical match for a sanctions task was `testimonial-collector` — so the
+ * operator names them and the harness obeys.
+ */
+describe("skill routing", () => {
+  const routedDag = (title: string, spec: string) =>
+    "```json\n" +
+    JSON.stringify({
+      epics: [{ id: "epic-e", title: "E", summary: "s" }],
+      tasks: [{ id: "task-a", epicId: "epic-e", title, spec, acceptanceCriteria: ["x"], dependsOn: [], touchedPaths: [], estimatedSize: "S" }],
+    }) +
+    "\n```";
+
+  const ROUTED = [
+    "architect",
+    "security-engineer",
+    "performance-engineer",
+    "frontend-design",
+    "ui-ux-cx-engineer",
+    "product-manager",
+    "marketing-director",
+    "branding-manager",
+    "online-sales-specialist",
+    "persona-panel",
+  ];
+
+  function routingSkillsDir(): string {
+    const dir = mkdtempSync(path.join(tmpdir(), "skills-routing-"));
+    // Deliberately bland bodies: none of these would win on lexical overlap.
+    for (const name of ROUTED) {
+      mkdirSync(path.join(dir, name));
+      writeFileSync(path.join(dir, name, "SKILL.md"), `---\nname: ${name}\ndescription: guidance for ${name}\n---\nGuidance body for ${name}.`);
+    }
+    return dir;
+  }
+
+  async function inject(title: string, spec: string): Promise<string> {
+    let planning = 0;
+    let workerSystem = "";
+    const pool = {
+      async run(s: AgentSpec): Promise<AgentResult> {
+        if (s.role === "planner") return { sessionId: "p", resultText: planning++ === 0 ? DOCS : routedDag(title, spec), costUsd: 0, turns: 1, outcome: "done" };
+        if (s.role === "worker") {
+          workerSystem = s.systemPrompt!;
+          writeFileSync(path.join(s.cwd, "f.txt"), "done\n");
+          gitIn(s.cwd, "add", "-A");
+          gitIn(s.cwd, "commit", "-m", "wip");
+          return { sessionId: "w", resultText: "done", costUsd: 0, turns: 1, outcome: "done" };
+        }
+        return { sessionId: "q", resultText: '{"verdict":"PASS","notes":"ok"}', costUsd: 0, turns: 1, outcome: "done" };
+      },
+    } as unknown as AgentPool;
+    const store = new Store(":memory:");
+    const controller = new RunController(store, new Bus(store), pool, noGithub, approveAll, repo());
+    await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], skillsDirs: [routingSkillsDir()] }));
+    return workerSystem;
+  }
+
+  it("gives architecture work the architecture skills by default", async () => {
+    const system = await inject("Design the ledger", "Decide the data model and system design for double-entry postings");
+    expect(system).toContain('<skill name="architect"');
+    expect(system).toContain('<skill name="security-engineer"');
+    expect(system).toContain('<skill name="performance-engineer"');
+  }, 30_000);
+
+  it("gives UI work the UI skills by default", async () => {
+    const system = await inject("Operator dashboard", "Build the web dashboard page with a responsive component layout");
+    expect(system).toContain('<skill name="frontend-design"');
+    expect(system).toContain('<skill name="ui-ux-cx-engineer"');
+  }, 30_000);
+
+  it("injects nothing when no rule matches and nothing scores", async () => {
+    const system = await inject("Rotate the log files", "Truncate stale files on disk once a week");
+    for (const name of ROUTED) expect(system).not.toContain(`<skill name="${name}"`);
+  }, 30_000);
+
+  it("routes marketing, sales and research work to the people who own them", async () => {
+    const marketing = await inject("Launch announcement", "Write the campaign messaging and positioning for the launch");
+    expect(marketing).toContain('<skill name="marketing-director"');
+    expect(marketing).toContain('<skill name="branding-manager"');
+
+    const sales = await inject("Upsell path", "Add an upsell offer to the checkout funnel and track conversion");
+    expect(sales).toContain('<skill name="online-sales-specialist"');
+
+    // The panel is consulted on demand, not bolted onto every task.
+    const research = await inject("Validate the flow", "Run a usability study with a focus group before we commit");
+    expect(research).toContain('<skill name="persona-panel"');
+    const unrelated = await inject("Rotate the log files", "Truncate stale files on disk once a week");
+    expect(unrelated).not.toContain('<skill name="persona-panel"');
+  }, 60_000);
+});
+
+/**
+ * "All product decisions" cannot be satisfied by routing task text: the decisions
+ * that matter most — what is in scope, how the work is cut up — are made by
+ * intake and the planner, before any task exists. Both carried no skills at all.
+ */
+describe("skills bound to a role rather than a topic", () => {
+  function skillsFixture(): string {
+    const dir = mkdtempSync(path.join(tmpdir(), "skills-role-"));
+    for (const name of ["product-manager", "branding-manager"]) {
+      mkdirSync(path.join(dir, name));
+      writeFileSync(path.join(dir, name, "SKILL.md"), `---\nname: ${name}\ndescription: guidance for ${name}\n---\nGuidance body for ${name}.`);
+    }
+    return dir;
+  }
+
+  /** Captures the system prompt of every role the run spawns. */
+  async function systemsByRole(assignment: string): Promise<Record<string, string>> {
+    let planning = 0;
+    const seen: Record<string, string> = {};
+    const pool = {
+      async run(s: AgentSpec): Promise<AgentResult> {
+        seen[s.role] = s.systemPrompt ?? "";
+        if (s.role === "planner") return { sessionId: "p", resultText: planning++ === 0 ? DOCS : DAG, costUsd: 0, turns: 1, outcome: "done" };
+        if (s.role === "worker") {
+          writeFileSync(path.join(s.cwd, "f.txt"), "done\n");
+          gitIn(s.cwd, "add", "-A");
+          gitIn(s.cwd, "commit", "-m", "wip");
+          return { sessionId: "w", resultText: "done", costUsd: 0, turns: 1, outcome: "done" };
+        }
+        return { sessionId: "q", resultText: '{"verdict":"PASS","notes":"ok"}', costUsd: 0, turns: 1, outcome: "done" };
+      },
+    } as unknown as AgentPool;
+    const store = new Store(":memory:");
+    const controller = new RunController(store, new Bus(store), pool, noGithub, approveAll, repo());
+    await controller.startRun(assignment, RunConfig.parse({ deterministicChecks: [], skillsDirs: [skillsFixture()] }));
+    return seen;
+  }
+
+  it("puts the product voice in the planner, whatever the assignment says", async () => {
+    // No product vocabulary anywhere in this assignment — that is the point.
+    const seen = await systemsByRole("Add rate limiting to the API");
+    expect(seen.planner).toContain('<skill name="product-manager"');
+  }, 30_000);
+
+  it("does not inject a role's standing skills into unrelated roles", async () => {
+    const seen = await systemsByRole("Add rate limiting to the API");
+    expect(seen.worker).not.toContain('<skill name="product-manager"');
+    expect(seen.planner).not.toContain('<skill name="branding-manager"');
+  }, 30_000);
+});

@@ -57,4 +57,30 @@ describe("toolbelt prompt block", () => {
     expect(block).toMatch(/READ ONLY/);
     expect(block).toMatch(/Never delete, terminate, scale, or modify/);
   });
+
+  it("tells an infra agent how to check its work and forbids applying it", () => {
+    // Infrastructure is the case where the read-only rule matters most: an
+    // `apply` cannot be reviewed after the fact, only undone. Every IaC tool
+    // must arrive with both halves — the verification command it should run,
+    // and the mutating one it must not.
+    const infra = ["terraform", "kubectl", "helm", "pulumi", "cdk"];
+    const block = toolbeltBlock(detectToolbelt(undefined, env(fakeBin(...infra))));
+    for (const name of infra) expect(block).toContain(`\`${name}\``);
+
+    expect(block).toMatch(/terraform validate.*plan|`plan`/);
+    expect(block).toMatch(/NEVER `apply`, `destroy`/);
+    expect(block).toMatch(/--dry-run=server/);
+    expect(block).toMatch(/helm lint/);
+    expect(block).toMatch(/pulumi preview/);
+    expect(block).toMatch(/cdk synth/);
+    expect(block).toMatch(/NEVER `pulumi up`/);
+    expect(block).toMatch(/NEVER `cdk deploy`/);
+  });
+
+  it("still lets a repo withhold the cloud CLIs entirely", () => {
+    // An operator who does not want agents near their account narrows the
+    // allowlist; detection must not smuggle the new tools in behind that.
+    const dir = fakeBin("terraform", "kubectl", "aws", "podman");
+    expect(detectToolbelt(["podman"], env(dir)).map((t) => t.name)).toEqual(["podman"]);
+  });
 });

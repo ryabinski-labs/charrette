@@ -64,7 +64,10 @@ export const HarnessEvent = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("git.worktree_created"), taskId: z.string(), path: z.string(), branch: z.string() }),
   // Dependency install run once at worktree creation, outside any agent's turn
   // budget — without it every worker paid for its own `pnpm install` in tokens.
-  z.object({ ...base, type: z.literal("task.deps_seeded"), taskId: z.string(), ok: z.boolean(), manager: z.string(), seconds: z.number() }),
+  // One event per manifest: a repo whose lockfiles live in `frontend/` and
+  // `backend/` seeds twice, and an operator watching a red baseline needs to see
+  // which of the two failed.
+  z.object({ ...base, type: z.literal("task.deps_seeded"), taskId: z.string(), dir: z.string().default(""), ok: z.boolean(), manager: z.string(), seconds: z.number() }),
   z.object({ ...base, type: z.literal("git.merged"), taskId: z.string(), branch: z.string(), sha: z.string() }),
   z.object({ ...base, type: z.literal("git.merge_conflict"), taskId: z.string(), branch: z.string(), files: z.array(z.string()) }),
   z.object({ ...base, type: z.literal("github.issue_created"), taskId: z.string().optional(), epicId: z.string().optional(), issueNumber: z.number().int(), url: z.string() }),

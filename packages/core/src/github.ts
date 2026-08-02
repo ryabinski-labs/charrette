@@ -129,6 +129,54 @@ export class GitHubAdapter {
   }
 
   /**
+   * Write a status comment on an issue, once per `key`.
+   *
+   * Keyed rather than unconditional because every status the harness has to say
+   * is replayable: a resumed run re-walks the same terminal states, and an issue
+   * that collects "merged" three times is noise an operator has to read past.
+   * The harness marker goes on too, so `issueComments` never reads this back as
+   * an operator answer — the run would otherwise take its own status update as
+   * guidance and hand it to the next worker.
+   *
+   * Returns whether this call wrote the comment.
+   */
+  async commentOnIssue(issueNumber: number, key: string, body: string): Promise<boolean> {
+    if (!this.octokit) return false;
+    const marker = `<!-- harness-status:${key} -->`;
+    const existing = await this.octokit
+      .paginate(this.octokit.rest.issues.listComments, { owner: this.owner, repo: this.repo, issue_number: issueNumber, per_page: 100 })
+      .catch(() => []);
+    if (existing.some((c) => (c.body ?? "").includes(marker))) return false;
+    await this.octokit.rest.issues.createComment({
+      owner: this.owner,
+      repo: this.repo,
+      issue_number: issueNumber,
+      body: `${body}\n\n${HARNESS_COMMENT_MARKER}\n${marker}`,
+    });
+    return true;
+  }
+
+  /**
+   * Close an issue the run is finished with. An issue that is already closed is
+   * left alone — whoever closed it, human or the merge of a "Closes #n" PR, has
+   * said something we would only be overwriting. Returns whether this call
+   * closed it.
+   */
+  async closeIssue(issueNumber: number, reason: "completed" | "not_planned"): Promise<boolean> {
+    if (!this.octokit) return false;
+    const { data } = await this.octokit.rest.issues.get({ owner: this.owner, repo: this.repo, issue_number: issueNumber });
+    if (data.state !== "open") return false;
+    await this.octokit.rest.issues.update({
+      owner: this.owner,
+      repo: this.repo,
+      issue_number: issueNumber,
+      state: "closed",
+      state_reason: reason,
+    });
+    return true;
+  }
+
+  /**
    * Open the PR for a task branch, or return the one already open for it.
    *
    * `null` means there is nothing to open a PR for — GitHub is not configured, or

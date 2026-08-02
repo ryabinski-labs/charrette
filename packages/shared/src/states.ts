@@ -79,7 +79,10 @@ export const TASK_TRANSITIONS: Record<TaskState, TaskState[]> = {
   WORKING: ["QA", "READY", "NEEDS_HUMAN", "CANCELLED"],
   QA: ["ACCEPTED", "QA_FAILED", "READY", "NEEDS_HUMAN", "CANCELLED"],
   QA_FAILED: ["WORKING", "READY", "NEEDS_HUMAN", "CANCELLED"],
-  ACCEPTED: ["MERGED", "NEEDS_HUMAN"],
+  // ACCEPTED -> WORKING: the merge into the integration branch conflicted. The
+  // work is good; it is the base that moved under it, so it goes back to the
+  // worker that wrote it rather than to a human.
+  ACCEPTED: ["MERGED", "WORKING", "NEEDS_HUMAN"],
   MERGED: [],
   NEEDS_HUMAN: ["READY", "ACCEPTED", "CANCELLED"],
   // "unreachable: dependencies parked" stops being true the moment the operator

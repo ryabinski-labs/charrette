@@ -442,9 +442,9 @@ function describe(ev) {
     case "git.worktree_created":
       return ["git", ev.taskId, "worktree on " + ev.branch];
     case "task.deps_seeded":
-      return [ev.ok ? "git" : "bad", ev.taskId, ev.ok
+      return [ev.ok ? "git" : "bad", ev.taskId, (ev.dir ? ev.dir + "/ " : "") + (ev.ok
         ? "deps seeded (" + ev.manager + ", " + ev.seconds + "s)"
-        : "deps seeding failed (" + ev.manager + ", " + ev.seconds + "s) \\u2014 the worker installs them itself"];
+        : "deps seeding failed (" + ev.manager + ", " + ev.seconds + "s) \\u2014 the worker installs them itself")];
     case "git.merged":
       return ["git", ev.taskId, "merged " + ev.branch + " @ " + String(ev.sha).slice(0, 8)];
     case "git.merge_conflict":
