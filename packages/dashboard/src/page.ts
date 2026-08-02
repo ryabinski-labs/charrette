@@ -436,7 +436,7 @@ function describe(ev) {
     case "intake.answered":
       return ["you", "you", clip(ev.answer, 220)];
     case "task.feedback":
-      return ["you", "you", "\\u2192 " + ev.taskId + (ev.delivery === "live" ? " (live)" : " (queued)") + ": " + clip(ev.text, 220)];
+      return ["you", "you", "\\u2192 " + ev.taskId + " (" + ev.delivery + "): " + clip(ev.text, 220)];
     case "intake.brief_ready":
       return ["state", "intake", "brief agreed (" + ev.decisions + " decisions): " + clip(ev.goal, 120)];
     case "git.worktree_created":
@@ -569,7 +569,11 @@ function renderNow() {
     const body = el("div", "body");
     const head = el("div");
     head.append(el("span", "who r-" + s.role, s.role + (s.taskId ? " \\u00b7 " + s.taskId : "")));
-    head.append(el("span", "meta", "  " + dur(Date.now() - s.startedAt) + " \\u00b7 " + s.turns + " turns"));
+    // "replies", not "turns": this counts assistant messages, which runs ahead
+    // of the SDK's own turn accounting that qaMaxTurns is measured in (a
+    // validator capped at 60 ended showing 66). Calling both of them "turns"
+    // invites tuning the cap against a number in a different scale.
+    head.append(el("span", "meta", "  " + dur(Date.now() - s.startedAt) + " \\u00b7 " + s.turns + " replies"));
     body.append(head);
     body.append(el("div", "meta", s.model));
     body.append(el("div", "doing", lastAction[s.id] || "thinking\\u2026"));
@@ -632,7 +636,9 @@ async function sendFeedback(e) {
     $("fb-text").value = "";
     note.textContent = body.delivery === "live"
       ? "Delivered \\u2014 the running agent sees it as its next message."
-      : "Queued \\u2014 the next agent on this task starts with it.";
+      : body.delivery === "revived"
+      ? "Reopened \\u2014 this task was parked; your note is the guidance the next worker starts from."
+      : "Queued \\u2014 the next agent on this task starts with it, including after a resume.";
   } else {
     note.textContent = body.error || "could not send feedback";
   }

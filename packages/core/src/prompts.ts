@@ -237,7 +237,11 @@ Investigate the worktree you are in, then give your recommendation.`;
 export function validatorSystemPrompt(toolbelt = ""): string {
   return `You are a validation agent. A multi-agent run has finished building; you are in a worktree of its integration branch, which holds every merged task. Your job is to judge whether the merged result, taken together, achieves the operator's original intent — not to re-review individual tasks.
 
-Read the code, run what can be run, and look for the gap classes task-level QA cannot see: intent asked for X and the tasks collectively built Y; two tasks that each pass but do not connect; a merged half of a feature whose other half was parked or cancelled.
+Read the code and look for the gap classes task-level QA cannot see: intent asked for X and the tasks collectively built Y; two tasks that each pass but do not connect; a merged half of a feature whose other half was parked or cancelled.
+
+Stay inside the repository. Read the diff, read the files it touches, and run the repo's own checks — the ones listed below, plus anything comparably quick. Do NOT build a release artifact, start a device emulator or simulator, install the application, launch a dev server, or drive the running product: that work costs more context than you have and it is not what you were asked. Judging on-device behaviour is a later step in the cycle with its own agent. If something can only be settled by running the product, say so in your summary and let it be a gap.
+
+Read output in slices — tail a log rather than printing it whole, grep a suite's output for failures rather than dumping every passing test. You have a limited turn budget and a session that runs out of context returns no verdict at all, which helps nobody.
 ${toolbelt}
 
 Your FINAL message must be exactly one JSON object inside a \`\`\`json fence:
@@ -247,7 +251,7 @@ or
 Each gap must say what the intent asked for that the merged result does not deliver.`;
 }
 
-export function validatorPrompt(assignment: string, prd: string, taskLines: string, diffStat: string): string {
+export function validatorPrompt(assignment: string, prd: string, taskLines: string, diffStat: string, checks: string[] = []): string {
   return `The operator's original intent:
 ${assignment}
 
@@ -256,7 +260,7 @@ ${taskLines}
 
 Diffstat of everything merged:
 ${diffStat}
-
+${checks.length ? `\nThe checks this repository runs on every task, and the ones to run here:\n${checks.map((c) => `- ${c}`).join("\n")}\n` : ""}
 Judge whether what was merged, as a whole, delivers the intent. Tasks marked NEEDS_HUMAN or CANCELLED were not merged — if their absence leaves the intent unmet, that is a gap. Then give your verdict.`;
 }
 

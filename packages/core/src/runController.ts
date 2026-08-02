@@ -10,7 +10,7 @@ import { seedWorktreeDeps } from "./deps.js";
 import { git, WorktreeManager } from "./git.js";
 import { GitHubAdapter, type PrRef } from "./github.js";
 import { runIntake, type IntakeUi } from "./intake.js";
-import { AgentPool } from "./pool.js";
+import { AgentPool, type AgentResult } from "./pool.js";
 import {
   advisorPrompt,
   advisorSystemPrompt,
@@ -33,7 +33,7 @@ import {
 } from "./prompts.js";
 import { runDeterministicChecks } from "./qa.js";
 import { detectToolbelt, toolbeltBlock } from "./toolbelt.js";
-import { Store, TaskRow } from "./store.js";
+import { Store, TaskRow, type RunRow } from "./store.js";
 
 const FULL_TEXT_SKILL_TOKEN_LIMIT = 1500; // PERF-4
 const MAX_FULL_TEXT_SKILLS = 2;
@@ -407,7 +407,7 @@ export class RunController {
         role: "validator",
         model: run.config.models.qa,
         systemPrompt: validatorSystemPrompt(toolbeltBlock(detectToolbelt(run.config.externalTools))),
-        prompt: validatorPrompt(run.assignment, this.planPrd(runId), taskLines, diffStat.slice(0, 3000)),
+        prompt: validatorPrompt(run.assignment, this.planPrd(runId), taskLines, diffStat.slice(0, 3000), run.config.deterministicChecks),
         cwd: wtPath,
         disallowedTools: ["WebSearch"],
         maxTurns: 60,
@@ -951,9 +951,6 @@ export class RunController {
   /** Operator guidance for tasks revived by `reopen`, consumed by the first worker dispatch. */
   private revivalGuidance = new Map<string, string>();
 
-  /** Feedback that missed a live session, waiting for the next agent on its task. */
-  private pendingFeedback = new Map<string, string[]>();
-
   /**
    * Unprompted operator feedback mid-run ("skip the e2e suite, it was red
    * before you started"). The target is a task id or an `@role` handle for a
@@ -962,8 +959,16 @@ export class RunController {
    * dispatched on the task. Run-level agents have no "next dispatch" to queue
    * for, so their feedback only lands while they are running — otherwise this
    * throws. Also throws for unknown or finished tasks.
+   *
+   * A parked task has no next dispatch either, unless something arranges one.
+   * "queued" on a NEEDS_HUMAN task used to mean "nobody will read this until
+   * you reopen the task on some later resume" while reading exactly like
+   * feedback to a task with a worker seconds away. An operator answering a
+   * parked task is answering the escalation gate whether or not the gate is
+   * still open, so while the run is still executing that answer revives the
+   * task on the spot — which is what `reopen` would have done with it later.
    */
-  sendFeedback(runId: string, target: string, text: string): "live" | "queued" {
+  sendFeedback(runId: string, target: string, text: string): "live" | "queued" | "revived" {
     const trimmed = text.trim().slice(0, 4000);
     if (!trimmed) throw new Error("feedback is empty");
     if (target.startsWith("@")) {
@@ -979,21 +984,93 @@ export class RunController {
     }
     // Fakes in tests stand in for the pool without an inject(), hence the `?.`.
     const hit = this.pool.inject?.(runId, target, operatorFeedbackMessage(trimmed));
-    if (!hit) {
-      const key = `${runId}/${target}`;
-      this.pendingFeedback.set(key, [...(this.pendingFeedback.get(key) ?? []), trimmed]);
+    if (!hit) this.store.queueFeedback(runId, target, trimmed);
+    // Only while the scheduler is still looping: it re-lists tasks on every
+    // dispatch and takes READY ones first, so a revived task is picked up
+    // within one worker slot. After EXECUTING nothing is watching, and the
+    // note waits in the queue for `reopen` on the next resume — where it now
+    // survives to be read, which is the whole point of persisting it.
+    const revived = !hit && task.state === "NEEDS_HUMAN" && this.store.getRun(runId)?.state === "EXECUTING";
+    if (revived) {
+      this.store.updateTask(runId, target, { qaIterations: 0, respawns: 0, errorSummary: null });
+      this.store.transitionTask(runId, target, "READY", "reopened by the operator's feedback");
     }
-    const delivery = hit ? ("live" as const) : ("queued" as const);
+    const delivery = hit ? ("live" as const) : revived ? ("revived" as const) : ("queued" as const);
     this.bus.publish({ type: "task.feedback", runId, taskId: target, text: trimmed, delivery, ts: Date.now() });
     return delivery;
   }
 
-  private drainFeedback(runId: string, taskId: string): string {
-    const key = `${runId}/${taskId}`;
-    const notes = this.pendingFeedback.get(key);
-    if (!notes?.length) return "";
-    this.pendingFeedback.delete(key);
-    return notes.join("\n\n");
+  /**
+   * Fold new comments on a task's GitHub issue into its feedback queue.
+   *
+   * An operator who reads "QA rejected this three times" on issue #52 answers
+   * it there — that is what the issue is for. Every one of those answers used
+   * to go nowhere, because the harness only ever wrote to GitHub. Each comment
+   * is queued once, keyed by its comment id, so re-polling on every iteration
+   * costs one request and never repeats itself into the prompt.
+   *
+   * Never fatal: GitHub being unreachable must not park a task that is
+   * otherwise ready to run.
+   */
+  private async ingestIssueComments(runId: string, taskId: string): Promise<void> {
+    const task = this.store.getTask(runId, taskId);
+    if (!task?.githubIssueNumber || !this.github.enabled) return;
+    try {
+      // `?.` for the same reason as everywhere else here: test fakes stand in
+      // for the adapter and implement only the methods they care about.
+      const comments = (await this.github.issueComments?.(task.githubIssueNumber)) ?? [];
+      let queued = 0;
+      for (const c of comments) {
+        const text = `${c.author} commented on issue #${task.githubIssueNumber}:\n${c.body.slice(0, 4000)}`;
+        if (this.store.queueFeedback(runId, taskId, text, "issue", String(c.id))) queued++;
+      }
+      if (queued) {
+        this.bus.publish({
+          type: "task.feedback",
+          runId,
+          taskId,
+          text: `${queued} new comment${queued === 1 ? "" : "s"} on issue #${task.githubIssueNumber}`,
+          delivery: "queued",
+          ts: Date.now(),
+        });
+      }
+    } catch {
+      /* an unreachable GitHub is not a reason to hold up the task */
+    }
+  }
+
+  /**
+   * Resume a QA session that finished without writing its verdict JSON, and ask
+   * for nothing but the verdict.
+   *
+   * Null when there is no session to resume, when the retry also fails, or when
+   * it still will not answer in the required shape — every one of which leaves
+   * the caller's existing FAIL exactly where it was. Budget stops are the one
+   * thing that must still propagate: a run over its cap does not get to spend
+   * two more turns being polite about it.
+   */
+  private async reaskVerdict(runId: string, taskId: string, qa: AgentResult, run: RunRow, cwd: string): Promise<QaVerdict | null> {
+    if (!qa.sdkSessionId) return null;
+    try {
+      const retry = await this.pool.run({
+        runId,
+        taskId,
+        role: "qa",
+        model: run.config.models.qa,
+        systemPrompt: "You are finishing a verification you have already done. Answer with JSON and nothing else.",
+        prompt:
+          "Your previous message did not contain the verdict JSON this task requires. Do not investigate anything further and do not change your judgment — just state the conclusion you already reached, as exactly one JSON object inside a ```json fence:\n" +
+          '{"verdict":"PASS","notes":string}\nor\n{"verdict":"FAIL","reasons":[string],"mustFix":[string]}',
+        cwd,
+        resume: qa.sdkSessionId,
+        maxTurns: 2,
+        budgetCheck: () => this.checkBudget(runId, taskId),
+      });
+      return QaVerdict.parse(extractJson(retry.resultText));
+    } catch (e) {
+      if (e instanceof BudgetExceeded) throw e;
+      return null;
+    }
   }
 
   /** Every task that cannot run until `taskId` does — directly or through another. */
@@ -1377,9 +1454,13 @@ export class RunController {
           `The operator reviewed why this task is taking so long and says — follow it over anything that contradicts it:\n${guidance}` +
           (qaFeedback ? `\n\nThe pending feedback from the previous iteration still applies:\n${qaFeedback}` : "");
       }
+      // The issue thread is the other place an operator answers a task, and
+      // until now it was the one place nobody read. Polled here rather than on
+      // a timer: this is the moment the answer can still change what happens.
+      await this.ingestIssueComments(runId, taskId);
       // Operator feedback that arrived while no session was live on this task —
       // the task was queued, or between sessions — joins the worker's briefing.
-      const queuedFeedback = this.drainFeedback(runId, taskId);
+      const queuedFeedback = this.store.drainFeedback(runId, taskId);
       if (queuedFeedback) {
         qaFeedback =
           (qaFeedback ? `${qaFeedback}\n\n` : "") +
@@ -1444,7 +1525,7 @@ export class RunController {
           role: "qa",
           model: run.config.models.qa,
           systemPrompt: qaSystemPrompt(toolbelt, skillsBlock(qaSkills)),
-          prompt: qaTaskPrompt(task, workerSummary.slice(0, 4000), diffStat.slice(0, 2000), this.drainFeedback(runId, taskId) || undefined),
+          prompt: qaTaskPrompt(task, workerSummary.slice(0, 4000), diffStat.slice(0, 2000), this.store.drainFeedback(runId, taskId) || undefined),
           cwd: wt.path,
           disallowedTools: ["WebSearch"],
           maxTurns: qaTurns,
@@ -1487,9 +1568,18 @@ export class RunController {
         verdict = QaVerdict.parse(extractJson(qa.resultText));
       } catch {
         // Reached only when the session ended cleanly and still wrote something
-        // that is not a verdict — a QA agent that ignored its output contract,
-        // which is a real finding about the run and does count as an iteration.
-        verdict = { verdict: "FAIL", reasons: ["QA finished but wrote no valid verdict JSON"], mustFix: ["re-run"] };
+        // that is not a verdict — a QA agent that ignored its output contract.
+        //
+        // The verification itself happened; only the formatting is missing, and
+        // the whole investigation is still sitting in that session's context.
+        // Ask it for the JSON alone before throwing the work away: two turns
+        // against a warm cache, versus booking a FAIL that sends the worker
+        // back to fix nothing and spends an iteration of the cap doing it.
+        verdict = (await this.reaskVerdict(runId, taskId, qa, run, wt.path)) ?? {
+          verdict: "FAIL",
+          reasons: ["QA finished but wrote no valid verdict JSON, and could not produce one when asked again"],
+          mustFix: ["re-run"],
+        };
       }
       const iterations = this.store.getTask(runId, taskId)!.qaIterations + 1;
       this.store.updateTask(runId, taskId, { qaIterations: iterations });
@@ -1498,7 +1588,7 @@ export class RunController {
       if (verdict.verdict === "PASS") {
         // Feedback that landed after QA already judged must not be merged away
         // unread — it buys the operator one more worker iteration instead.
-        const late = this.drainFeedback(runId, taskId);
+        const late = this.store.drainFeedback(runId, taskId);
         if (late) {
           this.store.transitionTask(runId, taskId, "QA_FAILED", "operator feedback arrived after the PASS");
           this.store.transitionTask(runId, taskId, "WORKING", "re-dispatched with the operator's feedback");

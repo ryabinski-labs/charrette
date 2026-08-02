@@ -1,9 +1,47 @@
-import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { execFile, execFileSync } from "node:child_process";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { promisify } from "node:util";
 import path from "node:path";
 
 const execFileP = promisify(execFile);
+
+/**
+ * Add `entry` to the target repo's `.gitignore` unless git already ignores it.
+ *
+ * The harness writes its state into the repo it is working on, and that state is
+ * not source: `.harness/harness.db` is the run ledger, holding every prompt,
+ * every tool result and every file an agent read. A stray `git add -A` in the
+ * target repo would commit the whole transcript — megabytes that rewrite on
+ * every event. So the harness cleans up after itself rather than leaving the
+ * operator to notice.
+ *
+ * Deliberately synchronous: this runs once at startup, before the run exists,
+ * and making it async would turn the controller's construction async with it.
+ */
+export function ensureIgnored(repoPath: string, entry: string): boolean {
+  try {
+    // Ask git rather than reading the file: the entry may already be covered by
+    // a parent .gitignore, the global excludesfile, or .git/info/exclude, and a
+    // redundant line in someone else's repo is still an unwanted diff.
+    execFileSync("git", ["check-ignore", "-q", "--no-index", entry], { cwd: repoPath, stdio: "ignore" });
+    return false; // already ignored
+  } catch (e) {
+    // Exit 1 is the answer "not ignored". Anything else — not a repo, no git on
+    // PATH — means we cannot reason about the repo and must not write to it.
+    if ((e as { status?: number }).status !== 1) return false;
+  }
+  const file = path.join(repoPath, ".gitignore");
+  try {
+    const existing = existsSync(file) ? readFileSync(file, "utf8") : "";
+    const lead = existing === "" || existing.endsWith("\n") ? "" : "\n";
+    appendFileSync(file, `${lead}${entry}\n`);
+    return true;
+  } catch {
+    // An unwritable .gitignore is the operator's business, not a reason to
+    // refuse to start the run.
+    return false;
+  }
+}
 
 /** Serialize mutating git ops in the main repo — parallel worktree ops corrupt via git's global locks. */
 let mainRepoLock: Promise<unknown> = Promise.resolve();

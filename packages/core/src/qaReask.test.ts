@@ -1,0 +1,112 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { RunConfig } from "@harness/shared";
+import { describe, expect, it } from "vitest";
+import { Bus } from "./bus.js";
+import type { GitHubAdapter } from "./github.js";
+import type { AgentPool, AgentResult, AgentSpec } from "./pool.js";
+import { RunController, type GateHandler } from "./runController.js";
+import { Store } from "./store.js";
+
+/**
+ * A QA session that finished cleanly and wrote something other than its verdict
+ * JSON. The verification happened; only the formatting is missing, and the whole
+ * investigation is still in that session's context. Booking a FAIL instead sends
+ * the worker back to fix nothing and spends one of three iterations doing it.
+ */
+const DOCS = "<prd>\n# PRD\n</prd>\n<conventions>\nc\n</conventions>";
+const DAG =
+  "```json\n" +
+  JSON.stringify({
+    epics: [{ id: "epic-e", title: "E", summary: "s" }],
+    tasks: [{ id: "task-a", epicId: "epic-e", title: "A", spec: "s", acceptanceCriteria: ["x"], dependsOn: [], touchedPaths: [], estimatedSize: "S" }],
+  }) +
+  "\n```";
+
+const gitIn = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "ignore" });
+
+function repo(): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "harness-reask-"));
+  writeFileSync(path.join(dir, "README.md"), "# fixture\n");
+  gitIn(dir, "init", "-b", "main");
+  gitIn(dir, "config", "user.email", "harness@example.com");
+  gitIn(dir, "config", "user.name", "harness");
+  gitIn(dir, "add", "-A");
+  gitIn(dir, "commit", "-m", "init");
+  return dir;
+}
+
+const noGithub = { enabled: false } as unknown as GitHubAdapter;
+const approveAll: GateHandler = {
+  async resolvePlanGate() {
+    return { approved: true, feedback: "" };
+  },
+  async resolveBudgetGate() {
+    return null;
+  },
+};
+
+/** Records every spec so the test can assert what was and was not re-dispatched. */
+function poolThatForgetsTheJson(opts: { retryAnswers: string }) {
+  let planning = 0;
+  const specs: AgentSpec[] = [];
+  const pool = {
+    async run(spec: AgentSpec): Promise<AgentResult> {
+      specs.push(spec);
+      if (spec.role === "planner") {
+        return { sessionId: `s${specs.length}`, resultText: planning++ === 0 ? DOCS : DAG, costUsd: 0, turns: 1, outcome: "done" };
+      }
+      if (spec.role === "worker") {
+        writeFileSync(path.join(spec.cwd, "feature.txt"), "done\n");
+        gitIn(spec.cwd, "add", "-A");
+        gitIn(spec.cwd, "commit", "-m", "wip");
+        return { sessionId: `s${specs.length}`, resultText: "worker done", costUsd: 0, turns: 1, outcome: "done" };
+      }
+      if (spec.role === "qa") {
+        // The re-ask is the resumed one; the first pass wanders off-contract.
+        const resultText = spec.resume
+          ? opts.retryAnswers
+          : "I verified the acceptance criteria and everything checks out. Looks good to me!";
+        return { sessionId: `s${specs.length}`, sdkSessionId: "sdk-qa-1", resultText, costUsd: 0, turns: 1, outcome: "done" };
+      }
+      return { sessionId: `s${specs.length}`, resultText: '{"verdict":"PASS","summary":"n/a"}', costUsd: 0, turns: 1, outcome: "done" };
+    },
+  };
+  return { pool: pool as unknown as AgentPool, specs };
+}
+
+describe("QA that finished without writing its verdict", () => {
+  it("is asked for the JSON alone, in the session that already did the work", async () => {
+    const { pool, specs } = poolThatForgetsTheJson({ retryAnswers: '```json\n{"verdict":"PASS","notes":"criteria met"}\n```' });
+    const store = new Store(":memory:");
+    const controller = new RunController(store, new Bus(store), pool, noGithub, approveAll, repo());
+    const runId = await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], qaIterationCap: 3 }));
+
+    const retry = specs.find((s) => s.role === "qa" && s.resume);
+    expect(retry?.resume).toBe("sdk-qa-1");
+    // Cheap and pointed: no re-investigation, just the missing shape.
+    expect(retry?.maxTurns).toBe(2);
+    expect(retry?.prompt).toContain("do not change your judgment");
+
+    const task = store.getTask(runId, "task-a")!;
+    expect(task.state).toBe("MERGED");
+    // One QA iteration, one worker dispatch: the re-ask is not a second opinion
+    // and the worker was never sent back to fix nothing.
+    expect(task.qaIterations).toBe(1);
+    expect(specs.filter((s) => s.role === "worker")).toHaveLength(1);
+  });
+
+  it("keeps the FAIL when the retry will not answer either", async () => {
+    const { pool, specs } = poolThatForgetsTheJson({ retryAnswers: "still not JSON, sorry" });
+    const store = new Store(":memory:");
+    const controller = new RunController(store, new Bus(store), pool, noGithub, approveAll, repo());
+    const runId = await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], qaIterationCap: 1 }));
+
+    expect(specs.some((s) => s.role === "qa" && s.resume)).toBe(true);
+    // A QA agent that ignores its output contract twice is a real finding about
+    // the run, and the task must not merge on the strength of prose.
+    expect(store.getTask(runId, "task-a")!.state).not.toBe("MERGED");
+  });
+});

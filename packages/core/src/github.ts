@@ -17,6 +17,9 @@ export interface PrRef {
   fresh?: boolean;
 }
 
+/** Stamped on every comment the harness writes, so it never reads its own back. */
+const HARNESS_COMMENT_MARKER = "<!-- harness-comment -->";
+
 /**
  * GitHub adapter (PRD §11.1): the only module that talks to GitHub. Every write is
  * idempotent via a deterministic marker in the body, so crash-replays never duplicate.
@@ -101,6 +104,28 @@ export class GitHubAdapter {
     // Keep the cache authoritative: the next task must see this one immediately.
     issues.set(marker, ref);
     return ref;
+  }
+
+  /**
+   * Every comment on an issue the harness filed, oldest first.
+   *
+   * The harness used to write issues and never read them, so an operator who
+   * answered a stuck task in its issue thread — the most natural place to
+   * answer it — was talking to nobody. This is the read half.
+   *
+   * Comments the harness wrote itself are excluded by id, not by author: the
+   * token may well be the operator's own, and dropping everything that account
+   * said would drop exactly the words we came for.
+   */
+  async issueComments(issueNumber: number): Promise<{ id: number; author: string; body: string }[]> {
+    if (!this.octokit) return [];
+    const items = await this.octokit
+      .paginate(this.octokit.rest.issues.listComments, { owner: this.owner, repo: this.repo, issue_number: issueNumber, per_page: 100 })
+      .catch(() => []);
+    return items
+      .filter((c) => !(c.body ?? "").includes(HARNESS_COMMENT_MARKER))
+      .map((c) => ({ id: c.id, author: c.user?.login ?? "someone", body: (c.body ?? "").trim() }))
+      .filter((c) => c.body.length > 0);
   }
 
   /**
@@ -287,7 +312,7 @@ export class GitHubAdapter {
     if (!this.octokit) return false;
     const { data } = await this.octokit.rest.pulls.get({ owner: this.owner, repo: this.repo, pull_number: prNumber });
     if (data.state !== "open") return false;
-    await this.octokit.rest.issues.createComment({ owner: this.owner, repo: this.repo, issue_number: prNumber, body: comment });
+    await this.octokit.rest.issues.createComment({ owner: this.owner, repo: this.repo, issue_number: prNumber, body: `${comment}\n\n${HARNESS_COMMENT_MARKER}` });
     await this.octokit.rest.pulls.update({ owner: this.owner, repo: this.repo, pull_number: prNumber, state: "closed" });
     return true;
   }
