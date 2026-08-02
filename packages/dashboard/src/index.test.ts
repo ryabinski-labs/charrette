@@ -163,6 +163,37 @@ describe("saying why a task is parked", () => {
     const body = (await res.json()) as { runs: { tasks: { errorSummary: string | null }[] }[] };
     expect(body.runs[0]!.tasks[0]!.errorSummary).toBe("iteration cap hit on deterministic checks");
   });
+
+  it("leaves every other task exactly as the store has it", async () => {
+    const store = new Store(":memory:");
+    store.createRun({
+      id: "run1", repoPath: "/tmp/x", assignment: "a", state: "CREATED", prdPath: null, planHash: null,
+      integrationBranch: "harness/run1/main", config: RunConfig.parse({}),
+    });
+    const task = (id: string, errorSummary: string | null) => ({
+      id, epicId: "e1", title: id.toUpperCase(), spec: "", acceptanceCriteria: [], dependsOn: [], state: "PENDING" as TaskState,
+      branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0,
+      assignedSkills: [], errorSummary,
+    });
+    store.insertTasks("run1", [{ id: "e1", title: "E" }], [task("working", null), task("parked", "the reason already on the row")]);
+    store.transitionTask("run1", "working", "READY");
+    store.transitionTask("run1", "working", "WORKING");
+    store.transitionTask("run1", "parked", "READY");
+    store.transitionTask("run1", "parked", "WORKING");
+    store.transitionTask("run1", "parked", "NEEDS_HUMAN", "a different reason in the event");
+
+    const dash = new Dashboard(store, new Bus(store));
+    started.push(dash);
+    const url = await dash.start();
+    const res = await fetch(new URL("/api/state", url), { headers: { authorization: `Bearer ${dash.token}`, connection: "close" } });
+    const body = (await res.json()) as { runs: { tasks: { id: string; errorSummary: string | null }[] }[] };
+
+    const byId = new Map(body.runs[0]!.tasks.map((t) => [t.id, t.errorSummary]));
+    // A task that is not parked is not given a reason it does not have…
+    expect(byId.get("working")).toBeNull();
+    // …and one whose row already carries the reason keeps that one, not the event's.
+    expect(byId.get("parked")).toBe("the reason already on the row");
+  });
 });
 
 describe("task-escalation gate", () => {
