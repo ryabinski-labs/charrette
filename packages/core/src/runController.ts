@@ -7,13 +7,19 @@ import { indexSkills, matchSkills, verifyHash, type IndexedSkill } from "@harnes
 import { Bus } from "./bus.js";
 import { BudgetExceeded } from "./budget.js";
 import { seedWorktreeDeps } from "./deps.js";
+import { nextDispatch } from "./dispatchOrder.js";
 import { git, WorktreeManager } from "./git.js";
 import { GitHubAdapter, type PrRef } from "./github.js";
 import { runIntake, type IntakeUi } from "./intake.js";
+import { isolationBlock, isolationEnv, taskIsolation } from "./isolation.js";
+import { reapUnder } from "./reaper.js";
 import { AgentPool, type AgentResult } from "./pool.js";
 import {
+  type AdvisorCheck,
+  advisorAnswer,
   advisorPrompt,
   advisorSystemPrompt,
+  conflictPrompt,
   extractJson,
   extractSection,
   operatorFeedbackMessage,
@@ -31,7 +37,7 @@ import {
   workerSystemPrompt,
   workerTaskPrompt,
 } from "./prompts.js";
-import { runDeterministicChecks } from "./qa.js";
+import { runDeterministicChecks, splitInheritedFailures, type CheckResult } from "./qa.js";
 import { detectToolbelt, toolbeltBlock } from "./toolbelt.js";
 import { Store, TaskRow, type RunRow } from "./store.js";
 
@@ -48,6 +54,11 @@ const MAX_FULL_TEXT_SKILLS = 2;
  */
 const ROLE_SKILL_LENS: Record<string, string> = {
   worker: "",
+  // The two roles that decide *what* gets built rather than how. Their lens is
+  // deliberately product-shaped: the assignment they match against is one line
+  // of the operator's prose, which carries far less signal than a task spec.
+  intake: "product scope requirements brief stakeholder user customer decision trade-off out of scope",
+  planner: "product roadmap requirements PRD scope prioritisation user story acceptance criteria decomposition milestone",
   qa: "QA quality assurance verify verification testing test end-to-end e2e regression review evidence security",
   // Pulls the operator's own production-validation and QA playbooks in, so the
   // live check is run the way they would run it rather than improvised.
@@ -59,7 +70,26 @@ const ROLE_SKILL_LENS: Record<string, string> = {
  * skill corpus a genuine match scores well above 1; incidental term overlap
  * lands under ~0.4. A session with no relevant skill should carry none.
  */
-const SKILL_SCORE_FLOOR = 0.5;
+/**
+ * The bar a *scored* skill must clear to be injected without the operator
+ * having asked for it.
+ *
+ * Raised from 0.5, which admitted almost anything: on one run it let through
+ * `cartographer` on a state machine and `play-store-publisher` on a credential
+ * store. This is a volume control on noise, not a correctness mechanism —
+ * measurement showed irrelevant skills outscoring relevant ones, so no value
+ * here makes scoring trustworthy. `skillRouting` is where correctness lives.
+ */
+const SKILL_SCORE_FLOOR = 1;
+/** Context budget: how many skills any one session's prompt will carry. */
+const MAX_SKILLS_PER_ROLE = 4;
+/**
+ * How many times an accepted task's merge conflict goes back to its worker
+ * before it goes to the operator. One: a worker that cannot resolve its own
+ * conflict with the files in front of it will not do better on a second pass,
+ * and each attempt costs a worker session and a QA session.
+ */
+const CONFLICT_FIX_ATTEMPTS = 1;
 
 /** The validator's judgment of the merged whole against the operator's intent. */
 const IntentVerdict = z.object({
@@ -198,6 +228,8 @@ export class RunController {
       config: run.config,
       ui,
       budgetCheck: () => this.checkBudget(runId),
+      // Matched on the seed — the only text that exists this early.
+      skillsBlock: skillsBlock(this.selectSkills(indexSkills(run.config.skillsDirs), "intake", seed, run.config)),
     });
     const assignment = briefToAssignment(brief);
     const dir = path.join(this.repoPath, ".harness", runId);
@@ -326,6 +358,7 @@ export class RunController {
   private async drive(runId: string): Promise<void> {
     let run = this.store.getRun(runId);
     if (!run) throw new Error(`unknown run ${runId}`);
+    await this.sweepOrphans(runId);
     if (run.state === "CREATED") {
       this.store.transitionRun(runId, "PLANNING");
       run = this.store.getRun(runId)!;
@@ -542,10 +575,12 @@ export class RunController {
       .map((t) => `- ${t.title}: ${t.acceptanceCriteria.map((c) => c.slice(0, 160)).join(" | ")}`)
       .join("\n");
     try {
-      const skills = this.selectSkills(indexSkills(run.config.skillsDirs), "prod", {
-        title: "validate the deployed system in production",
-        spec: run.assignment,
-      } as TaskRow);
+      const skills = this.selectSkills(
+        indexSkills(run.config.skillsDirs),
+        "prod",
+        `validate the deployed system in production\n${run.assignment}`,
+        run.config
+      );
       const result = await this.pool.run({
         runId,
         role: "prod",
@@ -925,6 +960,12 @@ export class RunController {
    * A short read-only advisor session in the stuck task's worktree, drafting
    * the answer the operator will probably give. Never fatal — a crashed or
    * unparseable advisor just means the old, question-only gate.
+   *
+   * The turn budget buys verification, not just reading. An advisor that only
+   * summarises the rejection is worse than none: on the run where this was
+   * measured, QA's third paragraph reported a real key mismatch, the draft
+   * compressed it away, the operator accepted the draft in one click and the
+   * worker was re-dispatched never having heard about the defect.
    */
   private async adviseOperator(runId: string, taskId: string, why: string): Promise<string> {
     const run = this.store.getRun(runId)!;
@@ -939,17 +980,56 @@ export class RunController {
         prompt: advisorPrompt(task, why),
         cwd: task.worktreePath ?? this.repoPath,
         disallowedTools: ["Write", "Edit", "NotebookEdit", "WebSearch"],
-        maxTurns: 15,
+        maxTurns: 30,
+        env: isolationEnv(taskIsolation(runId, taskId)),
+        // The advisor re-runs the suite to check QA's claims, so it leaves the
+        // same debris a worker does — but only when it has a worktree of its own
+        // to leave it in. Falling back to the repo means sweeping the repo.
+        reapOnEnd: Boolean(task.worktreePath),
       });
-      const parsed = extractJson(result.resultText) as { recommendation?: unknown };
-      return typeof parsed?.recommendation === "string" ? parsed.recommendation.trim().slice(0, 1500) : "";
+      const parsed = extractJson(result.resultText) as { recommendation?: unknown; checked?: unknown };
+      if (typeof parsed?.recommendation !== "string") return "";
+      const checked = Array.isArray(parsed.checked) ? (parsed.checked as AdvisorCheck[]) : [];
+      // advisorAnswer budgets the 4000 itself, spending it on the checks first.
+      return advisorAnswer(parsed.recommendation.trim(), checked);
     } catch {
       return "";
     }
   }
 
+  /**
+   * Kill anything still running in this run's worktrees before the run starts.
+   *
+   * The per-session sweep only catches what a session leaves behind while the
+   * harness is alive to notice. A harness killed by SIGTERM — or by the operator's
+   * terminal closing, which is how most of them end — takes its sessions with it
+   * and leaves their shells running: run 40da9337 was resumed with 37 of them
+   * still writing to the database every later task's checks would read. So a
+   * resume starts by clearing the ground it is about to work on.
+   *
+   * Scoped to this run's own worktree tree, which is the harness's to clear.
+   * A second harness working a different repo is untouched.
+   */
+  private async sweepOrphans(runId: string): Promise<void> {
+    const root = path.join(this.wt.worktreeRoot(), runId);
+    const reaped = await reapUnder(root).catch(() => []);
+    if (!reaped.length) return;
+    this.bus.publish({
+      type: "agent.log",
+      runId,
+      sessionId: "integrator",
+      text:
+        `swept ${reaped.length} process${reaped.length === 1 ? "" : "es"} left over in this run's worktrees by an earlier harness process: ` +
+        reaped.map((r) => `${r.pid} ${r.command.slice(0, 60)}`).join("; "),
+      ts: Date.now(),
+    });
+  }
+
   /** Operator guidance for tasks revived by `reopen`, consumed by the first worker dispatch. */
   private revivalGuidance = new Map<string, string>();
+
+  /** What the checks do on the integration branch, per commit of it. See `baseFailures`. */
+  private baselines = new Map<string, Promise<CheckResult>>();
 
   /**
    * Unprompted operator feedback mid-run ("skip the e2e suite, it was red
@@ -1118,7 +1198,7 @@ export class RunController {
         runId,
         role: "planner",
         model: run.config.models.planner,
-        systemPrompt: plannerDocsSystemPrompt(),
+        systemPrompt: plannerDocsSystemPrompt(skillsBlock(this.planSkills(runId))),
         prompt:
           `Assignment:\n${run.assignment}\n` +
           (feedback ? `\nOperator feedback on the previous plan:\n${feedback}\n` : "") +
@@ -1164,7 +1244,7 @@ export class RunController {
         runId,
         role: "planner",
         model: run.config.models.planner,
-        systemPrompt: plannerBreakdownSystemPrompt(),
+        systemPrompt: plannerBreakdownSystemPrompt(skillsBlock(this.planSkills(runId))),
         prompt: repair
           ? plannerRepairPrompt(lastOutput, lastReason, lastTruncated)
           : `Assignment:\n${run.assignment}\n${feedback ? `\nOperator feedback on the previous plan:\n${feedback}\n` : ""}\n\nYou have already surveyed the repository and written these documents. Do not use any tools.\n\n<prd>\n${docs.prdMarkdown}\n</prd>\n\n<conventions>\n${docs.conventionsMarkdown}\n</conventions>\n\nEmit the epic/task DAG as JSON.`,
@@ -1327,14 +1407,11 @@ export class RunController {
 
     for (;;) {
       // Fill capacity. Re-listed per dispatch: a task that just merged may have
-      // unblocked its dependents. A task already READY was revived by `reopen`
-      // — it goes first.
+      // unblocked its dependents. Which runnable task goes next is `nextDispatch`
+      // — the order decides what a budget cap leaves unbuilt.
       while (!budgetStop && inFlight.size < cap) {
         const tasks = this.store.listTasks(runId);
-        const merged = new Set(tasks.filter((t) => t.state === "MERGED").map((t) => t.id));
-        const ready =
-          tasks.find((t) => t.state === "READY" && !inFlight.has(t.id)) ??
-          tasks.find((t) => t.state === "PENDING" && !inFlight.has(t.id) && t.dependsOn.every((d) => merged.has(d)));
+        const ready = nextDispatch(tasks, new Set(inFlight.keys()));
         if (!ready) break;
         if (ready.state === "PENDING") this.store.transitionTask(runId, ready.id, "READY");
         const id = ready.id;
@@ -1355,6 +1432,10 @@ export class RunController {
           })
           .finally(() => {
             inFlight.delete(id);
+            // Every path out of runTask lands here with the task in its terminal
+            // state — merged, parked or crashed-then-parked — so this is the one
+            // place that has to say so on the issue.
+            this.queueIssueSync(runId, id);
           });
         inFlight.set(id, flight);
       }
@@ -1363,6 +1444,10 @@ export class RunController {
         await Promise.race(inFlight.values());
         continue;
       }
+      // Nothing left to dispatch: let the queued issue updates land before this
+      // returns or throws, or a budget stop ends the process with the tracker
+      // still claiming every task is untouched.
+      await this.issueSync;
       if (budgetStop) throw budgetStop;
 
       const tasks = this.store.listTasks(runId);
@@ -1370,21 +1455,126 @@ export class RunController {
       // Nothing runnable, nothing in flight: whatever is left waits on parked
       // or cancelled dependencies and can never start.
       for (const t of tasks) {
-        if (!terminal(t.state)) this.store.transitionTask(runId, t.id, "CANCELLED", "unreachable: dependencies parked");
+        if (!terminal(t.state)) {
+          this.store.transitionTask(runId, t.id, "CANCELLED", "unreachable: dependencies parked");
+          this.queueIssueSync(runId, t.id);
+        }
       }
       break;
     }
+    await this.issueSync;
   }
 
-  /** Match, hash-verify, and budget the skills one role's session will carry. */
-  private selectSkills(skills: IndexedSkill[], role: keyof typeof ROLE_SKILL_LENS, task: TaskRow) {
-    const query = `${task.title}\n${task.spec}\n${ROLE_SKILL_LENS[role] ?? ""}`;
-    const matches = matchSkills(skills, query, 3).filter((m) => m.score >= SKILL_SCORE_FLOOR && verifyHash(m.skill));
+  /**
+   * The skills an operator bound to this kind of work by name, in `skillRouting`
+   * order. A rule naming a skill that is not in `skillsDirs` is ignored rather
+   * than fatal: the routing table outlives any one machine's skill collection.
+   */
+  private routedSkills(skills: IndexedSkill[], config: RunConfig, text: string, role: string): IndexedSkill[] {
+    const byName = new Map(skills.map((s) => [s.name, s]));
+    const picked: IndexedSkill[] = [];
+    const take = (name: string) => {
+      const skill = byName.get(name);
+      if (skill && !picked.some((p) => p.name === name) && verifyHash(skill)) picked.push(skill);
+    };
+    // Bound to the job before bound to the topic: a role's standing skills are
+    // unconditional, so they must not lose the per-role cap to a keyword hit.
+    for (const name of config.roleSkills[role] ?? []) take(name);
+    for (const rule of config.skillRouting) {
+      let matches = false;
+      try {
+        matches = new RegExp(rule.when, "i").test(text);
+      } catch {
+        continue; // an unparseable rule is the operator's typo, not a reason to fail the run
+      }
+      if (!matches) continue;
+      for (const name of rule.skills) take(name);
+    }
+    return picked;
+  }
+
+  /**
+   * The skills the planner carries, matched against the operator's assignment.
+   *
+   * Planning had no skills at all until the operator asked for a product voice
+   * in every product decision — and the PRD and the task cut *are* the product
+   * decisions. Everything downstream inherits them: a task the planner never
+   * wrote cannot be rescued by giving its worker the right playbook.
+   */
+  private planSkills(runId: string) {
+    const run = this.store.getRun(runId)!;
+    return this.selectSkills(indexSkills(run.config.skillsDirs), "planner", run.assignment, run.config);
+  }
+
+  /**
+   * What the configured checks do on the integration branch as it stands right now.
+   *
+   * Keyed by that branch's commit, so the suite runs once per merge rather than
+   * once per task per iteration — and only ever lazily, when a task has already
+   * failed and the answer would change what happens to it. A green base costs
+   * nothing at all, because nothing asks.
+   *
+   * Every failure path returns "the base is clean", which charges the task for
+   * everything: a baseline we could not measure is not evidence of innocence,
+   * and the wrong direction here would wave real defects through.
+   */
+  private async baseFailures(runId: string): Promise<CheckResult> {
+    const run = this.store.getRun(runId)!;
+    const clean: CheckResult = { ok: true, failures: [] };
+    if (!run.config.deterministicChecks.length) return clean;
+    const sha = await this.wt.integrationHead(runId);
+    if (!sha) return clean;
+    const key = `${runId}/${sha}`;
+    let measured = this.baselines.get(key);
+    if (!measured) {
+      measured = this.wt
+        .withBaselineWorktree(runId, sha, async (wtPath) => {
+          // Same warm install the task worktrees get: without it every check
+          // fails on missing dependencies and none of it means anything.
+          await seedWorktreeDeps(wtPath);
+          const result = await runDeterministicChecks(wtPath, run.config.deterministicChecks);
+          if (!result.ok) {
+            this.bus.publish({
+              type: "agent.log",
+              runId,
+              sessionId: runId,
+              text: `integration branch at ${sha.slice(0, 8)} is already failing: ${result.failures.map((f) => f.command).join(", ")}`,
+              ts: Date.now(),
+            });
+          }
+          return result;
+        })
+        .catch(() => clean);
+      this.baselines.set(key, measured);
+    }
+    return measured;
+  }
+
+  /**
+   * Match, hash-verify, and budget the skills one role's session will carry.
+   *
+   * `text` is whatever that role is deciding about — a task's title and spec for
+   * worker/QA, the operator's assignment for the roles that run before any task
+   * exists.
+   */
+  private selectSkills(skills: IndexedSkill[], role: keyof typeof ROLE_SKILL_LENS, text: string, config: RunConfig) {
+    const query = `${text}\n${ROLE_SKILL_LENS[role] ?? ""}`;
+    // Routed skills are the operator's declared intent and come first; scoring
+    // only fills whatever room is left, and no skill at all is a valid outcome.
+    const routed = this.routedSkills(skills, config, text, role);
+    const scored = matchSkills(skills, query, MAX_SKILLS_PER_ROLE)
+      .filter((m) => m.score >= SKILL_SCORE_FLOOR && verifyHash(m.skill))
+      .map((m) => m.skill);
+    const chosen: IndexedSkill[] = [];
+    for (const skill of [...routed, ...scored]) {
+      if (chosen.length >= MAX_SKILLS_PER_ROLE) break;
+      if (!chosen.some((c) => c.name === skill.name)) chosen.push(skill);
+    }
     let fullCount = 0;
-    return matches.map((m) => {
-      const full = m.skill.tokensApprox <= FULL_TEXT_SKILL_TOKEN_LIMIT && fullCount < MAX_FULL_TEXT_SKILLS;
+    return chosen.map((skill) => {
+      const full = skill.tokensApprox <= FULL_TEXT_SKILL_TOKEN_LIMIT && fullCount < MAX_FULL_TEXT_SKILLS;
       if (full) fullCount++;
-      return { name: m.skill.name, path: m.skill.path, sha256: m.skill.sha256, content: full ? m.skill.body : undefined };
+      return { name: skill.name, path: skill.path, sha256: skill.sha256, content: full ? skill.body : undefined };
     });
   }
 
@@ -1396,16 +1586,18 @@ export class RunController {
     if (wt.created) {
       // Install once, off the agent's clock, warm from the package store —
       // otherwise the worker's first act is paying for `pnpm install` in tokens.
-      const seeded = await seedWorktreeDeps(wt.path);
-      if (seeded) this.bus.publish({ type: "task.deps_seeded", runId, taskId, ...seeded, ts: Date.now() });
+      for (const seeded of await seedWorktreeDeps(wt.path)) {
+        this.bus.publish({ type: "task.deps_seeded", runId, taskId, ...seeded, ts: Date.now() });
+      }
     }
 
     let task = this.store.getTask(runId, taskId)!;
     // Skill matching + provenance (SEC-14, PERF-4). Selected once per task,
     // per role: workers match on the task text alone, QA matches with a
     // verification lens on top (ROLE_SKILL_LENS).
-    const workerSkills = this.selectSkills(skills, "worker", task);
-    const qaSkills = this.selectSkills(skills, "qa", task);
+    const taskText = `${task.title}\n${task.spec}`;
+    const workerSkills = this.selectSkills(skills, "worker", taskText, run.config);
+    const qaSkills = this.selectSkills(skills, "qa", taskText, run.config);
     const meta = (s: { name: string; sha256: string; content?: string }) => ({ name: s.name, sha256: s.sha256, mode: s.content ? ("full" as const) : ("reference" as const) });
     this.store.updateTask(runId, taskId, {
       assignedSkills: [
@@ -1420,8 +1612,13 @@ export class RunController {
     }
 
     const conventions = this.readConventions(runId);
+    // The host ports and compose project this task owns. Handed to the agent two
+    // ways, because both are load-bearing: in the environment, so compose picks
+    // it up without the agent thinking about it, and in the prompt, so an agent
+    // writing a compose file or a test fixture knows which ports are its own.
+    const iso = taskIsolation(runId, taskId);
     // Stated once per task, ahead of the task block, so it stays prompt-cacheable.
-    const toolbelt = toolbeltBlock(detectToolbelt(run.config.externalTools));
+    const toolbelt = `${toolbeltBlock(detectToolbelt(run.config.externalTools))}\n\n${isolationBlock(iso)}`;
     let workerSummary = "";
     // A revived task starts from the operator's words, not from a blank prompt.
     let qaFeedback: string | undefined = this.revivalGuidance.get(`${runId}/${taskId}`);
@@ -1436,17 +1633,50 @@ export class RunController {
     // Raised when a QA session dies at its ceiling: retrying a truncated
     // verification with the same budget truncates it again in the same place.
     let qaTurns = run.config.qaMaxTurns;
+    // Raised on the same terms as qaTurns, for the same reason: a worker that
+    // ran out of turns re-dispatched with the same ceiling runs out again in
+    // the same place, having paid twice to reach it.
+    let workerTurns = run.config.workerMaxTurns;
+    /** Merges handed back to the worker so far; past the cap it is the operator's. */
+    let conflictFixes = 0;
+    /**
+     * Why the last iteration was sent back, verbatim — QA's reasons, or the
+     * failing check's output.
+     *
+     * Every other gate names its own cause ("QA rejected it 3 times: …"), but the
+     * wall-clock gate only knows that time passed, so it opened with "still not
+     * accepted after 45 minutes" and nothing else. The advisor drafting the
+     * operator's answer then had no failure to look at: on cost-and-risk-reporting
+     * it read the worktree line by line, confirmed five acceptance criteria, and
+     * left the two that mattered UNVERIFIED — while the rejection that would have
+     * pointed straight at them was sitting in a variable one frame up.
+     */
+    let lastRejection = "";
     let startedAt = Date.now();
+    /**
+     * Every gate, with the operator's thinking time given back to the clock.
+     * A task blocked on a human is not a task going nowhere — it is a task
+     * going nowhere *of its own accord*, and charging it the hours it spent
+     * waiting means the answer is spent the instant it arrives: the loop
+     * resumes, the wall-clock bound is already blown, and it re-asks. Observed
+     * in run 40da9337, where three tasks waited seven hours for an answer and
+     * re-gated sixty seconds after getting one.
+     */
+    const ask = async (why: string): Promise<string | null> => {
+      const waitingSince = Date.now();
+      const guidance = await this.askOrPark(runId, taskId, why);
+      startedAt += Date.now() - waitingSince;
+      return guidance;
+    };
     for (;;) {
       task = this.store.getTask(runId, taskId)!;
       // Wall clock (taskWallClockMinutes): a task looping past its bound is a
       // task going nowhere — ask the operator rather than iterating forever.
       // Their answer resets the clock along with the iteration caps.
       if (Date.now() - startedAt > run.config.taskWallClockMinutes * 60_000) {
-        const guidance = await this.askOrPark(
-          runId,
-          taskId,
-          `still not accepted after ${run.config.taskWallClockMinutes} minutes of wall clock (${task.qaIterations} QA iterations so far)`
+        const guidance = await ask(
+          `still not accepted after ${run.config.taskWallClockMinutes} minutes of wall clock (${task.qaIterations} QA iterations so far)` +
+            (lastRejection ? `\n\nWhy the last iteration was sent back:\n${lastRejection}` : "")
         );
         if (guidance === null) return;
         startedAt = Date.now();
@@ -1477,40 +1707,75 @@ export class RunController {
           resume: workerSession,
           cwd: wt.path,
           disallowedTools: ["WebSearch"],
-          maxTurns: 100,
+          maxTurns: workerTurns,
+          env: isolationEnv(iso),
+          reapOnEnd: true,
           budgetCheck: () => this.checkBudget(runId, taskId),
         });
         workerSummary = worker.resultText;
         workerSession = worker.sdkSessionId ?? workerSession;
+        if (worker.outcome === "error" && worker.errorDetail?.includes("error_max_turns")) {
+          workerTurns = Math.min(400, Math.ceil(workerTurns * 1.5));
+          this.bus.publish({ type: "agent.log", runId, taskId, sessionId: worker.sessionId, text: `worker ran out of turns; the next dispatch on this task gets ${workerTurns}`, ts: Date.now() });
+        } else if (worker.outcome === "error") {
+          // A worker that hit the turn ceiling stopped; a worker that died was
+          // stopped, mid-thought, and its worktree is whatever it happened to
+          // have written by then. Running the checks against that tree charges
+          // the task for being interrupted and sends a half-built feature to QA.
+          // Treat it as the crash it is — the catch below re-dispatches against
+          // the same worktree, so the committed work survives.
+          throw new Error(worker.errorDetail ?? "worker session ended abnormally");
+        }
       } catch (e) {
         if (e instanceof BudgetExceeded) throw e;
         workerSession = undefined;
         const respawns = task.respawns + 1;
         this.store.updateTask(runId, taskId, { respawns, errorSummary: String(e).slice(0, 500) });
         if (respawns >= run.config.workerRespawnCap) {
-          const guidance = await this.askOrPark(runId, taskId, `worker crashed ${respawns} times (the cap); last: ${String(e).slice(0, 200)}`);
+          const guidance = await ask(`worker crashed ${respawns} times (the cap); last: ${String(e).slice(0, 200)}`);
           if (guidance === null) return;
           qaFeedback = `The operator looked at the repeated crashes and says:\n${guidance}\nInspect git log in this worktree and continue.`;
           continue;
         }
+        lastRejection = `The worker session died before finishing (respawn ${respawns} of ${run.config.workerRespawnCap}): ${String(e).slice(0, 500)}`;
         qaFeedback = `Previous session was interrupted (${String(e).slice(0, 200)}). Inspect git log in this worktree and continue.`;
         continue;
       }
 
       // Deterministic checks before QA tokens (PRD §11.1)
       const checks = await runDeterministicChecks(wt.path, run.config.deterministicChecks);
-      if (!checks.ok) {
-        qaFeedback = `Deterministic checks failed. Fix these before finishing:\n${checks.failures.map((f) => `$ ${f.command}\n${f.output}`).join("\n\n")}`;
+      // Only the failures this task actually introduced are its problem. The
+      // rest are the integration branch's, arriving either as the base the
+      // worktree branched from or as a catch-up merge, and charging them to
+      // whichever task happened to be in flight parks correct work.
+      const { failures, inherited } = checks.ok
+        ? { failures: [], inherited: [] }
+        : splitInheritedFailures(checks, await this.baseFailures(runId));
+      if (inherited.length) {
+        this.bus.publish({
+          type: "agent.log",
+          runId,
+          taskId,
+          sessionId: workerSession ?? taskId,
+          text: `${inherited.map((i) => i.command).join(", ")} also fails on ${this.wt.integrationBranch(runId)} — not charged to this task`,
+          ts: Date.now(),
+        });
+      }
+      if (failures.length) {
+        const detail = failures.map((f) => `$ ${f.command}\n${f.output}`).join("\n\n");
+        const notYours = inherited.length
+          ? `\n\nThese were already failing on the integration branch before you started — do NOT try to fix them, and do not let them distract you: ${inherited.map((i) => i.command).join(", ")}.`
+          : "";
+        qaFeedback = `Deterministic checks failed. Fix these before finishing:\n${detail}${notYours}`;
+        lastRejection = `Deterministic checks failed: ${failures.map((f) => f.command).join(", ")}\n${failures.map((f) => f.output.slice(-1500)).join("\n")}`;
         const iterations = task.qaIterations + 1;
         this.store.updateTask(runId, taskId, { qaIterations: iterations });
         if (iterations >= run.config.qaIterationCap) {
-          const guidance = await this.askOrPark(
-            runId,
-            taskId,
-            `deterministic checks still failing after ${iterations} attempts: ${checks.failures.map((f) => f.command).join(", ")}\n\n${checks.failures.map((f) => f.output.slice(-1500)).join("\n")}`
+          const guidance = await ask(
+            `deterministic checks still failing after ${iterations} attempts: ${failures.map((f) => f.command).join(", ")}\n\n${failures.map((f) => f.output.slice(-1500)).join("\n")}${notYours}`
           );
           if (guidance === null) return;
-          qaFeedback = `The operator looked at the failing checks and says:\n${guidance}\n\nThe checks that were failing:\n${checks.failures.map((f) => `$ ${f.command}\n${f.output}`).join("\n\n")}`;
+          qaFeedback = `The operator looked at the failing checks and says:\n${guidance}\n\nThe checks that were failing:\n${detail}`;
         }
         continue;
       }
@@ -1525,10 +1790,18 @@ export class RunController {
           role: "qa",
           model: run.config.models.qa,
           systemPrompt: qaSystemPrompt(toolbelt, skillsBlock(qaSkills)),
-          prompt: qaTaskPrompt(task, workerSummary.slice(0, 4000), diffStat.slice(0, 2000), this.store.drainFeedback(runId, taskId) || undefined),
+          prompt: qaTaskPrompt(
+            task,
+            workerSummary.slice(0, 4000),
+            diffStat.slice(0, 2000),
+            this.store.drainFeedback(runId, taskId) || undefined,
+            inherited.map((i) => i.command)
+          ),
           cwd: wt.path,
           disallowedTools: ["WebSearch"],
           maxTurns: qaTurns,
+          env: isolationEnv(iso),
+          reapOnEnd: true,
           budgetCheck: () => this.checkBudget(runId, taskId),
         });
         // A session cut off at its turn ceiling still returns a result message —
@@ -1552,12 +1825,13 @@ export class RunController {
         const respawns = task.respawns + 1;
         this.store.updateTask(runId, taskId, { respawns, errorSummary: String(e).slice(0, 500) });
         if (respawns >= run.config.workerRespawnCap) {
-          const guidance = await this.askOrPark(runId, taskId, `QA ended without a verdict ${respawns} times (the cap); last: ${String(e).slice(0, 200)}`);
+          const guidance = await ask(`QA ended without a verdict ${respawns} times (the cap); last: ${String(e).slice(0, 200)}`);
           if (guidance === null) return;
           qaFeedback = `QA never delivered a verdict — the work itself may be fine, and was never judged — and the operator stepped in with guidance; follow it over anything that contradicts it:\n${guidance}`;
         } else {
           qaFeedback = `The previous QA session ended without a verdict (${String(e).slice(0, 200)}) — the work itself may be fine, and was never judged. Inspect git log in this worktree, verify the committed work, and finish. Leave the verification cheap to repeat: a deterministic check or a command recorded in the commit message beats a long manual investigation QA has to redo.`;
         }
+        lastRejection = `QA ended without a verdict (respawn ${respawns} of ${run.config.workerRespawnCap}): ${String(e).slice(0, 500)}`;
         this.store.transitionTask(runId, taskId, "QA_FAILED", "QA ended without a verdict");
         this.store.transitionTask(runId, taskId, "WORKING", "re-dispatched after QA returned no verdict");
         continue;
@@ -1596,10 +1870,27 @@ export class RunController {
           continue;
         }
         this.store.transitionTask(runId, taskId, "ACCEPTED", verdict.notes);
-        break;
+        const merged = await this.integrate(runId, taskId);
+        if (merged.ok) return;
+        // The work passed; the base moved. Hand the conflict back to the worker
+        // that wrote the code — it has the worktree, the context and the only
+        // informed opinion about which side of each hunk belongs. Parking is
+        // what happens when that also fails.
+        if (conflictFixes >= CONFLICT_FIX_ATTEMPTS) {
+          const guidance = await ask(`merge conflicts in ${merged.conflicts.join(", ")}, and the worker could not resolve them`);
+          if (guidance === null) return;
+          qaFeedback = `The operator looked at the unresolved merge and says — follow it over anything that contradicts it:\n${guidance}`;
+          this.store.transitionTask(runId, taskId, "WORKING", "re-dispatched with the operator's merge guidance");
+          continue;
+        }
+        conflictFixes++;
+        const caught = await this.wt.catchUpTaskBranch(runId, taskId);
+        qaFeedback = conflictPrompt(this.wt.integrationBranch(runId), caught.ok ? merged.conflicts : caught.conflicts, caught.ok);
+        this.store.transitionTask(runId, taskId, "WORKING", "re-dispatched to resolve merge conflicts");
+        continue;
       }
       if (iterations >= run.config.qaIterationCap) {
-        const guidance = await this.askOrPark(runId, taskId, `QA rejected it ${iterations} times (the cap): ${verdict.reasons.join("; ")}`);
+        const guidance = await ask(`QA rejected it ${iterations} times (the cap): ${verdict.reasons.join("; ")}`);
         if (guidance === null) return;
         this.store.transitionTask(runId, taskId, "QA_FAILED", "cap reached; operator answered the escalation");
         this.store.transitionTask(runId, taskId, "WORKING", "re-dispatched with the operator's guidance");
@@ -1609,27 +1900,112 @@ export class RunController {
       this.store.transitionTask(runId, taskId, "QA_FAILED", verdict.reasons.join("; "));
       this.store.transitionTask(runId, taskId, "WORKING", "re-dispatched with mustFix list");
       qaFeedback = `QA rejected the previous iteration.\nReasons: ${verdict.reasons.join("; ")}\nMust fix:\n${verdict.mustFix.map((m) => `- ${m}`).join("\n")}`;
+      lastRejection = `QA rejected iteration ${iterations}.\nReasons: ${verdict.reasons.join("; ")}\nMust fix:\n${verdict.mustFix.map((m) => `- ${m}`).join("\n")}`;
     }
-
-    await this.integrate(runId, taskId);
   }
 
-  /** Continuous integration: merge on accept (PRD §11.1 Integrator); PRs wait for openPrs. */
-  private async integrate(runId: string, taskId: string): Promise<void> {
+  /**
+   * Continuous integration: merge on accept (PRD §11.1 Integrator); PRs wait for
+   * openPrs. Reports a conflict rather than parking on it — the caller decides
+   * whether the worker gets a go at it first.
+   */
+  private async integrate(runId: string, taskId: string): Promise<{ ok: true } | { ok: false; conflicts: string[] }> {
     const run = this.store.getRun(runId)!;
     const task = this.store.getTask(runId, taskId)!;
     const merge = await this.wt.mergeTaskBranch(runId, taskId);
     if (!merge.ok) {
       this.bus.publish({ type: "git.merge_conflict", runId, taskId, branch: task.branch ?? "", files: merge.conflicts, ts: Date.now() });
-      this.park(runId, taskId, `merge conflicts in ${merge.conflicts.join(", ")}`);
-      return;
+      return merge;
     }
     this.store.transitionTask(runId, taskId, "MERGED");
+    this.mergedShas.set(`${runId}/${taskId}`, merge.sha);
     this.bus.publish({ type: "git.merged", runId, taskId, branch: task.branch ?? "", sha: merge.sha, ts: Date.now() });
     // The PR is NOT opened here. Merging is continuous; publishing waits until
     // the whole run has been validated against the operator's intent (openPrs),
     // so no reviewer ever sees a PR the harness has not finished judging.
     void run;
+    return { ok: true };
+  }
+
+  /** The integration-branch commit each merged task landed as, for its issue. */
+  private mergedShas = new Map<string, string>();
+
+  /** Issue writes are serialized: one API call in flight, in the order tasks finished. */
+  private issueSync: Promise<void> = Promise.resolve();
+
+  /**
+   * Queue "what became of this task" for its issue. Never awaited by the caller:
+   * a GitHub round trip must not hold a worker slot that another ready task
+   * could be using, and an issue that fails to update is not a reason to fail
+   * a task whose code is already merged.
+   */
+  private queueIssueSync(runId: string, taskId: string): void {
+    if (!this.github.enabled) return;
+    this.issueSync = this.issueSync
+      .then(() => this.syncIssue(runId, taskId))
+      .catch((e) => {
+        this.bus.publish({
+          type: "agent.log",
+          runId,
+          sessionId: "integrator",
+          taskId,
+          text: `could not update the issue for this task: ${String(e).slice(0, 200)}`,
+          ts: Date.now(),
+        });
+      });
+  }
+
+  /**
+   * Say on the task's issue what became of it, now that the task is finished with.
+   *
+   * The harness filed an issue per task and then never wrote to it again. After a
+   * thirty-task run every issue still read as untouched — one that merged twelve
+   * hours ago looked exactly like one that never started, and the only place the
+   * outcome existed was a sqlite file on the operator's laptop.
+   *
+   * What merged is *commented*, not closed: it is merged into the run's
+   * integration branch, and the pull request that lands it on the base branch
+   * says "Closes #n", so a human merging it closes the issue with the merge that
+   * actually shipped. What was cancelled is closed here as not planned — no PR
+   * will ever mention it, so nothing else would ever close it. What parked stays
+   * open, which is precisely what an open issue means, and the comment says so.
+   */
+  private async syncIssue(runId: string, taskId: string): Promise<void> {
+    const task = this.store.getTask(runId, taskId);
+    if (!task?.githubIssueNumber) return;
+    const issue = task.githubIssueNumber;
+    // Keyed by state, so a resumed run that re-walks the same terminal state
+    // does not comment twice, but a task that parks and later merges does.
+    const key = `${runId}/${taskId}/${task.state}`;
+    const why = this.store.taskStateReason(runId, taskId);
+
+    if (task.state === "MERGED") {
+      const sha = this.mergedShas.get(`${runId}/${taskId}`);
+      const n = task.qaIterations;
+      await this.github.commentOnIssue(
+        issue,
+        key,
+        `**Done** — merged into \`${this.wt.integrationBranch(runId)}\`${sha ? ` as \`${sha.slice(0, 7)}\`` : ""} after ${n} QA iteration${n === 1 ? "" : "s"}.\n\n` +
+          `**Acceptance criteria**\n${task.acceptanceCriteria.map((c) => `- [x] ${c}`).join("\n")}\n\n` +
+          `This closes when the pull request for \`${task.branch ?? "the task branch"}\` is merged.`
+      );
+      return;
+    }
+
+    if (task.state === "NEEDS_HUMAN") {
+      await this.github.commentOnIssue(
+        issue,
+        key,
+        `**Parked for a human** — ${task.errorSummary || why || "the harness could not finish it"}\n\n` +
+          `The work so far is on \`${task.branch ?? "no branch"}\`. While the run is still going, a reply in this thread is picked up as guidance and the task is dispatched again.`
+      );
+      return;
+    }
+
+    if (task.state === "CANCELLED") {
+      await this.github.commentOnIssue(issue, key, `**Not attempted** — ${why || "the run ended before this task became reachable"}.`);
+      await this.github.closeIssue(issue, "not_planned");
+    }
   }
 
   private async openTaskPr(runId: string, taskId: string): Promise<void> {

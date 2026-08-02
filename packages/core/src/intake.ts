@@ -24,6 +24,13 @@ export interface IntakeRequest {
   config: RunConfig;
   ui: IntakeUi;
   budgetCheck: () => void | Promise<void>;
+  /**
+   * Skills for the intake conversation, already selected and rendered by the
+   * controller (which owns matching). Intake is where scope, edges and what is
+   * explicitly *not* wanted get decided, so an operator who binds a product
+   * skill to this role is binding it to the earliest decision in the run.
+   */
+  skillsBlock?: string;
 }
 
 const ASK_TOOL = "mcp__harness_intake__ask_user";
@@ -103,7 +110,7 @@ export async function runIntake(pool: AgentPool, bus: Bus, req: IntakeRequest): 
       sessionId,
       role: "intake",
       model: req.config.models.intake,
-      systemPrompt: intakeSystemPrompt(),
+      systemPrompt: intakeSystemPrompt(req.skillsBlock ?? ""),
       prompt:
         `The operator wants:\n\n${req.seed}\n\n` +
         `Survey the repository at your working directory, then ask what you need to. ` +

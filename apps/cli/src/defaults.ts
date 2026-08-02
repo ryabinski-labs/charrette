@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
+import { SUBPROJECT_DIRS } from "@harness/core";
 
 export const CONFIG_FILENAME = "harness.config.json";
 
@@ -64,12 +65,8 @@ const NODE_SCRIPTS = ["typecheck", "type-check", "lint", "test"];
  * gives QA a hard signal. Only conventional, non-destructive commands are
  * inferred; anything else must be passed explicitly with --check.
  */
-/**
- * Where a Node project commonly lives when the repo root is not one — a repo with
- * `frontend/` and `backend/` still has real checks, and reporting `none` there
- * silently leaves QA with no hard signal.
- */
-const SUBPROJECT_DIRS = ["frontend", "backend", "client", "server", "web", "api", "app", "src"];
+// Shared with the dependency seeder on purpose: checks inferred for a directory
+// the seeder does not install into are a red baseline in every worktree.
 
 /** Node scripts worth running in `dir` (relative to the repo), or [] if none. */
 function nodeScriptsIn(repo: string, dir: string): { checks: string[]; pm: string } {
@@ -92,11 +89,16 @@ export function detectChecks(repo: string): DetectedChecks {
   if (root.checks.length > 0) {
     return { checks: root.checks, source: `package.json scripts via ${root.pm}` };
   }
-  for (const dir of SUBPROJECT_DIRS) {
-    const sub = nodeScriptsIn(repo, dir);
-    if (sub.checks.length > 0) {
-      return { checks: sub.checks, source: `${dir}/package.json scripts via ${sub.pm}` };
-    }
+  // Every subproject, not the first one found. A repo shaped `frontend/` +
+  // `backend/` used to get checks for whichever came first in this list and
+  // none at all for the other half of the product — QA's only hard signal,
+  // silently covering half the code.
+  const subs = SUBPROJECT_DIRS.map((dir) => ({ dir, ...nodeScriptsIn(repo, dir) })).filter((s) => s.checks.length > 0);
+  if (subs.length > 0) {
+    return {
+      checks: subs.flatMap((s) => s.checks),
+      source: subs.map((s) => `${s.dir}/package.json scripts via ${s.pm}`).join(", "),
+    };
   }
   if (existsSync(path.join(repo, "Cargo.toml"))) {
     return { checks: ["cargo test", "cargo clippy -- -D warnings"], source: "Cargo.toml" };
@@ -117,6 +119,7 @@ export const FileConfig = z
     maxParallelWorkers: z.number().int().min(1).max(16).optional(),
     qaIterationCap: z.number().int().min(1).max(3).optional(),
     qaMaxTurns: z.number().int().min(20).max(300).optional(),
+    workerMaxTurns: z.number().int().min(20).max(400).optional(),
     workerRespawnCap: z.number().int().min(1).max(3).optional(),
     taskWallClockMinutes: z.number().int().min(5).optional(),
     models: z
@@ -135,6 +138,16 @@ export const FileConfig = z
       })
       .optional(),
     skillsDirs: z.array(z.string()).optional(),
+    /**
+     * Which skills a class of work gets, by name. Declaring this replaces the
+     * built-in table rather than extending it — the operator who writes one is
+     * saying what their corpus is for, and a silent merge with defaults naming
+     * skills they do not have would be harder to reason about than a list they
+     * can read. Copy the default out of `RunConfig` and edit it.
+     */
+    skillRouting: z.array(z.object({ when: z.string(), skills: z.array(z.string()) })).optional(),
+    /** Skills a role always carries, keyed by role, whatever the work says. */
+    roleSkills: z.record(z.string(), z.array(z.string())).optional(),
     githubRepo: z.string().optional(),
     prMode: z.enum(["single", "per-task"]).optional(),
     deterministicChecks: z.array(z.string()).optional(),

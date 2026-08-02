@@ -1,0 +1,127 @@
+import { execFileSync } from "node:child_process";
+import { appendFileSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { RunConfig } from "@harness/shared";
+import { describe, expect, it } from "vitest";
+import { Bus } from "./bus.js";
+import type { GitHubAdapter } from "./github.js";
+import type { AgentPool, AgentResult, AgentSpec } from "./pool.js";
+import { RunController, type GateHandler } from "./runController.js";
+import { Store } from "./store.js";
+
+const DOCS = "<prd>\n# PRD\n</prd>\n<conventions>\nc\n</conventions>";
+const DAG =
+  "```json\n" +
+  JSON.stringify({
+    epics: [{ id: "epic-e", title: "E", summary: "s" }],
+    tasks: [
+      {
+        id: "task-a",
+        epicId: "epic-e",
+        title: "Webhook delivery",
+        spec: "Deliver signed webhooks",
+        acceptanceCriteria: ["it delivers"],
+        dependsOn: [],
+        touchedPaths: [],
+        estimatedSize: "S",
+      },
+    ],
+  }) +
+  "\n```";
+
+/**
+ * The check reads a file that is already committed, so "what the suite does" is
+ * a property of the tree — identical on the base, and changed only by a worker
+ * that actually breaks something.
+ */
+const CHECK = "cat failures.txt >&2; exit 1";
+const PRE_EXISTING = "✖ card provider rejects an expired token (196.264417ms)";
+
+const gitIn = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "ignore" });
+
+function repo(): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "harness-baseline-"));
+  writeFileSync(path.join(dir, "README.md"), "# fixture\n");
+  writeFileSync(path.join(dir, "failures.txt"), `${PRE_EXISTING}\n`);
+  gitIn(dir, "init", "-b", "main");
+  gitIn(dir, "config", "user.email", "harness@example.com");
+  gitIn(dir, "config", "user.name", "harness");
+  gitIn(dir, "add", "-A");
+  gitIn(dir, "commit", "-m", "init");
+  return dir;
+}
+
+const noGithub = { enabled: false } as unknown as GitHubAdapter;
+const approveAll: GateHandler = {
+  async resolvePlanGate() {
+    return { approved: true, feedback: "" };
+  },
+  async resolveBudgetGate() {
+    return null;
+  },
+};
+
+/** Plays the happy path; `work` is what the worker does to its worktree. */
+function pool(work: (cwd: string) => void) {
+  let planning = 0;
+  const qaPrompts: string[] = [];
+  const agents = {
+    async run(spec: AgentSpec): Promise<AgentResult> {
+      let resultText = "";
+      if (spec.role === "planner") resultText = planning++ === 0 ? DOCS : DAG;
+      else if (spec.role === "worker") {
+        work(spec.cwd);
+        gitIn(spec.cwd, "add", "-A");
+        gitIn(spec.cwd, "commit", "-m", "wip");
+        resultText = "worker done";
+      } else if (spec.role === "qa") {
+        qaPrompts.push(spec.prompt as string);
+        resultText = '{"verdict":"PASS","notes":"fine"}';
+      } else resultText = '{"verdict":"PASS","summary":"n/a"}';
+      return { sessionId: `s${qaPrompts.length}${planning}`, resultText, costUsd: 0, turns: 1, outcome: "done" };
+    },
+  };
+  return { pool: agents as unknown as AgentPool, qaPrompts };
+}
+
+async function run(work: (cwd: string) => void) {
+  const { pool: agents, qaPrompts } = pool(work);
+  const store = new Store(":memory:");
+  const controller = new RunController(store, new Bus(store), agents, noGithub, approveAll, repo());
+  const runId = await controller.startRun("build it", RunConfig.parse({ deterministicChecks: [CHECK], qaIterationCap: 1 }));
+  return { task: store.getTask(runId, "task-a")!, qaPrompts };
+}
+
+/**
+ * Production, run 40da9337: `webhook-delivery-worker` failed its deterministic
+ * checks three times on `providers.test.ts` — a test belonging to another task's
+ * code, pulled into its worktree by a catch-up merge and already failing on the
+ * integration branch. It burned its whole iteration cap on somebody else's bug
+ * and escalated to the operator with correct work sitting in the worktree.
+ */
+describe("a task whose base is already red", () => {
+  it("is not charged for a failure it inherited, and reaches QA", async () => {
+    const { task, qaPrompts } = await run((cwd) => writeFileSync(path.join(cwd, "feature.ts"), "export const x = 1;\n"));
+
+    expect(task.state).toBe("MERGED");
+    // Never spent an iteration: the check failed, and none of it was its doing.
+    expect(task.qaIterations).toBe(1); // the QA pass itself, not a check failure
+    expect(qaPrompts).toHaveLength(1);
+    // And QA is told, so it does not independently fail the task for the same suite.
+    expect(qaPrompts[0]).toContain("Already red on the integration branch");
+    expect(qaPrompts[0]).toContain(CHECK);
+  }, 30_000);
+
+  it("is still charged for the failure it introduced itself", async () => {
+    const { task, qaPrompts } = await run((cwd) => {
+      writeFileSync(path.join(cwd, "feature.ts"), "export const x = 1;\n");
+      appendFileSync(path.join(cwd, "failures.txt"), "✖ webhook signature verifies against the endpoint secret\n");
+    });
+
+    // One new failure among the inherited ones is still a failure: cap is 1, so
+    // it escalates rather than merging.
+    expect(task.state).toBe("NEEDS_HUMAN");
+    expect(qaPrompts).toHaveLength(0);
+  }, 30_000);
+});

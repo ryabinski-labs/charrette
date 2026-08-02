@@ -29,6 +29,50 @@ const CANDIDATES: { name: string; use: string }[] = [
     use: "AWS CLI with the operator's live credentials. READ ONLY unless the task spec names the exact resource to change: describe/list/get calls are fine, and so is anything against a localstack or sandbox endpoint. Never delete, terminate, scale, or modify a resource you did not create.",
   },
   {
+    name: "terraform",
+    use: "Infrastructure as code. `init -backend=false`, `fmt -check`, `validate` and `plan` are the verification loop — run them, they are how an IaC change is checked. NEVER `apply`, `destroy`, `import`, `state mv/rm`, or `taint`: those change the operator's real infrastructure. You write reviewed configuration; a human applies it.",
+  },
+  {
+    name: "tofu",
+    use: "OpenTofu, the Terraform fork — same commands, same rule. `init -backend=false`, `fmt -check`, `validate`, `plan` yes; `apply`/`destroy`/`import`/`state` writes never.",
+  },
+  {
+    name: "kubectl",
+    use: "Kubernetes. `--dry-run=server` (or `-o yaml`) validates a manifest against the live API without changing anything, and `kubectl explain` settles schema questions — use both. Read verbs (get/describe/logs/diff) are fine. NEVER apply/create/delete/patch/scale/rollout without --dry-run: the cluster is production.",
+  },
+  {
+    name: "helm",
+    use: "Helm charts. `helm lint`, `helm template` and `helm install --dry-run` render and check a chart without touching a cluster. NEVER `install`, `upgrade`, `rollback` or `uninstall` for real.",
+  },
+  {
+    name: "pulumi",
+    use: "Infrastructure as code. `pulumi preview` is the check. NEVER `pulumi up`, `destroy`, or `state` writes.",
+  },
+  {
+    name: "cdk",
+    use: "AWS CDK. `cdk synth` (emits the CloudFormation template — read it, that is the real artifact) and `cdk diff` are the checks. NEVER `cdk deploy` or `cdk destroy`.",
+  },
+  {
+    name: "gcloud",
+    use: "Google Cloud CLI with the operator's live credentials. READ ONLY: describe/list/get. Many commands take `--dry-run` or `--validate-only` — prefer those. Never create, delete, or update a resource.",
+  },
+  {
+    name: "az",
+    use: "Azure CLI with the operator's live credentials. READ ONLY: show/list. `az deployment ... what-if` and `--validate-only` check a template without deploying it. Never create, delete, or update a resource.",
+  },
+  {
+    name: "conftest",
+    use: "Policy checks over IaC and manifests (`conftest test <dir>`). If the repo ships policies, an infra change is not verified until they pass.",
+  },
+  {
+    name: "checkov",
+    use: "Static security scanning for IaC (`checkov -d <dir>`). Catches the class of defect a plan never shows: public ingress, unencrypted volumes, IAM wildcards, missing deletion protection.",
+  },
+  {
+    name: "tflint",
+    use: "Terraform linter (`tflint --recursive`). Provider-aware, so it catches invalid instance types and deprecated arguments that `terraform validate` accepts.",
+  },
+  {
     name: "podman",
     use: "Containers. Use `podman compose up -d` (or `podman run`) to stand up the app and its dependencies for a real end-to-end check instead of guessing. Tear down what you start.",
   },

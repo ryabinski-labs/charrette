@@ -77,6 +77,8 @@ export class WorktreeManager {
    * between A's failed merge and A's abort wedges the worktree on MERGE_HEAD).
    */
   private mergeLock: Promise<unknown> = Promise.resolve();
+  /** Its own lock, so measuring the base never waits on a merge or blocks one. */
+  private baselineLock: Promise<unknown> = Promise.resolve();
 
   constructor(private repoPath: string) {}
 
@@ -125,6 +127,39 @@ export class WorktreeManager {
     await git(this.repoPath, ["worktree", "prune"], { serialize: true }).catch(() => undefined);
   }
 
+  /** The commit the integration branch currently points at — the base every task is judged against. */
+  async integrationHead(runId: string): Promise<string> {
+    return git(this.repoPath, ["rev-parse", this.integrationBranch(runId)], { serialize: true }).catch(() => "");
+  }
+
+  /**
+   * Run something against one commit of the integration branch, in a worktree of
+   * its own, and give the caller its path.
+   *
+   * Deliberately not the integration worktree: what runs here is a full test
+   * suite that can take minutes, and the integration worktree is where merges
+   * land — a merge landing under a running suite would corrupt both. Serialized
+   * so a second caller cannot check out a different commit mid-suite, and reused
+   * across commits so the dependency install is paid once per run.
+   */
+  async withBaselineWorktree<T>(runId: string, sha: string, fn: (wtPath: string) => Promise<T>): Promise<T> {
+    const wtPath = path.join(this.worktreeRoot(), runId, "__baseline__");
+    const run = async (): Promise<T> => {
+      if (!existsSync(wtPath)) {
+        await git(this.repoPath, ["worktree", "add", "--detach", wtPath, sha], { serialize: true });
+      } else {
+        await git(wtPath, ["checkout", "--detach", "--force", sha], { serialize: true });
+        // Leftovers from the previous commit's suite. Without -x, so the seeded
+        // node_modules (gitignored) survives and is not reinstalled every time.
+        await git(wtPath, ["clean", "-fd"], { serialize: true }).catch(() => undefined);
+      }
+      return fn(wtPath);
+    };
+    const next = this.baselineLock.then(run, run);
+    this.baselineLock = next.catch(() => undefined);
+    return next;
+  }
+
   /** The integration branch checked out on disk — where merges land and the validator reads. */
   async ensureIntegrationWorktree(runId: string): Promise<string> {
     let ready = this.integrationReady.get(runId);
@@ -144,6 +179,42 @@ export class WorktreeManager {
       ready.catch(() => this.integrationReady.delete(runId));
     }
     return ready;
+  }
+
+  /**
+   * Bring the integration branch *into* a task's worktree, so the worker that
+   * wrote the code can resolve the conflict itself.
+   *
+   * A task branches from the integration branch when it starts and merges back
+   * when it is accepted; anything that merged in between is divergence it has
+   * never seen. That is not a defect in the work — one run parked two tasks
+   * this way, both carrying QA-accepted code, both colliding on the same shared
+   * registry module that the plan told every task to append to.
+   *
+   * A failed merge is deliberately left in place rather than aborted: the
+   * worker gets real conflict markers and a `git status` that says what to fix,
+   * which is the thing it is best at. `git merge --abort` remains available to
+   * it if it decides the merge is wrong.
+   */
+  async catchUpTaskBranch(runId: string, taskId: string): Promise<{ ok: true } | { ok: false; conflicts: string[] }> {
+    const wtPath = path.join(this.worktreeRoot(), runId, taskId);
+    const integration = this.integrationBranch(runId);
+    const run = async (): Promise<{ ok: true } | { ok: false; conflicts: string[] }> => {
+      try {
+        await git(wtPath, ["merge", "--no-ff", "--no-edit", integration], { serialize: true });
+        return { ok: true };
+      } catch {
+        const status = await git(wtPath, ["diff", "--name-only", "--diff-filter=U"], { serialize: true }).catch(() => "");
+        const conflicts = status.split("\n").filter(Boolean);
+        // No unmerged paths means the merge failed for some other reason (a
+        // dirty worktree, say). Leaving a half-merge behind then helps nobody.
+        if (!conflicts.length) await git(wtPath, ["merge", "--abort"], { serialize: true }).catch(() => undefined);
+        return { ok: false, conflicts };
+      }
+    };
+    const next = this.mergeLock.then(run, run);
+    this.mergeLock = next.catch(() => undefined);
+    return next;
   }
 
   /**

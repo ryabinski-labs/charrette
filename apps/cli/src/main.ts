@@ -17,7 +17,10 @@ import {
   resolveRepoRoot,
 } from "./defaults.js";
 import { TerminalChat } from "./chat.js";
+import { armCrashLog, installCrashLog, recordFatal } from "./crashlog.js";
 import { notifyDone } from "./notify.js";
+
+installCrashLog();
 
 /**
  * Start the dashboard for a run, or nothing when it is turned off. Kept in one
@@ -49,6 +52,9 @@ function makeDashboardFactory(want: boolean, port: number | undefined): {
 function makeController(repoPath: string, gateOverride?: (bus: Bus, store: Store) => GateHandler): { controller: RunController; store: Store; bus: Bus } {
   const stateDir = path.join(repoPath, ".harness");
   mkdirSync(stateDir, { recursive: true });
+  // The first moment there is somewhere durable to write down why this process
+  // stopped. Every run and resume passes through here.
+  armCrashLog(stateDir);
   // Every run and resume passes through here, so this is the one place the state
   // directory is known to exist before anything writes to it.
   if (ensureIgnored(repoPath, ".harness/")) process.stdout.write("  added .harness/ to .gitignore (harness run state, not source)\n");
@@ -334,11 +340,14 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
     maxParallelWorkers: file.maxParallelWorkers,
     qaIterationCap: file.qaIterationCap,
     qaMaxTurns: file.qaMaxTurns,
+    workerMaxTurns: file.workerMaxTurns,
     workerRespawnCap: file.workerRespawnCap,
     taskWallClockMinutes: file.taskWallClockMinutes,
     models: file.models,
     budget: { runCapUsd, taskCapUsd },
     skillsDirs,
+    skillRouting: file.skillRouting,
+    roleSkills: file.roleSkills,
     // Persist the resolved slug so the dashboard can link issues and PRs on a resume.
     githubRepo: github.slug ?? file.githubRepo,
     prMode: file.prMode,
@@ -483,6 +492,20 @@ program
       store.patchRunConfig(runId, { qaMaxTurns: file.qaMaxTurns });
       process.stdout.write(`QA turn ceiling updated from ${CONFIG_FILENAME}: ${existing.config.qaMaxTurns} → ${file.qaMaxTurns}\n`);
     }
+    // Same reason again, for the worker: the ceiling is what a long task dies at.
+    if (existing && file.workerMaxTurns && file.workerMaxTurns !== existing.config.workerMaxTurns) {
+      store.patchRunConfig(runId, { workerMaxTurns: file.workerMaxTurns });
+      process.stdout.write(`Worker turn ceiling updated from ${CONFIG_FILENAME}: ${existing.config.workerMaxTurns} → ${file.workerMaxTurns}\n`);
+    }
+    // Who the remaining tasks get to consult. A run's routing table is frozen at
+    // the moment it started, which means a run half finished when the operator
+    // decided its UI work needs a designer would never see that decision — and
+    // the tasks that would benefit are exactly the ones still queued.
+    for (const key of ["skillRouting", "roleSkills"] as const) {
+      if (!existing || !file[key] || JSON.stringify(file[key]) === JSON.stringify(existing.config[key])) continue;
+      store.patchRunConfig(runId, { [key]: file[key] } as Partial<RunConfig>);
+      process.stdout.write(`${key} updated from ${CONFIG_FILENAME} for the remaining tasks\n`);
+    }
     // Setting prodUrl on a run that already finished is what extends it past the
     // pull request: the next resume follows the deploy and checks production.
     if (existing && file.prodUrl !== undefined && file.prodUrl !== existing.config.prodUrl) {
@@ -602,6 +625,6 @@ program
   });
 
 program.parseAsync().catch((e: unknown) => {
-  console.error(e instanceof Error ? e.message : String(e));
+  recordFatal(e);
   process.exit(1);
 });

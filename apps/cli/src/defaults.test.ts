@@ -67,6 +67,26 @@ describe("loadFileConfig", () => {
     const repo = tmpRepo({ "harness.config.json": "{ nope" });
     expect(() => loadFileConfig(repo)).toThrow(/not valid JSON/);
   });
+
+  /**
+   * The schema is `.strict()`, so a knob that exists in `RunConfig` but not here
+   * is not merely undocumented — declaring it makes the whole file throw. Every
+   * one of these shipped that way: settable in the type, unsettable by a person.
+   */
+  it("accepts the knobs that decide who works on what", () => {
+    const declared = {
+      workerMaxTurns: 200,
+      skillRouting: [{ when: "\\b(payments|billing)\\b", skills: ["fintech-reviewer"] }],
+      roleSkills: { planner: ["product-manager"], qa: ["security-engineer"] },
+    };
+    const repo = tmpRepo({ "harness.config.json": JSON.stringify(declared) });
+    expect(loadFileConfig(repo).config).toEqual(declared);
+  });
+
+  it("still rejects a routing rule that is not one", () => {
+    const repo = tmpRepo({ "harness.config.json": JSON.stringify({ skillRouting: [{ when: "x" }] }) });
+    expect(() => loadFileConfig(repo)).toThrow(/is invalid/);
+  });
 });
 
 describe("detectChecks in monorepo layouts", () => {
@@ -89,6 +109,32 @@ describe("detectChecks in monorepo layouts", () => {
     mkdirSync(path.join(repo, "frontend"));
     writeFileSync(path.join(repo, "frontend", "package.json"), JSON.stringify({ scripts: { lint: "eslint" } }));
     expect(detectChecks(repo).checks).toEqual(["npm run test"]);
+  });
+
+  /**
+   * The regression: the loop returned at the first subproject it found, so a
+   * repo with both halves got checks for whichever came first in the list and
+   * none at all for the other — QA's only hard signal, silently covering half
+   * the product.
+   */
+  it("collects every subproject, not just the first one found", () => {
+    const repo = tmpRepo();
+    for (const [dir, scripts] of [
+      ["frontend", { typecheck: "vue-tsc", test: "vitest" }],
+      ["backend", { lint: "golangci-lint run", test: "go test ./..." }],
+    ] as const) {
+      mkdirSync(path.join(repo, dir));
+      writeFileSync(path.join(repo, dir, "package.json"), JSON.stringify({ scripts }));
+    }
+    const { checks, source } = detectChecks(repo);
+    expect(checks).toEqual([
+      "cd frontend && npm run typecheck",
+      "cd frontend && npm run test",
+      "cd backend && npm run lint",
+      "cd backend && npm run test",
+    ]);
+    expect(source).toContain("frontend/package.json");
+    expect(source).toContain("backend/package.json");
   });
 
   it("still reports none when a subdirectory has no useful scripts", () => {
