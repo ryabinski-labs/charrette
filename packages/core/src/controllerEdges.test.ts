@@ -165,7 +165,7 @@ describe("a budget stop reaching each stage that must let it through", () => {
     const dir = repo();
     const { pool, ref } = rolePool(
       {
-        planner: (s) => (s.prompt.includes("PRD") ? dagJson() : DOCS()),
+        planner: (s) => (s.tools?.length ? DOCS() : dagJson()),
         worker,
         qa: () => QA_PASS,
         // Bills enough to trip the cap the moment this stage starts.
@@ -189,7 +189,7 @@ describe("a budget stop reaching each stage that must let it through", () => {
     const dir = repo();
     const { pool, ref } = rolePool(
       {
-        planner: (s) => (s.prompt.includes("PRD") ? dagJson() : DOCS()),
+        planner: (s) => (s.tools?.length ? DOCS() : dagJson()),
         worker,
         // Never writes the verdict, so the re-ask runs — and trips the cap.
         qa: () => "no verdict here",
@@ -209,7 +209,7 @@ describe("a budget stop reaching each stage that must let it through", () => {
     let asked = 0;
     const { pool, ref } = rolePool(
       {
-        planner: (s) => (s.prompt.includes("PRD") ? dagJson(["task-a", "task-b"]) : DOCS()),
+        planner: (s) => (s.tools?.length ? DOCS() : dagJson(["task-a", "task-b"])),
         worker,
         qa: () => QA_PASS,
       },
@@ -241,7 +241,7 @@ describe("following a merge that has not happened yet", () => {
     const dir = repo({ remote: true });
     const { adapter } = fakeGithub();
     const { pool } = rolePool({
-      planner: (s) => (s.prompt.includes("PRD") ? dagJson() : DOCS()),
+      planner: (s) => (s.tools?.length ? DOCS() : dagJson()),
       worker,
       qa: () => QA_PASS,
       validator: () => '```json\n{"verdict":"PASS","gaps":[],"summary":"ok"}\n```',
@@ -269,7 +269,7 @@ describe("following a merge that has not happened yet", () => {
       checks: { listForRef: async () => ({ data: [{ name: "deploy-prod", status: "completed", conclusion: "failure" }] }) },
     });
     const { pool } = rolePool({
-      planner: (s) => (s.prompt.includes("PRD") ? dagJson() : DOCS()),
+      planner: (s) => (s.tools?.length ? DOCS() : dagJson()),
       worker,
       qa: () => QA_PASS,
       validator: () => '```json\n{"verdict":"PASS","gaps":[],"summary":"ok"}\n```',
@@ -294,32 +294,34 @@ describe("opening pull requests from a detached HEAD", () => {
     const dir = repo({ remote: true, detached: true });
     const { adapter } = fakeGithub();
     const { pool } = rolePool({
-      planner: (s) => (s.prompt.includes("PRD") ? dagJson() : DOCS()),
+      planner: (s) => (s.tools?.length ? DOCS() : dagJson()),
       worker,
       qa: () => QA_PASS,
       validator: () => '```json\n{"verdict":"PASS","gaps":[],"summary":"ok"}\n```',
     });
-    const { controller } = build({ repoPath: dir, pool, github: adapter });
+    const { controller, events } = build({ repoPath: dir, pool, github: adapter });
 
-    await expect(controller.startRun("build a thing", RunConfig.parse(BASE))).rejects.toThrow(
-      /no base branch \(detached HEAD\)/
-    );
+    await controller.startRun("build a thing", RunConfig.parse(BASE));
+
+    // Reported, not thrown: the work is merged locally either way, and losing
+    // the run over a missing branch name would throw that away.
+    expect(logs(events).some((t) => /pull request could not be opened[\s\S]*detached HEAD/.test(t))).toBe(true);
   });
 
   it("refuses the same way for per-task pull requests", async () => {
     const dir = repo({ remote: true, detached: true });
     const { adapter } = fakeGithub();
     const { pool } = rolePool({
-      planner: (s) => (s.prompt.includes("PRD") ? dagJson() : DOCS()),
+      planner: (s) => (s.tools?.length ? DOCS() : dagJson()),
       worker,
       qa: () => QA_PASS,
       validator: () => '```json\n{"verdict":"PASS","gaps":[],"summary":"ok"}\n```',
     });
-    const { controller } = build({ repoPath: dir, pool, github: adapter });
+    const { controller, events } = build({ repoPath: dir, pool, github: adapter });
 
-    await expect(controller.startRun("build a thing", RunConfig.parse({ ...BASE, prMode: "per-task" }))).rejects.toThrow(
-      /no base branch \(detached HEAD\)/
-    );
+    await controller.startRun("build a thing", RunConfig.parse({ ...BASE, prMode: "per-task" }));
+
+    expect(logs(events).some((t) => /pull request could not be opened[\s\S]*detached HEAD/.test(t))).toBe(true);
   });
 });
 
@@ -333,7 +335,7 @@ describe("the pull request's title and body", () => {
       body: string;
     }) => (created.push(a), { data: { number: 51, html_url: "https://x.invalid/pull/51" } });
     const { pool } = rolePool({
-      planner: (s) => (s.prompt.includes("PRD") ? dagJson() : DOCS("no heading here, just prose")),
+      planner: (s) => (s.tools?.length ? DOCS("no heading here, just prose") : dagJson()),
       worker,
       qa: () => QA_PASS,
       validator: () => '```json\n{"verdict":"FAIL","gaps":["no offline mode"],"summary":"most of it"}\n```',
@@ -355,7 +357,7 @@ describe("the pull request's title and body", () => {
     (adapter as unknown as { octokit: { rest: { pulls: { create: unknown } } } }).octokit.rest.pulls.create = async (a: { title: string }) =>
       (created.push(a), { data: { number: 51, html_url: "https://x.invalid/pull/51" } });
     const { pool } = rolePool({
-      planner: (s) => (s.prompt.includes("PRD") ? dagJson() : DOCS(`# ${"a rather wordy heading ".repeat(8)}`)),
+      planner: (s) => (s.tools?.length ? DOCS(`# ${"a rather wordy heading ".repeat(8)}`) : dagJson()),
       worker,
       qa: () => QA_PASS,
       validator: () => '```json\n{"verdict":"FAIL","gaps":[],"summary":""}\n```',
@@ -376,7 +378,7 @@ describe("the pull request's title and body", () => {
     (adapter as unknown as { octokit: { rest: { pulls: { create: unknown } } } }).octokit.rest.pulls.create = async (a: { body: string }) =>
       (created.push(a), { data: { number: 51, html_url: "https://x.invalid/pull/51" } });
     const { pool } = rolePool({
-      planner: (s) => (s.prompt.includes("PRD") ? dagJson() : DOCS()),
+      planner: (s) => (s.tools?.length ? DOCS() : dagJson()),
       worker,
       qa: () => QA_PASS,
       validator: () => '```json\n{"verdict":"FAIL","gaps":[],"summary":""}\n```',
@@ -392,32 +394,28 @@ describe("the pull request's title and body", () => {
 });
 
 describe("what the issue comment says when the harness knows less", () => {
-  it("names no branch and no reason when it has neither", async () => {
+  it("names no branch for a task that parked before it ever had one", async () => {
     const dir = repo({ remote: true });
     const { adapter, comments } = fakeGithub();
     const { pool } = rolePool({
-      planner: (s) => (s.prompt.includes("PRD") ? dagJson(["task-a", "task-b"]) : DOCS()),
-      worker: (spec, nth) => (spec.taskId === "task-b" ? new Error("boom") : worker(spec, nth)),
-      advisor: () => "",
+      planner: (s) => (s.tools?.length ? DOCS() : dagJson()),
+      worker,
       qa: () => QA_PASS,
-      validator: () => '```json\n{"verdict":"PASS","gaps":[],"summary":"ok"}\n```',
     });
+    // A file where the worktree root has to go: the task cannot be given a
+    // branch at all, so the issue has nothing to point the operator at.
+    writeFileSync(`${dir}-wt`, "not a directory");
     const { controller, store } = build({
       repoPath: dir,
       pool,
       github: adapter,
       gates: { async resolveTaskGate() { return null; } },
     });
-    const runId = await controller.startRun("build a thing", RunConfig.parse({ ...BASE, workerRespawnCap: 1, maxParallelWorkers: 1 }));
-    // Strip what the harness recorded, leaving the fallbacks to do the talking.
-    store.updateTask(runId, "task-b", { errorSummary: null, branch: null });
-    store.db.prepare("DELETE FROM events WHERE type = 'task.state_changed' AND taskId = 'task-b'").run();
-    comments.length = 0;
 
-    await controller.resume(runId);
+    const runId = await controller.startRun("build a thing", RunConfig.parse(BASE));
 
-    expect(comments.some((c) => /\*\*Parked for a human\*\* — the harness could not finish it/.test(c.body))).toBe(true);
-    expect(comments.some((c) => /on `no branch`/.test(c.body))).toBe(true);
+    expect(store.getTask(runId, "task-a")!.branch).toBeNull();
+    expect(comments.some((c) => /\*\*Parked for a human\*\*/.test(c.body) && /on \`no branch\`/.test(c.body))).toBe(true);
   });
 });
 
@@ -441,6 +439,12 @@ describe("counting things the operator reads", () => {
 });
 
 describe("a task gate opened before anything was rejected", () => {
+  /**
+   * The wall-clock gate is the only one that does not know its own cause: every
+   * other gate names the failure that opened it. Reaching it with nothing yet
+   * rejected takes the merge-conflict path, which is the one loop that comes
+   * back round without recording a rejection.
+   */
   it("says only that time passed, because that is all it knows", async () => {
     const dir = repo();
     const realNow = Date.now.bind(Date);
@@ -448,12 +452,17 @@ describe("a task gate opened before anything was rejected", () => {
     vi.spyOn(Date, "now").mockImplementation(() => realNow() + offset);
     const gates: TaskGate[] = [];
     const { pool } = rolePool({
-      planner: (s) => (s.prompt.includes("PRD") ? dagJson() : DOCS()),
+      planner: (s) => (s.tools?.length ? DOCS() : dagJson(["task-a", "task-b"])),
       worker: (spec, nth) => {
-        // Blows the wall clock on the very first pass, before QA has judged
-        // anything at all.
-        if (nth === 1) offset = 2 * 60 * 60 * 1000;
-        else return worker(spec, nth);
+        if (/ACCEPTED by QA/.test(spec.prompt)) {
+          // Handed a conflict it cannot settle, and slow about it.
+          offset = 2 * 60 * 60 * 1000;
+          return "I could not work out which side to keep";
+        }
+        commitInWorktree(spec.cwd, "shared.txt");
+        writeFileSync(path.join(spec.cwd, "shared.txt"), `${path.basename(spec.cwd)} ${nth}\n`);
+        execFileSync("git", ["add", "-A"], { cwd: spec.cwd, stdio: "ignore" });
+        execFileSync("git", ["-c", "user.email=w@x.invalid", "-c", "user.name=W", "commit", "-m", "differ"], { cwd: spec.cwd, stdio: "ignore" });
         return "did the work";
       },
       advisor: () => "",
@@ -465,15 +474,19 @@ describe("a task gate opened before anything was rejected", () => {
       gates: {
         async resolveTaskGate(gate) {
           gates.push(gate);
-          return "carry on";
+          // Answer the conflict gate so the loop comes back round once more —
+          // that next pass is the one whose wall clock has already blown, with
+          // nothing yet rejected to explain it.
+          return /merge conflicts/.test(gate.why) ? "keep both sides" : null;
         },
       },
     });
 
-    await controller.startRun("build a thing", RunConfig.parse({ ...BASE, taskWallClockMinutes: 30 }));
+    await controller.startRun("build a thing", RunConfig.parse({ ...BASE, taskWallClockMinutes: 30, maxParallelWorkers: 2 }));
 
-    expect(gates[0]!.why).toContain("still not accepted after 30 minutes");
-    expect(gates[0]!.why).not.toContain("Why the last iteration was sent back");
+    const wallClock = gates.find((g) => /still not accepted after 30 minutes/.test(g.why));
+    expect(wallClock).toBeDefined();
+    expect(wallClock!.why).not.toContain("Why the last iteration was sent back");
   });
 });
 
@@ -482,7 +495,7 @@ describe("the advisor with nowhere of its own to work", () => {
     const dir = repo();
     const seen: AgentSpec[] = [];
     const { pool, specs } = rolePool({
-      planner: (s) => (s.prompt.includes("PRD") ? dagJson() : DOCS()),
+      planner: (s) => (s.tools?.length ? DOCS() : dagJson()),
       worker: () => new Error("boom"),
       advisor: (spec) => (seen.push(spec), ""),
     });
