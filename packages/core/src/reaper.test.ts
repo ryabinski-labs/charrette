@@ -59,6 +59,27 @@ describe("orphan reaper", () => {
     expect(alive(pid)).toBe(false);
   });
 
+  /**
+   * SIGTERM first so a test runner can drop its database connections; SIGKILL
+   * for whatever ignores it. A wedged test process — the exact thing that held
+   * a worktree open for 13 hours — is under no obligation to take the hint.
+   */
+  it("escalates to SIGKILL for a process that ignores SIGTERM, and says which signal killed it", async () => {
+    const wt = dir("wt");
+    const child = spawn("sh", ["-c", 'trap "" TERM; sleep 120'], { cwd: wt, detached: true, stdio: "ignore" });
+    child.unref();
+    started.push(child.pid!);
+    await new Promise((r) => setTimeout(r, 300));
+
+    const reaped = await reapUnder(wt, { graceMs: 500 });
+
+    const mine = reaped.find((r) => r.pid === child.pid);
+    expect(mine?.signal).toBe("SIGKILL");
+    // Waited for rather than probed: a just-killed child stays a zombie, and so
+    // still answers signal 0, until this process reaps it.
+    await expect(new Promise((r) => child.on("exit", (_c, s) => r(s)))).resolves.toBe("SIGKILL");
+  });
+
   it("reaches a process in a subdirectory of the worktree", async () => {
     const wt = dir("wt");
     const sub = realpathSync(mkdtempSync(path.join(wt, "backend-")));
