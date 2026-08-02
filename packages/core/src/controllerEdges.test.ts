@@ -65,7 +65,7 @@ const dagJson = (ids: string[] = ["task-a"]) =>
   }) +
   "\n```";
 
-type Answer = string | ((spec: AgentSpec, nth: number) => string | AgentResult | Error);
+type Answer = string | ((spec: AgentSpec, nth: number) => string | Partial<AgentResult> | Error);
 
 function rolePool(answers: Partial<Record<string, Answer>>, opts: { bill?: number; noSdkSession?: boolean } = {}) {
   const specs: AgentSpec[] = [];
@@ -165,7 +165,7 @@ describe("a budget stop reaching each stage that must let it through", () => {
     const dir = repo();
     const { pool, ref } = rolePool(
       {
-        planner: (s) => (s.tools?.length ? DOCS() : dagJson()),
+        planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS() : dagJson()),
         worker,
         qa: () => QA_PASS,
         // Bills enough to trip the cap the moment this stage starts.
@@ -189,7 +189,7 @@ describe("a budget stop reaching each stage that must let it through", () => {
     const dir = repo();
     const { pool, ref } = rolePool(
       {
-        planner: (s) => (s.tools?.length ? DOCS() : dagJson()),
+        planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS() : dagJson()),
         worker,
         // Never writes the verdict, so the re-ask runs — and trips the cap.
         qa: () => "no verdict here",
@@ -209,7 +209,7 @@ describe("a budget stop reaching each stage that must let it through", () => {
     let asked = 0;
     const { pool, ref } = rolePool(
       {
-        planner: (s) => (s.tools?.length ? DOCS() : dagJson(["task-a", "task-b"])),
+        planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS() : dagJson(["task-a", "task-b"])),
         worker,
         qa: () => QA_PASS,
       },
@@ -241,7 +241,7 @@ describe("following a merge that has not happened yet", () => {
     const dir = repo({ remote: true });
     const { adapter } = fakeGithub();
     const { pool } = rolePool({
-      planner: (s) => (s.tools?.length ? DOCS() : dagJson()),
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS() : dagJson()),
       worker,
       qa: () => QA_PASS,
       validator: () => '```json\n{"verdict":"PASS","gaps":[],"summary":"ok"}\n```',
@@ -269,7 +269,7 @@ describe("following a merge that has not happened yet", () => {
       checks: { listForRef: async () => ({ data: [{ name: "deploy-prod", status: "completed", conclusion: "failure" }] }) },
     });
     const { pool } = rolePool({
-      planner: (s) => (s.tools?.length ? DOCS() : dagJson()),
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS() : dagJson()),
       worker,
       qa: () => QA_PASS,
       validator: () => '```json\n{"verdict":"PASS","gaps":[],"summary":"ok"}\n```',
@@ -294,7 +294,7 @@ describe("opening pull requests from a detached HEAD", () => {
     const dir = repo({ remote: true, detached: true });
     const { adapter } = fakeGithub();
     const { pool } = rolePool({
-      planner: (s) => (s.tools?.length ? DOCS() : dagJson()),
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS() : dagJson()),
       worker,
       qa: () => QA_PASS,
       validator: () => '```json\n{"verdict":"PASS","gaps":[],"summary":"ok"}\n```',
@@ -312,7 +312,7 @@ describe("opening pull requests from a detached HEAD", () => {
     const dir = repo({ remote: true, detached: true });
     const { adapter } = fakeGithub();
     const { pool } = rolePool({
-      planner: (s) => (s.tools?.length ? DOCS() : dagJson()),
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS() : dagJson()),
       worker,
       qa: () => QA_PASS,
       validator: () => '```json\n{"verdict":"PASS","gaps":[],"summary":"ok"}\n```',
@@ -335,7 +335,7 @@ describe("the pull request's title and body", () => {
       body: string;
     }) => (created.push(a), { data: { number: 51, html_url: "https://x.invalid/pull/51" } });
     const { pool } = rolePool({
-      planner: (s) => (s.tools?.length ? DOCS("no heading here, just prose") : dagJson()),
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS("no heading here, just prose") : dagJson()),
       worker,
       qa: () => QA_PASS,
       validator: () => '```json\n{"verdict":"FAIL","gaps":["no offline mode"],"summary":"most of it"}\n```',
@@ -357,7 +357,7 @@ describe("the pull request's title and body", () => {
     (adapter as unknown as { octokit: { rest: { pulls: { create: unknown } } } }).octokit.rest.pulls.create = async (a: { title: string }) =>
       (created.push(a), { data: { number: 51, html_url: "https://x.invalid/pull/51" } });
     const { pool } = rolePool({
-      planner: (s) => (s.tools?.length ? DOCS(`# ${"a rather wordy heading ".repeat(8)}`) : dagJson()),
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS(`# ${"a rather wordy heading ".repeat(8)}`) : dagJson()),
       worker,
       qa: () => QA_PASS,
       validator: () => '```json\n{"verdict":"FAIL","gaps":[],"summary":""}\n```',
@@ -378,7 +378,7 @@ describe("the pull request's title and body", () => {
     (adapter as unknown as { octokit: { rest: { pulls: { create: unknown } } } }).octokit.rest.pulls.create = async (a: { body: string }) =>
       (created.push(a), { data: { number: 51, html_url: "https://x.invalid/pull/51" } });
     const { pool } = rolePool({
-      planner: (s) => (s.tools?.length ? DOCS() : dagJson()),
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS() : dagJson()),
       worker,
       qa: () => QA_PASS,
       validator: () => '```json\n{"verdict":"FAIL","gaps":[],"summary":""}\n```',
@@ -398,7 +398,7 @@ describe("what the issue comment says when the harness knows less", () => {
     const dir = repo({ remote: true });
     const { adapter, comments } = fakeGithub();
     const { pool } = rolePool({
-      planner: (s) => (s.tools?.length ? DOCS() : dagJson()),
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS() : dagJson()),
       worker,
       qa: () => QA_PASS,
     });
@@ -452,7 +452,7 @@ describe("a task gate opened before anything was rejected", () => {
     vi.spyOn(Date, "now").mockImplementation(() => realNow() + offset);
     const gates: TaskGate[] = [];
     const { pool } = rolePool({
-      planner: (s) => (s.tools?.length ? DOCS() : dagJson(["task-a", "task-b"])),
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS() : dagJson(["task-a", "task-b"])),
       worker: (spec, nth) => {
         if (/ACCEPTED by QA/.test(spec.prompt)) {
           // Handed a conflict it cannot settle, and slow about it.
@@ -495,7 +495,7 @@ describe("the advisor with nowhere of its own to work", () => {
     const dir = repo();
     const seen: AgentSpec[] = [];
     const { pool, specs } = rolePool({
-      planner: (s) => (s.tools?.length ? DOCS() : dagJson()),
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS() : dagJson()),
       worker: () => new Error("boom"),
       advisor: (spec) => (seen.push(spec), ""),
     });

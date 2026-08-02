@@ -11,24 +11,34 @@ import { GitHubAdapter, isNoCommitsError } from "./github.js";
  * arms are not incidental, they are what keeps a repo with no CI, or a label no
  * issue carries yet, from failing a run.
  */
+/**
+ * One endpoint, with a default reply a test can replace by any shape the real
+ * API returns. Deliberately loose: inferring the type from the default would
+ * make `mockResolvedValue` reject every field the default happens not to carry,
+ * which is most of what these tests are about.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Reply = { data: any };
+const endpoint = (data: unknown = {}) => vi.fn(async (..._args: unknown[]): Promise<Reply> => ({ data }));
+
 function fakeOctokit() {
   const api = {
     issues: {
-      listForRepo: vi.fn(async () => ({ data: [] as unknown[] })),
-      create: vi.fn(async () => ({ data: { number: 7, html_url: "https://example.invalid/issues/7" } })),
-      listComments: vi.fn(async () => ({ data: [] as unknown[] })),
-      createComment: vi.fn(async () => ({ data: {} })),
-      get: vi.fn(async () => ({ data: { state: "open" } })),
-      update: vi.fn(async () => ({ data: {} })),
+      listForRepo: endpoint([]),
+      create: endpoint({ number: 7, html_url: "https://example.invalid/issues/7" }),
+      listComments: endpoint([]),
+      createComment: endpoint(),
+      get: endpoint({ state: "open" }),
+      update: endpoint(),
     },
     pulls: {
-      list: vi.fn(async () => ({ data: [] as unknown[] })),
-      create: vi.fn(async () => ({ data: { number: 42, html_url: "https://example.invalid/pull/42" } })),
-      get: vi.fn(async () => ({ data: { state: "open", draft: false, head: { sha: "deadbeef" } } })),
-      update: vi.fn(async () => ({ data: {} })),
+      list: endpoint([]),
+      create: endpoint({ number: 42, html_url: "https://example.invalid/pull/42" }),
+      get: endpoint({ state: "open", draft: false, head: { sha: "deadbeef" } }),
+      update: endpoint(),
     },
-    checks: { listForRef: vi.fn(async () => ({ data: [] as unknown[] })) },
-    repos: { getCombinedStatusForRef: vi.fn(async () => ({ data: { statuses: [] as unknown[] } })) },
+    checks: { listForRef: endpoint([]) },
+    repos: { getCombinedStatusForRef: endpoint({ statuses: [] }) },
   };
   return {
     rest: api,
@@ -46,7 +56,7 @@ function adapterWith(): { adapter: GitHubAdapter; api: Fake } {
   return { adapter, api };
 }
 
-const issue = (number: number, body: string, extra: Record<string, unknown> = {}) => ({
+const issue = (number: number, body: string | null, extra: Record<string, unknown> = {}) => ({
   number,
   html_url: `https://example.invalid/issues/${number}`,
   body,
@@ -93,7 +103,7 @@ describe("filing a run's issues", () => {
     const ref = await adapter.ensureIssue("run1", "auth-task", "Auth", "Build the auth flow", ["harness"]);
 
     expect(ref).toEqual({ number: 7, url: "https://example.invalid/issues/7" });
-    const args = api.rest.issues.create.mock.calls[0]![0] as { body: string; labels: string[] };
+    const args = (api.rest.issues.create.mock.calls[0] as unknown[])[0] as { body: string; labels: string[] };
     expect(args.body).toBe("Build the auth flow\n\n<!-- harness-run:run1/auth-task -->");
     expect(args.labels).toEqual(["harness", "harness-run:run1"]);
   });
@@ -337,7 +347,7 @@ describe("what CI says about a commit", () => {
     api.rest.checks.listForRef.mockResolvedValue({ data: [run("build", "completed", "success")] });
 
     await expect(adapter.prChecks(3)).resolves.toMatchObject({ state: "passing" });
-    expect(api.rest.checks.listForRef.mock.calls[0]![0]).toMatchObject({ ref: "deadbeef" });
+    expect((api.rest.checks.listForRef.mock.calls[0] as unknown[])[0]).toMatchObject({ ref: "deadbeef" });
   });
 
   /**

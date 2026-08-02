@@ -64,7 +64,7 @@ const dagJson = (ids: string[]) =>
   }) +
   "\n```";
 
-type Answer = string | ((spec: AgentSpec, nth: number) => string | AgentResult | Error);
+type Answer = string | ((spec: AgentSpec, nth: number) => string | Partial<AgentResult> | Error);
 
 function rolePool(answers: Partial<Record<string, Answer>>, bill = 0) {
   const specs: AgentSpec[] = [];
@@ -147,7 +147,7 @@ function build(opts: { repoPath: string; pool: AgentPool; github?: GitHubAdapter
 }
 
 const worker = (spec: AgentSpec, nth: number) => (commit(spec.cwd, `w-${path.basename(spec.cwd)}-${nth}.txt`), "did the work");
-const planner = (ids: string[]) => (s: AgentSpec) => (s.tools?.length ? DOCS : dagJson(ids));
+const planner = (ids: string[]) => (s: AgentSpec) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS : dagJson(ids));
 const BASE = { deterministicChecks: [] as string[], waitForChecks: false };
 
 const MERGED_PR = {

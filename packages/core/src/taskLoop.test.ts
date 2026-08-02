@@ -55,7 +55,7 @@ const QA_PASS = '```json\n{"verdict":"PASS","summary":"looks right","issues":[]}
 const QA_FAIL = '```json\n{"verdict":"FAIL","reasons":["the toggle is not wired"],"mustFix":["wire it to the store"]}\n```';
 
 /** Returning an Error makes the session itself fail, the way a dead subprocess does. */
-type Answer = string | ((spec: AgentSpec, nth: number) => string | AgentResult | Error);
+type Answer = string | ((spec: AgentSpec, nth: number) => string | Partial<AgentResult> | Error);
 
 /** A pool that answers per role, and can count how many times each was asked. */
 function rolePool(answers: Partial<Record<string, Answer>>) {

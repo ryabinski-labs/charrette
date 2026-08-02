@@ -63,7 +63,7 @@ const dagJson = (ids: string[]) =>
   }) +
   "\n```";
 
-type Answer = string | ((spec: AgentSpec, nth: number) => string | AgentResult | Error);
+type Answer = string | ((spec: AgentSpec, nth: number) => string | Partial<AgentResult> | Error);
 
 function rolePool(answers: Partial<Record<string, Answer>>) {
   const specs: AgentSpec[] = [];
@@ -108,7 +108,7 @@ const worker = (spec: AgentSpec, nth: number) => (commitInWorktree(spec.cwd, `w-
 const logs = (events: HarnessEvent[]) => events.filter((e): e is HarnessEvent & { text: string } => e.type === "agent.log").map((e) => e.text);
 const BASE = { deterministicChecks: [] as string[], waitForChecks: false };
 
-const planner = (ids: string[]) => (s: AgentSpec) => (s.tools?.length ? DOCS : dagJson(ids));
+const planner = (ids: string[]) => (s: AgentSpec) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS : dagJson(ids));
 
 describe("counting merged work", () => {
   it("says two tasks merged, not two task", async () => {
@@ -284,7 +284,7 @@ describe("a planner attempt that fails in an unusual way", () => {
     const dir = repo();
     const { pool } = rolePool({
       planner: (s) => {
-        if (s.tools?.length) return DOCS;
+        if (Array.isArray(s.tools) && s.tools.length > 0) return DOCS;
         // eslint-disable-next-line no-throw-literal
         throw "the session vanished";
       },

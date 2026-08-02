@@ -112,7 +112,7 @@ function fakeGithub(opts: { noCommits?: boolean } = {}): FakeGh {
   return state;
 }
 
-type Answer = string | ((spec: AgentSpec, nth: number) => string | AgentResult | Error);
+type Answer = string | ((spec: AgentSpec, nth: number) => string | Partial<AgentResult> | Error);
 
 function rolePool(answers: Partial<Record<string, Answer>>) {
   const specs: AgentSpec[] = [];

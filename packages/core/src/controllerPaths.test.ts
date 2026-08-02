@@ -224,7 +224,7 @@ describe("the closing line", () => {
   const record = (store: Store, runId: string, ev: Record<string, unknown>) =>
     store.db
       .prepare("INSERT INTO events (runId, taskId, sessionId, type, payload, ts) VALUES (?,?,?,?,?,?)")
-      .run(runId, null, null, ev.type, JSON.stringify({ runId, ...ev }), Date.now());
+      .run(runId, null, null, String(ev.type), JSON.stringify({ runId, ...ev }), Date.now());
 
   it("says CI is green, red with names, or still running", async () => {
     for (const [state, expected] of [

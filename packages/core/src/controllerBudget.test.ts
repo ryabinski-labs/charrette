@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { RunConfig } from "@harness/shared";
-import type { BudgetGate, HarnessEvent } from "@harness/shared";
+import type { HarnessEvent } from "@harness/shared";
+import type { BudgetGate } from "./runController.js";
 import { Bus } from "./bus.js";
 import { GitHubAdapter } from "./github.js";
 import type { AgentPool, AgentResult, AgentSpec } from "./pool.js";
@@ -58,7 +59,7 @@ const dagJson = (ids: string[] = ["task-a"]) =>
   }) +
   "\n```";
 
-type Answer = string | ((spec: AgentSpec, nth: number) => string | AgentResult | Error);
+type Answer = string | ((spec: AgentSpec, nth: number) => string | Partial<AgentResult> | Error);
 
 /** A pool that bills `costUsd` per session, so a cap can actually be reached. */
 function billingPool(answers: Partial<Record<string, Answer>>, costPerSession = 0) {

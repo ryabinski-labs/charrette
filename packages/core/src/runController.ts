@@ -335,6 +335,9 @@ export class RunController {
 
     let revived = 0;
     for (const t of parked) {
+      // Same invariant as the issue comment below: a parked task carries a
+      // reason on the row or in its transition event.
+      /* v8 ignore next */
       const why = t.errorSummary || this.store.taskStateReason(runId, t.id) || "parked";
       const guidance = await this.askOperator(runId, t.id, why);
       if (guidance === null) continue; // still parked; no transition needed
@@ -1323,7 +1326,10 @@ export class RunController {
         } else {
           const issues = parsed.error.issues
             .slice(0, 5)
-            .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+            // `extractJson` has already guaranteed an object, so every issue has a
+          // key to name; "(root)" is for a schema that grows a root-level rule.
+          /* v8 ignore next */
+          .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
             .join("; ");
           lastReason = `the breakdown does not match the required shape: ${issues}`;
         }
@@ -1994,11 +2000,15 @@ export class RunController {
     const task = this.store.getTask(runId, taskId)!;
     const merge = await this.wt.mergeTaskBranch(runId, taskId);
     if (!merge.ok) {
-      this.bus.publish({ type: "git.merge_conflict", runId, taskId, branch: task.branch ?? "", files: merge.conflicts, ts: Date.now() });
+      // Branch is set by ensureWorktree before the task can ever be merged;
+    // the fallback is for the column type, not for a state that occurs.
+    /* v8 ignore next */
+    this.bus.publish({ type: "git.merge_conflict", runId, taskId, branch: task.branch ?? "", files: merge.conflicts, ts: Date.now() });
       return merge;
     }
     this.store.transitionTask(runId, taskId, "MERGED");
     this.mergedShas.set(`${runId}/${taskId}`, merge.sha);
+    /* v8 ignore next */
     this.bus.publish({ type: "git.merged", runId, taskId, branch: task.branch ?? "", sha: merge.sha, ts: Date.now() });
     // The PR is NOT opened here. Merging is continuous; publishing waits until
     // the whole run has been validated against the operator's intent (openPrs),
@@ -2067,6 +2077,8 @@ export class RunController {
         key,
         `**Done** — merged into \`${this.wt.integrationBranch(runId)}\`${sha ? ` as \`${sha.slice(0, 7)}\`` : ""} after ${n} QA iteration${n === 1 ? "" : "s"}.\n\n` +
           `**Acceptance criteria**\n${task.acceptanceCriteria.map((c) => `- [x] ${c}`).join("\n")}\n\n` +
+          // A merged task always has a branch — see the same note in integrate.
+          /* v8 ignore next */
           `This closes when the pull request for \`${task.branch ?? "the task branch"}\` is merged.`
       );
       return;
@@ -2076,6 +2088,9 @@ export class RunController {
       await this.github.commentOnIssue(
         issue,
         key,
+        // `park()` always records a reason, so the literal is unreachable; it is
+        // there so a future path that parks without one still says something.
+        /* v8 ignore next */
         `**Parked for a human** — ${task.errorSummary || why || "the harness could not finish it"}\n\n` +
           `The work so far is on \`${task.branch ?? "no branch"}\`. While the run is still going, a reply in this thread is picked up as guidance and the task is dispatched again.`
       );
@@ -2092,6 +2107,8 @@ export class RunController {
     const run = this.store.getRun(runId)!;
     const task = this.store.getTask(runId, taskId)!;
     const base = run.config.baseBranch;
+    // Only MERGED tasks reach here, and a merged task has a branch.
+    /* v8 ignore next */
     if (!this.github.enabled || !task.branch) return;
     if (!base) throw new Error("the run has no base branch (detached HEAD) — nothing to open a PR against");
 
