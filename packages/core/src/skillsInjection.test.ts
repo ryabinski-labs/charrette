@@ -150,6 +150,8 @@ describe("skill routing", () => {
     "branding-manager",
     "online-sales-specialist",
     "persona-panel",
+    "dns-project-iac-engineer",
+    "fullstack-app",
   ];
 
   function routingSkillsDir(): string {
@@ -215,6 +217,30 @@ describe("skill routing", () => {
     expect(research).toContain('<skill name="persona-panel"');
     const unrelated = await inject("Rotate the log files", "Truncate stale files on disk once a week");
     expect(unrelated).not.toContain('<skill name="persona-panel"');
+  }, 60_000);
+
+  /**
+   * DNS and stack selection are routed *before* architecture, and that ordering
+   * is the whole fix rather than an aesthetic choice: both kinds of task also
+   * match the architecture vocabulary, which alone fills all four of a role's
+   * skill slots. Routed last, the one skill that knows the answer is the one
+   * dropped at the cap.
+   */
+  it("routes DNS work to the DNS engineer even when the task reads as infrastructure", async () => {
+    const system = await inject("Migrate DNS to dns-project", "Update the Terraform infrastructure for cert-manager DNS-01 issuers and the ACME solver");
+    expect(system).toContain('<skill name="dns-project-iac-engineer"');
+    // Four slots, five matching skills: the architecture rule's last one gives way.
+    expect(system).not.toContain('<skill name="frontend-design"');
+  }, 30_000);
+
+  it("consults the stack skill when a task picks a stack rather than extends one", async () => {
+    const greenfield = await inject("Bootstrap the companion service", "Scaffold a new service from scratch with magic-link auth and DynamoDB");
+    expect(greenfield).toContain('<skill name="fullstack-app"');
+
+    // ...and it survives a task that is also an architecture decision.
+    const both = await inject("Design the companion service", "Decide the system design for a new service, including the technology stack");
+    expect(both).toContain('<skill name="fullstack-app"');
+    expect(both).toContain('<skill name="architect"');
   }, 60_000);
 });
 

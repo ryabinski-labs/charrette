@@ -69,6 +69,18 @@ export const RunConfig = z.object({
   skillRouting: z
     .array(z.object({ when: z.string(), skills: z.array(z.string()) }))
     .default([
+      // First, because both of these lose the per-role cap to the architecture
+      // rule otherwise. A DNS task and a greenfield task both match the
+      // architecture vocabulary, and that rule alone fills all four slots — so
+      // the one skill that knows the actual answer would be the one dropped.
+      {
+        when: "\\b(dns|dns-project|nameservers?|name server|cname|txt record|mx record|zone file|subdomain|apex domain|custom domain|cert-?manager|clusterissuer|dns-?01|let'?s encrypt|route ?53)\\b",
+        skills: ["dns-project-iac-engineer"],
+      },
+      {
+        when: "\\b(greenfield|from scratch|scaffold\\w*|boilerplate|new (project|service|application)|tech(nology)? stack|stack (choice|selection)|dynamodb|magic[- ]link|webauthn|passwordless|serverless|lambda|cloudfront|api gateway)\\b",
+        skills: ["fullstack-app"],
+      },
       {
         when: "\\b(architect(ure|ural)?|system design|data model|schema design|infrastructur\\w*|terraform|cloudformation|kubernetes|k8s|deployment topology|scalab\\w+|throughput|latency|capacity)\\b",
         skills: ["architect", "security-engineer", "performance-engineer", "frontend-design"],

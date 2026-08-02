@@ -795,6 +795,32 @@ Which skills were injected — and in which mode — is recorded per task and em
 as a `skills.injected` event, so the dashboard log tells you exactly what shaped a
 worker's behaviour.
 
+### Routing beats scoring, and order beats both
+
+Lexical matching cannot decide which specialist owns a task — measured against a
+real corpus, the top match for a sanctions-screening task was
+`testimonial-collector`. So `skillRouting` lets you bind skills to a class of work
+by name: `when` is a case-insensitive regular expression tested against the task's
+title and spec, and every named skill that exists in `skillsDirs` is injected
+before scoring fills whatever room is left. `roleSkills` does the same for a *job*
+rather than a topic — the planner carries `product-manager` whatever the
+assignment says, because "add rate limiting" is still a product decision.
+
+The defaults route architecture, UI, product, marketing, sales and research work,
+plus two narrow rules that must stay near the top of the list:
+
+| Rule | Skill |
+|---|---|
+| DNS, dns-project, CNAME/TXT records, cert-manager, DNS-01, ACME, Route 53 | `dns-project-iac-engineer` |
+| greenfield, scaffolding, technology-stack choice, DynamoDB, magic-link, WebAuthn, serverless | `fullstack-app` |
+
+**A role carries at most four skills.** Rules are applied in list order and the
+fifth match is dropped, so a narrow rule placed below a broad one never fires in
+practice: a DNS task also says "infrastructure" and a greenfield task also says
+"system design", and the architecture rule alone fills all four slots. Put the
+specific rule above the general one — the regression tests in
+`skillsInjection.test.ts` assert exactly this and go red if the order is reversed.
+
 ### Using the indexer as a standalone MCP server
 
 `packages/skills-mcp` also ships a stdio MCP server exposing `search_skills` and
