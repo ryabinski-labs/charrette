@@ -1,7 +1,14 @@
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const { execFileSyncMock } = vi.hoisted(() => ({ execFileSyncMock: vi.fn() }));
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return { ...actual, execFileSync: execFileSyncMock };
+});
+
 import { detectChecks, loadFileConfig, resolveGitHub, resolveRepoRoot } from "./defaults.js";
 
 function tmpRepo(files: Record<string, string> = {}, withGit = true): string {
@@ -45,6 +52,44 @@ describe("detectChecks", () => {
   it("falls back to cargo, then reports nothing found", () => {
     expect(detectChecks(tmpRepo({ "Cargo.toml": "" })).checks[0]).toBe("cargo test");
     expect(detectChecks(tmpRepo()).checks).toEqual([]);
+  });
+
+  it("builds as well as tests a Go module, since a Go test run does not compile every package", () => {
+    const detected = detectChecks(tmpRepo({ "go.mod": "module example.com/api\n\ngo 1.23\n" }));
+
+    expect(detected).toEqual({ checks: ["go build ./...", "go test ./..."], source: "go.mod" });
+  });
+
+  it("names why it found nothing, so the banner can say it", () => {
+    expect(detectChecks(tmpRepo()).source).toBe("no conventional checks found");
+  });
+
+  const PKG = JSON.stringify({ scripts: { test: "vitest run" } });
+
+  it.each([
+    ["pnpm-lock.yaml", "pnpm"],
+    ["yarn.lock", "yarn"],
+    ["bun.lockb", "bun"],
+    ["bun.lock", "bun"],
+    ["package-lock.json", "npm"],
+  ])("runs the scripts with the package manager %s implies", (lockfile, pm) => {
+    const repo = tmpRepo({ "package.json": PKG, [lockfile]: "" });
+
+    expect(detectChecks(repo).checks).toEqual([`${pm} run test`]);
+  });
+
+  it("assumes npm when there is no lockfile at all", () => {
+    expect(detectChecks(tmpRepo({ "package.json": PKG })).checks).toEqual(["npm run test"]);
+  });
+
+  it("ignores a package.json whose JSON is valid but is not an object", () => {
+    // `JSON.parse` succeeds here, so the try/catch does not catch it — without
+    // the type check this would read `.scripts` off a number and throw.
+    expect(detectChecks(tmpRepo({ "package.json": "42" })).checks).toEqual([]);
+  });
+
+  it("ignores a package.json with no scripts block", () => {
+    expect(detectChecks(tmpRepo({ "package.json": JSON.stringify({ name: "x" }) })).checks).toEqual([]);
   });
 });
 
@@ -147,6 +192,26 @@ describe("detectChecks in monorepo layouts", () => {
 
 describe("resolveGitHub", () => {
   const saved = { token: process.env.GITHUB_TOKEN, repo: process.env.HARNESS_GITHUB_REPO };
+
+  /**
+   * `gh` is stubbed rather than shelled out to. What this function returns
+   * otherwise depends on whether the developer running the suite happens to be
+   * logged into the GitHub CLI — which made the "no token" case untestable on a
+   * logged-in machine and would have had CI, where gh is absent, exercising a
+   * different path than anyone had ever run locally.
+   */
+  function ghSays(answers: { token?: string; slug?: string }): void {
+    execFileSyncMock.mockImplementation((_cmd: string, args: string[]) => {
+      const wanted = args[0] === "auth" ? answers.token : answers.slug;
+      if (wanted === undefined) throw new Error("gh: not authenticated");
+      return `${wanted}\n`;
+    });
+  }
+
+  beforeEach(() => {
+    execFileSyncMock.mockReset();
+  });
+
   afterEach(() => {
     for (const [k, v] of [["GITHUB_TOKEN", saved.token], ["HARNESS_GITHUB_REPO", saved.repo]] as const) {
       if (v === undefined) delete process.env[k];
@@ -163,6 +228,7 @@ describe("resolveGitHub", () => {
       slug: "acme/widgets",
       source: "GITHUB_TOKEN + HARNESS_GITHUB_REPO",
     });
+    expect(execFileSyncMock).not.toHaveBeenCalled();
   });
 
   it("names both sources when the token and the slug come from different places", () => {
@@ -173,19 +239,76 @@ describe("resolveGitHub", () => {
     expect(gh.source).toBe("GITHUB_TOKEN + harness.config.json");
   });
 
-  it("withholds the slug when there is no token, so the adapter stays disabled", () => {
+  it("falls back to the gh CLI for both, and names it once", () => {
     delete process.env.GITHUB_TOKEN;
     delete process.env.HARNESS_GITHUB_REPO;
-    // A directory that is not a GitHub checkout: `gh repo view` cannot answer.
+    ghSays({ token: "ghp_from_cli", slug: "acme/from-cli" });
+
+    expect(resolveGitHub(tmpRepo(), undefined)).toEqual({
+      token: "ghp_from_cli",
+      slug: "acme/from-cli",
+      source: "gh cli",
+    });
+  });
+
+  it("says how to fix it when nothing has authenticated", () => {
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.HARNESS_GITHUB_REPO;
+    ghSays({});
+
     const gh = resolveGitHub(tmpRepo(), undefined);
-    if (!gh.token) {
-      expect(gh.slug).toBeUndefined();
-      expect(gh.source).toMatch(/^off — /);
-    } else {
-      // gh is logged in on this machine; the token is real but the repo is not.
-      expect(gh.slug).toBeUndefined();
-      expect(gh.source).toBe("off — no GitHub remote found for this repo");
-    }
+
+    expect(gh.token).toBeUndefined();
+    expect(gh.slug).toBeUndefined();
+    expect(gh.source).toBe("off — no GITHUB_TOKEN and `gh auth login` has not been run");
+  });
+
+  it("withholds the slug when there is a token but no remote, so the adapter stays disabled", () => {
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.HARNESS_GITHUB_REPO;
+    ghSays({ token: "ghp_from_cli" });
+
+    const gh = resolveGitHub(tmpRepo(), undefined);
+
+    expect(gh.token).toBe("ghp_from_cli");
+    expect(gh.slug).toBeUndefined();
+    expect(gh.source).toBe("off — no GitHub remote found for this repo");
+  });
+
+  it("caches per repo, so gh is not shelled out to twice for the same answer", () => {
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.HARNESS_GITHUB_REPO;
+    ghSays({ token: "ghp_from_cli", slug: "acme/from-cli" });
+    const repo = tmpRepo();
+
+    const first = resolveGitHub(repo, undefined);
+    const callsAfterFirst = execFileSyncMock.mock.calls.length;
+    const second = resolveGitHub(repo, undefined);
+
+    expect(second).toEqual(first);
+    expect(execFileSyncMock.mock.calls.length).toBe(callsAfterFirst);
+  });
+
+  it("does not serve a cached answer to a caller whose environment has changed", () => {
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.HARNESS_GITHUB_REPO;
+    ghSays({ token: "ghp_from_cli", slug: "acme/from-cli" });
+    const repo = tmpRepo();
+    expect(resolveGitHub(repo, undefined).token).toBe("ghp_from_cli");
+
+    process.env.GITHUB_TOKEN = "ghp_from_env";
+
+    expect(resolveGitHub(repo, undefined).source).toBe("GITHUB_TOKEN + gh cli");
+  });
+
+  it("treats an empty answer from gh as no answer", () => {
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.HARNESS_GITHUB_REPO;
+    // `gh auth token` exits 0 with an empty line in some logged-out states;
+    // an empty string is not a token.
+    execFileSyncMock.mockReturnValue("  \n");
+
+    expect(resolveGitHub(tmpRepo(), undefined).token).toBeUndefined();
   });
 
   it("never puts the token in the provenance string", () => {

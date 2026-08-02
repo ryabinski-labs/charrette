@@ -10,13 +10,17 @@
   "scripts": {
     "build": "pnpm -r build",
     "link-cli": "mkdir -p \"$HOME/.local/bin\" && ln -sf \"$PWD/apps/cli/dist/main.js\" \"$HOME/.local/bin/harness\" && echo \"linked $HOME/.local/bin/harness -> $PWD/apps/cli/dist/main.js\"",
-    "test": "pnpm -r test",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:watch": "vitest",
+    "test:packages": "pnpm -r test",
     "typecheck": "pnpm -r typecheck"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^3.2.0",
     "typescript": "^5.5.0",
-    "vitest": "^3.0.0",
-    "@types/node": "^22.0.0"
+    "vitest": "^3.0.0"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const { createInterfaceMock } = vi.hoisted(() => ({ createInterfaceMock: vi.fn() }));
+vi.mock("node:readline/promises", () => ({ createInterface: createInterfaceMock }));
+
 import { promptForNewCap } from "./budget.js";
 
 const GATE = { scope: "run" as const, spentUsd: 8.5, capUsd: 8, runSpentUsd: 8.5 };
@@ -56,5 +60,44 @@ describe("terminal budget prompt", () => {
     const text = io.shown.join("");
     expect(text).toMatch(/on task publisher-reindex/);
     expect(text).toMatch(/\$22\.40 in total/);
+  });
+
+  /**
+   * The tests above inject their own `ask`/`write`, which is what makes the
+   * decision logic testable — but it also means the real terminal path they
+   * stand in for had never once executed. These two cover the defaults.
+   */
+  describe("wired to a real terminal", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+      createInterfaceMock.mockReset();
+    });
+
+    it("asks on stdin and closes the readline interface it opened", async () => {
+      const close = vi.fn();
+      const question = vi.fn(async () => "  42  ");
+      createInterfaceMock.mockReturnValue({ question, close });
+      vi.spyOn(process.stdout, "write").mockReturnValue(true);
+
+      await expect(promptForNewCap(GATE)).resolves.toBe(42);
+
+      expect(createInterfaceMock).toHaveBeenCalledWith({ input: process.stdin, output: process.stdout });
+      expect(question).toHaveBeenCalledOnce();
+      // A prompt left open holds stdin and the process never exits.
+      expect(close).toHaveBeenCalledOnce();
+    });
+
+    it("prints to stdout when given no writer", async () => {
+      createInterfaceMock.mockReturnValue({ question: async () => "s", close: () => undefined });
+      const written: string[] = [];
+      vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+        written.push(String(chunk));
+        return true;
+      });
+
+      await expect(promptForNewCap(GATE)).resolves.toBeNull();
+
+      expect(written.join("")).toMatch(/===== BUDGET =====/);
+    });
   });
 });
