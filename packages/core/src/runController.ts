@@ -1557,6 +1557,10 @@ export class RunController {
     // unconditional, so they must not lose the per-role cap to a keyword hit.
     for (const name of config.roleSkills[role] ?? []) take(name);
     for (const rule of config.skillRouting) {
+      // A rule that names roles is for those roles only. Absent, it is for all
+      // of them — the routing tables written before `roles` existed must keep
+      // meaning exactly what they meant.
+      if (rule.roles?.length && !rule.roles.includes(role as (typeof rule.roles)[number])) continue;
       let matches = false;
       try {
         matches = new RegExp(rule.when, "i").test(text);

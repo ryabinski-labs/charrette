@@ -17,6 +17,18 @@ export const Budget = z.object({
   taskCapUsd: z.number().positive().default(10),
 });
 
+/**
+ * The vocabulary of user-interface work, written once because three rules match
+ * on it. Splitting the UI rule by role is the point — see `skillRouting` — and
+ * three copies of a regex this long is three chances for them to drift apart.
+ */
+// Deliberately excludes `brand`, `logo` and `visual identity`: those are the
+// marketing rule's words, that rule sits below this one, and a branding task
+// that tripped both would spend its four slots on frontend skills and drop
+// `branding-manager` at the cap. Design-system vocabulary is named instead.
+const UI_WHEN =
+  "\\b(ui|ux|frontend|front-end|dashboard|console|web page|landing|component|css|styling|layout|responsive|accessib\\w+|design system|design token|design language|style guide|screen|theme|palette|typograph\\w+|wordmark)\\b";
+
 export const RunConfig = z.object({
   // PRD §11.5: default 3. Independent DAG tasks run concurrently, each in its
   // own worktree; runs recorded before the parallel scheduler keep whatever
@@ -65,9 +77,22 @@ export const RunConfig = z.object({
    * So the operator says it outright. `when` is a case-insensitive regular
    * expression tested against the task's title and spec; every named skill that
    * exists in `skillsDirs` is injected, and scoring only fills what is left.
+   *
+   * `roles` narrows a rule to the sessions that should carry it — omit it and
+   * every role does, which is the older behaviour. The reason it exists is that
+   * some skills are for building and some are for grading, and handing the agent
+   * that wrote the screen the playbook for judging it is not a review. It also
+   * relieves the per-role cap: a builder skill and a grader skill no longer
+   * compete for the same four slots.
    */
   skillRouting: z
-    .array(z.object({ when: z.string(), skills: z.array(z.string()) }))
+    .array(
+      z.object({
+        when: z.string(),
+        skills: z.array(z.string()),
+        roles: z.array(z.enum(["intake", "planner", "worker", "qa", "prod"])).optional(),
+      })
+    )
     .default([
       // First, because both of these lose the per-role cap to the architecture
       // rule otherwise. A DNS task and a greenfield task both match the
@@ -85,10 +110,12 @@ export const RunConfig = z.object({
         when: "\\b(architect(ure|ural)?|system design|data model|schema design|infrastructur\\w*|terraform|cloudformation|kubernetes|k8s|deployment topology|scalab\\w+|throughput|latency|capacity)\\b",
         skills: ["architect", "security-engineer", "performance-engineer", "frontend-design"],
       },
-      {
-        when: "\\b(ui|ux|frontend|front-end|dashboard|console|web page|landing|component|css|styling|layout|responsive|accessib\\w+|design system)\\b",
-        skills: ["frontend-design", "ui-ux-cx-engineer"],
-      },
+      // UI work, split by who is doing what. The build side gets a product voice
+      // alongside the design ones; the grading side gets the specialist that
+      // looks at pixels, and never reaches the agent that drew them.
+      { when: UI_WHEN, skills: ["frontend-design", "ui-ux-cx-engineer"] },
+      { when: UI_WHEN, skills: ["product-manager"], roles: ["worker"] },
+      { when: UI_WHEN, skills: ["visual-qa-agent"], roles: ["qa"] },
       {
         when: "\\b(product|roadmap|prioriti\\w+|user stor(y|ies)|onboarding|activation|retention|churn|pricing|monetiz\\w+|scope|mvp|kpi|north star|funnel|success metric)\\b",
         skills: ["product-manager"],

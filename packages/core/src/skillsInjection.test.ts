@@ -152,6 +152,7 @@ describe("skill routing", () => {
     "persona-panel",
     "dns-project-iac-engineer",
     "fullstack-app",
+    "visual-qa-agent",
   ];
 
   function routingSkillsDir(): string {
@@ -164,27 +165,31 @@ describe("skill routing", () => {
     return dir;
   }
 
-  async function inject(title: string, spec: string): Promise<string> {
+  /** The system prompt each of the two task-level roles was handed. */
+  async function injectRoles(title: string, spec: string): Promise<{ worker: string; qa: string }> {
     let planning = 0;
-    let workerSystem = "";
+    const seen = { worker: "", qa: "" };
     const pool = {
       async run(s: AgentSpec): Promise<AgentResult> {
         if (s.role === "planner") return { sessionId: "p", resultText: planning++ === 0 ? DOCS : routedDag(title, spec), costUsd: 0, turns: 1, outcome: "done" };
         if (s.role === "worker") {
-          workerSystem = s.systemPrompt!;
+          seen.worker = s.systemPrompt!;
           writeFileSync(path.join(s.cwd, "f.txt"), "done\n");
           gitIn(s.cwd, "add", "-A");
           gitIn(s.cwd, "commit", "-m", "wip");
           return { sessionId: "w", resultText: "done", costUsd: 0, turns: 1, outcome: "done" };
         }
+        if (s.role === "qa") seen.qa = s.systemPrompt!;
         return { sessionId: "q", resultText: '{"verdict":"PASS","notes":"ok"}', costUsd: 0, turns: 1, outcome: "done" };
       },
     } as unknown as AgentPool;
     const store = new Store(":memory:");
     const controller = new RunController(store, new Bus(store), pool, noGithub, approveAll, repo());
     await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], skillsDirs: [routingSkillsDir()] }));
-    return workerSystem;
+    return seen;
   }
+
+  const inject = async (title: string, spec: string) => (await injectRoles(title, spec)).worker;
 
   it("gives architecture work the architecture skills by default", async () => {
     const system = await inject("Design the ledger", "Decide the data model and system design for double-entry postings");
@@ -242,6 +247,40 @@ describe("skill routing", () => {
     expect(both).toContain('<skill name="fullstack-app"');
     expect(both).toContain('<skill name="architect"');
   }, 60_000);
+
+  /**
+   * Building a screen and grading one are different jobs, so they get different
+   * playbooks. Handing `visual-qa-agent` to the agent that drew the screen is
+   * not a review, and it would also cost a slot on both sides of a cap that only
+   * holds four.
+   */
+  it("sends the design skills to the builder and the visual reviewer to QA", async () => {
+    const { worker, qa } = await injectRoles("Sign-in screen", "Build the sign-in screen with a responsive component layout");
+
+    // Shared: both sides argue from the same design playbooks.
+    for (const system of [worker, qa]) {
+      expect(system).toContain('<skill name="frontend-design"');
+      expect(system).toContain('<skill name="ui-ux-cx-engineer"');
+    }
+
+    // Split: the product voice builds it, the visual reviewer grades it.
+    expect(worker).toContain('<skill name="product-manager"');
+    expect(worker).not.toContain('<skill name="visual-qa-agent"');
+    expect(qa).toContain('<skill name="visual-qa-agent"');
+    expect(qa).not.toContain('<skill name="product-manager"');
+  }, 30_000);
+
+  /**
+   * The UI vocabulary grew to cover design-system work, and `brand`/`logo` were
+   * kept out of it on purpose: the marketing rule owns those words and sits
+   * below this one, so a branding task matching both would fill its four slots
+   * with frontend skills and drop `branding-manager` at the cap.
+   */
+  it("leaves branding work to the branding people", async () => {
+    const system = await inject("Refresh the brand", "Rework the logo and brand voice across the marketing site");
+    expect(system).toContain('<skill name="branding-manager"');
+    expect(system).toContain('<skill name="marketing-director"');
+  }, 30_000);
 });
 
 /**
