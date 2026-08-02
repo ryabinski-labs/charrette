@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   verify:
-    name: typecheck, build, test @ 100% coverage
+    name: build, test @ 100% coverage
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -39,13 +39,15 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      - name: Typecheck
-        run: pnpm typecheck
-
-      # Not a redundant check on top of typecheck: the packages are consumed
-      # through their `dist/` entrypoints, and `tsc --noEmit` will not catch a
-      # build that fails only when it has to actually write declarations.
-      - name: Build
+      # Build is the typecheck. Each package compiles the same project either
+      # way — `typecheck` is `build --noEmit` — and it has to be this one,
+      # because the packages resolve each other through their `dist/*.d.ts`.
+      # Nothing but a build writes those, so `pnpm typecheck` on a clean
+      # checkout fails on every cross-package import in the repo: it is only
+      # green on a machine that has built at some point, which is why it passed
+      # locally and failed here. pnpm walks the workspace in dependency order,
+      # so shared emits before core compiles against it.
+      - name: Build (typechecks every package)
         run: pnpm build
 
       # `vitest run` fails the job on the first failing test. The coverage
