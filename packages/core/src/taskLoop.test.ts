@@ -64,6 +64,9 @@ function rolePool(answers: Partial<Record<string, Answer>>) {
   const pool = {
     async run(spec: AgentSpec): Promise<AgentResult> {
       specs.push(spec);
+      // The real pool checks the budget on every message; a fake that never
+      // does leaves the run-wide cap unexercised for every role.
+      await spec.budgetCheck?.();
       counts[spec.role] = (counts[spec.role] ?? 0) + 1;
       const answer = answers[spec.role];
       const base: AgentResult = { sessionId: `s${specs.length}`, resultText: "", costUsd: 0, turns: 1, outcome: "done" };

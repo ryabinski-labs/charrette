@@ -34,6 +34,10 @@ export default defineConfig({
   test: {
     include: ["packages/*/src/**/*.test.ts", "apps/*/src/**/*.test.ts"],
     environment: "node",
+    // Several suites drive real git — worktrees, merges, pushes to a bare
+    // remote — and a whole run can be a few dozen of those. The 5s default is
+    // comfortable on a developer's laptop and a coin flip on a CI runner.
+    testTimeout: 30_000,
     coverage: {
       provider: "v8",
       reporter: ["text", "html", "lcov", "json-summary"],
