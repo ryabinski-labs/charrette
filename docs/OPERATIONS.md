@@ -924,6 +924,13 @@ honest posture is:
 - Prefer a fine-grained GitHub token scoped to one repository. If it leaks, one
   repo is exposed, not your account.
 
+**`maxParallelWorkers` counts agents, not tasks.** A task sitting at an
+escalation gate waiting for your answer holds no agent, so it does not occupy a
+worker slot — the run dispatches something else and comes back to it when you
+answer. One consequence worth knowing: answering a gate resumes that task
+immediately rather than queueing it, so for a few seconds the run can be one
+worker over the cap for each gate you answer at once.
+
 **Worktrees are not machine isolation.** Each task gets its own checkout, its own
 branch and its own dependency install. It does *not* get its own network stack or
 its own container daemon, and three workers running at once share both. Two

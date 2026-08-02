@@ -942,16 +942,29 @@ export class RunController {
     // the cheapest latency win in the system.
     const recommendation = await this.adviseOperator(runId, taskId, why);
     this.bus.publish({ type: "task.gate_opened", runId, taskId, why, recommendation, iterations: task.qaIterations, ts: Date.now() });
-    const guidance = (await this.gates.resolveTaskGate({
-      runId,
-      taskId,
-      title: task.title,
-      why,
-      recommendation,
-      iterations: task.qaIterations,
-      branch: task.branch,
-      worktreePath: task.worktreePath,
-    }))?.trim() || null;
+    // From here until the answer arrives this task is running no agent, so its
+    // worker slot goes back to the run. The advisor above is deliberately
+    // outside this window: it *is* an agent, and it is this task's.
+    this.gatedTasks.add(taskId);
+    this.wakeScheduler();
+    let guidance: string | null;
+    try {
+      guidance = (await this.gates.resolveTaskGate({
+        runId,
+        taskId,
+        title: task.title,
+        why,
+        recommendation,
+        iterations: task.qaIterations,
+        branch: task.branch,
+        worktreePath: task.worktreePath,
+      }))?.trim() || null;
+    } finally {
+      // Claim the slot back before the loop next counts, and wake it either way:
+      // an answer means this task wants to work again, and the count changed.
+      this.gatedTasks.delete(taskId);
+      this.wakeScheduler();
+    }
     this.bus.publish({ type: "task.gate_resolved", runId, taskId, parked: guidance === null, guidance: guidance ?? "", ts: Date.now() });
     return guidance;
   }
@@ -1025,6 +1038,42 @@ export class RunController {
     });
   }
 
+  /**
+   * Tasks sitting at a gate, waiting on a human. In flight, but running no agent
+   * — see `working()` in the dispatch loop.
+   */
+  private gatedTasks = new Set<string>();
+
+  /**
+   * Resolved whenever something outside the dispatch loop changes what is
+   * runnable: a gate opens or closes, or an operator revives a parked task. The
+   * loop otherwise only ever wakes when a task *finishes*, which is far too
+   * coarse — a revived task can wait out an unrelated task's entire
+   * worker→QA→worker loop before anyone looks at the ready set again.
+   *
+   * One promise shared by every waiter, replaced on each wake, so a loop that
+   * races it repeatedly does not accumulate resolvers.
+   */
+  private wake: { promise: Promise<void>; resolve: () => void } | null = null;
+
+  private schedulerChanged(): Promise<void> {
+    if (!this.wake) {
+      let resolve!: () => void;
+      const promise = new Promise<void>((r) => {
+        resolve = r;
+      });
+      this.wake = { promise, resolve };
+    }
+    return this.wake.promise;
+  }
+
+  /** Tell the dispatch loop to look at the ready set again now. */
+  private wakeScheduler(): void {
+    const pending = this.wake;
+    this.wake = null;
+    pending?.resolve();
+  }
+
   /** Operator guidance for tasks revived by `reopen`, consumed by the first worker dispatch. */
   private revivalGuidance = new Map<string, string>();
 
@@ -1066,14 +1115,16 @@ export class RunController {
     const hit = this.pool.inject?.(runId, target, operatorFeedbackMessage(trimmed));
     if (!hit) this.store.queueFeedback(runId, target, trimmed);
     // Only while the scheduler is still looping: it re-lists tasks on every
-    // dispatch and takes READY ones first, so a revived task is picked up
-    // within one worker slot. After EXECUTING nothing is watching, and the
-    // note waits in the queue for `reopen` on the next resume — where it now
-    // survives to be read, which is the whole point of persisting it.
+    // dispatch and takes READY ones first. After EXECUTING nothing is watching,
+    // and the note waits in the queue for `reopen` on the next resume — where it
+    // now survives to be read, which is the whole point of persisting it.
     const revived = !hit && task.state === "NEEDS_HUMAN" && this.store.getRun(runId)?.state === "EXECUTING";
     if (revived) {
       this.store.updateTask(runId, target, { qaIterations: 0, respawns: 0, errorSummary: null });
       this.store.transitionTask(runId, target, "READY", "reopened by the operator's feedback");
+      // …and tell the loop now, rather than leaving the revived task to wait out
+      // whatever unrelated task happens to be mid-iteration.
+      this.wakeScheduler();
     }
     const delivery = hit ? ("live" as const) : revived ? ("revived" as const) : ("queued" as const);
     this.bus.publish({ type: "task.feedback", runId, taskId: target, text: trimmed, delivery, ts: Date.now() });
@@ -1404,12 +1455,31 @@ export class RunController {
     const terminal = (s: TaskState) => ["MERGED", "NEEDS_HUMAN", "CANCELLED"].includes(s);
     const inFlight = new Map<string, Promise<void>>();
     let budgetStop: BudgetExceeded | null = null;
+    /**
+     * Slots in use. A task waiting at a gate is in flight but is not running an
+     * agent, so it does not count.
+     *
+     * `maxParallelWorkers` is a bound on concurrent *agents* — how much of the
+     * machine and the API the run may use at once — and a task blocked on a
+     * human is using neither. Counting it anyway is how run 40da9337 spent half
+     * an hour at one-third throughput: 21 merged, 12 pending, three slots, and
+     * two of the three held by tasks that had been waiting on an answer since
+     * 23:18. $13 in 29 minutes to run one worker.
+     *
+     * The cost is a transient overshoot: a task whose gate is answered resumes
+     * immediately rather than queueing for a slot, so for as long as it takes the
+     * replacement task to reach its next await, the run can be one worker over
+     * cap per gate answered at once. Making it queue instead would put the
+     * answered task — the one the operator is waiting on, with a warm worktree —
+     * at the back of the line, which is the bug this fixes wearing a hat.
+     */
+    const working = () => [...inFlight.keys()].filter((id) => !this.gatedTasks.has(id)).length;
 
     for (;;) {
       // Fill capacity. Re-listed per dispatch: a task that just merged may have
       // unblocked its dependents. Which runnable task goes next is `nextDispatch`
       // — the order decides what a budget cap leaves unbuilt.
-      while (!budgetStop && inFlight.size < cap) {
+      while (!budgetStop && working() < cap) {
         const tasks = this.store.listTasks(runId);
         const ready = nextDispatch(tasks, new Set(inFlight.keys()));
         if (!ready) break;
@@ -1441,7 +1511,13 @@ export class RunController {
       }
 
       if (inFlight.size) {
-        await Promise.race(inFlight.values());
+        // Woken by a task finishing *or* by something outside this loop changing
+        // what is runnable — a gate opening (which frees a slot), a gate closing,
+        // or an operator reviving a parked task. Waiting only on completions is
+        // how four tasks revived at 20:32 sat READY for eighteen minutes with two
+        // of three slots idle, because the one task still running had not
+        // finished its worker→QA→worker loop yet.
+        await Promise.race([...inFlight.values(), this.schedulerChanged()]);
         continue;
       }
       // Nothing left to dispatch: let the queued issue updates land before this
