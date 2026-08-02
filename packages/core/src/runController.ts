@@ -1607,8 +1607,13 @@ export class RunController {
   private async baseFailures(runId: string): Promise<CheckResult> {
     const run = this.store.getRun(runId)!;
     const clean: CheckResult = { ok: true, failures: [] };
+    // Both are guards on a call that only happens after the checks have already
+    // run and failed against a branch that therefore exists — kept so a future
+    // caller cannot measure a baseline that is not there.
+    /* v8 ignore next */
     if (!run.config.deterministicChecks.length) return clean;
     const sha = await this.wt.integrationHead(runId);
+    /* v8 ignore next */
     if (!sha) return clean;
     const key = `${runId}/${sha}`;
     let measured = this.baselines.get(key);
@@ -2198,6 +2203,10 @@ export class RunController {
     const run = this.store.getRun(runId)!;
     const cap = scope === "run" ? run.config.budget.runCapUsd : run.config.budget.taskCapUsd;
     const spent = this.store.spentUsd(runId, taskId);
+    // `enforce` already returned for anything under the cap, and spend only
+    // grows — so this is a re-check that cannot fire, kept because the queue
+    // between the two makes "still over?" the honest question to ask here.
+    /* v8 ignore next */
     if (spent < cap) return;
     // The operator already declined while this check was queued — every other
     // session stops on its next check without opening the gate again.
