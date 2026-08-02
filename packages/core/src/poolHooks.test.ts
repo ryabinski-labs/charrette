@@ -28,6 +28,11 @@ describe("the hooks every agent session runs with", () => {
     expect(pre[0]!.matcher).toBe("Bash");
   });
 
+  it("ignores a tool that is not Bash, and an event that is not PreToolUse", async () => {
+    expect(await fire(1, { hook_event_name: "PreToolUse", tool_name: "Write", tool_input: {} } as unknown as HookInput)).toEqual({});
+    expect(await fire(1, { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: {} } as unknown as HookInput)).toEqual({});
+  });
+
   it("denies an apply through the registered hook, whether or not rtk is installed", async () => {
     // rtk is optional and absent on most machines. The guard is not: it is
     // prepended unconditionally rather than added to rtk's list, so it cannot
