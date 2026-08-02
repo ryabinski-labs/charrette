@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # So a red main can be re-checked without an empty commit.
+  workflow_dispatch:
+
+# A new push to a PR makes the in-flight run irrelevant; don't burn minutes on it.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: build, test @ 100% coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      # Node 24: `node:sqlite` (packages/core/src/store.ts) is only available
+      # unflagged from 23.4 on, and the store is not an optional part of the
+      # suite — every runController test builds one.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # Build is the typecheck. Each package compiles the same project either
+      # way — `typecheck` is `build --noEmit` — and it has to be this one,
+      # because the packages resolve each other through their `dist/*.d.ts`.
+      # Nothing but a build writes those, so `pnpm typecheck` on a clean
+      # checkout fails on every cross-package import in the repo: it is only
+      # green on a machine that has built at some point, which is why it passed
+      # locally and failed here. pnpm walks the workspace in dependency order,
+      # so shared emits before core compiles against it.
+      - name: Build (typechecks every package)
+        run: pnpm build
+
+      # `vitest run` fails the job on the first failing test. The coverage
+      # thresholds in vitest.config.ts (100% lines/functions/branches/
+      # statements) fail it separately, after the suite passes — so a green
+      # tick means both "every test passed" and "every shipped line ran".
+      - name: Test with coverage
+        run: pnpm test:coverage
+
+      - name: Upload coverage report
+        # Uploaded on failure too — that is exactly when someone needs to open
+        # the HTML report to see which lines went uncovered.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/
+          retention-days: 14

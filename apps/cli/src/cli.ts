@@ -1,0 +1,633 @@
+import { Command } from "commander";
+import { createInterface } from "node:readline/promises";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { RunConfig } from "@harness/shared";
+import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, detectToolbelt, ensureIgnored, originSlug } from "@harness/core";
+import { Dashboard } from "@harness/dashboard";
+import { promptForNewCap } from "./budget.js";
+import {
+  CONFIG_FILENAME,
+  DEFAULT_SKILLS_DIRS,
+  detectChecks,
+  expandHome,
+  loadFileConfig,
+  resolveGitHub,
+  resolveRepoRoot,
+} from "./defaults.js";
+import { TerminalChat } from "./chat.js";
+import { armCrashLog } from "./crashlog.js";
+import { notifyDone } from "./notify.js";
+
+/**
+ * Start the dashboard for a run, or nothing when it is turned off. Kept in one
+ * place so `run` and `resume` cannot drift apart on port handling.
+ */
+function makeDashboardFactory(want: boolean, port: number | undefined): {
+  gateOverride?: (bus: Bus, store: Store) => GateHandler;
+  connect: (controller: RunController) => void;
+  start: () => Promise<string | null>;
+  stop: () => Promise<void>;
+} {
+  if (!want) return { connect: () => undefined, start: async () => null, stop: async () => undefined };
+  let dash: Dashboard | undefined;
+  return {
+    gateOverride: (bus, store) => {
+      dash = new Dashboard(store, bus, { port });
+      return dash;
+    },
+    // The dashboard is born inside makeController, before the controller exists;
+    // feedback flows the other way (browser → controller), so it is wired after.
+    connect: (controller) => dash?.attach(controller),
+    start: () => dash!.start(),
+    stop: async () => {
+      if (dash) await dash.stop();
+    },
+  };
+}
+
+function makeController(repoPath: string, gateOverride?: (bus: Bus, store: Store) => GateHandler): { controller: RunController; store: Store; bus: Bus } {
+  const stateDir = path.join(repoPath, ".harness");
+  mkdirSync(stateDir, { recursive: true });
+  // The first moment there is somewhere durable to write down why this process
+  // stopped. Every run and resume passes through here.
+  armCrashLog(stateDir);
+  // Every run and resume passes through here, so this is the one place the state
+  // directory is known to exist before anything writes to it.
+  if (ensureIgnored(repoPath, ".harness/")) process.stdout.write("  added .harness/ to .gitignore (harness run state, not source)\n");
+  const store = new Store(path.join(stateDir, "harness.db"));
+  const bus = new Bus(store);
+  // The intake agent owns the terminal while it is talking to the operator, so
+  // its own log/tool traffic must not interleave with the conversation.
+  const intakeSessions = new Set<string>();
+  bus.subscribe(({ event }) => {
+    if (event.type === "agent.spawned" && event.role === "intake") {
+      intakeSessions.add(event.sessionId);
+      return;
+    }
+    if ("sessionId" in event && typeof event.sessionId === "string" && intakeSessions.has(event.sessionId)) return;
+    if (event.type === "agent.log") {
+      process.stdout.write(`  [${event.taskId ?? "run"}] ${event.text.split("\n")[0]!.slice(0, 120)}\n`);
+    } else if (event.type === "run.state_changed" || event.type === "task.state_changed") {
+      const scope = "taskId" in event && event.taskId ? `task ${event.taskId}` : "run";
+      process.stdout.write(`▶ ${scope}: ${event.from} → ${event.to}${event.reason ? ` (${event.reason})` : ""}\n`);
+    } else if (event.type === "agent.usage") {
+      process.stdout.write(`  $ ${event.costUsd.toFixed(3)} (${event.model})\n`);
+    } else if (event.type === "task.qa_verdict") {
+      process.stdout.write(`  QA[${event.taskId}] iteration ${event.iteration}: ${event.verdict}\n`);
+    } else if (event.type === "task.feedback") {
+      process.stdout.write(`  ✉ your feedback → ${event.taskId} (${event.delivery})\n`);
+    }
+  });
+  const pool = new AgentPool(store, bus);
+  // The token comes from the environment or from `gh`, and stays in this process.
+  const gh = resolveGitHub(repoPath, loadFileConfig(repoPath).config.githubRepo);
+  const github = new GitHubAdapter(gh.token, gh.slug);
+  const terminalGates: GateHandler = {
+    async resolvePlanGate(prd, summary) {
+      process.stdout.write(`\n===== GENERATED PRD =====\n${prd}\n\n===== TASK BREAKDOWN =====\n${summary}\n\n`);
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      const answer = (await rl.question("Approve plan? [y = approve / anything else = rejection feedback] ")).trim();
+      rl.close();
+      if (answer.toLowerCase() === "y") return { approved: true, feedback: "" };
+      return { approved: false, feedback: answer || "rejected without feedback" };
+    },
+    resolveBudgetGate: (gate) => promptForNewCap(gate),
+    // Gate: task-escalation. A task at its cap is one answer away from either a
+    // fresh set of iterations or a parked branch — so ask, in the same terminal
+    // that has been narrating the failures the operator is about to explain.
+    async resolveTaskGate(gate) {
+      process.stdout.write(
+        `\n===== TASK NEEDS YOU =====\n` +
+          `${gate.title} (${gate.taskId})\n` +
+          `${gate.why.split("\n")[0]}\n` +
+          (gate.branch ? `Its work so far is on ${gate.branch}\n` : "") +
+          (gate.worktreePath ? `Worktree: ${gate.worktreePath}\n` : "") +
+          (gate.recommendation ? `Suggested answer: ${gate.recommendation}\n` : "") +
+          `Answer it and the worker continues with your words and a fresh iteration budget.\n`
+      );
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      const answer = (
+        await rl.question(
+          gate.recommendation
+            ? "Your guidance [y = send the suggested answer / enter = park the task] "
+            : "Your guidance [enter = park the task and move on] "
+        )
+      ).trim();
+      rl.close();
+      if (gate.recommendation && answer.toLowerCase() === "y") return gate.recommendation;
+      return answer || null;
+    },
+  };
+  const gates = gateOverride ? gateOverride(bus, store) : terminalGates;
+  return { controller: new RunController(store, bus, pool, github, gates, repoPath), store, bus };
+}
+
+/**
+ * The last thing the operator reads. It used to say "Review PRs on GitHub" whatever
+ * happened — including for a run whose foundation tasks all parked, which opens no
+ * pull request at all and sends them hunting for work that was never pushed.
+ *
+ * Every pull request is printed as a full URL, because "PR #118" is not something
+ * you can click, and a run of thirty tasks is not something you want to page
+ * through on GitHub to find the four that landed.
+ */
+async function reportOutcome(
+  controller: RunController,
+  repoPath: string,
+  runId: string,
+  opts: { notify?: boolean } = {}
+): Promise<void> {
+  const out = controller.outcome(runId);
+  const slug = (await originSlug(repoPath).catch(() => null)) ?? loadFileConfig(repoPath).config.githubRepo;
+  const link = (kind: "pull" | "issues", n: number) => (slug ? `https://github.com/${slug}/${kind}/${n}` : `#${n}`);
+  const lines = [`\nRun ${runId} finished — ${out.line}.`];
+
+  // The validator's verdict comes first: it is the answer to "did this do what
+  // I asked?", which outranks the list of artifacts that tried to.
+  if (out.intent) {
+    if (out.intent.verdict === "PASS") {
+      lines.push("", `  Intent check: PASS — ${out.intent.summary.replace(/\s+/g, " ").slice(0, 240)}`);
+    } else {
+      lines.push("", `  Intent check: FAIL — the merged result does not fully deliver what you asked for:`);
+      for (const gap of out.intent.gaps) lines.push(`    - ${gap.replace(/\s+/g, " ").slice(0, 240)}`);
+      if (out.intent.summary) lines.push(`    ${out.intent.summary.replace(/\s+/g, " ").slice(0, 240)}`);
+    }
+  }
+
+  // What the repo and the world said, in the order they said it. A green CI over
+  // a red deploy, or a green deploy over a production that disagrees, are the two
+  // shapes of "merged but not actually done" — both belong above the artifacts.
+  if (out.ci && out.ci.state !== "none") {
+    lines.push(
+      "",
+      out.ci.state === "passing"
+        ? `  CI: green on ${link("pull", out.ci.prNumber)}`
+        : out.ci.state === "failing"
+          ? `  CI: RED on ${link("pull", out.ci.prNumber)} — ${out.ci.failing.join(", ")}`
+          : `  CI: still running on ${link("pull", out.ci.prNumber)} (${out.ci.total} check(s))`
+    );
+  }
+  if (out.deploy && out.deploy.state !== "none") {
+    lines.push(
+      out.deploy.state === "passing"
+        ? `  Deploy: green on ${out.deploy.sha.slice(0, 7)} — the change is live`
+        : out.deploy.state === "failing"
+          ? `  Deploy: RED on ${out.deploy.sha.slice(0, 7)} — ${out.deploy.failing.join(", ")}. It is merged but NOT live.`
+          : `  Deploy: still running on ${out.deploy.sha.slice(0, 7)}`
+    );
+  }
+  if (out.prod) {
+    if (out.prod.verdict === "PASS") {
+      lines.push(`  Production: verified at ${out.prod.url} — ${out.prod.summary.replace(/\s+/g, " ").slice(0, 240)}`);
+    } else {
+      lines.push("", `  Production check: FAIL at ${out.prod.url} — the deployed system does not do what you asked:`);
+      for (const f of out.prod.findings) lines.push(`    - ${f.replace(/\s+/g, " ").slice(0, 240)}`);
+      if (out.prod.summary) lines.push(`    ${out.prod.summary.replace(/\s+/g, " ").slice(0, 240)}`);
+      lines.push("    Fix it, then `harness resume` to re-check — the run stays open until production agrees.");
+    }
+  }
+
+  if (out.prs.length) {
+    lines.push("", "  Open for review (the harness never merges — that part is yours):");
+    for (const pr of out.prs) lines.push(`    ${link("pull", pr.number)}  ${pr.title}`);
+  }
+
+  if (out.parked.length) {
+    lines.push("", `  Parked, waiting on you (${out.parked.length}):`);
+    for (const t of out.parked) {
+      lines.push(`    ${t.title}`);
+      if (t.issue) lines.push(`      ${link("issues", t.issue)}`);
+      if (t.why) lines.push(`      why: ${t.why.replace(/\s+/g, " ").slice(0, 300)}`);
+      if (t.branch) lines.push(`      its work is on ${t.branch}`);
+      if (t.blocking.length) lines.push(`      ${t.blocking.length} other task(s) were waiting on it`);
+    }
+  }
+
+  // "Cancelled" reads like a decision someone made. It is not: these tasks were
+  // never attempted, because the DAG gave them no legal start.
+  if (out.cancelled) {
+    lines.push(
+      "",
+      `  ${out.cancelled} task(s) never started: each depends, directly or through another`,
+      "  task, on something parked above, so there was never a legal point at which to",
+      "  begin it. No tokens were spent on them. A finished run does not reopen — take",
+      "  the parked work forward on its branch, or start a fresh run once you know why",
+      "  it stalled."
+    );
+  }
+
+  lines.push("", `  Full picture: harness status --repo ${repoPath}`);
+  process.stdout.write(`${lines.join("\n")}\n`);
+  // Re-reading a finished run is not an event worth a desktop notification.
+  if (opts.notify !== false) notifyDone(`${path.basename(repoPath)} — run done`, `${runId}: ${out.line}.`);
+}
+
+const DEFAULT_RUN_CAP = 30;
+const DEFAULT_TASK_CAP = 10;
+
+interface RunOpts {
+  repo: string;
+  runCap: string;
+  taskCap: string;
+  check?: string[];
+  checks: boolean;
+  dashboard?: boolean;
+  port?: string;
+  chat?: boolean;
+}
+
+interface Resolved {
+  repo: string;
+  config: RunConfig;
+  dashboard: boolean;
+  /** undefined = take the first free port, so several repos can run at once. */
+  dashboardPort: number | undefined;
+  chat: boolean;
+  banner: string[];
+}
+
+function positive(value: string, flag: string): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) throw new Error(`${flag} must be a positive number, got "${value}"`);
+  return n;
+}
+
+function port(value: string): number {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) throw new Error(`--port must be 1-65535, got "${value}"`);
+  return n;
+}
+
+/**
+ * Layer the run settings: CLI flag > harness.config.json > auto-detection >
+ * built-in default. Every resolved value is reported in the banner so a bare
+ * `harness run` is never silently doing something surprising.
+ */
+function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined): Resolved {
+  const repo = resolveRepoRoot(opts.repo);
+  const { config: file, path: filePath } = loadFileConfig(repo);
+  const fromCli = (name: string): boolean => cmd.getOptionValueSource(name) === "cli";
+  const via = filePath ? CONFIG_FILENAME : "";
+  const banner: string[] = [`repo       ${repo}`];
+
+  let checks: string[];
+  let checksFrom: string;
+  if (opts.checks === false) {
+    checks = [];
+    checksFrom = "--no-checks";
+  } else if (opts.check && opts.check.length > 0) {
+    checks = opts.check;
+    checksFrom = "--check";
+  } else if (file.deterministicChecks) {
+    checks = file.deterministicChecks;
+    checksFrom = via;
+  } else {
+    const detected = detectChecks(repo);
+    checks = detected.checks;
+    checksFrom = `auto-detected from ${detected.source}`;
+  }
+  banner.push(
+    checks.length > 0
+      ? `checks     ${checks.join(" · ")}   (${checksFrom})`
+      : `checks     none (${checksFrom}) — QA has no hard signal; pass --check "<cmd>" to add one`
+  );
+
+  const runCapUsd = fromCli("runCap")
+    ? positive(opts.runCap, "--run-cap")
+    : file.budget?.runCapUsd ?? DEFAULT_RUN_CAP;
+  const taskCapUsd = fromCli("taskCap")
+    ? positive(opts.taskCap, "--task-cap")
+    : file.budget?.taskCapUsd ?? DEFAULT_TASK_CAP;
+  const budgetFrom = fromCli("runCap") || fromCli("taskCap") ? "flags" : file.budget ? via : "defaults";
+  banner.push(`budget     run $${runCapUsd} · task $${taskCapUsd}   (${budgetFrom})`);
+
+  const skillsDirs = (file.skillsDirs ?? DEFAULT_SKILLS_DIRS).map(expandHome);
+  banner.push(`skills     ${skillsDirs.join(" · ")}   (${file.skillsDirs ? via : "defaults"})`);
+
+  const github = resolveGitHub(repo, file.githubRepo);
+  banner.push(github.slug ? `github     ${github.slug}   (${github.source})` : `github     ${github.source}`);
+  if (github.slug) {
+    banner.push(
+      (file.prMode ?? "single") === "single"
+        ? `prs        one rollup PR for the whole run   (${file.prMode ? via : "default"})`
+        : `prs        one PR per task   (${via})`
+    );
+  }
+
+  const toolbelt = detectToolbelt(file.externalTools);
+  banner.push(
+    toolbelt.length > 0
+      ? `tools      ${toolbelt.map((t) => t.name).join(" · ")}   (offered to worker + QA agents)`
+      : `tools      none detected on PATH`
+  );
+
+  const dashboard = fromCli("dashboard") ? opts.dashboard === true : file.dashboard ?? true;
+  const dashboardPort = fromCli("port") ? port(opts.port!) : file.dashboardPort;
+  // An assignment on the command line is taken as final; without one, the intake
+  // agent is the only way the operator gets to say what they want.
+  const chat = fromCli("chat") ? opts.chat === true : file.chat ?? assignment === undefined;
+  banner.push(
+    chat
+      ? `intake     conversation before planning   (${fromCli("chat") ? "--chat" : file.chat !== undefined ? via : "default"})`
+      : `intake     off — planning directly from the assignment`
+  );
+
+  const config = RunConfig.parse({
+    maxParallelWorkers: file.maxParallelWorkers,
+    qaIterationCap: file.qaIterationCap,
+    qaMaxTurns: file.qaMaxTurns,
+    workerMaxTurns: file.workerMaxTurns,
+    workerRespawnCap: file.workerRespawnCap,
+    taskWallClockMinutes: file.taskWallClockMinutes,
+    models: file.models,
+    budget: { runCapUsd, taskCapUsd },
+    skillsDirs,
+    skillRouting: file.skillRouting,
+    roleSkills: file.roleSkills,
+    // Persist the resolved slug so the dashboard can link issues and PRs on a resume.
+    githubRepo: github.slug ?? file.githubRepo,
+    prMode: file.prMode,
+    deterministicChecks: checks,
+    waitForChecks: file.waitForChecks,
+    checkTimeoutMinutes: file.checkTimeoutMinutes,
+    prodUrl: file.prodUrl,
+    deployTimeoutMinutes: file.deployTimeoutMinutes,
+    externalTools: file.externalTools,
+  });
+  if (filePath) banner.push(`config     ${CONFIG_FILENAME}`);
+  return { repo, config, dashboard, dashboardPort, chat, banner };
+}
+
+/**
+ * Build the command tree.
+ *
+ * A function, not a module-level `program`, so a test can construct a fresh
+ * one per case: commander keeps parsed option values on the command objects,
+ * and a shared instance would carry one test's flags into the next.
+ */
+export function buildProgram(): Command {
+  const program = new Command();
+  program.name("harness").description("Multi-agent development harness: assignment in, reviewed PRs out");
+
+  program
+    .command("run")
+    .description("plan and build an assignment in the current repo")
+    .argument("[assignment]", "what to build; omit to describe it in a conversation")
+    .option("-r, --repo <path>", "target repo (default: the git repo containing the cwd)", process.cwd())
+    .option("--run-cap <usd>", "run budget cap in USD", String(DEFAULT_RUN_CAP))
+    .option("--task-cap <usd>", "task budget cap in USD", String(DEFAULT_TASK_CAP))
+    .option("--check <cmd...>", "deterministic checks run before QA (default: auto-detected)")
+    .option("--no-checks", "run no deterministic checks")
+    .option("--dashboard", "serve the monitoring dashboard and resolve gates there (default)")
+    .option("--no-dashboard", "run headless; resolve gates in this terminal")
+    .option("--port <n>", "pin the dashboard port (default: the first free port from 4777)")
+    .option("--chat", "talk the assignment through with an intake agent first (default when no assignment is given)")
+    .option("--no-chat", "skip the conversation; plan directly from the assignment")
+    .action(async (assignment: string | undefined, opts: RunOpts, cmd: Command) => {
+      const { repo, config, dashboard: wantDashboard, dashboardPort, chat: wantChat, banner } = resolveRun(cmd, opts, assignment);
+      const dash = makeDashboardFactory(wantDashboard, dashboardPort);
+      const { controller, store } = makeController(repo, dash.gateOverride);
+      // A new run forks from the base branch as it is right now. Another run whose
+      // work is merged locally but not yet in that base is invisible to it — so the
+      // two plan against different trees, build the same thing twice, and the second
+      // pull request lands in conflicts against the first. Nothing else warns.
+      // VERIFYING and DONE runs are already merged, so they are in the base this
+      // run forks from and pose no staleness risk.
+      const unlanded = store.listRuns().filter((r) => !["DONE", "VERIFYING", "FAILED", "ABORTED"].includes(r.state));
+      if (unlanded.length) {
+        banner.push(
+          `WARNING    ${unlanded.length} run${unlanded.length === 1 ? " is" : "s are"} still open in this repo: ${unlanded
+            .map((r) => `${r.id} (${r.state})`)
+            .join(", ")}`,
+          "           this run forks from the base branch as it is now, so their unmerged work is invisible to it"
+        );
+      }
+      dash.connect(controller);
+      const url = await dash.start();
+      if (url) {
+        banner.push(`dashboard  ${url}   (the fragment is your auth token)`);
+      } else {
+        banner.push("dashboard  off — the plan gate will be resolved in this terminal");
+      }
+      process.stdout.write(`\n${banner.map((l) => `  ${l}`).join("\n")}\n`);
+
+      const chat = wantChat || assignment === undefined ? new TerminalChat() : undefined;
+      const seed = assignment ?? (await chat!.promptSeed(wantChat));
+      try {
+        const runId = await controller.startRun(seed, config, wantChat ? chat : undefined);
+        await reportOutcome(controller, repo, runId);
+      } catch (e) {
+        notifyDone(`${path.basename(repo)} — run stopped`, e instanceof Error ? e.message : String(e));
+        throw e;
+      } finally {
+        chat?.close();
+        await dash.stop();
+      }
+    });
+
+  program
+    .command("resume")
+    .description("continue the last run (or a given one); completed tasks never re-execute, parked tasks ask you")
+    .argument("[runId]", "run to resume (default: the newest run with something left to do)")
+    .option("-r, --repo <path>", "target repo (default: the git repo containing the cwd)", process.cwd())
+    .option("--dashboard", "serve the monitoring dashboard and resolve gates there (default)")
+    .option("--no-dashboard", "run headless; resolve gates in this terminal")
+    .option("--port <n>", "pin the dashboard port (default: the first free port from 4777)")
+    .action(async (runIdArg: string | undefined, opts: { repo: string; dashboard?: boolean; port?: string }, cmd: Command) => {
+      const repo = resolveRepoRoot(opts.repo);
+      const file = loadFileConfig(repo).config;
+      const fromCli = (name: string) => cmd.getOptionValueSource(name) === "cli";
+      const wantDashboard = fromCli("dashboard") ? opts.dashboard === true : file.dashboard ?? true;
+      const dash = makeDashboardFactory(wantDashboard, fromCli("port") ? port(opts.port!) : file.dashboardPort);
+      const { controller, store } = makeController(repo, dash.gateOverride);
+      dash.connect(controller);
+      // Resumable = interrupted mid-run, or finished with parked tasks, cancelled
+      // tasks whose blockers have since merged, or merged work whose PRs never
+      // opened. FAILED and ABORTED runs stay closed.
+      // A run whose pull request is merged is resumable even with no task work
+      // left: the deploy and the production check are what remain, and re-entering
+      // verification is exactly how a fixed deploy gets noticed.
+      const resumable = (id: string, state: string) =>
+        !["FAILED", "ABORTED", "DONE"].includes(state) &&
+        (state !== "PR_REVIEW" || controller.hasRecoverableWork(id) || controller.awaitingVerification(id));
+      let runId = runIdArg;
+      if (!runId) {
+        const pick = store.listRuns().find((r) => resumable(r.id, r.state));
+        if (!pick) {
+          process.stdout.write("No run to resume: every run in this repo either finished cleanly or failed before producing work.\n");
+          return;
+        }
+        runId = pick.id;
+        process.stdout.write(`Resuming run ${runId} [${pick.state}] — ${pick.assignment.slice(0, 80).replace(/\n.*/s, "")}\n`);
+      }
+      const existing = store.getRun(runId);
+      if (existing && !resumable(runId, existing.state)) {
+        process.stdout.write(`Run ${runId} already finished (${existing.state}); there is nothing to resume.\n`);
+        await reportOutcome(controller, repo, runId, { notify: false });
+        return;
+      }
+      // The run's checks are frozen in its config; the file is the operator's
+      // current declaration. A run whose checks were the problem — `cd web && …`
+      // for tasks living in mobile/ — resumes with the corrected ones.
+      if (existing && file.deterministicChecks && JSON.stringify(file.deterministicChecks) !== JSON.stringify(existing.config.deterministicChecks)) {
+        store.patchRunConfig(runId, { deterministicChecks: file.deterministicChecks });
+        process.stdout.write(`Checks updated from ${CONFIG_FILENAME}:\n${file.deterministicChecks.map((c) => `  $ ${c}`).join("\n")}\n`);
+      }
+      if (existing && file.prMode && file.prMode !== existing.config.prMode) {
+        store.patchRunConfig(runId, { prMode: file.prMode });
+        process.stdout.write(`PR mode updated from ${CONFIG_FILENAME}: ${file.prMode}\n`);
+      }
+      // Runs started before parallel dispatch existed carry a cap of 1 forever.
+      // The scheduler reads the cap when it starts executing, so patching here —
+      // before resume() — is what lets an old run finish with parallel workers.
+      if (existing && file.maxParallelWorkers && file.maxParallelWorkers !== existing.config.maxParallelWorkers) {
+        store.patchRunConfig(runId, { maxParallelWorkers: file.maxParallelWorkers });
+        process.stdout.write(`Parallel workers updated from ${CONFIG_FILENAME}: ${existing.config.maxParallelWorkers} → ${file.maxParallelWorkers}\n`);
+      }
+      // Runs started before the CI wait existed default to true on resume, which
+      // is the safe direction: they end by asking the repo instead of assuming.
+      if (existing && file.waitForChecks !== undefined && file.waitForChecks !== existing.config.waitForChecks) {
+        store.patchRunConfig(runId, { waitForChecks: file.waitForChecks });
+        process.stdout.write(`Wait for CI updated from ${CONFIG_FILENAME}: ${file.waitForChecks}\n`);
+      }
+      // A run that parked tasks because QA kept running out of turns is the run
+      // most likely to be resumed with a bigger ceiling — that has to reach it.
+      if (existing && file.qaMaxTurns && file.qaMaxTurns !== existing.config.qaMaxTurns) {
+        store.patchRunConfig(runId, { qaMaxTurns: file.qaMaxTurns });
+        process.stdout.write(`QA turn ceiling updated from ${CONFIG_FILENAME}: ${existing.config.qaMaxTurns} → ${file.qaMaxTurns}\n`);
+      }
+      // Same reason again, for the worker: the ceiling is what a long task dies at.
+      if (existing && file.workerMaxTurns && file.workerMaxTurns !== existing.config.workerMaxTurns) {
+        store.patchRunConfig(runId, { workerMaxTurns: file.workerMaxTurns });
+        process.stdout.write(`Worker turn ceiling updated from ${CONFIG_FILENAME}: ${existing.config.workerMaxTurns} → ${file.workerMaxTurns}\n`);
+      }
+      // Who the remaining tasks get to consult. A run's routing table is frozen at
+      // the moment it started, which means a run half finished when the operator
+      // decided its UI work needs a designer would never see that decision — and
+      // the tasks that would benefit are exactly the ones still queued.
+      for (const key of ["skillRouting", "roleSkills"] as const) {
+        if (!existing || !file[key] || JSON.stringify(file[key]) === JSON.stringify(existing.config[key])) continue;
+        store.patchRunConfig(runId, { [key]: file[key] } as Partial<RunConfig>);
+        process.stdout.write(`${key} updated from ${CONFIG_FILENAME} for the remaining tasks\n`);
+      }
+      // Setting prodUrl on a run that already finished is what extends it past the
+      // pull request: the next resume follows the deploy and checks production.
+      if (existing && file.prodUrl !== undefined && file.prodUrl !== existing.config.prodUrl) {
+        store.patchRunConfig(runId, { prodUrl: file.prodUrl });
+        process.stdout.write(`Production URL updated from ${CONFIG_FILENAME}: ${file.prodUrl || "(none)"}\n`);
+      }
+      const url = await dash.start();
+      if (url) process.stdout.write(`Dashboard: ${url}\n(keep the fragment — it is your auth token)\n`);
+      try {
+        await controller.resume(runId);
+        await reportOutcome(controller, repo, runId);
+      } catch (e) {
+        notifyDone(`${path.basename(repo)} — run stopped`, e instanceof Error ? e.message : String(e));
+        throw e;
+      } finally {
+        await dash.stop();
+      }
+    });
+
+  program
+    .command("regroup")
+    .description("replace a run's per-task pull requests with one rollup PR carrying the whole diff")
+    .argument("[runId]", "run to regroup (default: the newest run with pull requests)")
+    .option("-r, --repo <path>", "target repo (default: the git repo containing the cwd)", process.cwd())
+    .action(async (runIdArg: string | undefined, opts: { repo: string }) => {
+      const repo = resolveRepoRoot(opts.repo);
+      const { controller, store } = makeController(repo);
+      const runId = runIdArg ?? store.listRuns().find((r) => store.listTasks(r.id).some((t) => t.prNumber !== null))?.id;
+      if (!runId) {
+        process.stdout.write("No run with pull requests to regroup.\n");
+        return;
+      }
+      const res = await controller.regroupPrs(runId);
+      if (!res) {
+        process.stdout.write(`Run ${runId} has nothing to roll up: no merged work, or no commits the base branch does not already have.\n`);
+        return;
+      }
+      process.stdout.write(`Rollup PR: ${res.pr.url}\n`);
+      process.stdout.write(
+        res.closed.length
+          ? `Closed ${res.closed.length} superseded pull request${res.closed.length === 1 ? "" : "s"}: ${res.closed.map((n) => `#${n}`).join(", ")}\n`
+          : "No per-task pull requests needed closing.\n"
+      );
+    });
+
+  program
+    .command("status")
+    .description("show runs, task states, pull requests and spend")
+    .option("-r, --repo <path>", "target repo (default: the git repo containing the cwd)", process.cwd())
+    .option("--all", "include finished runs (default: the open ones plus the last finished)", false)
+    .action(async (opts: { repo: string; all: boolean }) => {
+      const repo = resolveRepoRoot(opts.repo);
+      const { store } = makeController(repo);
+      const all = store.listRuns();
+      // VERIFYING counts as open: the pull request is merged but the cycle has not
+      // closed, and that is precisely the run the operator needs to see.
+      const open = all.filter((r) => !["PR_REVIEW", "DONE", "FAILED", "ABORTED"].includes(r.state));
+      // A finished run still holds the answer to "what did it actually produce?", so
+      // the most recent one is shown even without --all. Nothing at all is printed
+      // only when the repo has genuinely never been run.
+      const runs = opts.all ? all : open.length ? open : all.slice(0, 1);
+      if (runs.length === 0) {
+        process.stdout.write("No runs yet.\n");
+        return;
+      }
+      const slug = (await originSlug(repo).catch(() => null)) ?? loadFileConfig(repo).config.githubRepo;
+      for (const run of runs) {
+        process.stdout.write(`run ${run.id} [${run.state}] $${store.spentUsd(run.id).toFixed(2)} — ${run.assignment.slice(0, 60)}\n`);
+        const dep = store.deployStatus(run.id);
+        if (dep && dep.state !== "none") process.stdout.write(`  deploy ${dep.sha.slice(0, 7)}: ${dep.state}${dep.failing.length ? ` — ${dep.failing.join(", ")}` : ""}\n`);
+        const prod = store.prodVerdict(run.id);
+        if (prod) process.stdout.write(`  production ${prod.url}: ${prod.verdict}${prod.findings.length ? ` — ${prod.findings.length} finding(s)` : ""}\n`);
+        const tasks = store.listTasks(run.id);
+        for (const t of tasks) {
+          process.stdout.write(`  ${t.id} [${t.state}] qa=${t.qaIterations}${t.prNumber ? ` PR#${t.prNumber}` : ""}\n`);
+        }
+        // A rollup PR is shared by every merged task; list it once, not per task.
+        const byPr = new Map<number, string[]>();
+        for (const t of tasks) {
+          if (t.prNumber !== null) byPr.set(t.prNumber, [...(byPr.get(t.prNumber) ?? []), t.title]);
+        }
+        if (byPr.size) {
+          process.stdout.write("  pull requests:\n");
+          for (const [n, titles] of byPr) {
+            const url = slug ? `https://github.com/${slug}/pull/${n}` : `PR #${n}`;
+            process.stdout.write(`    ${url}  ${titles.length === 1 ? titles[0] : `${titles.length} tasks (rollup)`}\n`);
+          }
+        } else if (["INTEGRATING", "PR_REVIEW"].includes(run.state)) {
+          process.stdout.write("  pull requests: none — no task got far enough to open one.\n");
+        }
+      }
+    });
+
+  program
+    .command("init")
+    .description(`write ${CONFIG_FILENAME} with the settings this repo would run with`)
+    .option("-r, --repo <path>", "target repo (default: the git repo containing the cwd)", process.cwd())
+    .option("-f, --force", "overwrite an existing config file", false)
+    .action((opts: { repo: string; force: boolean }) => {
+      const repo = resolveRepoRoot(opts.repo);
+      const target = path.join(repo, CONFIG_FILENAME);
+      if (existsSync(target) && !opts.force) {
+        throw new Error(`${target} already exists. Pass --force to overwrite.`);
+      }
+      const detected = detectChecks(repo);
+      const contents = {
+        budget: { runCapUsd: DEFAULT_RUN_CAP, taskCapUsd: DEFAULT_TASK_CAP },
+        deterministicChecks: detected.checks,
+        dashboard: true,
+        skillsDirs: DEFAULT_SKILLS_DIRS,
+      };
+      writeFileSync(target, `${JSON.stringify(contents, null, 2)}\n`);
+      process.stdout.write(
+        `Wrote ${target}\n  checks: ${detected.checks.join(", ") || `none (${detected.source})`}\n` +
+          `Edit it and re-run \`harness run "<assignment>"\` — no flags needed.\n`
+      );
+    });
+
+  return program;
+}

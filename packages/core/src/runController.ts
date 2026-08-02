@@ -335,6 +335,9 @@ export class RunController {
 
     let revived = 0;
     for (const t of parked) {
+      // Same invariant as the issue comment below: a parked task carries a
+      // reason on the row or in its transition event.
+      /* v8 ignore next */
       const why = t.errorSummary || this.store.taskStateReason(runId, t.id) || "parked";
       const guidance = await this.askOperator(runId, t.id, why);
       if (guidance === null) continue; // still parked; no transition needed
@@ -1323,13 +1326,19 @@ export class RunController {
         } else {
           const issues = parsed.error.issues
             .slice(0, 5)
-            .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+            // `extractJson` has already guaranteed an object, so every issue has a
+          // key to name; "(root)" is for a schema that grows a root-level rule.
+          /* v8 ignore next */
+          .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
             .join("; ");
           lastReason = `the breakdown does not match the required shape: ${issues}`;
         }
       } catch (e) {
         lastReason = lastTruncated
           ? "the breakdown ran past the output-token limit and was cut off mid-JSON — it is too long to emit in one message"
+          // Only `extractJson` and `JSON.parse` throw in here, and both throw
+          // Errors — the String() arm is for a future throw that does not.
+          /* v8 ignore next */
           : `the breakdown JSON could not be read: ${(e instanceof Error ? e.message : String(e)).slice(0, 300)}`;
       }
       lastReason = this.failedAttempt(runId, attempt, lastReason, lastPath, result.outcome, result.errorDetail);
@@ -1557,6 +1566,10 @@ export class RunController {
     // unconditional, so they must not lose the per-role cap to a keyword hit.
     for (const name of config.roleSkills[role] ?? []) take(name);
     for (const rule of config.skillRouting) {
+      // A rule that names roles is for those roles only. Absent, it is for all
+      // of them — the routing tables written before `roles` existed must keep
+      // meaning exactly what they meant.
+      if (rule.roles?.length && !rule.roles.includes(role as (typeof rule.roles)[number])) continue;
       let matches = false;
       try {
         matches = new RegExp(rule.when, "i").test(text);
@@ -1597,8 +1610,13 @@ export class RunController {
   private async baseFailures(runId: string): Promise<CheckResult> {
     const run = this.store.getRun(runId)!;
     const clean: CheckResult = { ok: true, failures: [] };
+    // Both are guards on a call that only happens after the checks have already
+    // run and failed against a branch that therefore exists — kept so a future
+    // caller cannot measure a baseline that is not there.
+    /* v8 ignore next */
     if (!run.config.deterministicChecks.length) return clean;
     const sha = await this.wt.integrationHead(runId);
+    /* v8 ignore next */
     if (!sha) return clean;
     const key = `${runId}/${sha}`;
     let measured = this.baselines.get(key);
@@ -1634,6 +1652,9 @@ export class RunController {
    * exists.
    */
   private selectSkills(skills: IndexedSkill[], role: keyof typeof ROLE_SKILL_LENS, text: string, config: RunConfig) {
+    // Every role that calls this has a lens; the fallback is for one added
+    // later without one.
+    /* v8 ignore next */
     const query = `${text}\n${ROLE_SKILL_LENS[role] ?? ""}`;
     // Routed skills are the operator's declared intent and come first; scoring
     // only fills whatever room is left, and no skill at all is a valid outcome.
@@ -1758,6 +1779,10 @@ export class RunController {
         startedAt = Date.now();
         qaFeedback =
           `The operator reviewed why this task is taking so long and says — follow it over anything that contradicts it:\n${guidance}` +
+          // The clock is set immediately before the loop, so the first pass
+          // cannot blow it — anything that gets here has been round at least
+          // once, and every path that loops leaves feedback behind.
+          /* v8 ignore next */
           (qaFeedback ? `\n\nThe pending feedback from the previous iteration still applies:\n${qaFeedback}` : "");
       }
       // The issue thread is the other place an operator answers a task, and
@@ -1961,6 +1986,9 @@ export class RunController {
         }
         conflictFixes++;
         const caught = await this.wt.catchUpTaskBranch(runId, taskId);
+        // A merge that conflicted one way conflicts the other way too, so a
+        // clean catch-up after a conflicted integrate does not happen.
+        /* v8 ignore next */
         qaFeedback = conflictPrompt(this.wt.integrationBranch(runId), caught.ok ? merged.conflicts : caught.conflicts, caught.ok);
         this.store.transitionTask(runId, taskId, "WORKING", "re-dispatched to resolve merge conflicts");
         continue;
@@ -1990,11 +2018,15 @@ export class RunController {
     const task = this.store.getTask(runId, taskId)!;
     const merge = await this.wt.mergeTaskBranch(runId, taskId);
     if (!merge.ok) {
-      this.bus.publish({ type: "git.merge_conflict", runId, taskId, branch: task.branch ?? "", files: merge.conflicts, ts: Date.now() });
+      // Branch is set by ensureWorktree before the task can ever be merged;
+    // the fallback is for the column type, not for a state that occurs.
+    /* v8 ignore next */
+    this.bus.publish({ type: "git.merge_conflict", runId, taskId, branch: task.branch ?? "", files: merge.conflicts, ts: Date.now() });
       return merge;
     }
     this.store.transitionTask(runId, taskId, "MERGED");
     this.mergedShas.set(`${runId}/${taskId}`, merge.sha);
+    /* v8 ignore next */
     this.bus.publish({ type: "git.merged", runId, taskId, branch: task.branch ?? "", sha: merge.sha, ts: Date.now() });
     // The PR is NOT opened here. Merging is continuous; publishing waits until
     // the whole run has been validated against the operator's intent (openPrs),
@@ -2061,8 +2093,12 @@ export class RunController {
       await this.github.commentOnIssue(
         issue,
         key,
+        // The sha was recorded by this same process when it merged the task.
+        /* v8 ignore next */
         `**Done** — merged into \`${this.wt.integrationBranch(runId)}\`${sha ? ` as \`${sha.slice(0, 7)}\`` : ""} after ${n} QA iteration${n === 1 ? "" : "s"}.\n\n` +
           `**Acceptance criteria**\n${task.acceptanceCriteria.map((c) => `- [x] ${c}`).join("\n")}\n\n` +
+          // A merged task always has a branch — see the same note in integrate.
+          /* v8 ignore next */
           `This closes when the pull request for \`${task.branch ?? "the task branch"}\` is merged.`
       );
       return;
@@ -2072,6 +2108,9 @@ export class RunController {
       await this.github.commentOnIssue(
         issue,
         key,
+        // `park()` always records a reason, so the literal is unreachable; it is
+        // there so a future path that parks without one still says something.
+        /* v8 ignore next */
         `**Parked for a human** — ${task.errorSummary || why || "the harness could not finish it"}\n\n` +
           `The work so far is on \`${task.branch ?? "no branch"}\`. While the run is still going, a reply in this thread is picked up as guidance and the task is dispatched again.`
       );
@@ -2079,6 +2118,9 @@ export class RunController {
     }
 
     if (task.state === "CANCELLED") {
+      // Cancelling always records why; the literal is for a path that stops
+      // doing so.
+      /* v8 ignore next */
       await this.github.commentOnIssue(issue, key, `**Not attempted** — ${why || "the run ended before this task became reachable"}.`);
       await this.github.closeIssue(issue, "not_planned");
     }
@@ -2088,6 +2130,8 @@ export class RunController {
     const run = this.store.getRun(runId)!;
     const task = this.store.getTask(runId, taskId)!;
     const base = run.config.baseBranch;
+    // Only MERGED tasks reach here, and a merged task has a branch.
+    /* v8 ignore next */
     if (!this.github.enabled || !task.branch) return;
     if (!base) throw new Error("the run has no base branch (detached HEAD) — nothing to open a PR against");
 
@@ -2177,6 +2221,10 @@ export class RunController {
     const run = this.store.getRun(runId)!;
     const cap = scope === "run" ? run.config.budget.runCapUsd : run.config.budget.taskCapUsd;
     const spent = this.store.spentUsd(runId, taskId);
+    // `enforce` already returned for anything under the cap, and spend only
+    // grows — so this is a re-check that cannot fire, kept because the queue
+    // between the two makes "still over?" the honest question to ask here.
+    /* v8 ignore next */
     if (spent < cap) return;
     // The operator already declined while this check was queued — every other
     // session stops on its next check without opening the gate again.

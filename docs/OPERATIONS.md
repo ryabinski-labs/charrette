@@ -795,6 +795,80 @@ Which skills were injected — and in which mode — is recorded per task and em
 as a `skills.injected` event, so the dashboard log tells you exactly what shaped a
 worker's behaviour.
 
+### Routing beats scoring, and order beats both
+
+Lexical matching cannot decide which specialist owns a task — measured against a
+real corpus, the top match for a sanctions-screening task was
+`testimonial-collector`. So `skillRouting` lets you bind skills to a class of work
+by name: `when` is a case-insensitive regular expression tested against the task's
+title and spec, and every named skill that exists in `skillsDirs` is injected
+before scoring fills whatever room is left. `roleSkills` does the same for a *job*
+rather than a topic — the planner carries `product-manager` whatever the
+assignment says, because "add rate limiting" is still a product decision.
+
+The defaults route architecture, UI, product, marketing, sales and research work,
+plus two narrow rules that must stay near the top of the list:
+
+| Rule | Skill |
+|---|---|
+| DNS, dns-project, CNAME/TXT records, cert-manager, DNS-01, ACME, Route 53 | `dns-project-iac-engineer` |
+| greenfield, scaffolding, technology-stack choice, DynamoDB, magic-link, WebAuthn, serverless | `fullstack-app` |
+
+**A role carries at most four skills.** Rules are applied in list order and the
+fifth match is dropped, so a narrow rule placed below a broad one never fires in
+practice: a DNS task also says "infrastructure" and a greenfield task also says
+"system design", and the architecture rule alone fills all four slots. Put the
+specific rule above the general one — the regression tests in
+`skillsInjection.test.ts` assert exactly this and go red if the order is reversed.
+
+A rule may also name the `roles` it applies to (`intake`, `planner`, `worker`,
+`qa`, `prod`); omit the field and it applies to all of them, which is what every
+rule written before this option existed still means. Use it when a skill belongs
+to one side of the work rather than to the topic — the UI defaults build with
+`frontend-design`, `ui-ux-cx-engineer` and `product-manager`, and grade with
+`visual-qa-agent`, which never reaches the agent that drew the screen. It also
+buys back cap: a builder skill and a grader skill no longer compete for the same
+four slots.
+
+```json
+{ "when": "\\b(ui|ux|frontend|screen|theme)\\b", "skills": ["visual-qa-agent"], "roles": ["qa"] }
+```
+
+### Design is a planned deliverable, not the first UI task's side effect
+
+The planner is told that when a product has a user interface, one task
+establishes the visual language — name, logo, palette, type scale, spacing,
+shared primitives — derived from what the product already has, and every other UI
+task `dependsOn` it. Without that rule, parallel workers each invent a screen from
+nothing in a separate worktree and the result is a set of screens that share no
+visual language and belong to no product. Routing the design skills does not fix
+it: run `ec40b527` carried `frontend-design` and `ui-ux-cx-engineer` on every UI
+task, worker and QA, and still shipped an unbranded generic card. UI acceptance
+criteria are also required to be settleable from the rendered screen — "uses the
+design system" cannot be judged, "the sign-in screen shows the product logo and
+its primary button uses the palette's primary token" can.
+
+### What QA and the validator owe you
+
+Two obligations exist because a green run shipped a broken build:
+
+- **QA runs the application.** For application code the suite passing is where
+  verification starts. A criterion satisfied only against a mock, a fake or a
+  stub is reported as unverified, not passed; new code must be traced to the
+  entrypoint that actually invokes it; and the unhappy path gets exercised too,
+  because a handler that swallows its error and answers `{"ok":true}` is
+  indistinguishable from a working one. `main.go` never calling
+  `store.EnsureTable()` was invisible to `go vet && go test && go build` because
+  nothing ever executed `main`.
+- **The intent validator checks the seams.** It is the only agent that ever sees
+  the merged whole, so it verifies the contracts *between* tasks: field and
+  parameter names matching on the wire, routes and env var names agreeing, and
+  everything implemented being mounted, registered or called from somewhere. A
+  client posting `{token}` to a handler requiring `orderToken` type-checks on
+  both sides and passes both suites; a fully implemented router that `app.ts`
+  never mounts 404s for every user. Task-level QA cannot see either, by
+  construction — each task is judged alone in its own worktree.
+
 ### Using the indexer as a standalone MCP server
 
 `packages/skills-mcp` also ships a stdio MCP server exposing `search_skills` and
