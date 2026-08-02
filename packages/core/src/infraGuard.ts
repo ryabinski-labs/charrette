@@ -113,6 +113,9 @@ function segments(command: string): string[] {
 
 /** Whitespace-separated tokens, with quoted spans held together. */
 function rawTokens(segment: string): string[] {
+  // `segments()` only yields segments with non-whitespace in them, so the match
+  // cannot come back null — the fallback is for the type, not for a real input.
+  /* v8 ignore next */
   return segment.match(/(?:[^\s'"]|'[^']*'|"[^"]*")+/g) ?? [];
 }
 
@@ -138,6 +141,8 @@ function resolve(segment: string): Resolved | null {
     while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]!)) i++;
     const token = tokens[i];
     if (!token) return null;
+    // `split` always yields at least one element, so `pop` cannot be undefined.
+    /* v8 ignore next */
     const bin = unquote(token).split("/").pop() ?? "";
     if (WRAPPERS.has(bin)) {
       i++;
@@ -284,6 +289,10 @@ export function infraMutation(command: string, depth = 0): { what: string; inste
     const check = CHECKS[resolved.bin];
     if (!check) continue;
     const what = check(resolved);
+    // Every tool in CHECKS has an INSTEAD entry today; the fallback is there so
+    // adding a check and forgetting the advice degrades the message rather than
+    // the denial. Unreachable until someone does exactly that.
+    /* v8 ignore next */
     if (what) return { what, instead: INSTEAD[resolved.bin] ?? "the tool's plan or dry-run mode" };
   }
   return null;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { priceFor, costUsd, BudgetExceeded } from "./budget.js";
-import { infraMutation } from "./infraGuard.js";
+import { infraGuardHook, infraMutation } from "./infraGuard.js";
 import { plannerRepairPrompt, qaSystemPrompt, qaTaskPrompt, validatorPrompt, prodValidatorPrompt } from "./prompts.js";
 
 const TASK = { id: "t1", title: "T", spec: "s", acceptanceCriteria: ["it works"] } as never;
@@ -135,6 +135,60 @@ describe("recognising an apply however it is written", () => {
     const found = infraMutation("kubectl delete ns prod");
 
     expect(found?.instead).toBeTruthy();
+  });
+
+  it("names the tool's own safe mode where there is one to name", () => {
+    expect(infraMutation("terraform apply")?.instead).toMatch(/plan/i);
+  });
+
+  it("says nothing about a command that is only whitespace or separators", () => {
+    expect(infraMutation("")).toBeNull();
+    expect(infraMutation("   ")).toBeNull();
+    expect(infraMutation("&& ||")).toBeNull();
+  });
+
+  it("reads past a heredoc body rather than parsing it as commands", () => {
+    // The body is data, not a command list — a manifest that happens to
+    // contain the word `apply` must not be read as running it.
+    expect(infraMutation("cat <<'EOF' > out.yaml\nterraform apply\nEOF")).toBeNull();
+  });
+
+  it("gives up at the recursion floor", () => {
+    // Depth is bounded so a pathological nesting cannot loop; past the floor
+    // the guard reports nothing rather than spinning.
+    expect(infraMutation("terraform apply", 4)).toBeNull();
+  });
+});
+
+describe("the guard as the agent session runs it", () => {
+  it("stays out of the way of anything that is not a Bash command", async () => {
+    const hook = infraGuardHook();
+    const fire = (input: unknown) => hook(input as never);
+
+    expect(await fire({ hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "terraform apply" } })).toEqual({});
+    expect(await fire({ hook_event_name: "PreToolUse", tool_name: "Write", tool_input: {} })).toEqual({});
+  });
+
+  it("stays out of the way of a Bash call with no command to inspect", async () => {
+    const hook = infraGuardHook();
+    const fire = (input: unknown) => hook(input as never);
+
+    expect(await fire({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: null })).toEqual({});
+    expect(await fire({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: {} })).toEqual({});
+    expect(await fire({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "  " } })).toEqual({});
+  });
+
+  it("denies an apply and says what to do instead", async () => {
+    const hook = infraGuardHook();
+
+    const out = (await hook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "terraform apply -auto-approve" },
+    } as never)) as { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string } };
+
+    expect(out.hookSpecificOutput?.permissionDecision).toBe("deny");
+    expect(out.hookSpecificOutput?.permissionDecisionReason).toContain("terraform apply");
   });
 });
 

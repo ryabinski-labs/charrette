@@ -222,6 +222,24 @@ describe("reading what an operator wrote on an issue", () => {
     await expect(adapter.issueComments(9)).resolves.toEqual([]);
   });
 
+  it("copes with an existing comment whose body is empty when checking for its marker", async () => {
+    const { adapter, api } = adapterWith();
+    api.rest.issues.listComments.mockResolvedValue({ data: [{ id: 1, body: null }] });
+
+    await expect(adapter.commentOnIssue(9, "merged", "it merged")).resolves.toBe(true);
+    expect(api.rest.issues.createComment).toHaveBeenCalledOnce();
+  });
+
+  it("says nothing twice about the same state", async () => {
+    const { adapter, api } = adapterWith();
+    api.rest.issues.listComments.mockResolvedValue({
+      data: [{ id: 1, body: "merged\n\n<!-- harness-comment -->\n<!-- harness-status:merged -->" }],
+    });
+
+    await expect(adapter.commentOnIssue(9, "merged", "it merged")).resolves.toBe(false);
+    expect(api.rest.issues.createComment).not.toHaveBeenCalled();
+  });
+
   it("reads no comments when the listing fails on the status path either", async () => {
     const { adapter, api } = adapterWith();
     api.rest.issues.listComments.mockRejectedValue(new Error("410 Gone"));

@@ -1,3 +1,0 @@
-{"total": {"lines":{"total":273,"covered":236,"skipped":0,"pct":86.44},"statements":{"total":273,"covered":236,"skipped":0,"pct":86.44},"functions":{"total":33,"covered":28,"skipped":0,"pct":84.84},"branches":{"total":84,"covered":81,"skipped":0,"pct":96.42},"branchesTrue":{"total":0,"covered":0,"skipped":0,"pct":"Unknown"}}
-,"/Users/dev/Documents/projects/harness/packages/core/src/store.ts": {"lines":{"total":273,"covered":236,"skipped":0,"pct":86.44},"functions":{"total":33,"covered":28,"skipped":0,"pct":84.84},"statements":{"total":273,"covered":236,"skipped":0,"pct":86.44},"branches":{"total":84,"covered":81,"skipped":0,"pct":96.42}}
-}
