@@ -1,5 +1,9 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
-import { RunConfig } from "@harness/shared";
+import { RunConfig, type TaskState } from "@harness/shared";
 import { Bus } from "./bus.js";
 import { InvalidTransition, Store } from "./store.js";
 import { costUsd } from "./budget.js";
@@ -55,7 +59,7 @@ describe("Store run lifecycle", () => {
       [{
         id: "a", epicId: "e1", title: "A", spec: "s", acceptanceCriteria: ["ok"], dependsOn: [],
         state: "PENDING", branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null,
-        qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null,
+        qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [], estimatedSize: "M",
       }]
     );
     store.transitionTask("run1", "a", "READY");
@@ -174,5 +178,108 @@ describe("costUsd", () => {
   it("prices unknown models at the top tier, never under", () => {
     const cost = costUsd("mystery-model", { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 });
     expect(cost).toBeCloseTo(5);
+  });
+});
+
+/**
+ * `touchedPaths` and `estimatedSize` were emitted by the planner from the first
+ * version of the harness and thrown away at the door. The scheduler needs the
+ * first to keep two workers out of one file; the plan gate needs the second to
+ * tell the operator what a run is likely to cost.
+ */
+describe("what a task remembers about the plan that made it", () => {
+  const task = (id: string, over: Partial<{ touchedPaths: string[]; estimatedSize: "S" | "M" | "L"; state: TaskState }> = {}) => ({
+    id, epicId: "e1", title: id, spec: "s", acceptanceCriteria: ["ok"], dependsOn: [],
+    state: "PENDING" as TaskState, branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null,
+    qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null,
+    touchedPaths: [] as string[], estimatedSize: "M" as const, ...over,
+  });
+
+  it("keeps the files and the size the planner named", () => {
+    const store = makeStore();
+    makeRun(store);
+    store.insertTasks("run1", [{ id: "e1", title: "E" }], [task("a", { touchedPaths: ["src/api/orders.ts", "src/db"], estimatedSize: "L" })]);
+
+    const back = store.getTask("run1", "a")!;
+    expect(back.touchedPaths).toEqual(["src/api/orders.ts", "src/db"]);
+    expect(back.estimatedSize).toBe("L");
+  });
+
+  it("adds the columns to a database written before they existed", () => {
+    // A run resumed across an upgrade is exactly the run that most needs to
+    // resume, and `CREATE TABLE IF NOT EXISTS` would have left it short a column.
+    const dir = mkdtempSync(path.join(tmpdir(), "harness-migrate-"));
+    const dbPath = path.join(dir, "old.db");
+    const old = new DatabaseSync(dbPath);
+    old.exec(`CREATE TABLE tasks (
+      id TEXT NOT NULL, runId TEXT NOT NULL, epicId TEXT NOT NULL,
+      title TEXT NOT NULL, spec TEXT NOT NULL, acceptanceCriteria TEXT NOT NULL,
+      dependsOn TEXT NOT NULL, state TEXT NOT NULL, branch TEXT,
+      worktreePath TEXT, githubIssueNumber INTEGER, prNumber INTEGER,
+      qaIterations INTEGER NOT NULL DEFAULT 0, respawns INTEGER NOT NULL DEFAULT 0,
+      assignedSkills TEXT NOT NULL DEFAULT '[]', errorSummary TEXT,
+      PRIMARY KEY (runId, id))`);
+    old.exec("INSERT INTO tasks (id, runId, epicId, title, spec, acceptanceCriteria, dependsOn, state) VALUES ('a','run1','e1','A','s','[]','[]','PENDING')");
+    old.close();
+
+    const store = new Store(dbPath);
+
+    // The old row survives with defaults; a new one round-trips as normal.
+    expect(store.getTask("run1", "a")!.touchedPaths).toEqual([]);
+    expect(store.getTask("run1", "a")!.estimatedSize).toBe("M");
+    makeRun(store);
+    store.insertTasks("run1", [{ id: "e1", title: "E" }], [task("b", { touchedPaths: ["x.ts"] })]);
+    expect(store.getTask("run1", "b")!.touchedPaths).toEqual(["x.ts"]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("what previous runs in this repository cost", () => {
+  const merged = (id: string, size: "S" | "M" | "L") => ({
+    id, epicId: "e1", title: id, spec: "s", acceptanceCriteria: ["ok"], dependsOn: [],
+    state: "MERGED" as TaskState, branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null,
+    qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [] as string[], estimatedSize: size,
+  });
+  const spend = (store: Store, runId: string, usd: number) =>
+    store.recordUsage({ runId, sessionId: `s-${runId}-${usd}`, model: "claude-sonnet-5", inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: usd });
+
+  it("weighs what merged against what was spent, per run", () => {
+    const store = makeStore();
+    makeRun(store, "run1");
+    store.insertTasks("run1", [{ id: "e1", title: "E" }], [merged("a", "L"), merged("b", "S")]);
+    spend(store, "run1", 20);
+    spend(store, "run1", 5);
+
+    expect(store.runCosts()).toEqual([{ weight: 5, spentUsd: 25 }]);
+  });
+
+  it("leaves out the run being estimated, so it cannot predict itself", () => {
+    const store = makeStore();
+    makeRun(store, "run1");
+    makeRun(store, "run2");
+    store.insertTasks("run1", [{ id: "e1", title: "E" }], [merged("a", "M")]);
+    store.insertTasks("run2", [{ id: "e1", title: "E" }], [merged("a", "M")]);
+    spend(store, "run1", 10);
+    spend(store, "run2", 99);
+
+    expect(store.runCosts("run2")).toEqual([{ weight: 2, spentUsd: 10 }]);
+  });
+
+  it("counts a run that spent money and merged nothing, so it can be discarded upstream", () => {
+    const store = makeStore();
+    makeRun(store);
+    spend(store, "run1", 40);
+
+    expect(store.runCosts()).toEqual([{ weight: 0, spentUsd: 40 }]);
+  });
+
+  it("treats a size it does not recognise as the middle one", () => {
+    // Rows written before `estimatedSize` existed default to 'M'; a row edited
+    // by hand could be anything, and a NaN weight would poison every estimate.
+    const store = makeStore();
+    makeRun(store);
+    store.insertTasks("run1", [{ id: "e1", title: "E" }], [merged("a", "XL" as "L")]);
+
+    expect(store.runCosts()).toEqual([{ weight: 2, spentUsd: 0 }]);
   });
 });

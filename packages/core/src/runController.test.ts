@@ -215,3 +215,55 @@ describe("agent confinement", () => {
     }
   });
 });
+
+/**
+ * The cap was the only cost signal a run had, and a cap is not an estimate: it
+ * says where the run stops, not what it needs. Run 40da9337 was approved against
+ * a $61 cap and cost $774, interrupting the operator nine times to double it —
+ * every one of those a surprise, because nobody had ever been shown a number to
+ * set the cap against.
+ */
+describe("what the operator is shown before they approve a plan", () => {
+  function planGateHarness() {
+    const repo = mkdtempSync(path.join(tmpdir(), "harness-estimate-"));
+    const store = new Store(":memory:");
+    const summaries: string[] = [];
+    const { pool } = fakePool([DOCS, dagJson()]);
+    const controller = new RunController(
+      store,
+      new Bus(store),
+      pool,
+      new GitHubAdapter(undefined, undefined),
+      {
+        async resolvePlanGate(_prd, summary) {
+          summaries.push(summary);
+          return { approved: false, feedback: "" }; // stop at the gate; the plan is the subject
+        },
+        async resolveBudgetGate() {
+          return null;
+        },
+      },
+      repo
+    );
+    return { controller, store, summaries };
+  }
+
+  it("prices the plan next to the cap, and says where the number came from", async () => {
+    const { controller, summaries } = planGateHarness();
+    // Rejecting sends it back to the planner, which runs out of canned answers
+    // and throws. The first summary — the one under test — is already recorded.
+    await controller.startRun("do a thing", RunConfig.parse({ budget: { runCapUsd: 500 } })).catch(() => undefined);
+
+    expect(summaries[0]).toContain("[task-a] A");
+    expect(summaries[0]).toMatch(/Estimated cost: \$\d/);
+    expect(summaries[0]).toContain("against a cap of $500");
+    expect(summaries[0]).toContain("no finished run in this repository yet");
+  });
+
+  it("says plainly when the cap cannot cover what the plan looks like", async () => {
+    const { controller, summaries } = planGateHarness();
+    await controller.startRun("do a thing", RunConfig.parse({ budget: { runCapUsd: 1 } })).catch(() => undefined);
+
+    expect(summaries[0]).toContain("The cap is below the estimate");
+  });
+});

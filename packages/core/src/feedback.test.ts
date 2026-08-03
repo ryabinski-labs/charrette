@@ -206,7 +206,7 @@ describe("feedback that outlives the process", () => {
     const runId = "run-1";
     store.createRun({ id: runId, repoPath: "/tmp/x", assignment: "do a thing", state: "PLANNING", prdPath: null, planHash: null, integrationBranch: "harness/run-1/main", config: RunConfig.parse({ deterministicChecks: [] }) });
     store.insertTasks(runId, [{ id: "epic-e", title: "E" }], [
-      { id: "task-a", epicId: "epic-e", title: "A", spec: "s", acceptanceCriteria: ["x"], dependsOn: [], state: "PENDING", branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null },
+      { id: "task-a", epicId: "epic-e", title: "A", spec: "s", acceptanceCriteria: ["x"], dependsOn: [], state: "PENDING", branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [], estimatedSize: "M" },
     ]);
     store.transitionRun(runId, "PLAN_REVIEW");
     store.transitionRun(runId, "EXECUTING");

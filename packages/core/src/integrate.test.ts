@@ -273,9 +273,9 @@ describe("what the run says it produced", () => {
     // One task the operator has to deal with, and two that never became reachable —
     // the second only transitively, through the first.
     store.insertTasks(runId, [], [
-      { id: "b", epicId: "epic-e", title: "B", spec: "", acceptanceCriteria: [], dependsOn: [], state: "NEEDS_HUMAN", branch: "harness/x/b", worktreePath: null, githubIssueNumber: 12, prNumber: null, qaIterations: 3, respawns: 0, assignedSkills: [], errorSummary: "QA rejected it 3 times (the cap): still no tests" },
-      { id: "c", epicId: "epic-e", title: "C", spec: "", acceptanceCriteria: [], dependsOn: ["b"], state: "CANCELLED", branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null },
-      { id: "d", epicId: "epic-e", title: "D", spec: "", acceptanceCriteria: [], dependsOn: ["c"], state: "CANCELLED", branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null },
+      { id: "b", epicId: "epic-e", title: "B", spec: "", acceptanceCriteria: [], dependsOn: [], state: "NEEDS_HUMAN", branch: "harness/x/b", worktreePath: null, githubIssueNumber: 12, prNumber: null, qaIterations: 3, respawns: 0, assignedSkills: [], errorSummary: "QA rejected it 3 times (the cap): still no tests", touchedPaths: [], estimatedSize: "M" },
+      { id: "c", epicId: "epic-e", title: "C", spec: "", acceptanceCriteria: [], dependsOn: ["b"], state: "CANCELLED", branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [], estimatedSize: "M" },
+      { id: "d", epicId: "epic-e", title: "D", spec: "", acceptanceCriteria: [], dependsOn: ["c"], state: "CANCELLED", branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [], estimatedSize: "M" },
     ]);
     const out = controller.outcome(runId);
     expect(out.line).toBe("no pull requests opened; 1 task needs you; 2 never started, blocked behind them; intent check passed");
@@ -291,7 +291,7 @@ describe("what the run says it produced", () => {
     const { adapter } = fakeGitHub(() => null);
     const { store, runId, controller } = await build(adapter, false);
     store.insertTasks(runId, [], [
-      { id: "e", epicId: "epic-e", title: "E", spec: "", acceptanceCriteria: [], dependsOn: [], state: "PENDING", branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null },
+      { id: "e", epicId: "epic-e", title: "E", spec: "", acceptanceCriteria: [], dependsOn: [], state: "PENDING", branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [], estimatedSize: "M" },
     ]);
     store.transitionTask(runId, "e", "READY");
     store.transitionTask(runId, "e", "WORKING");

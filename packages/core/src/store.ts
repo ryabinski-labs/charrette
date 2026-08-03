@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   worktreePath TEXT, githubIssueNumber INTEGER, prNumber INTEGER,
   qaIterations INTEGER NOT NULL DEFAULT 0, respawns INTEGER NOT NULL DEFAULT 0,
   assignedSkills TEXT NOT NULL DEFAULT '[]', errorSummary TEXT,
+  touchedPaths TEXT NOT NULL DEFAULT '[]', estimatedSize TEXT NOT NULL DEFAULT 'M',
   PRIMARY KEY (runId, id)
 );
 CREATE TABLE IF NOT EXISTS sessions (
@@ -96,6 +97,14 @@ export interface TaskRow {
   respawns: number;
   assignedSkills: { name: string; sha256: string; mode: "full" | "reference"; role?: "worker" | "qa" }[];
   errorSummary: string | null;
+  /**
+   * The files the planner expects this task to touch. Persisted because the
+   * scheduler reads it: two tasks editing the same file concurrently produce a
+   * merge conflict that costs more than the parallelism saved.
+   */
+  touchedPaths: string[];
+  /** The planner's size guess, and the only input a pre-run cost estimate has. */
+  estimatedSize: "S" | "M" | "L";
 }
 
 export interface SessionRow {
@@ -133,6 +142,27 @@ export class Store {
       this.db.exec("PRAGMA busy_timeout = 5000");
     }
     this.db.exec(SCHEMA);
+    this.migrate();
+  }
+
+  /**
+   * Bring a database written by an older harness up to the current schema.
+   *
+   * `CREATE TABLE IF NOT EXISTS` creates the current shape for a fresh run and
+   * silently leaves an existing table at whatever shape it already had, so a
+   * column added after a run started is missing for exactly the runs that most
+   * want to be resumable. Every entry here is additive and has a default, which
+   * is what lets this be a plain idempotent sweep rather than a version ladder.
+   */
+  private migrate(): void {
+    const added: Record<string, string> = {
+      touchedPaths: "TEXT NOT NULL DEFAULT '[]'",
+      estimatedSize: "TEXT NOT NULL DEFAULT 'M'",
+    };
+    const have = new Set((this.db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[]).map((c) => c.name));
+    for (const [name, decl] of Object.entries(added)) {
+      if (!have.has(name)) this.db.exec(`ALTER TABLE tasks ADD COLUMN ${name} ${decl}`);
+    }
   }
 
   /** Run fn inside a transaction (node:sqlite has no transaction helper). */
@@ -436,7 +466,7 @@ export class Store {
   insertTasks(runId: string, epics: { id: string; title: string }[], tasks: Omit<TaskRow, "runId">[]): void {
     const insEpic = this.db.prepare("INSERT OR REPLACE INTO epics (id, runId, title, ord) VALUES (?,?,?,?)");
     const insTask = this.db.prepare(
-      "INSERT OR REPLACE INTO tasks (id, runId, epicId, title, spec, acceptanceCriteria, dependsOn, state, branch, worktreePath, githubIssueNumber, prNumber, qaIterations, respawns, assignedSkills, errorSummary) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+      "INSERT OR REPLACE INTO tasks (id, runId, epicId, title, spec, acceptanceCriteria, dependsOn, state, branch, worktreePath, githubIssueNumber, prNumber, qaIterations, respawns, assignedSkills, errorSummary, touchedPaths, estimatedSize) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
     );
     this.txn(() => {
       epics.forEach((e, i) => insEpic.run(e.id, runId, e.title, i));
@@ -445,10 +475,38 @@ export class Store {
           t.id, runId, t.epicId, t.title, t.spec,
           JSON.stringify(t.acceptanceCriteria), JSON.stringify(t.dependsOn), t.state,
           t.branch, t.worktreePath, t.githubIssueNumber, t.prNumber,
-          t.qaIterations, t.respawns, JSON.stringify(t.assignedSkills), t.errorSummary
+          t.qaIterations, t.respawns, JSON.stringify(t.assignedSkills), t.errorSummary,
+          JSON.stringify(t.touchedPaths), t.estimatedSize
         );
       }
     });
+  }
+
+  /**
+   * What every other run in this database merged, and what it cost — the whole
+   * input to a pre-run cost estimate.
+   *
+   * Scoped to the database, which is scoped to the repository, because the
+   * repository is what actually decides the rate: the same harness costs an
+   * order of magnitude more per task on a large brownfield service than on a
+   * small greenfield one. The run being estimated is excluded so that a resumed
+   * or re-planned run does not predict itself from its own spend so far.
+   */
+  runCosts(excludeRunId?: string): { weight: number; spentUsd: number }[] {
+    const weights: Record<string, number> = { S: 1, M: 2, L: 4 };
+    const byRun = new Map<string, { weight: number; spentUsd: number }>();
+    const at = (id: string) => {
+      if (!byRun.has(id)) byRun.set(id, { weight: 0, spentUsd: 0 });
+      return byRun.get(id)!;
+    };
+    const merged = this.db
+      .prepare("SELECT runId, estimatedSize, COUNT(*) AS n FROM tasks WHERE state = 'MERGED' GROUP BY runId, estimatedSize")
+      .all() as { runId: string; estimatedSize: string; n: number }[];
+    for (const row of merged) at(row.runId).weight += (weights[row.estimatedSize] ?? weights.M!) * row.n;
+    const spent = this.db.prepare("SELECT runId, SUM(costUsd) AS usd FROM ledger GROUP BY runId").all() as { runId: string; usd: number }[];
+    for (const row of spent) at(row.runId).spentUsd += row.usd;
+    byRun.delete(excludeRunId ?? "");
+    return [...byRun.values()];
   }
 
   getTask(runId: string, taskId: string): TaskRow | undefined {
@@ -459,6 +517,9 @@ export class Store {
       acceptanceCriteria: JSON.parse(r.acceptanceCriteria as string),
       dependsOn: JSON.parse(r.dependsOn as string),
       assignedSkills: JSON.parse(r.assignedSkills as string),
+      // `migrate` has already added the column to any database old enough to
+      // lack it, so this is never reading an absence.
+      touchedPaths: JSON.parse(r.touchedPaths as string),
     } as TaskRow;
   }
 

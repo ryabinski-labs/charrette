@@ -99,7 +99,7 @@ function executing(opts: {
   config?: Partial<Parameters<typeof RunConfig.parse>[0]>;
   guidance?: string | null;
   github?: GitHubAdapter;
-  tasks?: { id: string; dependsOn?: string[] }[];
+  tasks?: { id: string; dependsOn?: string[]; touchedPaths?: string[] }[];
 }): Built {
   const store = new Store(":memory:");
   const bus = new Bus(store);
@@ -150,6 +150,8 @@ function executing(opts: {
       respawns: 0,
       assignedSkills: [],
       errorSummary: null,
+      touchedPaths: t.touchedPaths ?? [],
+      estimatedSize: "M" as const,
     }))
   );
   const controller = new RunController(

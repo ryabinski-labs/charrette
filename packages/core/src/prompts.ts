@@ -242,6 +242,13 @@ When the artifact is infrastructure, not application code — Terraform, CloudFo
 - Run the repo's policy and scanning tools if it ships them (conftest, checkov, tflint) — for infra those are the test suite.
 - Then read the diff for what a plan cannot show, because this is where infra defects actually live: IAM or security-group wildcards, \`0.0.0.0/0\` ingress, public buckets, unencrypted storage, secrets in plaintext or in the state file, no deletion protection on stateful resources, no backup or retention, a hardcoded region or account id, a resource with no tags. Judge these literally against the criteria and name the file and line.
 - NEVER apply, deploy, or destroy anything to verify it. Your evidence comes from plan, synth, template, dry-run and diff. If a criterion genuinely cannot be settled without provisioning, say so in your notes and judge the rest — a criterion you could not check is a gap to report, not a reason to touch the operator's infrastructure.
+
+Any test you commit has to pass on a machine that is not this one. A test that encodes something about this host is worse than no test: it goes green here, and then fails for everybody else with a message about your laptop. Before you commit a test, check it does not depend on
+- an address or interface belonging to this machine — a link-local address like \`fe80::1\`, \`127.0.0.1\` where the code accepts any loopback, this host's name, its LAN address, whatever \`ifconfig\` happens to say today;
+- an absolute path outside the repository — a home directory, a temp directory you hardcoded, a checkout location;
+- the local clock or timezone, today's date, or an ordering that only holds while your machine is fast;
+- a service, port, tool, credential or environment variable that happens to be present here and is not started or declared by the repository itself.
+Assert on the behaviour instead: use the repository's own fixtures, a temp directory the test creates and removes, an address the test binds and reads back, a clock the code takes as an argument. If a criterion can only be verified against something host-specific, report it as unverified rather than committing a test that pins it.
 ${toolbelt}${skills}
 
 Your FINAL message must be exactly one JSON object inside a \`\`\`json fence:
@@ -305,7 +312,14 @@ Your FINAL message must be exactly one JSON object inside a \`\`\`json fence:
 The recommendation is instructions addressed to the worker's next attempt. Carry every confirmed finding into it; say which to do first when one blocks another. Be as long as the findings require and no longer — no restating the task, no padding. If the operator must do something outside the repo first (start a service, provide credentials), open with that: "After you start X, tell the worker: ...". If you genuinely cannot tell what is wrong, say what to check rather than guessing.`;
 }
 
-export function advisorPrompt(task: TaskRow, why: string): string {
+/**
+ * The advisor is asked to verify QA's claims and it is dropped into a worktree
+ * with no idea how the repository runs anything. Naming the checks costs one
+ * line and is the difference between an advisor that reproduces the failure and
+ * one that reasons about it: in run 40da9337 the fact it needed was
+ * `npx tsx scripts/testRun.ts <file>`, which nothing ever told it.
+ */
+export function advisorPrompt(task: TaskRow, why: string, checks: string[] = []): string {
   return `The stuck task: ${task.title}
 
 Its spec:
@@ -316,7 +330,7 @@ ${task.acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n")}
 
 Why it is escalating:
 ${why.slice(0, 6000)}
-
+${checks.length ? `\nHow this repository checks a task — run these rather than guessing at a command, and narrow them to the failing case where the runner allows it:\n${checks.map((c) => `- ${c}`).join("\n")}\n` : ""}
 Investigate the worktree you are in, then give your recommendation.`;
 }
 
