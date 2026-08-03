@@ -57,6 +57,86 @@ export async function git(cwd: string, args: string[], opts: { serialize?: boole
   return next;
 }
 
+/**
+ * Whether this repository can host a run at all — asked before anything is spent.
+ *
+ * Every task the harness dispatches runs in a `git worktree`, and a worktree
+ * needs a commit to branch from. A repository with no commits — `git init` and
+ * nothing since — fails at `git worktree add` with `fatal: invalid reference:
+ * main`, and it fails once per task, after intake and planning have already been
+ * paid for and the operator has approved a plan that was never going to run. One
+ * live run died exactly this way, with the PRD it was pointed at sitting
+ * untracked in the working tree.
+ *
+ * Returns why the run cannot start, or null when it can.
+ */
+export async function repoUnusable(repoPath: string): Promise<string | null> {
+  const inside = await git(repoPath, ["rev-parse", "--is-inside-work-tree"]).catch(() => "");
+  if (inside !== "true") {
+    return `${repoPath} is not a git repository.\n\nThe harness builds every task on a branch in its own worktree, so it needs one. Run \`git init\`, commit what is already there, and start the run again.`;
+  }
+  const head = await git(repoPath, ["rev-parse", "--verify", "HEAD"]).catch(() => "");
+  if (!head) {
+    return (
+      `${repoPath} is a git repository with no commits, so there is nothing for a worktree to branch from.\n\n` +
+      `Every task runs in its own worktree, and \`git worktree add\` on an unborn branch fails outright — the run would interview you, plan, charge for both, and then fail once per task. ` +
+      `Untracked files are invisible inside a worktree too, so anything the assignment points at has to be committed to be readable there.\n\n` +
+      `  git add -A && git commit -m "initial commit"\n\n` +
+      `then start the run again.`
+    );
+  }
+  return null;
+}
+
+/**
+ * How much of the file list the planner is given, in characters. Roughly four
+ * characters per token, so a few thousand tokens at the cap — measurably worth
+ * it (see below) and still an order of magnitude under anything that crowds out
+ * the PRD.
+ */
+const FILE_LIST_CHARS = 16_000;
+
+/**
+ * The repository's tracked files, as text for the planning prompt.
+ *
+ * Phase B of planning runs with no tools, so anything it knows about the
+ * repository has to arrive as prompt text. Measured against what two merged
+ * pull requests actually shipped, handing it this list took the ordering
+ * constraints a plan gets right from 1.67 to 3.50 — the same score as a full
+ * AST dependency graph of the repository, at ~300 tokens and no dependency.
+ * Knowing which files exist is the whole of the effect; knowing what imports
+ * what added nothing.
+ *
+ * Over the cap the list becomes directory counts. An alphabetical list cut off
+ * at the cap is worse than no list: it tells the planner the repository ends at
+ * "m", and a plan that believes that names paths in a tree it cannot see.
+ */
+export async function repoFileList(repoPath: string, cap = FILE_LIST_CHARS): Promise<string> {
+  const out = await git(repoPath, ["ls-files"]).catch(() => "");
+  const files = out.split("\n").filter(Boolean);
+  if (!files.length) return "";
+  const flat = files.join("\n");
+  if (flat.length <= cap) return flat;
+
+  const counts = new Map<string, number>();
+  for (const f of files) {
+    const dir = path.dirname(f);
+    counts.set(dir, (counts.get(dir) ?? 0) + 1);
+  }
+  const header = `${files.length} tracked files — too many to name. The directories they are in:\n`;
+  const rolled = [...counts.keys()].sort().map((d) => `${d === "." ? "(repository root)" : d} — ${counts.get(d)} file${counts.get(d) === 1 ? "" : "s"}`);
+  const kept: string[] = [];
+  let used = header.length;
+  for (const line of rolled) {
+    if (used + line.length + 1 > cap) break;
+    kept.push(line);
+    used += line.length + 1;
+  }
+  const omitted = rolled.length - kept.length;
+  // Say what was dropped. A silently truncated list reads as a complete one.
+  return header + kept.join("\n") + (omitted ? `\n… and ${omitted} more director${omitted === 1 ? "y" : "ies"}` : "");
+}
+
 export interface WorktreeInfo {
   path: string;
   branch: string;

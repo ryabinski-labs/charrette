@@ -8,7 +8,7 @@ import { Bus } from "./bus.js";
 import { BudgetExceeded } from "./budget.js";
 import { seedWorktreeDeps } from "./deps.js";
 import { nextDispatch } from "./dispatchOrder.js";
-import { git, WorktreeManager } from "./git.js";
+import { git, repoFileList, WorktreeManager } from "./git.js";
 import { GitHubAdapter, type PrRef } from "./github.js";
 import { runIntake, type IntakeUi } from "./intake.js";
 import { isolationBlock, isolationEnv, taskIsolation } from "./isolation.js";
@@ -1564,6 +1564,10 @@ export class RunController {
     let lastPath = "";
     let lastOutput = "";
     let lastTruncated = false;
+    // Phase B has no tools, so what it knows about the repository is what it is
+    // told. Without this it names `touchedPaths` from the PRD's vocabulary and
+    // invents paths for files that already exist a directory away.
+    const files = await repoFileList(this.repoPath);
 
     for (let attempt = 1; attempt <= attempts; attempt++) {
       // Only the first attempt restates the PRD. A rejected breakdown is a shape
@@ -1577,7 +1581,11 @@ export class RunController {
         systemPrompt: plannerBreakdownSystemPrompt(skillsBlock(this.planSkills(runId))),
         prompt: repair
           ? plannerRepairPrompt(lastOutput, lastReason, lastTruncated)
-          : `Assignment:\n${run.assignment}\n${feedback ? `\nOperator feedback on the previous plan:\n${feedback}\n` : ""}\n\nYou have already surveyed the repository and written these documents. Do not use any tools.\n\n<prd>\n${docs.prdMarkdown}\n</prd>\n\n<conventions>\n${docs.conventionsMarkdown}\n</conventions>\n\nEmit the epic/task DAG as JSON.`,
+          : `Assignment:\n${run.assignment}\n${feedback ? `\nOperator feedback on the previous plan:\n${feedback}\n` : ""}\n\nYou have already surveyed the repository and written these documents. Do not use any tools.\n\n<prd>\n${docs.prdMarkdown}\n</prd>\n\n<conventions>\n${docs.conventionsMarkdown}\n</conventions>\n${
+              files
+                ? `\n<repository-files>\n${files}\n</repository-files>\n\nThese are the files that exist today. Put the real ones under \`touchedPaths\` — a path you invent for a file that already exists is a task pointed at nothing, and two tasks naming the same file by different paths will collide instead of depending on each other. Only invent a path for a file the assignment genuinely requires and the repository does not have.\n`
+                : ""
+            }\nEmit the epic/task DAG as JSON.`,
         cwd: this.repoPath,
         tools: [],
         allowedTools: [],
