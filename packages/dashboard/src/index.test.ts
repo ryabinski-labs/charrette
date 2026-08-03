@@ -448,6 +448,39 @@ describe("the page itself", () => {
     expect(PAGE_HTML).toMatch(/a task needs you/);
   });
 
+  it("never re-aims a half-written note at a task the operator did not choose", () => {
+    // Reproduced in a browser against a real run: the operator picked
+    // `ach-origination`, typed a note, that task merged, the 5s poll rebuilt the
+    // <select>, and the option was gone — so the browser fell back to the first
+    // one and the note was POSTed to `auth-middleware-hardening` under a
+    // "Delivered" confirmation. Feedback is how a run gets steered; sending it
+    // to the wrong agent is worse than not sending it.
+    const literal = /(function keepTarget\([\s\S]*?\n\})/.exec(PAGE_HTML)![1]!;
+    const keepTarget = new Function("return " + literal)() as (p: string, v: string[], t: boolean) => string;
+    const open = ["r/a", "r/b"];
+
+    expect(keepTarget("r/b", open, true)).toBe("r/b");
+    // Gone, with a note in the box: ask, never guess.
+    expect(keepTarget("r/b", ["r/a"], true)).toBe("");
+    // Gone with nothing typed is nothing to misroute, so the first is fine.
+    expect(keepTarget("r/b", ["r/a"], false)).toBe("r/a");
+    expect(keepTarget("", open, false)).toBe("r/a");
+    expect(keepTarget("r/b", [], true)).toBe("");
+
+    // …and the UI has to say why the target went blank, or the operator just
+    // sees a Send that refuses.
+    expect(PAGE_HTML).toContain("finished \\u2014 choose who gets this");
+    expect(PAGE_HTML).toMatch(/That task finished while you were writing/);
+    // An explicit pick is the only thing allowed to re-aim it.
+    expect(PAGE_HTML).toMatch(/\$\("fb-task"\)\.addEventListener\("change"/);
+  });
+
+  it("declares its own icon, so no dashboard load logs a 404 in the console", () => {
+    // The console is where an operator looks when a run stalls; a favicon 404 on
+    // every load is noise in exactly that place.
+    expect(PAGE_HTML).toMatch(/<link rel="icon" href="data:image\/svg\+xml,/);
+  });
+
   it("parses as JavaScript", () => {
     // The whole SPA lives in one template literal, so a syntax error in it compiles
     // cleanly and only fails in the browser, where nobody is watching the console.

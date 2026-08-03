@@ -426,6 +426,20 @@ describe("the event stream", () => {
     expect(frames.join("\n")).not.toContain("already seen");
   });
 
+  it("replays from the start when the cursor is not a number", async () => {
+    // `Number("abc")` is NaN and every `seq > NaN` is false, so a garbled cursor
+    // used to replay nothing at all — a feed that silently begins mid-run, which
+    // reads exactly like a harness that has not done anything yet.
+    const { dash, url, store, bus } = await serving();
+    makeRun(store);
+    bus.publish({ type: "agent.log", runId: "r1", sessionId: "s", text: "already done", ts: 1 });
+
+    const res = await fetch(new URL("/api/runs/r1/events?after=abc", url), { headers: auth(dash) });
+    const frames = await readFrames(res, 2);
+
+    expect(frames.join("\n")).toContain("already done");
+  });
+
   it("live-tails what happens next, and ignores other runs", async () => {
     const { dash, url, store, bus } = await serving();
     makeRun(store);
