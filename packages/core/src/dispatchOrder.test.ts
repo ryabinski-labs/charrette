@@ -121,6 +121,45 @@ describe("two tasks reaching for the same file", () => {
     expect(nextDispatch(tasks, new Set(["api"]))!.id).toBe("unknown");
   });
 
+  it("holds them apart on a file neither task named, when the repo always ships it alongside", () => {
+    // The measured gap: the planner names four or five files out of a dozen, so
+    // the two tasks below look independent and are not. `src/api.test.ts` is
+    // what this repository has always committed with `src/api/orders.ts`.
+    const tasks = [t("api", "WORKING", [], ["src/api/orders.ts"]), t("tests", "PENDING", [], ["src/api.test.ts"])];
+    const nearby = (paths: string[]) => (paths.includes("src/api/orders.ts") ? ["src/api.test.ts"] : []);
+
+    expect(nextDispatch(tasks, new Set(["api"]))!.id).toBe("tests");
+    expect(nextDispatch(tasks, new Set(["api"]), nearby)).toBeUndefined();
+  });
+
+  it("widens the task waiting as well as the one in flight", () => {
+    // The shared file may be the one neither named; whichever side history
+    // attaches it to, the pair has to be held apart.
+    const tasks = [t("api", "WORKING", [], ["src/api/orders.ts"]), t("tests", "PENDING", [], ["src/checkout.ts"])];
+    const nearby = (paths: string[]) => (paths.includes("src/checkout.ts") ? ["src/api/orders.ts"] : []);
+
+    expect(nextDispatch(tasks, new Set(["api"]), nearby)).toBeUndefined();
+  });
+
+  it("still dispatches a task history has nothing to say about", () => {
+    const tasks = [
+      t("api", "WORKING", [], ["src/api/orders.ts"]),
+      t("tests", "PENDING", [], ["src/api.test.ts"]),
+      t("docs", "PENDING", [], ["README.md"]),
+    ];
+    const nearby = (paths: string[]) => (paths.includes("src/api/orders.ts") ? ["src/api.test.ts"] : []);
+
+    expect(nextDispatch(tasks, new Set(["api"]), nearby)!.id).toBe("docs");
+  });
+
+  it("behaves exactly as before when it is given no history", () => {
+    // Every other test in this file passes no `nearby`, which is the point: a
+    // repository with no usable history gets the scheduler it had.
+    const tasks = [t("api", "WORKING", [], ["src/api/orders.ts"]), t("tests", "PENDING", [], ["src/api.test.ts"])];
+
+    expect(nextDispatch(tasks, new Set(["api"]), () => [])!.id).toBe("tests");
+  });
+
   it("counts a directory as containing the files under it", () => {
     expect(pathsCollide(["src/api"], ["src/api/orders.ts"])).toBe(true);
     expect(pathsCollide(["src/api/orders.ts"], ["src/api"])).toBe(true);

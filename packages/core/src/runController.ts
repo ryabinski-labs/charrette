@@ -7,6 +7,7 @@ import { indexSkills, matchSkills, verifyHash, type IndexedSkill } from "@harnes
 import { Bus } from "./bus.js";
 import { BudgetExceeded } from "./budget.js";
 import { seedWorktreeDeps } from "./deps.js";
+import { coChangeIndex, coChangeNote } from "./coChange.js";
 import { nextDispatch } from "./dispatchOrder.js";
 import { git, repoFileList, WorktreeManager } from "./git.js";
 import { GitHubAdapter, type PrRef } from "./github.js";
@@ -1750,6 +1751,18 @@ export class RunController {
     const cap = Math.max(1, run.config.maxParallelWorkers);
     const terminal = (s: TaskState) => ["MERGED", "NEEDS_HUMAN", "CANCELLED"].includes(s);
     const inFlight = new Map<string, Promise<void>>();
+    // What this repository ships together, read once for the whole loop. It is
+    // history, not state: nothing the run does changes it, and re-reading it per
+    // dispatch would spend a `git log` to learn the same thing. A repo with no
+    // usable history returns an index that widens nothing.
+    const nearby = await coChangeIndex(this.repoPath);
+    this.bus.publish({
+      type: "agent.log",
+      runId,
+      sessionId: "scheduler",
+      text: coChangeNote(nearby),
+      ts: Date.now(),
+    });
     let budgetStop: BudgetExceeded | null = null;
     /**
      * Slots in use. A task waiting at a gate is in flight but is not running an
@@ -1787,7 +1800,7 @@ export class RunController {
       // — the order decides what a budget cap leaves unbuilt.
       while (!budgetStop && !due && working() < cap) {
         const tasks = this.store.listTasks(runId);
-        const ready = nextDispatch(tasks, new Set(inFlight.keys()));
+        const ready = nextDispatch(tasks, new Set(inFlight.keys()), nearby.widen);
         if (!ready) break;
         if (ready.state === "PENDING") this.store.transitionTask(runId, ready.id, "READY");
         const id = ready.id;
