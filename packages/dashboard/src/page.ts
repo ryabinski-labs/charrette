@@ -17,6 +17,9 @@ export const PAGE_HTML = `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Harness</title>
+<!-- Inline, so the browser never requests /favicon.ico and logs a 404 into the
+     one console an operator might open to find out why a run stalled. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230b0d10'/%3E%3Cpath d='M4 4v8M12 4v8M4 8h8' stroke='%237aa2f7' stroke-width='2' fill='none'/%3E%3C/svg%3E">
 <style>
   :root {
     color-scheme: dark;
@@ -610,6 +613,21 @@ function renderNow() {
    half-typed message; only the <select> options are rebuilt, and only when the
    set of open tasks (or who is working them) changes. */
 let fbSig = "";
+/* The target the operator last chose, tracked apart from the <select> because
+   the option can vanish while they are still typing: a task merges, the poll
+   rebuilds the list, and a browser whose selected option no longer exists falls
+   back to whichever one sorts first. The note then goes to a different agent
+   under a "Delivered" confirmation, which is worse than not sending it. */
+let fbChosen = "";
+
+/* Which option should stay selected once the list is rebuilt. Never another
+   task's id: if the chosen one is gone and there is a note in the box, this
+   returns "" so the operator is asked rather than guessed at. */
+function keepTarget(previous, values, hasText) {
+  if (previous && values.indexOf(previous) !== -1) return previous;
+  if (previous && hasText) return "";
+  return values[0] || "";
+}
 function renderFeedback() {
   const open = [];
   for (const run of runs) {
@@ -632,7 +650,7 @@ function renderFeedback() {
   if (sig === fbSig) return;
   fbSig = sig;
   const sel = $("fb-task");
-  const keep = sel.value;
+  const wanted = fbChosen || sel.value;
   sel.textContent = "";
   for (const o of open) {
     const opt = document.createElement("option");
@@ -640,15 +658,30 @@ function renderFeedback() {
     opt.textContent = o.label;
     sel.append(opt);
   }
-  for (const opt of sel.options) if (opt.value === keep) sel.value = keep;
+  const keep = keepTarget(wanted, open.map((o) => o.runId + "/" + o.taskId), $("fb-text").value.trim() !== "");
+  if (keep === "" && wanted) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = wanted.split("/").slice(1).join("/") + " \\u00b7 finished \\u2014 choose who gets this";
+    sel.prepend(opt);
+    $("fb-note").style.color = "var(--red)";
+    $("fb-note").textContent = "That task finished while you were writing. Your note is still here \\u2014 pick who should get it.";
+  }
+  sel.value = keep;
+  fbChosen = keep;
 }
 
 async function sendFeedback(e) {
   e.preventDefault();
-  const target = $("fb-task").value.split("/");
+  const raw = $("fb-task").value;
+  const target = raw.split("/");
   const text = $("fb-text").value.trim();
   const note = $("fb-note");
-  if (!target[0] || !text) { note.textContent = "write something for the agent first"; return; }
+  // Two different failures, and telling them apart matters: an empty box is the
+  // operator's own omission, an empty target means the task they wrote it for
+  // finished and nobody has said where it should go instead.
+  if (!raw) { note.style.color = "var(--red)"; note.textContent = "choose who this is for \\u2014 the task you wrote it for has finished"; return; }
+  if (!text) { note.style.color = ""; note.textContent = "write something for the agent first"; return; }
   const res = await fetch("/api/feedback", {
     method: "POST",
     headers: Object.assign({ "content-type": "application/json" }, headers),
@@ -1232,6 +1265,12 @@ async function resolveBudget(stop) {
 buildFilters();
 renderNotifyButton();
 $("fb").addEventListener("submit", sendFeedback);
+/* An explicit pick is the only thing that re-aims a note; the refresh cycle
+   must never do it silently. */
+$("fb-task").addEventListener("change", () => {
+  fbChosen = $("fb-task").value;
+  if (fbChosen) { $("fb-note").style.color = ""; $("fb-note").textContent = ""; }
+});
 refresh();
 setInterval(refresh, 5000);
 setInterval(renderNow, 1000);   // keep the elapsed clocks moving between refreshes
