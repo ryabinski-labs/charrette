@@ -127,7 +127,7 @@ vi.mock("node:fs", async (importOriginal) => {
 vi.mock("node:readline/promises", () => ({ createInterface: h.createInterfaceMock }));
 
 import type { GateHandler } from "@harness/core";
-import { buildProgram } from "./cli.js";
+import { buildProgram, modelOverrides } from "./cli.js";
 
 let out: string[];
 
@@ -304,6 +304,15 @@ describe("harness run — resolving what the run will actually do", () => {
     // other entry point either.
     h.loadFileConfigMock.mockReturnValue({ config: { models: { qa: "gpt-5.6-terra" } }, path: "/repo/harness.config.json" });
     await expect(cli("run", "build a thing", "--repo", "/repo", "--no-dashboard")).rejects.toThrow(/pinned to Anthropic/);
+  });
+
+  it("takes a routing change from the command line, over the config file", async () => {
+    h.loadFileConfigMock.mockReturnValue({ config: { models: { worker: "claude-sonnet-5" } }, path: "/repo/harness.config.json" });
+    await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard", "--model", "worker=gpt-5.6-terra", "--model", "demo=gemini-3.5-flash-lite");
+
+    const banner = printed();
+    expect(banner).toContain("worker→gpt-5.6-terra");
+    expect(banner).toContain("demo→gemini-3.5-flash-lite");
   });
 
   it("says when the run will stop to show you what it built, and how often", async () => {
@@ -1001,6 +1010,65 @@ describe("harness resume — settings the operator changed since the run started
     await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
 
     expect(h.storeMethods.patchRunConfig).not.toHaveBeenCalled();
+  });
+
+  it("re-routes a role for the rest of the run, which is the point of doing it here", async () => {
+    // The reason to change routing mid-run is that the budget is going faster
+    // than the work is, and the tasks still queued are the only ones that can
+    // still be made cheaper.
+    existing({ models: { worker: "claude-sonnet-5", qa: "claude-sonnet-5" } });
+    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/harness.config.json" });
+
+    await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard", "--model", "worker=gpt-5.6-terra");
+
+    expect(h.storeMethods.patchRunConfig).toHaveBeenCalledWith("run-1", {
+      models: { worker: "gpt-5.6-terra", qa: "claude-sonnet-5" },
+    });
+    expect(printed()).toContain("worker re-routed for the rest of the run: claude-sonnet-5 → gpt-5.6-terra");
+  });
+
+  it("takes the same change from the config file", async () => {
+    existing({ models: { worker: "claude-sonnet-5" } });
+    h.loadFileConfigMock.mockReturnValue({ config: { models: { worker: "gpt-5.6-terra" } }, path: "/repo/harness.config.json" });
+
+    await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
+
+    expect(h.storeMethods.patchRunConfig).toHaveBeenCalledWith("run-1", { models: { worker: "gpt-5.6-terra" } });
+  });
+
+  it("leaves the routing alone when nothing changed", async () => {
+    existing({ models: { worker: "claude-sonnet-5" } });
+    h.loadFileConfigMock.mockReturnValue({ config: { models: { worker: "claude-sonnet-5" } }, path: "/repo/harness.config.json" });
+
+    await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
+
+    expect(h.storeMethods.patchRunConfig).not.toHaveBeenCalled();
+  });
+
+  it("refuses a re-route to a provider with no key, before resuming", async () => {
+    existing({ models: { worker: "claude-sonnet-5" } });
+    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/harness.config.json" });
+    h.missingKeysMock.mockReturnValue(["OPENAI_API_KEY is not set, but worker (gpt-5.6-terra) is routed to openai."]);
+
+    await expect(cli("resume", "run-1", "--repo", "/repo", "--no-dashboard", "--model", "worker=gpt-5.6-terra")).rejects.toThrow(/OPENAI_API_KEY/);
+    expect(h.storeMethods.patchRunConfig).not.toHaveBeenCalled();
+  });
+
+  it("rejects a malformed pair rather than guessing what was meant", () => {
+    expect(() => modelOverrides(["worker"])).toThrow(/expects role=model, got "worker"/);
+    expect(() => modelOverrides(["=gpt-5.6-terra"])).toThrow(/expects role=model/);
+    expect(() => modelOverrides(["worker="])).toThrow(/expects role=model/);
+    expect(modelOverrides()).toEqual({});
+    expect(modelOverrides([" worker = gpt-5.6-terra "])).toEqual({ worker: "gpt-5.6-terra" });
+  });
+
+  it("rejects a misspelled role instead of silently ignoring it", async () => {
+    // A flag that quietly did nothing would leave the operator watching an
+    // expensive run they thought they had just made cheap.
+    existing({ models: { worker: "claude-sonnet-5" } });
+    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/harness.config.json" });
+
+    await expect(cli("resume", "run-1", "--repo", "/repo", "--no-dashboard", "--model", "wroker=gpt-5.6-terra")).rejects.toThrow(/no role called "wroker"/);
   });
 
   it("updates the PR mode", async () => {
