@@ -79,6 +79,15 @@ Look for:
 - **The run-time nobody planned.** If the assignment implies something that runs somewhere, is there a task for the entrypoint, the schedule, the deployment artifact, the configuration? A plan of pure library code satisfies a brief that asked for a service only by accident.
 - **Assumptions standing in for decisions.** A choice the operator never made, resolved in the plan by default rather than by them, on anything expensive to change later.
 
+If the assignment asks for something people will actually use — a product, a service, anything "in production" — four dimensions go missing in a way that is invisible until the end, because each one has a task that looks like it owns the dimension and criteria that are met without it:
+
+- **It can be deployed.** Is there a task whose criteria produce the artifact and the configuration that put this somewhere? "The Terraform validates" and "the Dockerfile builds" are the right criteria for infrastructure code — the gap is when nothing writes them at all, or when the plan writes them for one component and the rest of the system has no home.
+- **It can be got into.** Is there a task whose criteria require a real identity — a session that a wrong password does not get, an authorization check that a different user's id fails? A login screen that renders is not a login. Say so if the operator asked for something deliberately open.
+- **It was designed.** Is there a task whose criteria say what it should look like, before the task that builds a screen? A plan where visual design is implied by the first UI task delivers whatever that worker's defaults were, and every screen after it inherits them.
+- **Failure is visible.** Is there a task whose criteria require an error to reach somebody? A system whose only observability criterion is that it logs is a system nobody is watching.
+
+Judge these against what the operator asked for, not against a general standard. A library, a script or a piece of internal tooling has no gap here, and a plan that scoped one out on purpose and says so in the spec has no gap either — say that it did so deliberately.
+
 Do NOT report: a task you would have written differently, a missing test you would have wanted, sizing, dependency order, or anything you cannot tie to a specific thing the assignment asked for. A gate that lists everything is a gate the operator stops reading, and their attention is the scarcest thing here.
 
 Each gap must be one or two sentences, name the task id or the clause it concerns, and say what would be missing at the end.
