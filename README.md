@@ -17,7 +17,9 @@ Pre-release walking skeleton (v0.0 per the PRD phasing) plus the v0.1 dashboard 
 - ✅ Continuous integration into `harness/<runId>/main`, idempotent GitHub issues + PRs
 - ✅ Event-sourced SQLite state (`node:sqlite`, zero native deps), crash-resume
 - ✅ Budget caps enforced before every agent turn; live cost ledger; the plan gate prices the plan against the cap from what previous runs in the same repo actually cost
-- ✅ Intent validator reads the merged whole against your original assignment — and a FAIL queues one task per gap and builds them rather than just reporting them
+- ✅ Intent validator reads the merged whole against your original assignment — seams, reachability, and whether the thing could actually be deployed and would move real money — and a FAIL queues one task per gap and builds them rather than just reporting them
+- ✅ An interrupted conversation is picked up where it stopped: `resume` re-asks the question nobody answered instead of planning around it
+- ✅ The plan gate says which external services the plan intends to build for real and which it intends to fake, before a worker is paid
 - ✅ Skills discovery: lexical SKILL.md matching with SHA-256 provenance (also exposed as a stdio MCP server)
 - ✅ Localhost dashboard: live activity feed (what each agent is reading, editing, running), task board, cost meter, gate approval (127.0.0.1-only, bearer token, Origin/Host checks)
 - ✅ Pit stops: after every epic the run stops, a demo agent starts the half-built product and drives it, three named reviewers judge it, and you keep going, redirect the unbuilt tasks, re-plan them, or stop — [docs/PITSTOP.md](./docs/PITSTOP.md)

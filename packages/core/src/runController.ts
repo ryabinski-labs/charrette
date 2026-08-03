@@ -54,6 +54,7 @@ import {
 } from "./prompts.js";
 import { confirmFailures, runDeterministicChecks, splitInheritedFailures, type CheckResult } from "./qa.js";
 import { estimatePlan, renderEstimate } from "./estimate.js";
+import { renderIntegrations, scanIntegrations } from "./integrationScan.js";
 import { detectToolbelt, toolbeltBlock } from "./toolbelt.js";
 import { Store, TaskRow, type RunRow } from "./store.js";
 
@@ -306,8 +307,9 @@ export class RunController {
   }
 
   /** Gate 0: turn the seed into an agreed brief, on the run's ledger and budget. */
-  private async intake(runId: string, seed: string, ui: IntakeUi): Promise<void> {
-    this.store.transitionRun(runId, "INTAKE");
+  private async intake(runId: string, seed: string, ui: IntakeUi, prior: { question: string; answer: string | null }[] = []): Promise<void> {
+    // Already INTAKE when this is a resumed conversation rather than a new one.
+    if (this.store.getRun(runId)!.state !== "INTAKE") this.store.transitionRun(runId, "INTAKE");
     const run = this.store.getRun(runId)!;
     const brief = await runIntake(this.pool, this.bus, {
       runId,
@@ -318,6 +320,7 @@ export class RunController {
       budgetCheck: () => this.checkBudget(runId),
       // Matched on the seed — the only text that exists this early.
       skillsBlock: skillsBlock(this.selectSkills(indexSkills(run.config.skillsDirs), "intake", seed, run.config)),
+      prior,
     });
     const assignment = briefToAssignment(brief);
     const dir = path.join(this.repoPath, ".harness", runId);
@@ -327,10 +330,10 @@ export class RunController {
     this.store.transitionRun(runId, "PLANNING", "brief agreed");
   }
 
-  async resume(runId: string): Promise<void> {
+  async resume(runId: string, intake?: IntakeUi): Promise<void> {
     await this.wt.pruneAndReconcile();
     await this.reopen(runId);
-    await this.drive(runId);
+    await this.drive(runId, intake);
   }
 
   /** Does a finished run still have work `resume` can pick up? */
@@ -445,8 +448,14 @@ export class RunController {
     }
   }
 
-  /** Drive the run state machine forward until a terminal state or gate rejection. */
-  private async drive(runId: string): Promise<void> {
+  /**
+   * Drive the run state machine forward until a terminal state or gate rejection.
+   *
+   * `intake` is the transport to re-open an interrupted conversation with; a
+   * caller that has no operator attached (a daemon, a test) omits it and the
+   * open questions are reported instead of asked.
+   */
+  private async drive(runId: string, intake?: IntakeUi): Promise<void> {
     let run = this.store.getRun(runId);
     if (!run) throw new Error(`unknown run ${runId}`);
     await this.sweepOrphans(runId);
@@ -454,9 +463,30 @@ export class RunController {
       this.store.transitionRun(runId, "PLANNING");
       run = this.store.getRun(runId)!;
     } else if (run.state === "INTAKE") {
-      // Resumed while a conversation was open: the brief is gone, so plan from
-      // whatever assignment is on record rather than re-interviewing.
-      this.store.transitionRun(runId, "PLANNING", "resumed mid-intake");
+      // Resumed while a conversation was open. The agent's session and its brief
+      // are gone, but the conversation is on the event log — and the question it
+      // died holding is, by construction, the one it judged most worth asking.
+      // Planning straight past it is what run 40da9337 did: it stopped one
+      // question into "real vendor accounts, sandbox adapters, or fakes only?",
+      // never got an answer, and shipped six of seven integrations as stubs.
+      const prior = this.store.intakeTranscript(runId);
+      const open = prior.filter((p) => p.answer === null);
+      if (intake) {
+        await this.intake(runId, run.assignment, intake, prior);
+      } else {
+        // Headless resume — there is nobody to ask. Plan from the assignment as
+        // before, but never let the open question be the thing nobody mentions.
+        for (const p of open) {
+          this.bus.publish({
+            type: "agent.log",
+            runId,
+            sessionId: "intake",
+            text: `Resumed with no way to ask, so this went unanswered and the planner will have to assume: "${p.question}"`,
+            ts: Date.now(),
+          });
+        }
+        this.store.transitionRun(runId, "PLANNING", open.length ? `resumed mid-intake, ${open.length} question(s) unanswered` : "resumed mid-intake");
+      }
       run = this.store.getRun(runId)!;
     } else if (run.state === "PAUSED") {
       // The only thing that parks a run rather than a task is an operator
@@ -1587,7 +1617,11 @@ export class RunController {
     const tasks = this.store.listTasks(runId);
     const lines = tasks.map((t) => `- [${t.id}] ${t.title} (deps: ${t.dependsOn.join(", ") || "none"})`).join("\n");
     const estimate = estimatePlan(tasks, this.store.runCosts(runId));
-    return `${lines}\n\n${renderEstimate(estimate, run.config.budget.runCapUsd)}`;
+    // What the plan intends to fake, before anyone is paid to build it. Empty
+    // when every external task pins a real sandbox, which is the common case on
+    // a plan that does not have this problem.
+    const integrations = renderIntegrations(scanIntegrations(tasks));
+    return [lines, renderEstimate(estimate, run.config.budget.runCapUsd), integrations].filter(Boolean).join("\n\n");
   }
 
   private async fileIssues(runId: string): Promise<void> {

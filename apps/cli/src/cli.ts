@@ -559,13 +559,18 @@ export function buildProgram(): Command {
       }
       const url = await dash.start();
       if (url) process.stdout.write(`Dashboard: ${url}\n(keep the fragment — it is your auth token)\n`);
+      // Only a run interrupted mid-conversation needs the terminal back: opening
+      // readline for any other resume would hold stdin for a question never asked.
+      const chat = existing?.state === "INTAKE" ? new TerminalChat() : undefined;
+      if (chat) process.stdout.write("This run stopped mid-conversation — picking it up where it left off.\n");
       try {
-        await controller.resume(runId);
+        await controller.resume(runId, chat);
         await reportOutcome(controller, repo, runId);
       } catch (e) {
         notifyDone(`${path.basename(repo)} — run stopped`, e instanceof Error ? e.message : String(e));
         throw e;
       } finally {
+        chat?.close();
         await dash.stop();
       }
     });

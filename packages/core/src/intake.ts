@@ -4,7 +4,7 @@ import { z } from "zod";
 import { Brief, IntakeQuestion, RunConfig } from "@harness/shared";
 import { Bus } from "./bus.js";
 import { AgentPool } from "./pool.js";
-import { extractJson, intakeSystemPrompt } from "./prompts.js";
+import { extractJson, intakeSystemPrompt, resumedIntakeBlock } from "./prompts.js";
 
 /**
  * Transport for the intake conversation. The terminal implements this with
@@ -42,6 +42,12 @@ export interface IntakeRequest {
    * skill to this role is binding it to the earliest decision in the run.
    */
   skillsBlock?: string;
+  /**
+   * The conversation this one is continuing, when the process died mid-intake.
+   * Answered entries are handed back as settled; unanswered ones are what the
+   * agent has to ask again before it asks anything new.
+   */
+  prior?: { question: string; answer: string | null }[];
 }
 
 const ASK_TOOL = "mcp__harness_intake__ask_user";
@@ -55,7 +61,11 @@ const ASK_TOOL = "mcp__harness_intake__ask_user";
  */
 export async function runIntake(pool: AgentPool, bus: Bus, req: IntakeRequest): Promise<Brief> {
   const sessionId = randomUUID();
-  const transcript: { question: string; answer: string; rationale: string }[] = [];
+  // Seeded with what the interrupted conversation already settled, so the
+  // degraded-brief fallback keeps answers the operator has given once.
+  const transcript: { question: string; answer: string; rationale: string }[] = (req.prior ?? [])
+    .filter((p): p is { question: string; answer: string } => p.answer !== null)
+    .map((p) => ({ question: p.question, answer: p.answer, rationale: "" }));
 
   const askUser = tool(
     "ask_user",
@@ -131,7 +141,8 @@ export async function runIntake(pool: AgentPool, bus: Bus, req: IntakeRequest): 
       prompt:
         `The operator wants:\n\n${req.seed}\n\n` +
         `Survey the repository at your working directory, then ask what you need to. ` +
-        `Finish with the brief JSON once they approve it.`,
+        `Finish with the brief JSON once they approve it.` +
+        resumedIntakeBlock(req.prior ?? []),
       cwd: req.repoPath,
       // The intake agent talks to a human about a repo it may only read.
       tools: ["Read", "Glob", "Grep"],
