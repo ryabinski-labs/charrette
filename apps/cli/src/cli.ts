@@ -3,7 +3,7 @@ import { createInterface } from "node:readline/promises";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { ModelRoutingShape, RunConfig, providerFor } from "@harness/shared";
-import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, detectToolbelt, ensureIgnored, harnessBuild, missingKeys, originSlug, postmortem, renderPostmortem, repoUnusable } from "@harness/core";
+import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, checkMemoryBanner, detectToolbelt, ensureIgnored, harnessBuild, missingKeys, originSlug, postmortem, renderPostmortem, repoUnusable } from "@harness/core";
 import { Dashboard } from "@harness/dashboard";
 import { promptForNewCap } from "./budget.js";
 import {
@@ -509,6 +509,11 @@ export function buildProgram(): Command {
           "           this run forks from the base branch as it is now, so their unmerged work is invisible to it"
         );
       }
+      // What earlier runs in this repo watched these same checks do. Printed in
+      // the banner rather than anywhere later because a check that was red
+      // before any task started parks the whole run, and this is the last
+      // moment the operator can act on that for free.
+      banner.push(...checkMemoryBanner(store, config.deterministicChecks));
       dash.connect(controller);
       const url = await dash.start();
       if (url) {
@@ -652,6 +657,10 @@ export function buildProgram(): Command {
         store.patchRunConfig(runId, { prodUrl: file.prodUrl });
         process.stdout.write(`Production URL updated from ${CONFIG_FILENAME}: ${file.prodUrl || "(none)"}\n`);
       }
+      // Read after the patches above, so a resume that corrected its checks is
+      // told about the corrected ones rather than the ones it is abandoning.
+      const remembered = checkMemoryBanner(store, store.getRun(runId)?.config.deterministicChecks ?? []);
+      if (remembered.length) process.stdout.write(`${remembered.join("\n")}\n`);
       const url = await dash.start();
       if (url) process.stdout.write(`Dashboard: ${url}\n(keep the fragment — it is your auth token)\n`);
       // Only a run interrupted mid-conversation needs the terminal back: opening

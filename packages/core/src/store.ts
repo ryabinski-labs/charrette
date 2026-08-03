@@ -66,6 +66,16 @@ CREATE TABLE IF NOT EXISTS feedback (
 -- be queued once, however many times the issue is polled.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_feedback_source ON feedback(runId, taskId, source, sourceId);
 CREATE INDEX IF NOT EXISTS idx_feedback_pending ON feedback(runId, taskId, deliveredAt);
+-- What runs in this repository have been observed to do (memory.ts). The only
+-- table here that outlives the run that wrote it: rows carry a runId for
+-- provenance but are not scoped by it, because the point is the next run.
+CREATE TABLE IF NOT EXISTS memory (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL, subject TEXT NOT NULL, verdict TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '', runId TEXT NOT NULL,
+  observedAt INTEGER NOT NULL, observations INTEGER NOT NULL DEFAULT 1
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_fact ON memory(kind, subject, verdict);
 `;
 
 export interface RunRow {

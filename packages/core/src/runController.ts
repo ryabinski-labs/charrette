@@ -12,6 +12,7 @@ import { git, repoFileList, WorktreeManager } from "./git.js";
 import { GitHubAdapter, type PrRef } from "./github.js";
 import { runIntake, type IntakeUi } from "./intake.js";
 import { isolationBlock, isolationEnv, taskIsolation } from "./isolation.js";
+import { observeChecks } from "./memory.js";
 import { reapUnder } from "./reaper.js";
 import { AgentPool, type AgentResult } from "./pool.js";
 import {
@@ -2555,6 +2556,15 @@ export class RunController {
           ts: Date.now(),
         });
       }
+      // What this check run proved about the repository, for the next run in it
+      // to read before it spends anything (memory.ts).
+      observeChecks(this.store, {
+        runId,
+        configured: run.config.deterministicChecks,
+        failed: checks.failures.map((f) => f.command),
+        inherited,
+        flaky,
+      });
       if (failures.length) {
         const detail = failures.map((f) => `$ ${f.command}\n${f.output}`).join("\n\n");
         const notYours = inherited.length
