@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { failureSignatures, runDeterministicChecks, splitInheritedFailures, type CheckResult } from "./qa.js";
+import { confirmFailures, failureSignatures, runDeterministicChecks, splitInheritedFailures, type CheckResult } from "./qa.js";
 
 const check = (command: string, output: string): CheckResult => ({ ok: false, failures: [{ command, output }] });
 
@@ -80,5 +80,63 @@ describe("telling a task's own failures from the ones it inherited", () => {
     ]) {
       expect(failureSignatures(`some preamble\n${line}\ntrailing noise`), line).toContain(line);
     }
+  });
+});
+
+/**
+ * The other half of "not this task's fault": a failure that belongs to nobody's
+ * code at all. 29 of the 77 gates in run 40da9337 were failing deterministic
+ * checks, and the run's own logs put most of them on a DynamoDB table shared
+ * between worktrees — a task charged for a neighbour's leftover process.
+ */
+describe("asking a failing check a second time", () => {
+  const green: CheckResult = { ok: true, failures: [] };
+  const split = (command: string, output: string) => splitInheritedFailures(check(command, output), green);
+
+  it("drops a failure that does not survive the re-run", async () => {
+    const confirmed = await confirmFailures("/tmp", split("true", "✖ flake"), green);
+
+    expect(confirmed.failures).toEqual([]);
+    expect(confirmed.flaky).toEqual(["true"]);
+  });
+
+  it("keeps one that fails again, with the fresh output", async () => {
+    const confirmed = await confirmFailures("/tmp", split("echo '✖ real' >&2; false", "✖ real"), green);
+
+    expect(confirmed.flaky).toEqual([]);
+    expect(confirmed.failures).toHaveLength(1);
+    expect(confirmed.failures[0]!.output).toContain("✖ real");
+  });
+
+  it("does not run anything when there was nothing to confirm", async () => {
+    // The common case by a wide margin: a green tree must cost no second pass.
+    const confirmed = await confirmFailures("/tmp", { failures: [], inherited: [{ command: "x", signatures: [] }] }, green);
+
+    expect(confirmed).toEqual({ failures: [], inherited: [{ command: "x", signatures: [] }], flaky: [] });
+  });
+
+  it("moves a command the re-run shows as the base's own into inherited, not flaky", async () => {
+    // First pass: one new failure and one the base has. Second: only the base's.
+    // The task is owed "not yours", not "it passed" — nothing passed.
+    const command = "echo '✖ base only' >&2; false";
+    const base = check(command, "✖ base only");
+    const first = splitInheritedFailures(check(command, "✖ base only\n✖ mine"), base);
+    const confirmed = await confirmFailures("/tmp", first, base);
+
+    expect(confirmed.failures).toEqual([]);
+    expect(confirmed.flaky).toEqual([]);
+    expect(confirmed.inherited.map((i) => i.command)).toEqual([command]);
+  });
+
+  it("does not list a command twice when it was already known to be inherited", async () => {
+    const command = "echo '✖ base only' >&2; false";
+    const base: CheckResult = { ok: false, failures: [{ command, output: "✖ base only" }, { command: "true", output: "✖ other" }] };
+    const first = splitInheritedFailures(
+      { ok: false, failures: [{ command, output: "✖ base only\n✖ mine" }, { command: "true", output: "✖ other" }] },
+      base
+    );
+    const confirmed = await confirmFailures("/tmp", first, base);
+
+    expect(confirmed.inherited.map((i) => i.command).sort()).toEqual([command, "true"]);
   });
 });

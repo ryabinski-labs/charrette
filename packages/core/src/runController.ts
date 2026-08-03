@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
-import { Plan, PlanBreakdown, QaVerdict, RunConfig, TaskState, briefToAssignment, validatePlanDag } from "@harness/shared";
+import { Plan, PlanBreakdown, PlannedTask, QaVerdict, RunConfig, TaskState, briefToAssignment, validatePlanDag } from "@harness/shared";
 import { indexSkills, matchSkills, verifyHash, type IndexedSkill } from "@harness/skills-mcp";
 import { Bus } from "./bus.js";
 import { BudgetExceeded } from "./budget.js";
@@ -52,12 +52,45 @@ import {
   workerSystemPrompt,
   workerTaskPrompt,
 } from "./prompts.js";
-import { runDeterministicChecks, splitInheritedFailures, type CheckResult } from "./qa.js";
+import { confirmFailures, runDeterministicChecks, splitInheritedFailures, type CheckResult } from "./qa.js";
+import { estimatePlan, renderEstimate } from "./estimate.js";
 import { detectToolbelt, toolbeltBlock } from "./toolbelt.js";
 import { Store, TaskRow, type RunRow } from "./store.js";
 
 const FULL_TEXT_SKILL_TOKEN_LIMIT = 1500; // PERF-4
 const MAX_FULL_TEXT_SKILLS = 2;
+
+/**
+ * Where tasks queued from a failing intent verdict live.
+ *
+ * Its own epic rather than the epic of whichever task left the gap: the gap is a
+ * property of the merged whole, and a pit stop that groups by epic should show
+ * these together as "what the intent check found" rather than scattered.
+ */
+const INTENT_FIX_EPIC = { id: "intent-gaps", title: "Gaps the intent check found" };
+
+/** A planner's task as it enters the store: everything it said, nothing started yet. */
+function pendingRow(t: PlannedTask): Omit<TaskRow, "runId"> {
+  return {
+    id: t.id,
+    epicId: t.epicId,
+    title: t.title,
+    spec: t.spec,
+    acceptanceCriteria: t.acceptanceCriteria,
+    dependsOn: t.dependsOn,
+    state: "PENDING",
+    branch: null,
+    worktreePath: null,
+    githubIssueNumber: null,
+    prNumber: null,
+    qaIterations: 0,
+    respawns: 0,
+    assignedSkills: [],
+    errorSummary: null,
+    touchedPaths: t.touchedPaths,
+    estimatedSize: t.estimatedSize,
+  };
+}
 
 /**
  * Extra query terms per role, appended to the task text before skill matching.
@@ -473,13 +506,21 @@ export class RunController {
         // criteria, never the sum against the intent. Only after the verdict do the
         // pull requests open, so a reviewer arrives with the gap list in hand.
         await this.validateIntent(runId);
+        // A FAIL names work, so queue it before the pit stop rather than after:
+        // the operator is then shown the gaps *and* what is already queued to
+        // close them, and "stop, none of that is worth it" stays sayable.
+        const fixes = await this.queueIntentFixes(runId);
         const after = await this.closingPitStop(runId);
         if (after === "stop") {
           this.store.transitionRun(runId, "PAUSED", "you stopped the run at a pit stop");
           return;
         }
-        if (after === "back-to-work") {
-          this.store.transitionRun(runId, "EXECUTING", "you sent the run back to work at a pit stop");
+        if (after === "back-to-work" || fixes.length) {
+          this.store.transitionRun(
+            runId,
+            "EXECUTING",
+            after === "back-to-work" ? "you sent the run back to work at a pit stop" : `closing ${fixes.length} gap(s) the intent check found`
+          );
           run = this.store.getRun(runId)!;
           continue;
         }
@@ -537,6 +578,64 @@ export class RunController {
       // An unvalidated run is reportable; an unfinished one is not. Say so and move on.
       this.bus.publish({ type: "agent.log", runId, sessionId: "validator", text: `intent validation did not complete: ${String(e).slice(0, 300)}`, ts: Date.now() });
     }
+  }
+
+  /**
+   * Turn a failing intent verdict into work.
+   *
+   * The verdict was the most valuable thing the harness produced and the only
+   * one it did nothing with: run 40da9337 spent $774, merged all 36 tasks, and
+   * shipped a FAIL saying the disbursement worker, the webhook outbox, the
+   * funding poller and reconciliation were all built, all tested, and scheduled
+   * nowhere. Every one of those gaps is a task — small, concrete, and stated
+   * against a tree that already exists. Leaving them for the human meant the
+   * cheapest fixes in the run were the ones the harness declined to make.
+   *
+   * The gaps are chained rather than run in parallel. They are usually the same
+   * omission seen from different angles — four of the seven above were "wire
+   * this into the entrypoint" — so they land in the same file, and two workers
+   * in one file is a merge conflict for no gain.
+   *
+   * Returns the ids queued; empty when the verdict passed, when there is nothing
+   * to act on, or when this run has already had its rounds.
+   */
+  private async queueIntentFixes(runId: string): Promise<string[]> {
+    const run = this.store.getRun(runId)!;
+    const verdict = this.store.intentVerdict(runId);
+    if (!verdict || verdict.verdict === "PASS" || !verdict.gaps.length) return [];
+    const tasks = this.store.listTasks(runId);
+    const rounds = new Set(tasks.map((t) => /^intent-fix-(\d+)-/.exec(t.id)?.[1]).filter(Boolean));
+    if (rounds.size >= run.config.intentFixRounds) return [];
+    const round = rounds.size + 1;
+    // Enough to carry a real gap list, few enough that a validator answering
+    // with an essay cannot re-plan the run. Anything dropped is said out loud.
+    const MAX_GAPS = 10;
+    const gaps = verdict.gaps.slice(0, MAX_GAPS);
+    const queued: PlannedTask[] = gaps.map((gap, i) => ({
+      id: `intent-fix-${round}-${i + 1}`,
+      epicId: INTENT_FIX_EPIC.id,
+      title: `Close intent gap: ${gap.split("\n")[0]!.slice(0, 80)}`,
+      spec: `The run finished and a validation agent read the whole merged tree against the operator's original intent. It found this gap:\n\n${gap}\n\nWhat it concluded overall:\n${verdict.summary}\n\nClose that gap in the integration branch you are working from — it already contains every merged task, so the code the gap refers to is here. Fix the gap itself, not the surrounding design: the rest of this tree was reviewed and accepted, and a rewrite costs more than the gap did. If the gap turns out not to be real, say so in your summary with the file and line that settle it rather than changing code to satisfy it.`,
+      acceptanceCriteria: [gap.split("\n")[0]!.slice(0, 300), "The claim the gap makes is no longer true of this tree, demonstrated by a check or a test that fails without the change"],
+      // Chained: same omission, same file, and nothing here is urgent enough to
+      // be worth a conflict.
+      dependsOn: i === 0 ? [] : [`intent-fix-${round}-${i}`],
+      touchedPaths: [],
+      estimatedSize: "M",
+    }));
+    this.store.insertTasks(runId, [...this.store.listEpics(runId), INTENT_FIX_EPIC], queued.map(pendingRow));
+    this.bus.publish({
+      type: "agent.log",
+      runId,
+      sessionId: "validator",
+      text:
+        `the intent check failed with ${verdict.gaps.length} gap(s); queued ${queued.length} task(s) to close them` +
+        (verdict.gaps.length > gaps.length ? `. Not queued, and yours to judge: ${verdict.gaps.slice(MAX_GAPS).join(" | ")}` : ""),
+      ts: Date.now(),
+    });
+    await this.fileIssues(runId);
+    this.wakeScheduler();
+    return queued.map((t) => t.id);
   }
 
   /**
@@ -1074,7 +1173,7 @@ export class RunController {
         role: "advisor",
         model: run.config.models.advisor,
         systemPrompt: advisorSystemPrompt(),
-        prompt: advisorPrompt(task, why),
+        prompt: advisorPrompt(task, why, run.config.deterministicChecks),
         cwd: task.worktreePath ?? this.repoPath,
         disallowedTools: ["Write", "Edit", "NotebookEdit", "WebSearch"],
         maxTurns: 30,
@@ -1466,23 +1565,7 @@ export class RunController {
     this.store.insertTasks(
       runId,
       plan.epics.map((e) => ({ id: e.id, title: e.title })),
-      plan.tasks.map((t) => ({
-        id: t.id,
-        epicId: t.epicId,
-        title: t.title,
-        spec: t.spec,
-        acceptanceCriteria: t.acceptanceCriteria,
-        dependsOn: t.dependsOn,
-        state: "PENDING" as TaskState,
-        branch: null,
-        worktreePath: null,
-        githubIssueNumber: null,
-        prNumber: null,
-        qaIterations: 0,
-        respawns: 0,
-        assignedSkills: [],
-        errorSummary: null,
-      }))
+      plan.tasks.map(pendingRow)
     );
     void run;
   }
@@ -1492,9 +1575,19 @@ export class RunController {
     return run.prdPath ? readFileSync(run.prdPath, "utf8") : "";
   }
 
+  /**
+   * The plan as the operator approves it, with what it is likely to cost.
+   *
+   * The estimate goes here rather than anywhere later because this is the last
+   * moment it can change a decision: after approval the only cost signal is a
+   * budget gate, which arrives as an interruption with the money already spent.
+   */
   private planSummary(runId: string): string {
+    const run = this.store.getRun(runId)!;
     const tasks = this.store.listTasks(runId);
-    return tasks.map((t) => `- [${t.id}] ${t.title} (deps: ${t.dependsOn.join(", ") || "none"})`).join("\n");
+    const lines = tasks.map((t) => `- [${t.id}] ${t.title} (deps: ${t.dependsOn.join(", ") || "none"})`).join("\n");
+    const estimate = estimatePlan(tasks, this.store.runCosts(runId));
+    return `${lines}\n\n${renderEstimate(estimate, run.config.budget.runCapUsd)}`;
   }
 
   private async fileIssues(runId: string): Promise<void> {
@@ -1949,10 +2042,7 @@ export class RunController {
         prdMarkdown: "x",
         conventionsMarkdown: "x",
         epics: epicUnion,
-        tasks: [
-          ...keep.map((t) => ({ ...t, touchedPaths: [], estimatedSize: "M" as const })),
-          ...breakdown.tasks,
-        ],
+        tasks: [...keep, ...breakdown.tasks],
       });
       if (errors.length) throw new Error(`re-planned DAG is invalid: ${errors.join("; ")}`);
       const replaced = new Set(breakdown.tasks.map((t) => t.id));
@@ -1964,23 +2054,7 @@ export class RunController {
       this.store.insertTasks(
         runId,
         epicUnion,
-        breakdown.tasks.map((t) => ({
-          id: t.id,
-          epicId: t.epicId,
-          title: t.title,
-          spec: t.spec,
-          acceptanceCriteria: t.acceptanceCriteria,
-          dependsOn: t.dependsOn,
-          state: "PENDING" as TaskState,
-          branch: null,
-          worktreePath: null,
-          githubIssueNumber: null,
-          prNumber: null,
-          qaIterations: 0,
-          respawns: 0,
-          assignedSkills: [],
-          errorSummary: null,
-        }))
+        breakdown.tasks.map(pendingRow)
       );
       await this.fileIssues(runId);
       this.bus.publish({
@@ -2052,6 +2126,27 @@ export class RunController {
   private planSkills(runId: string) {
     const run = this.store.getRun(runId)!;
     return this.selectSkills(indexSkills(run.config.skillsDirs), "planner", run.assignment, run.config);
+  }
+
+  /**
+   * Remember a raised turn ceiling for the whole run, not just the task that
+   * discovered it.
+   *
+   * A ceiling that truncates one worker truncates the next: the repository is
+   * the same size for every task in it. Until now each task started from the
+   * configured value and rediscovered that independently, and the discovery is
+   * not cheap — it costs a session that ran to its limit having done the most
+   * work of any session on that task. Run 40da9337 paid for it 27 times: $142
+   * of the $206 it lost to errored sessions was `error_max_turns`, which is more
+   * than a sixth of the entire run.
+   *
+   * Written through the run config so it survives a resume, and only ever
+   * upward — a later task must not lower a ceiling an earlier one proved too low.
+   */
+  private raiseCeiling(runId: string, key: "workerMaxTurns" | "qaMaxTurns", turns: number): void {
+    const run = this.store.getRun(runId)!;
+    if (run.config[key] >= turns) return;
+    this.store.patchRunConfig(runId, { [key]: turns });
   }
 
   /**
@@ -2210,18 +2305,29 @@ export class RunController {
     let lastRejection = "";
     let startedAt = Date.now();
     /**
-     * Every gate, with the operator's thinking time given back to the clock.
-     * A task blocked on a human is not a task going nowhere — it is a task
-     * going nowhere *of its own accord*, and charging it the hours it spent
-     * waiting means the answer is spent the instant it arrives: the loop
-     * resumes, the wall-clock bound is already blown, and it re-asks. Observed
-     * in run 40da9337, where three tasks waited seven hours for an answer and
-     * re-gated sixty seconds after getting one.
+     * Every gate — and every answered gate restarts the wall clock.
+     *
+     * The bound exists to detect a task going nowhere on its own. An answered
+     * gate is the opposite of that: the operator has just read the failure and
+     * said what to do about it, and the attempt that follows is the first one
+     * made with that information. Judging it on a clock that has been running
+     * since before the question was asked means the very next check can trip the
+     * bound and interrupt them again — about their own answer.
+     *
+     * Giving back only the thinking time was not enough. A task that gates on
+     * failing checks at minute 44 of a 45-minute bound comes back with an answer
+     * and one minute of credit, and re-gates on the wall clock inside the next
+     * iteration. That is 19 of the 77 gates in run 40da9337: a wall-clock gate
+     * firing immediately after a different gate on the same task, asking a
+     * question nobody had new information to answer.
+     *
+     * The bound is not lost, only re-armed: a task that keeps going nowhere
+     * still reaches it again, one full interval later, and each of those
+     * intervals is separated by an operator who chose to continue.
      */
     const ask = async (why: string): Promise<string | null> => {
-      const waitingSince = Date.now();
       const guidance = await this.askOrPark(runId, taskId, why);
-      startedAt += Date.now() - waitingSince;
+      startedAt = Date.now();
       return guidance;
     };
     for (;;) {
@@ -2235,7 +2341,6 @@ export class RunController {
             (lastRejection ? `\n\nWhy the last iteration was sent back:\n${lastRejection}` : "")
         );
         if (guidance === null) return;
-        startedAt = Date.now();
         qaFeedback =
           `The operator reviewed why this task is taking so long and says — follow it over anything that contradicts it:\n${guidance}` +
           // The clock is set immediately before the loop, so the first pass
@@ -2276,6 +2381,7 @@ export class RunController {
         workerSession = worker.sdkSessionId ?? workerSession;
         if (worker.outcome === "error" && worker.errorDetail?.includes("error_max_turns")) {
           workerTurns = Math.min(400, Math.ceil(workerTurns * 1.5));
+          this.raiseCeiling(runId, "workerMaxTurns", workerTurns);
           this.bus.publish({ type: "agent.log", runId, taskId, sessionId: worker.sessionId, text: `worker ran out of turns; the next dispatch on this task gets ${workerTurns}`, ts: Date.now() });
         } else if (worker.outcome === "error") {
           // A worker that hit the turn ceiling stopped; a worker that died was
@@ -2308,9 +2414,25 @@ export class RunController {
       // rest are the integration branch's, arriving either as the base the
       // worktree branched from or as a catch-up merge, and charging them to
       // whichever task happened to be in flight parks correct work.
-      const { failures, inherited } = checks.ok
-        ? { failures: [], inherited: [] }
-        : splitInheritedFailures(checks, await this.baseFailures(runId));
+      // Then, of what is left, only what fails twice. A check that passes on the
+      // second run failed for a reason outside this tree — a neighbouring
+      // worktree's leftover process, a port still bound, a suite sharing state
+      // with itself — and a worker sent to fix it spends an iteration finding
+      // nothing wrong, while the iteration it spent is what opens a gate.
+      const base = checks.ok ? null : await this.baseFailures(runId);
+      const { failures, inherited, flaky } = checks.ok
+        ? { failures: [], inherited: [], flaky: [] }
+        : await confirmFailures(wt.path, splitInheritedFailures(checks, base!), base!);
+      if (flaky.length) {
+        this.bus.publish({
+          type: "agent.log",
+          runId,
+          taskId,
+          sessionId: workerSession ?? taskId,
+          text: `${flaky.join(", ")} failed once and passed on a re-run — not charged to this task`,
+          ts: Date.now(),
+        });
+      }
       if (inherited.length) {
         this.bus.publish({
           type: "agent.log",
@@ -2381,7 +2503,7 @@ export class RunController {
         if (e instanceof BudgetExceeded) throw e;
         // The one failure whose remedy is known: it ran out of room, so give the
         // next attempt more of it rather than replaying the same wall.
-        if (/max_turns/.test(String(e))) qaTurns = Math.min(300, Math.round(qaTurns * 1.5));
+        if (/max_turns/.test(String(e))) this.raiseCeiling(runId, "qaMaxTurns", (qaTurns = Math.min(300, Math.round(qaTurns * 1.5))));
         const respawns = task.respawns + 1;
         this.store.updateTask(runId, taskId, { respawns, errorSummary: String(e).slice(0, 500) });
         if (respawns >= run.config.workerRespawnCap) {

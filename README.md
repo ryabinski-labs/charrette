@@ -16,11 +16,18 @@ Pre-release walking skeleton (v0.0 per the PRD phasing) plus the v0.1 dashboard 
 - ✅ Worker → deterministic checks → QA agent loop with iteration caps
 - ✅ Continuous integration into `harness/<runId>/main`, idempotent GitHub issues + PRs
 - ✅ Event-sourced SQLite state (`node:sqlite`, zero native deps), crash-resume
-- ✅ Budget caps enforced before every agent turn; live cost ledger
+- ✅ Budget caps enforced before every agent turn; live cost ledger; the plan gate prices the plan against the cap from what previous runs in the same repo actually cost
+- ✅ Intent validator reads the merged whole against your original assignment — and a FAIL queues one task per gap and builds them rather than just reporting them
 - ✅ Skills discovery: lexical SKILL.md matching with SHA-256 provenance (also exposed as a stdio MCP server)
 - ✅ Localhost dashboard: live activity feed (what each agent is reading, editing, running), task board, cost meter, gate approval (127.0.0.1-only, bearer token, Origin/Host checks)
 - ✅ Pit stops: after every epic the run stops, a demo agent starts the half-built product and drives it, three named reviewers judge it, and you keep going, redirect the unbuilt tasks, re-plan them, or stop — [docs/PITSTOP.md](./docs/PITSTOP.md)
-- ⬜ Parallel workers, plan editing UI, OS sandboxing, semantic skill matching — see PRD §7
+- ✅ Parallel workers over the DAG, held apart by the planner's `touchedPaths` so two of them do not edit one file into a merge conflict
+- ⬜ Plan editing UI, OS sandboxing, semantic skill matching — see PRD §7
+
+Measured across four completed runs, cost per merged task ranges from about $2
+on a small greenfield repo to about $21 on a large brownfield service, and the
+number of times it stops to ask you something scales with it. Size the cap, and
+your own attention, against the repo rather than against the task count.
 
 ## Requirements
 

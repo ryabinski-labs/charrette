@@ -85,12 +85,15 @@ function pool(work: (cwd: string) => void) {
   return { pool: agents as unknown as AgentPool, qaPrompts };
 }
 
-async function run(work: (cwd: string) => void) {
+async function run(work: (cwd: string) => void, checks: string[] = [CHECK]) {
   const { pool: agents, qaPrompts } = pool(work);
   const store = new Store(":memory:");
-  const controller = new RunController(store, new Bus(store), agents, noGithub, approveAll, repo());
-  const runId = await controller.startRun("build it", RunConfig.parse({ deterministicChecks: [CHECK], qaIterationCap: 1 }));
-  return { task: store.getTask(runId, "task-a")!, qaPrompts };
+  const events: string[] = [];
+  const bus = new Bus(store);
+  bus.subscribe(({ event }) => void (event.type === "agent.log" && events.push(event.text)));
+  const controller = new RunController(store, bus, agents, noGithub, approveAll, repo());
+  const runId = await controller.startRun("build it", RunConfig.parse({ deterministicChecks: checks, qaIterationCap: 1 }));
+  return { task: store.getTask(runId, "task-a")!, qaPrompts, events };
 }
 
 /**
@@ -123,5 +126,43 @@ describe("a task whose base is already red", () => {
     // it escalates rather than merging.
     expect(task.state).toBe("NEEDS_HUMAN");
     expect(qaPrompts).toHaveLength(0);
+  }, 30_000);
+});
+
+/**
+ * The other way a task is charged for something it did not do, and the one the
+ * base comparison cannot catch: a failure that is not in the tree at all.
+ * Run 40da9337 shared one local DynamoDB table across every worktree, and 29 of
+ * its 77 gates were failing deterministic checks — a task asked to fix a
+ * neighbour's leftover process, spending the iteration cap that opens the gate.
+ */
+describe("a check that fails for a reason outside the tree", () => {
+  // Fails the first time it is run in a directory and passes afterwards, which
+  // is what contamination looks like from here. Only fires where the worker has
+  // been, so the integration branch stays green and the base comparison — which
+  // would otherwise call this inherited — has nothing to say about it.
+  const FLAKY = "test -f flaky.txt || exit 0; test -f .ran && exit 0; touch .ran; echo '✖ connection to localhost:8000 refused' >&2; exit 1";
+
+  it("asks again, and does not charge the task for a failure that does not survive", async () => {
+    const { task, qaPrompts, events } = await run(
+      (cwd) => writeFileSync(path.join(cwd, "flaky.txt"), "x\n"),
+      [FLAKY]
+    );
+
+    expect(task.state).toBe("MERGED");
+    // No iteration spent sending a worker to fix code that was never broken.
+    expect(task.qaIterations).toBe(1);
+    expect(qaPrompts).toHaveLength(1);
+    expect(events.some((t) => /failed once and passed on a re-run — not charged to this task/.test(t))).toBe(true);
+  }, 30_000);
+
+  it("still charges it for one that fails both times", async () => {
+    // Same shape, minus the flakiness: red wherever the worker has been, and
+    // red again when asked a second time. Cap is 1, so it escalates.
+    const { task } = await run((cwd) => writeFileSync(path.join(cwd, "feature.ts"), "export const x = 1;\n"), [
+      "test -f feature.ts || exit 0; echo '✖ this one is real' >&2; exit 1",
+    ]);
+
+    expect(task.state).toBe("NEEDS_HUMAN");
   }, 30_000);
 });

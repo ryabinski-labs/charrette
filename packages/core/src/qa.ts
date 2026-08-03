@@ -77,6 +77,47 @@ export interface InheritedSplit {
 }
 
 /**
+ * Run the failing commands a second time and keep only what fails again.
+ *
+ * A check can fail for reasons that have nothing to do with the tree it ran in:
+ * another worktree's leftover process writing to the same local database, a port
+ * that was still bound, a suite that shares a counter between its own cases. The
+ * harness cannot tell those from a real defect by reading the output — but it
+ * can ask again, and a contaminated failure usually does not survive the asking.
+ *
+ * Charging one to the task is expensive twice over: the worker spends an
+ * iteration trying to fix code that was never broken, and the iteration cap it
+ * burns is what opens a gate. 29 of the 77 gates in run 40da9337 were failing
+ * deterministic checks, and the run's own logs attribute most of them to a
+ * DynamoDB table shared across worktrees.
+ *
+ * Only the introduced failures are re-run — inherited ones were already settled
+ * against the base and cost nothing to keep — so this spends a second check pass
+ * exactly when the alternative is a wasted worker iteration.
+ */
+export async function confirmFailures(cwd: string, split: InheritedSplit, base: CheckResult): Promise<InheritedSplit & { flaky: string[] }> {
+  if (!split.failures.length) return { ...split, flaky: [] };
+  const rerun = await runDeterministicChecks(
+    cwd,
+    split.failures.map((f) => f.command)
+  );
+  const again = splitInheritedFailures(rerun, base);
+  const still = new Set(again.failures.map((f) => f.command));
+  // Re-splitting can move a command from introduced to inherited — a second run
+  // that produced only the base's own failures. Fold those in without listing a
+  // command twice: `inherited` is printed to the worker as "not yours".
+  const inherited = [...split.inherited];
+  for (const i of again.inherited) {
+    if (!inherited.some((h) => h.command === i.command)) inherited.push(i);
+  }
+  return {
+    failures: again.failures,
+    inherited,
+    flaky: split.failures.filter((f) => !still.has(f.command) && !again.inherited.some((i) => i.command === f.command)).map((f) => f.command),
+  };
+}
+
+/**
  * Separate the failures a task caused from the ones it inherited.
  *
  * A task's worktree branches from the integration branch, and a catch-up merge

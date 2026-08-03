@@ -119,6 +119,22 @@ export const RunConfig = z.object({
    * diff". `{"pitStop":{"every":"never"}}` restores that.
    */
   pitStop: PitStopConfig.default({}),
+  /**
+   * How many times a failing intent check may queue work to close its own gaps.
+   *
+   * The validator reads the merged tree as a whole and answers the only question
+   * task-level QA never asks: does the sum of this do what was asked? Its verdict
+   * used to be a note in the log. Run 40da9337 merged 36 tasks, opened its pull
+   * requests, and reported success carrying a FAIL that said none of the workers
+   * that move money were scheduled to run anywhere outside a test — seven gaps,
+   * every one of them a task the harness could have written.
+   *
+   * One round by default: the gaps are small, concrete and derived from a tree
+   * that already exists, so a second pass rarely finds what the first could not,
+   * and an unbounded loop is a run that never lets go. `0` restores the old
+   * behaviour of reporting the verdict and stopping there.
+   */
+  intentFixRounds: z.number().int().min(0).max(3).default(1),
   skillsDirs: z.array(z.string()).default([]),
   /**
    * Skills bound to a class of work, by name, ahead of any scoring.

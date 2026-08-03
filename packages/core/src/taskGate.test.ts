@@ -360,6 +360,62 @@ describe("the task-escalation gate", () => {
     expect(store.getTask(runId, "task-a")!.state).toBe("NEEDS_HUMAN");
   });
 
+  it("re-arms the clock when a gate is answered, rather than only crediting the wait", async () => {
+    /**
+     * The stronger half of the same bug, and the one giving back thinking time
+     * did not fix: the hours *before* the question still counted. A task that
+     * gated on failing checks at minute 44 of a 45-minute bound came back with
+     * an answer and one minute of credit, and re-gated inside the next
+     * iteration — asking the operator about the answer they had just given.
+     *
+     * 19 of the 77 gates in run 40da9337 are this: a wall-clock gate opening
+     * immediately after a different gate on the same task.
+     */
+    let clock = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => clock);
+
+    let planning = 0;
+    const pool = {
+      async run(spec: AgentSpec): Promise<AgentResult> {
+        if (spec.role === "planner") return { sessionId: "sp", resultText: planning++ === 0 ? DOCS : DAG, costUsd: 0, turns: 1, outcome: "done" };
+        if (spec.role === "worker") {
+          writeFileSync(path.join(spec.cwd, "feature.txt"), `attempt ${clock}\n`);
+          gitIn(spec.cwd, "add", "-A");
+          gitIn(spec.cwd, "commit", "-m", "wip");
+          return { sessionId: "sw", resultText: "worker done", costUsd: 0, turns: 1, outcome: "done" };
+        }
+        if (spec.role === "qa") {
+          // A slow iteration — the bound is blown by the time QA answers.
+          clock += 50 * 60_000;
+          return { sessionId: "sq", resultText: '{"verdict":"FAIL","reasons":["still wrong"],"mustFix":["fix it"]}', costUsd: 0, turns: 1, outcome: "done" };
+        }
+        return { sessionId: "sa", resultText: '{"recommendation":"try again","checked":[]}', costUsd: 0, turns: 1, outcome: "done" };
+      },
+    } as unknown as AgentPool;
+
+    const asked: string[] = [];
+    const store = new Store(":memory:");
+    const controller = new RunController(
+      store,
+      new Bus(store),
+      pool,
+      noGithub,
+      // Answer the first question instantly — no thinking time to credit, so
+      // only a real re-arming of the clock can keep the next gate off it.
+      gates(async (why) => {
+        asked.push(why);
+        return asked.length === 1 ? "the partition key is the one to look at" : null;
+      }),
+      repo()
+    );
+    const runId = await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], qaIterationCap: 1 }));
+
+    expect(asked).toHaveLength(2);
+    expect(asked.every((w) => /QA rejected it 1 times/.test(w))).toBe(true);
+    expect(asked.some((w) => /wall clock/.test(w))).toBe(false);
+    expect(store.getTask(runId, "task-a")!.state).toBe("NEEDS_HUMAN");
+  });
+
   /**
    * The wall-clock gate is the one gate that does not know its own cause: it
    * fires because time passed, and it used to say only that. The advisor then

@@ -119,6 +119,11 @@ function build(opts: { repoPath: string; pool: AgentPool; decide?: (stop: PitSto
   return { controller, store, events, stops };
 }
 
+/**
+ * `intentFixRounds: 0` throughout: these are about what the operator is *shown*
+ * when the intent check fails, and a run that also queues work to close the gaps
+ * goes round again, which is a different subject with its own tests below.
+ */
 describe("the pit stop a FAIL verdict opens", () => {
   it("shows the operator the verdict before any pull request exists", async () => {
     const dir = repo();
@@ -132,7 +137,7 @@ describe("the pit stop a FAIL verdict opens", () => {
     });
     const { controller, store, stops } = build({ repoPath: dir, pool });
 
-    const runId = await controller.startRun("build a thing", RunConfig.parse(BASE));
+    const runId = await controller.startRun("build a thing", RunConfig.parse({ ...BASE, intentFixRounds: 0 }));
 
     // Run ec40b527 printed exactly this verdict once, at the end, to a terminal
     // that had scrolled. Now it is a gate.
@@ -172,7 +177,7 @@ describe("the pit stop a FAIL verdict opens", () => {
     });
     const { controller, stops } = build({ repoPath: dir, pool });
 
-    const runId = await controller.startRun("build a thing", RunConfig.parse(BASE));
+    const runId = await controller.startRun("build a thing", RunConfig.parse({ ...BASE, intentFixRounds: 0 }));
     await controller.resume(runId);
 
     // The verdict has already been shown and answered; re-asking would be the
@@ -331,7 +336,9 @@ describe("re-planning what has not been built", () => {
       decide: () => (asked ? { action: "continue", feedback: "" } : ((asked = true), { action: "redirect", feedback: "fix the route name" })),
     });
 
-    const runId = await controller.startRun("build a thing", RunConfig.parse(BASE));
+    // Nothing queued is the whole premise: gap-closing tasks would be somewhere
+    // for the redirect to land, and then it is a redirect and not a re-plan.
+    const runId = await controller.startRun("build a thing", RunConfig.parse({ ...BASE, intentFixRounds: 0 }));
 
     expect(specs.filter((s) => s.role === "planner").length).toBe(3);
     expect(store.getTask(runId, "task-fix")!.state).toBe("MERGED");

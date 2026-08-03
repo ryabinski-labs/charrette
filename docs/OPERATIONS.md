@@ -43,6 +43,7 @@ what you typed
    ↓     merge into harness/<runId>/main      ← this is what unblocks dependents
    ↓  validator agent (Sonnet)  judges the merged whole against your original
    ↓                            intent — the last step before any PR exists
+   ↓       ↳ FAIL → one task per gap, queued and built, then judged again
    ↓  open one PR per merged task
    ↓  GATE 2 — you merge the PRs on GitHub
 ```
@@ -80,13 +81,27 @@ Two more things happen between the last task and `PR_REVIEW`. First, a
 **validator agent** reads the integration branch whole and judges it against
 your original assignment — did the sum of the merged tasks deliver what you
 asked for, not merely pass their own acceptance criteria? Its verdict (and each
-gap it finds) goes into the closing report and the run's events. Second, only
-after that verdict is the pull request opened — by default **one rollup PR for
-the whole run**, from the integration branch, listing every merged task (one
-`--no-ff` merge commit each) with the validator's verdict in the body, so a
-reviewer never sees a PR the harness has not finished judging. A FAIL verdict
-does not withhold the PR — the harness never merges, and human review is
-exactly where the gap list belongs — but it is printed first, above it.
+gap it finds) goes into the closing report and the run's events.
+
+**A FAIL does not just get reported — the harness goes and closes it.** Each gap
+becomes a task in its own `intent-gaps` epic, chained one after another (the
+gaps are usually the same omission seen from several angles, so they land in the
+same files and racing them would only produce merge conflicts), and the run goes
+back to `EXECUTING` to build them. When they have merged, the validator reads the
+tree again. This happens **once** by default: `{"intentFixRounds": 0}` restores
+the old behaviour of reporting the verdict and stopping there, and up to 3 is
+allowed. The gaps are stated against a tree that already exists, which is what
+makes them the cheapest work in the run — and leaving them for the human meant
+the harness declined to make exactly the fixes it was best placed to make. If a
+round of fixing does not satisfy the validator, the second verdict is reported
+and the PRs open carrying it.
+
+Second, only after that verdict is the pull request opened — by default **one
+rollup PR for the whole run**, from the integration branch, listing every merged
+task (one `--no-ff` merge commit each) with the validator's verdict in the body,
+so a reviewer never sees a PR the harness has not finished judging. A FAIL
+verdict does not withhold the PR — the harness never merges, and human review is
+exactly where a gap it could not close belongs — but it is printed first, above it.
 
 Why a rollup and not one PR per task: task branches are cut from the
 integration branch, so each carries every merge that landed before it — by the
@@ -529,10 +544,12 @@ Run configuration is a zod-validated `RunConfig`
 
 | Field | Default | CLI flag | Config file | Notes |
 |---|---|---|---|---|
-| `maxParallelWorkers` | `1` | — | ✅ | v0.0 is serial by design. The scheduler is already a ready-queue over the DAG, so raising this is the v0.1 change, not a rewrite. |
+| `maxParallelWorkers` | `3` | — | ✅ | concurrent *agents*, not tasks — one waiting at a gate is using neither the machine nor the API and does not hold a slot. Tasks whose planned `touchedPaths` overlap something in flight wait rather than race it into a merge conflict. |
 | `qaIterationCap` | `3` | — | ✅ | worker↔QA round trips before a task is parked as `NEEDS_HUMAN` |
 | `workerRespawnCap` | `3` | — | ✅ | crashed-session restarts before parking; the replacement gets a "read your own git log and continue" note |
-| `taskWallClockMinutes` | `45` | — | ✅ | reserved for the v0.1 watchdog |
+| `workerMaxTurns` | `120` | — | ✅ | turns before the SDK cuts a worker off. A session that hits it is the most expensive kind of failure — it dies having done the most work — so hitting it raises the ceiling **for the whole run**, not just that task: the repository is the same size for all of them. |
+| `qaMaxTurns` | `90` | — | ✅ | the same knob for QA, raised the same way. A QA session that runs out of turns never writes its verdict. |
+| `taskWallClockMinutes` | `45` | — | ✅ | a task looping this long without being accepted opens a gate. Answering **any** gate re-arms the clock, so the bound measures unattended time rather than time since dispatch. |
 | `models.intake` | `claude-opus-5` | — | ✅ | this one talks to you; question quality is the whole value |
 | `models.planner` | `claude-opus-5` | — | ✅ | planning quality dominates run cost efficiency |
 | `models.worker` | `claude-sonnet-5` | — | ✅ | |
@@ -543,8 +560,9 @@ Run configuration is a zod-validated `RunConfig`
 | `pitStop.every` | `"epic"` | — | ✅ | when the run stops to show you what it built: `"epic"`, `"never"`, `{"tasks":5}`, `{"usd":100}`, `{"minutes":90}` — see [PITSTOP.md](./PITSTOP.md) |
 | `pitStop.reviewers` | `product-manager`, `critical-challenger`, `qa-agent` | — | ✅ | one short session per lens, by skill name; max 4, `[]` for none. This is the pit stop's price. |
 | `pitStop.demoMaxTurns` | `80` | — | ✅ | the demo agent has to start a product it has never seen; too low and its report says only "I could not start it" |
-| `budget.runCapUsd` | `30` | `--run-cap` | ✅ | checked **before every agent turn** |
+| `budget.runCapUsd` | `30` | `--run-cap` | ✅ | checked **before every agent turn**; the plan gate prices the plan against it before you approve |
 | `budget.taskCapUsd` | `10` | `--task-cap` | ✅ | |
+| `intentFixRounds` | `1` | — | ✅ | how many times a FAIL from the intent validator may queue work to close its own gaps; `0` reports the verdict and stops there |
 | `skillsDirs` | `~/.claude/skills`, `~/skills` | — | ✅ | |
 | `deterministicChecks` | auto-detected | `--check`, `--no-checks` | ✅ | shell strings, run via `sh -c` in the worktree |
 | `githubRepo` | `gh repo view` in the target repo | — | ✅ | `HARNESS_GITHUB_REPO` takes precedence when set |
@@ -908,6 +926,31 @@ cache reads at 0.1×, cache writes at 1.25× — and appended to a ledger in SQL
 `harness status` prints spend per run at any time; the dashboard meter shows it
 live against the cap.
 
+### What the run is likely to cost, before you approve it
+
+A cap says where a run stops, not what it needs, so the plan gate now shows an
+estimate beside it:
+
+```
+Estimated cost: $46.00 (likely $28.00–$180) against a cap of $30.00.
+Based on 2 previous runs in this repository.
+The cap is below the estimate: expect this run to stop and ask you to raise it.
+Raising it now costs nothing and interrupts you less.
+```
+
+The rate comes from what previous runs **in this repository** merged and what
+they cost, weighted by the planner's own S/M/L sizing. Per repository because
+that is the variable that actually moves the number: the same harness costs
+around $2 a task on a small greenfield project and around $21 on a large
+brownfield service, and no single figure spans that. With no finished run to
+learn from, the estimate is that whole spread, and says so.
+
+It is a range on purpose. A confident single number across an order of magnitude
+would be worse than none — it reads as a promise, and the run then breaks it.
+What the range is for is setting the cap deliberately: one run reached its cap
+nine times and doubled it blind each time, having never been shown anything to
+compare it against.
+
 ### The budget gate
 
 In the terminal:
@@ -1092,6 +1135,17 @@ exact configured command in a clean worktree of the base branch — not in your
 main checkout, which has state a worktree does not inherit. When the escalation
 gate asks, the fix is one answer: say what to start or skip, and the run
 continues.
+
+Two classes of failure never reach you, and the run's log says so when they are
+filtered: one that is **also red on the integration branch** is somebody else's
+bug arriving through the base (`… also fails on harness/<runId>/main — not
+charged to this task`), and one that **passes when the same command is run a
+second time** was never about the tree at all (`… failed once and passed on a
+re-run — not charged to this task`). The second is what a shared local database,
+a still-bound port, or a suite sharing state between its own cases looks like
+from here; only the failing commands are re-run, so a green tree costs nothing.
+If you see the re-run line often, the run is fighting something shared between
+worktrees and worth isolating properly.
 
 **The run is sitting still and nothing is spending**
 Look for an amber panel: a gate is open and an agent is paused on your answer —

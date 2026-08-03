@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractJson, plannerBreakdownSystemPrompt, qaSystemPrompt } from "./prompts.js";
+import { advisorPrompt, extractJson, plannerBreakdownSystemPrompt, qaSystemPrompt } from "./prompts.js";
 
 const fence = "```";
 
@@ -120,5 +120,49 @@ describe("infrastructure work", () => {
     expect(p).toMatch(/checkable WITHOUT provisioning anything/);
     // The trap this closes: "the bucket exists in staging" is unjudgeable here.
     expect(p).toMatch(/cannot be judged and will park the task/);
+  });
+});
+
+describe("what an agent is told about the machine it is on", () => {
+  it("tells QA a test that pins this host is worse than no test", () => {
+    // Run 40da9337's PR came back red on CI over a QA-authored sanity check
+    // that asserted `fe80::1` was rejected as an SSRF target. True on the
+    // laptop that wrote it, false everywhere else, and green in the run.
+    const p = qaSystemPrompt();
+    expect(p).toMatch(/pass on a machine that is not this one/);
+    expect(p).toContain("fe80::1");
+    for (const trap of ["home directory", "timezone", "environment variable"]) {
+      expect(p).toContain(trap);
+    }
+    // And the way out, so the rule does not just forbid without instructing.
+    expect(p).toMatch(/a temp directory the test creates and removes/);
+    expect(p).toMatch(/report it as unverified rather than committing a test that pins it/);
+  });
+});
+
+describe("what the advisor is told about the repository", () => {
+  const task = {
+    id: "task-a", runId: "r", epicId: "e", title: "A", spec: "s", acceptanceCriteria: ["x"],
+    dependsOn: [], state: "WORKING" as const, branch: null, worktreePath: null,
+    githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0,
+    assignedSkills: [], errorSummary: null, touchedPaths: [], estimatedSize: "M" as const,
+  };
+
+  it("names the commands the repository actually checks a task with", () => {
+    // The advisor is asked to verify QA's claims and dropped into a worktree
+    // with no idea how anything runs. In run 40da9337 the fact it needed was
+    // one line, and nothing ever told it.
+    const p = advisorPrompt(task, "QA rejected it", ["npx tsx scripts/testRun.ts <file>", "npm run lint"]);
+
+    expect(p).toContain("npx tsx scripts/testRun.ts <file>");
+    expect(p).toContain("npm run lint");
+    expect(p).toMatch(/rather than guessing at a command/);
+  });
+
+  it("says nothing about checks when the repository declares none", () => {
+    const p = advisorPrompt(task, "QA rejected it");
+
+    expect(p).not.toMatch(/How this repository checks a task/);
+    expect(p).toContain("Investigate the worktree you are in");
   });
 });

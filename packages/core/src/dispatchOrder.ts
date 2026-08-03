@@ -8,6 +8,26 @@ export interface Dispatchable {
   id: string;
   state: TaskState;
   dependsOn: string[];
+  /** What the planner expects this task to edit. Empty means it did not say. */
+  touchedPaths: string[];
+}
+
+/** Trim the spellings of one path that mean the same file: `./a/b/`, `a/b`. */
+function normalizePath(p: string): string {
+  return p.trim().replace(/^\.\//, "").replace(/\/+$/, "");
+}
+
+/**
+ * Do these two path sets name any of the same work?
+ *
+ * A directory contains everything under it, so `src/api` and `src/api/orders.ts`
+ * collide — but `src/apiary.ts` does not, which is why the prefix test has to
+ * land on a separator rather than on a character.
+ */
+export function pathsCollide(a: string[], b: string[]): boolean {
+  const left = a.map(normalizePath).filter(Boolean);
+  const right = b.map(normalizePath).filter(Boolean);
+  return left.some((l) => right.some((r) => l === r || l.startsWith(`${r}/`) || r.startsWith(`${l}/`)));
 }
 
 /**
@@ -67,11 +87,26 @@ export function leverage(tasks: Dispatchable[], id: string): number {
  * READY still outranks everything. That state means an operator revived the
  * task by hand or a dead process left it mid-flight, and both want it picked up
  * now rather than ranked against the plan.
+ *
+ * A task whose `touchedPaths` overlap something already in flight is held back.
+ * Two workers editing one file each branch from the same commit and each commit
+ * a different version of it, so whichever merges second meets a conflict — 23 of
+ * them across 36 tasks in run 40da9337, each costing a re-dispatched worker or,
+ * past the conflict cap, an operator. The planner has always emitted the paths;
+ * nothing read them. Waiting is nearly free by comparison: the colliding task is
+ * next in line the moment the other one merges, and if nothing else is runnable
+ * the run loses one slot for a few minutes rather than a whole re-run of a task.
  */
 export function nextDispatch<T extends Dispatchable>(tasks: T[], inFlight: ReadonlySet<string>): T | undefined {
   const merged = new Set(tasks.filter((t) => t.state === "MERGED").map((t) => t.id));
+  const busy = tasks.filter((t) => inFlight.has(t.id)).flatMap((t) => t.touchedPaths);
   const runnable = tasks.filter(
-    (t) => !inFlight.has(t.id) && (t.state === "READY" || (t.state === "PENDING" && t.dependsOn.every((d) => merged.has(d)))),
+    (t) =>
+      !inFlight.has(t.id) &&
+      (t.state === "READY" || (t.state === "PENDING" && t.dependsOn.every((d) => merged.has(d)))) &&
+      // A planner that named no paths has told us nothing, so this cannot hold
+      // anything back on its account — the status quo, not a guess at one.
+      !pathsCollide(t.touchedPaths, busy),
   );
   if (runnable.length === 0) return undefined;
   const rank = new Map(runnable.map((t) => [t.id, leverage(tasks, t.id)]));

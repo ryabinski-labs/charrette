@@ -1,8 +1,8 @@
 import type { TaskState } from "@harness/shared";
 import { describe, expect, it } from "vitest";
-import { leverage, nextDispatch, type Dispatchable } from "./dispatchOrder.js";
+import { leverage, nextDispatch, pathsCollide, type Dispatchable } from "./dispatchOrder.js";
 
-const t = (id: string, state: TaskState, dependsOn: string[] = []): Dispatchable => ({ id, state, dependsOn });
+const t = (id: string, state: TaskState, dependsOn: string[] = [], touchedPaths: string[] = []): Dispatchable => ({ id, state, dependsOn, touchedPaths });
 const none = new Set<string>();
 
 /**
@@ -81,5 +81,62 @@ describe("what the scheduler starts next", () => {
     const tasks = [t("a", "PENDING", ["b"]), t("b", "PENDING", ["a"])];
     expect(leverage(tasks, "a")).toBe(1);
     expect(nextDispatch(tasks, none)).toBeUndefined();
+  });
+});
+
+/**
+ * 23 merge conflicts across 36 tasks in run 40da9337, each one two workers who
+ * branched from the same commit and edited the same file. The planner had said
+ * which files each task would touch since the first version of the harness; the
+ * scheduler had never read it.
+ */
+describe("two tasks reaching for the same file", () => {
+  it("holds one back while the other is in flight", () => {
+    const tasks = [t("api", "WORKING", [], ["src/api/orders.ts"]), t("also-api", "PENDING", [], ["src/api/orders.ts"])];
+
+    expect(nextDispatch(tasks, new Set(["api"]))).toBeUndefined();
+  });
+
+  it("starts it the moment the other one is out of flight", () => {
+    const tasks = [t("api", "MERGED", [], ["src/api/orders.ts"]), t("also-api", "PENDING", [], ["src/api/orders.ts"])];
+
+    expect(nextDispatch(tasks, none)!.id).toBe("also-api");
+  });
+
+  it("passes over the collision and dispatches something else that can run", () => {
+    const tasks = [
+      t("api", "WORKING", [], ["src/api"]),
+      t("also-api", "PENDING", [], ["src/api/orders.ts"]),
+      t("docs", "PENDING", [], ["README.md"]),
+    ];
+
+    expect(nextDispatch(tasks, new Set(["api"]))!.id).toBe("docs");
+  });
+
+  it("does not hold back a task the planner said nothing about", () => {
+    // Empty paths are an absence of information, not a claim of independence.
+    // Treating them as a collision would serialize every plan that omits them.
+    const tasks = [t("api", "WORKING", [], ["src/api/orders.ts"]), t("unknown", "PENDING", [], [])];
+
+    expect(nextDispatch(tasks, new Set(["api"]))!.id).toBe("unknown");
+  });
+
+  it("counts a directory as containing the files under it", () => {
+    expect(pathsCollide(["src/api"], ["src/api/orders.ts"])).toBe(true);
+    expect(pathsCollide(["src/api/orders.ts"], ["src/api"])).toBe(true);
+  });
+
+  it("does not mistake a shared prefix for a shared directory", () => {
+    // `src/apiary.ts` starts with `src/api` and has nothing to do with it.
+    expect(pathsCollide(["src/api"], ["src/apiary.ts"])).toBe(false);
+  });
+
+  it("reads the spellings of one path as one path", () => {
+    expect(pathsCollide(["./src/api/"], ["src/api"])).toBe(true);
+  });
+
+  it("ignores blank entries rather than colliding everything with them", () => {
+    expect(pathsCollide([""], ["src/api"])).toBe(false);
+    expect(pathsCollide([], ["src/api"])).toBe(false);
   });
 });

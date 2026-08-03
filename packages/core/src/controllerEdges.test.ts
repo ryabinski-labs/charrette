@@ -342,7 +342,9 @@ describe("the pull request's title and body", () => {
     });
     const { controller } = build({ repoPath: dir, pool, github: adapter });
 
-    await controller.startRun("add rate limiting to the API\nand nothing else", RunConfig.parse(BASE));
+    // The gap is a fixture for the singular wording, not work to do: without
+    // this the harness queues a task to close it and the counts stop being one.
+    await controller.startRun("add rate limiting to the API\nand nothing else", RunConfig.parse({ ...BASE, intentFixRounds: 0 }));
 
     expect(created[0]!.title).toContain("add rate limiting to the API");
     // One task, one gap: both singular.
@@ -443,7 +445,8 @@ describe("a task gate opened before anything was rejected", () => {
    * The wall-clock gate is the only one that does not know its own cause: every
    * other gate names the failure that opened it. Reaching it with nothing yet
    * rejected takes the merge-conflict path, which is the one loop that comes
-   * back round without recording a rejection.
+   * back round without recording a rejection — and, since an answered gate
+   * re-arms the clock, without an operator having been asked anything either.
    */
   it("says only that time passed, because that is all it knows", async () => {
     const dir = repo();
@@ -454,11 +457,15 @@ describe("a task gate opened before anything was rejected", () => {
     const { pool } = rolePool({
       planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS() : dagJson(["task-a", "task-b"])),
       worker: (spec, nth) => {
-        if (/ACCEPTED by QA/.test(spec.prompt)) {
-          // Handed a conflict it cannot settle, and slow about it.
-          offset = 2 * 60 * 60 * 1000;
-          return "I could not work out which side to keep";
-        }
+        // Handed a conflict it cannot settle.
+        if (/ACCEPTED by QA/.test(spec.prompt)) return "I could not work out which side to keep";
+        // Slow about the work itself, which is what the bound is there to catch.
+        // It has to be *this* session rather than the conflict-resolving one: an
+        // answered gate re-arms the clock, so time spent before the gate cannot
+        // open one after it, and only the unattended stretch counts. Additive
+        // because both tasks run at once — an assignment could land entirely
+        // before the second task started its own clock, and advance nothing.
+        offset += 2 * 60 * 60 * 1000;
         commitInWorktree(spec.cwd, "shared.txt");
         writeFileSync(path.join(spec.cwd, "shared.txt"), `${path.basename(spec.cwd)} ${nth}\n`);
         execFileSync("git", ["add", "-A"], { cwd: spec.cwd, stdio: "ignore" });
@@ -474,9 +481,6 @@ describe("a task gate opened before anything was rejected", () => {
       gates: {
         async resolveTaskGate(gate) {
           gates.push(gate);
-          // Answer the conflict gate so the loop comes back round once more —
-          // that next pass is the one whose wall clock has already blown, with
-          // nothing yet rejected to explain it.
           return /merge conflicts/.test(gate.why) ? "keep both sides" : null;
         },
       },
