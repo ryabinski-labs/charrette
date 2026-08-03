@@ -61,6 +61,7 @@ const h = vi.hoisted(() => {
     missingKeysMock: vi.fn(() => [] as string[]),
     ensureIgnoredMock: vi.fn(() => false),
     repoUnusableMock: vi.fn(async () => null as string | null),
+    checkMemoryBannerMock: vi.fn(() => [] as string[]),
     originSlugMock: vi.fn(async () => "acme/widgets" as string | null),
     detectChecksMock: vi.fn(() => ({ checks: ["npm test"], source: "package.json" })),
     loadFileConfigMock: vi.fn(() => ({ config: {} as Record<string, unknown>, path: null as string | null })),
@@ -99,6 +100,10 @@ vi.mock("@harness/core", () => ({
   // The rule itself is unit-tested against real repositories in core; here it
   // stands in so a test can prove `run` and `resume` actually stop.
   repoUnusable: h.repoUnusableMock,
+  // What the lines say is settled in memory.test.ts against a real database.
+  // What the CLI owes is asking about the checks this run will actually use,
+  // and putting the answer where the operator reads before approving a plan.
+  checkMemoryBanner: h.checkMemoryBannerMock,
   // Pinned, so the banner assertion is about the line existing rather than
   // about whatever commit this checkout happens to be on.
   harnessBuild: () => "0.0.1@7453d60",
@@ -238,6 +243,7 @@ beforeEach(() => {
   h.missingKeysMock.mockReset().mockReturnValue([]);
   h.ensureIgnoredMock.mockReset().mockReturnValue(false);
   h.repoUnusableMock.mockReset().mockResolvedValue(null);
+  h.checkMemoryBannerMock.mockReset().mockReturnValue([]);
   h.originSlugMock.mockReset().mockResolvedValue("acme/widgets");
   h.detectChecksMock.mockReset().mockReturnValue({ checks: ["npm test"], source: "package.json" });
   h.loadFileConfigMock.mockReset().mockReturnValue({ config: {}, path: null });
@@ -518,6 +524,74 @@ describe("a repository no run can be built in", () => {
     h.resolveRepoRootMock.mockReturnValue("/repo/root");
     await cli("run", "build a thing", "--repo", "/repo/sub/dir", "--no-dashboard");
     expect(h.repoUnusableMock).toHaveBeenCalledWith("/repo/root");
+  });
+});
+
+/**
+ * What an earlier run in this repo watched the checks do, surfaced at the one
+ * moment it is still free to act on. A check that was red before any task
+ * started parks every task in the run, and the operator finds out task by task,
+ * after paying for each.
+ */
+describe("what the repo already knows about its checks", () => {
+  const RED = ["memory     what earlier runs in this repo watched happen:", "           $ npm test was already failing on the base of run 40da9337 (today)"];
+
+  it("puts it in `run`'s banner, above the plan gate", async () => {
+    h.checkMemoryBannerMock.mockReturnValue(RED);
+    await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard");
+    expect(printed()).toContain("was already failing on the base of run 40da9337");
+  });
+
+  it("asks about the checks this run will actually use, not some other run's", async () => {
+    await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard", "--check", "pnpm build", "--check", "pnpm test");
+    expect(h.checkMemoryBannerMock).toHaveBeenCalledWith(h.storeMethods, ["pnpm build", "pnpm test"]);
+  });
+
+  it("adds nothing to the banner when the repo has never been observed", async () => {
+    h.checkMemoryBannerMock.mockReturnValue([]);
+    await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard");
+    expect(printed()).not.toContain("what earlier runs in this repo watched happen");
+  });
+
+  it("tells `resume` too — a resumed run inherits the same base", async () => {
+    h.checkMemoryBannerMock.mockReturnValue(RED);
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "EXECUTING", assignment: "a" }]);
+    h.storeMethods.getRun.mockReturnValue({ id: "run-1", state: "EXECUTING", config: { deterministicChecks: ["npm test"] } });
+
+    await cli("resume", "--repo", "/repo", "--no-dashboard");
+
+    expect(printed()).toContain("was already failing on the base of run 40da9337");
+    expect(h.checkMemoryBannerMock).toHaveBeenCalledWith(h.storeMethods, ["npm test"]);
+  });
+
+  it("reads `resume`'s corrected checks, not the ones it is abandoning", async () => {
+    // The config file has just overridden the run's frozen checks; the memory
+    // worth showing is about the commands that are going to run.
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "EXECUTING", assignment: "a" }]);
+    h.loadFileConfigMock.mockReturnValue({ config: { deterministicChecks: ["pnpm test"] }, path: "/repo/harness.config.json" });
+    h.storeMethods.getRun
+      .mockReturnValueOnce({ id: "run-1", state: "EXECUTING", config: { deterministicChecks: ["npm test"] } })
+      .mockReturnValue({ id: "run-1", state: "EXECUTING", config: { deterministicChecks: ["pnpm test"] } });
+
+    await cli("resume", "--repo", "/repo", "--no-dashboard");
+
+    expect(h.checkMemoryBannerMock).toHaveBeenLastCalledWith(h.storeMethods, ["pnpm test"]);
+  });
+
+  it("survives a resume naming a run this repo has never heard of", async () => {
+    h.storeMethods.getRun.mockReturnValue(undefined);
+    await cli("resume", "run-nope", "--repo", "/repo", "--no-dashboard");
+    expect(h.checkMemoryBannerMock).toHaveBeenCalledWith(h.storeMethods, []);
+  });
+
+  it("says nothing on `resume` when there is nothing remembered", async () => {
+    h.checkMemoryBannerMock.mockReturnValue([]);
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "EXECUTING", assignment: "a" }]);
+    h.storeMethods.getRun.mockReturnValue({ id: "run-1", state: "EXECUTING", config: { deterministicChecks: ["npm test"] } });
+
+    await cli("resume", "--repo", "/repo", "--no-dashboard");
+
+    expect(printed()).not.toContain("what earlier runs in this repo watched happen");
   });
 });
 
