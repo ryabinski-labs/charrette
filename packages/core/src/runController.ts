@@ -14,6 +14,7 @@ import { GitHubAdapter, type PrRef } from "./github.js";
 import { runIntake, type IntakeUi } from "./intake.js";
 import { isolationBlock, isolationEnv, taskIsolation } from "./isolation.js";
 import { observeChecks } from "./memory.js";
+import { ceilingNote, sdkCeiling } from "./outputCeiling.js";
 import { reapUnder } from "./reaper.js";
 import { AgentPool, type AgentResult } from "./pool.js";
 import {
@@ -1513,9 +1514,26 @@ export class RunController {
    * markdown; phase B turns that prose into the DAG with no tools and no prose.
    */
   private async plan(runId: string, feedback: string): Promise<Plan> {
+    await this.warnOutputCeiling(runId);
     const docs = await this.planDocs(runId, feedback);
     const breakdown = await this.planBreakdown(runId, docs, feedback);
     return { ...docs, ...breakdown };
+  }
+
+  /**
+   * Say so when the SDK is going to grant the planner less than it asked for.
+   *
+   * `PLANNER_MAX_OUTPUT_TOKENS` is a request the SDK clamps per model, and a
+   * model it does not recognise gets the default however high the request was.
+   * Run 3ae58e02 lost a phase-B attempt to exactly that and the retry told the
+   * planner to write less, because nothing had said the ceiling was half what
+   * the harness believed. The run continues either way — the two-phase split
+   * exists so it can — but the operator now knows which of the two it is.
+   */
+  private async warnOutputCeiling(runId: string): Promise<void> {
+    const model = this.store.getRun(runId)!.config.models.planner;
+    const text = ceilingNote(await sdkCeiling(model), PLANNER_MAX_OUTPUT_TOKENS);
+    if (text) this.bus.publish({ type: "agent.log", runId, sessionId: "planner", text, ts: Date.now() });
   }
 
   /** Phase A: survey the repository and write the PRD and conventions documents. */
