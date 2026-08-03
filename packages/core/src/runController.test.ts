@@ -320,4 +320,28 @@ describe("what the operator is shown before they approve a plan", () => {
 
     expect(summaries[0]).not.toContain("External services");
   });
+
+  it("names what the brief asked for that no task in the plan owns", async () => {
+    // The other half of how 40da9337 came out short: not a dimension defined as
+    // a mock, but a dimension nobody was ever assigned. `dagJson()` is one
+    // task-a that does a thing; the brief below asks for four more.
+    const { controller, summaries } = planGateHarness();
+    await controller
+      .startRun("A production web app with sign-in, a designed responsive UI, and alerting.", RunConfig.parse({}))
+      .catch(() => undefined);
+
+    expect(summaries[0]).toContain("Production shape");
+    expect(summaries[0]).toContain("deploy");
+    expect(summaries[0]).toContain("security");
+    expect(summaries[0]).toContain("design");
+    expect(summaries[0]).toContain("observability");
+    expect(summaries[0]).toContain("If one is deliberately out of scope, approve and it stays out.");
+  });
+
+  it("stays quiet about production shape when the brief never asked for any of it", async () => {
+    const { controller, summaries } = planGateHarness();
+    await controller.startRun("do a thing", RunConfig.parse({})).catch(() => undefined);
+
+    expect(summaries[0]).not.toContain("Production shape");
+  });
 });

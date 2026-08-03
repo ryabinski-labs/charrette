@@ -19,7 +19,7 @@ Pre-release walking skeleton (v0.0 per the PRD phasing) plus the v0.1 dashboard 
 - ✅ Budget caps enforced before every agent turn; live cost ledger; the plan gate prices the plan against the cap from what previous runs in the same repo actually cost
 - ✅ Intent validator reads the merged whole against your original assignment — seams, reachability, and whether the thing could actually be deployed and would move real money — and a FAIL queues one task per gap and builds them rather than just reporting them
 - ✅ An interrupted conversation is picked up where it stopped: `resume` re-asks the question nobody answered instead of planning around it
-- ✅ The plan gate says which external services the plan intends to build for real and which it intends to fake, before a worker is paid
+- ✅ The plan gate says which external services the plan intends to build for real and which it intends to fake, before a worker is paid — and which of deployment, sign-in, visual design and failure-visibility your brief asked for that no task owns at all
 - ✅ The same intent question is asked of the **plan**, not only the result: could this plan, executed perfectly, deliver the assignment? Gaps reach you at the gate and the planner on a reject
 - ✅ `harness postmortem` — why a run produced what it produced: questions nobody answered, verdicts and whether they were heeded, tasks that could pass without anything leaving the process, spend by how sessions died
 - ✅ Skills discovery: lexical SKILL.md matching with SHA-256 provenance (also exposed as a stdio MCP server)

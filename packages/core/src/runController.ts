@@ -57,6 +57,7 @@ import {
 import { confirmFailures, runDeterministicChecks, splitInheritedFailures, type CheckResult } from "./qa.js";
 import { estimatePlan, renderEstimate } from "./estimate.js";
 import { renderIntegrations, scanIntegrations } from "./integrationScan.js";
+import { renderProduction, scanProduction } from "./productionScan.js";
 import { detectToolbelt, toolbeltBlock } from "./toolbelt.js";
 import { Store, TaskRow, type RunRow } from "./store.js";
 
@@ -1686,7 +1687,11 @@ export class RunController {
     // when every external task pins a real sandbox, which is the common case on
     // a plan that does not have this problem.
     const integrations = renderIntegrations(scanIntegrations(tasks));
-    return [lines, renderEstimate(estimate, run.config.budget.runCapUsd), integrations].filter(Boolean).join("\n\n");
+    // And what it has no task for at all. The brief is the assignment plus the
+    // PRD written from it, because the operator's own words are the only thing
+    // that can say whether this product was ever meant to deploy or have a login.
+    const production = renderProduction(scanProduction(`${run.assignment}\n${this.planPrd(runId)}`, tasks));
+    return [lines, renderEstimate(estimate, run.config.budget.runCapUsd), integrations, production].filter(Boolean).join("\n\n");
   }
 
   private async fileIssues(runId: string): Promise<void> {
