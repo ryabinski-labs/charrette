@@ -224,11 +224,11 @@ describe("agent confinement", () => {
  * set the cap against.
  */
 describe("what the operator is shown before they approve a plan", () => {
-  function planGateHarness() {
+  function planGateHarness(dag = dagJson()) {
     const repo = mkdtempSync(path.join(tmpdir(), "harness-estimate-"));
     const store = new Store(":memory:");
     const summaries: string[] = [];
-    const { pool } = fakePool([DOCS, dagJson()]);
+    const { pool } = fakePool([DOCS, dag]);
     const controller = new RunController(
       store,
       new Bus(store),
@@ -265,5 +265,57 @@ describe("what the operator is shown before they approve a plan", () => {
     await controller.startRun("do a thing", RunConfig.parse({ budget: { runCapUsd: 1 } })).catch(() => undefined);
 
     expect(summaries[0]).toContain("The cap is below the estimate");
+  });
+
+  it("shows which integrations the plan intends to fake, using 40da9337's own criteria", async () => {
+    // These two tasks are copied out of run 40da9337's plan. They were approved
+    // at this gate, built, QA-passed and merged — and they are the reason the
+    // delivered product cannot debit a payer or mail a check. Nothing about them
+    // was visible here before, which is what made the approval uninformed.
+    const dag =
+      "```json\n" +
+      JSON.stringify({
+        epics: [{ id: "epic-e", title: "E", summary: "s" }],
+        tasks: [
+          {
+            id: "provider-layer",
+            epicId: "epic-e",
+            title: "Provider layer",
+            spec: "Create `src/providers/index.ts` resolved by `config.providerMode`.",
+            acceptanceCriteria: ["All seven vendor categories have an interface and a deterministic mock"],
+            dependsOn: [],
+            touchedPaths: [],
+            estimatedSize: "M",
+          },
+          {
+            id: "plaid-integration",
+            epicId: "epic-e",
+            title: "Plaid integration",
+            spec: "Link a bank account.",
+            acceptanceCriteria: ["The suite makes no outbound HTTP call"],
+            dependsOn: [],
+            touchedPaths: [],
+            estimatedSize: "M",
+          },
+        ],
+      }) +
+      "\n```";
+    const { controller, summaries } = planGateHarness(dag);
+    await controller.startRun("fully implement this, including all the integrations", RunConfig.parse({})).catch(() => undefined);
+
+    expect(summaries[0]).toContain("External services");
+    expect(summaries[0]).toContain("Built as a test double");
+    expect(summaries[0]).toContain("provider-layer");
+    expect(summaries[0]).toContain("plaid-integration");
+    expect(summaries[0]).toContain("The suite makes no outbound HTTP call");
+    expect(summaries[0]).toContain("reject the plan and say so");
+  });
+
+  it("stays quiet about integrations when the plan has none to worry about", async () => {
+    // A gate that prints the same warning every time is a gate nobody reads.
+    const { controller, summaries } = planGateHarness();
+    await controller.startRun("do a thing", RunConfig.parse({})).catch(() => undefined);
+
+    expect(summaries[0]).not.toContain("External services");
   });
 });

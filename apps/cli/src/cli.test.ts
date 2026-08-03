@@ -814,7 +814,7 @@ describe("harness resume", () => {
     await cli("resume", "--repo", "/repo", "--no-dashboard");
 
     expect(printed()).toContain("Resuming run run-open [EXECUTING] — the open one");
-    expect(h.controllerMethods.resume).toHaveBeenCalledWith("run-open");
+    expect(h.controllerMethods.resume).toHaveBeenCalledWith("run-open", undefined);
   });
 
   it("says so plainly when there is nothing to resume", async () => {
@@ -832,7 +832,7 @@ describe("harness resume", () => {
 
     await cli("resume", "--repo", "/repo", "--no-dashboard");
 
-    expect(h.controllerMethods.resume).toHaveBeenCalledWith("run-pr");
+    expect(h.controllerMethods.resume).toHaveBeenCalledWith("run-pr", undefined);
   });
 
   it("treats a PR_REVIEW run awaiting verification as resumable", async () => {
@@ -841,7 +841,22 @@ describe("harness resume", () => {
 
     await cli("resume", "--repo", "/repo", "--no-dashboard");
 
-    expect(h.controllerMethods.resume).toHaveBeenCalledWith("run-pr");
+    expect(h.controllerMethods.resume).toHaveBeenCalledWith("run-pr", undefined);
+  });
+
+  it("gives the terminal back to a run that stopped mid-conversation", async () => {
+    // Run 40da9337 was interrupted holding the question that decided whether its
+    // integrations would be real. Resume used to plan straight past it; the
+    // conversation now needs somewhere to happen, and only this state needs it —
+    // opening readline on any other resume would hold stdin for nothing.
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-chat", state: "INTAKE", assignment: "build it" }]);
+    h.storeMethods.getRun.mockReturnValue({ id: "run-chat", state: "INTAKE", config: {} });
+
+    await cli("resume", "--repo", "/repo", "--no-dashboard");
+
+    expect(h.TerminalChatMock).toHaveBeenCalled();
+    expect(printed()).toContain("stopped mid-conversation");
+    expect(h.controllerMethods.resume).toHaveBeenCalledWith("run-chat", expect.anything());
   });
 
   it("re-reports a finished run instead of resuming it, and does not notify", async () => {
@@ -860,7 +875,7 @@ describe("harness resume", () => {
 
     await cli("resume", "run-x", "--repo", "/repo", "--no-dashboard");
 
-    expect(h.controllerMethods.resume).toHaveBeenCalledWith("run-x");
+    expect(h.controllerMethods.resume).toHaveBeenCalledWith("run-x", undefined);
   });
 
   it("prints the dashboard URL and its token warning", async () => {

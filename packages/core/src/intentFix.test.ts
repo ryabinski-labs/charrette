@@ -134,6 +134,42 @@ describe("a failing intent verdict", () => {
     expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
   });
 
+  it("closes the seven gaps run 40da9337 actually shipped", async () => {
+    // Verbatim from `billing-app/.harness/harness.db`, the one `run.intent_verdict`
+    // that run produced. It is correct in every particular and it was the last
+    // thing the harness did: the run went to PR_REVIEW and stopped, and a day
+    // later a separate session rediscovered the same four unscheduled workers
+    // from scratch. This asserts the verdict becomes work.
+    const REAL = [
+      "Disbursement orchestration (src/workers/disbursementWorker.ts, main entry `runDisbursementWorker()` at line 542) is never invoked from any production code path — not from src/server.ts, not from any route, not from any cron/interval.",
+      "The webhook delivery worker (src/workers/webhookWorker.ts, main entry `processWebhookOutbox()` at line 100) is likewise never scheduled or called from any production route/cron — only from tests.",
+      "The funding poller (src/workers/fundingPoller.ts, main entry `runFundingPoller()` at line 555) is never scheduled from production code either — same pattern, only exercised by tests.",
+      "The daily trial-balance/reconciliation job (src/workers/reconciliation.ts) is only reachable on-demand via GET /v1/reports/trial-balance, never run on a schedule.",
+      "webhook-delivery-worker's own QA suite documents an unresolved, in-repo-acknowledged concurrency defect: concurrent sweeps of processWebhookOutbox both really POST to the customer's endpoint but only one attempt is recorded.",
+      "Vendor monthly spend budget (COST-5) is metered and alarmed but never enforced — no code path blocks or throttles a vendor call because the monthly budget was exceeded.",
+      "The pre-authorization quote endpoint (POST /v1/payment-orders/quote) computes fees but does not call evaluateMarginGuard, so the disclosed quote can promise a payment the platform will then block at creation time.",
+    ];
+    const dir = repo();
+    const { pool, specs } = rolePool({
+      planner, worker, qa: () => QA_PASS, demo: () => DEMO_OK, reviewer: () => REVIEW_OK,
+      validator: (_s, nth) => (nth === 1 ? failing(REAL) : PASS),
+    });
+    const { controller, store } = build({ repoPath: dir, pool });
+
+    const runId = await controller.startRun("fully implement this product, including all the integrations", RunConfig.parse(BASE));
+
+    const fixes = store.listTasks(runId).filter((t) => t.id.startsWith("intent-fix-"));
+    expect(fixes).toHaveLength(7);
+    expect(fixes.every((t) => t.state === "MERGED")).toBe(true);
+    // Chained, because four of the seven are "wire this into the entrypoint" and
+    // would otherwise be four workers fighting over src/server.ts.
+    expect(fixes.map((t) => t.dependsOn)).toEqual([[], ["intent-fix-1-1"], ["intent-fix-1-2"], ["intent-fix-1-3"], ["intent-fix-1-4"], ["intent-fix-1-5"], ["intent-fix-1-6"]]);
+    // The worker is handed the finding, line numbers and all.
+    const sent = specs.filter((s) => s.role === "worker").map((s) => s.prompt as string);
+    expect(sent.some((p) => p.includes("runDisbursementWorker()` at line 542"))).toBe(true);
+    expect(sent.some((p) => p.includes("evaluateMarginGuard"))).toBe(true);
+  }, 60_000);
+
   it("puts the gap itself in front of the worker, not a summary of it", async () => {
     const dir = repo();
     const { pool, specs } = rolePool({

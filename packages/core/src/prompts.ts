@@ -52,6 +52,43 @@ ${skills}`;
 }
 
 /**
+ * What an interrupted intake conversation already established, for the agent
+ * picking it back up.
+ *
+ * The unanswered tail is the whole point. A conversation stops mid-question far
+ * more often than it stops between them, and the question in flight is by
+ * construction the one the agent judged most worth asking. Run 40da9337 died one
+ * question into "do you want real vendor accounts wired up, or adapters against
+ * sandboxes, or interfaces and fakes only?", resumed past it, and shipped six of
+ * seven integrations as fail-closed stubs — the plan's own acceptance criteria
+ * asked for mocks, because nobody had said otherwise.
+ *
+ * Returns "" for an empty transcript so the caller can concatenate unconditionally.
+ */
+export function resumedIntakeBlock(prior: { question: string; answer: string | null }[]): string {
+  if (!prior.length) return "";
+  const answered = prior.filter((p) => p.answer !== null);
+  const open = prior.filter((p) => p.answer === null);
+  const lines = [
+    `\n\nThis conversation was interrupted and you are resuming it. Do not start over.`,
+    answered.length
+      ? `\nAlready settled — treat these as decided and never ask them again:\n${answered
+          .map((p) => `- ${p.question}\n  → ${p.answer}`)
+          .join("\n")}`
+      : `\nNothing was settled before the interruption.`,
+  ];
+  if (open.length) {
+    lines.push(
+      `\nAsked and never answered. Put ${open.length === 1 ? "it" : "them"} to the operator first, before anything new:\n${open
+        .map((p) => `- ${p.question}`)
+        .join("\n")}`,
+      `\nAn unanswered question is not a question the operator declined — the process stopped before they could reply. Do not answer it on their behalf and do not let it drop into an assumption; that is exactly how a run builds the cheap version of what was asked for.`
+    );
+  }
+  return lines.join("\n");
+}
+
+/**
  * Planning phase A: the prose. Emitted as raw markdown between tags rather than
  * as JSON strings — escaping a PRD into JSON roughly doubles its token cost and
  * makes a single stray quote unparseable, and the DAG is not needed yet.
@@ -89,6 +126,7 @@ Rules:
 - Infrastructure is a legitimate deliverable, not a footnote. If the PRD implies something has to run somewhere — a deployment target, a database, a queue, a scheduled job, a CI pipeline, a container image, secrets, DNS, observability — emit tasks for it rather than assuming a human will wire it up afterwards. Name the artifact (a Terraform module, a Helm chart, a CloudFormation stack, a workflow file) and put it under \`touchedPaths\` like any other file.
 - If the product has a user interface, its visual language is a deliverable with a task of its own, and it comes FIRST. One task establishes what every screen inherits — the product's name and logo, its palette, type scale, spacing, and the shared primitives (button, field, card, error, empty and loading states) — and every other UI task \`dependsOn\` it and is written to consume it rather than reinvent it. Derive it from what the product already has: an existing site, brand assets, a marketing page, a design token file, a sibling app. Say in the task where you found it. Parallel workers each building a screen from nothing produce a set of screens that share no visual language and belong to no product, and no later task can retrofit one.
 - Acceptance criteria for a UI task must be settleable by looking at the rendered screen, because that is how they will be checked. "Uses the design system" cannot be judged; "the sign-in screen shows the product logo and wordmark, and its primary button uses the palette's primary colour from the design tokens" can. Name the screen, the state, and the viewport where it matters.
+- A task that integrates an external service must say, in its acceptance criteria, which side of the mock/live line it delivers — and the default is live. Write criteria that pin a real client against the vendor's sandbox or documented test mode, or contract tests against recorded fixtures of real responses. If live genuinely cannot be built (no account, no credentials, no sandbox, the operator scoped it out), say so IN THE SPEC in one sentence beginning "Live is out of scope because", and the interface-plus-fake becomes the honest deliverable. What must never happen is the third thing: a task called \`stripe-integration\` whose every criterion is satisfied by a deterministic fake, passing QA and shipping a \`throw notConfigured()\`. Criteria like "the suite makes no outbound HTTP call" or "each vendor category has a deterministic mock" describe the test strategy, not the deliverable — they belong alongside a criterion that pins the real path, never instead of one.
 - Acceptance criteria for an infrastructure task must be checkable WITHOUT provisioning anything, because nothing in this harness may apply to a real account. Write them against \`terraform validate\`/\`plan\`, \`cdk synth\`, \`helm template\`, \`kubectl --dry-run=server\`, a policy or scanning tool, or a property of the rendered output ("the plan creates exactly one bucket, with versioning and SSE-KMS enabled and no public access"). A criterion whose only proof is a deployed resource cannot be judged and will park the task.
 - The whole DAG must fit in one message. If the PRD is genuinely too large for that, emit fewer, larger tasks covering the whole scope rather than an exhaustive list that gets cut off — a truncated DAG is worth nothing.
 - Your FINAL message must be exactly one JSON object inside a \`\`\`json fence with the shape:
@@ -375,6 +413,15 @@ The seams between tasks are yours alone, and they are where this run's real defe
 - Everything implemented is actually reachable. Follow each new router, handler, middleware, job, migration or subscriber to the entrypoint that mounts, registers, schedules or calls it. A fully written module nobody wired in is the single most common way a green run ships a dead feature.
 - Setup that only \`main\` performs really happens — table or schema creation, migrations, index registration, client construction. Unit tests inject their own doubles and never execute it.
 Report each mismatch as a gap naming both files and both lines. This is a reading task, not a running task, and it is cheap: grep the producing name, grep the consuming name, compare.
+
+Then judge it as something that has to run somewhere, for real, and report each of these as a gap when the intent implied it and the tree does not have it. A tree can be internally perfect and still be nowhere near shippable, and this is the axis task-level QA has no view of at all:
+- **The external services are real.** For every third-party the intent named, open the client and see what it does. A file that reads \`throw notConfigured()\`, \`TODO\`, or returns a canned object is a stub, however complete its interface, its types and its tests are — and a mock the code selects by config in every environment is not an integration, it is the shape of one. Say which vendors are live, which are fakes, and what breaks the first time production traffic arrives. A run asked for "all the integrations" that shipped one real client out of seven passed every test it had.
+- **Something starts the background work.** Follow every queue drain, poller, outbox, retry loop and scheduled job to the thing that invokes it on a timer or a schedule. Reachable from a test or an on-demand HTTP route is not scheduled.
+- **It can be deployed.** Is there a deployment artifact for what the intent described — a container image, an IaC module, a pipeline, a service definition — or does shipping this still require somebody to invent it? Do not provision anything; read what is committed.
+- **Configuration and secrets have a home.** Every credential the live path needs should have a documented name and a way to reach the process. A vendor key that exists only as \`process.env.THING\` with nothing that sets it is a gap.
+- **The messages it has to send can be sent.** If the product mails an invite, a receipt, a verification link or an alert, find the transport. "The token is returned to the API caller to deliver out of band" is a missing feature, not a design.
+- **Failure is visible.** Somewhere to see that the outbox is stuck or the poller stopped — logs with a level, a metric, a health endpoint, an alarm.
+Judge these against what the operator asked for, not against a general standard: a plan that deliberately scoped live vendors out has no gap here, and you should say that it did so deliberately if the repo says so.
 
 Stay inside the repository. Read the diff, read the files it touches, and run the repo's own checks — the ones listed below, plus anything comparably quick. Do NOT build a release artifact, start a device emulator or simulator, install the application, launch a dev server, or drive the running product: that work costs more context than you have and it is not what you were asked. Judging on-device behaviour is a later step in the cycle with its own agent. If something can only be settled by running the product, say so in your summary and let it be a gap.
 

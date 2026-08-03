@@ -471,6 +471,25 @@ last verdict. Fix the environment before you resume — start the service the
 checks need, correct the checks in `harness.config.json` — or your answer buys
 iterations that fail the same way.
 
+A run interrupted **mid-conversation** gets the conversation back. The intake
+agent's session is gone, but every question and answer is on the event log, so
+resume hands the new session what was already settled and puts the questions
+nobody answered in front of you first. It says so before it starts:
+
+```
+This run stopped mid-conversation — picking it up where it left off.
+```
+
+This matters more than it sounds. A conversation stops mid-question far more
+often than it stops between them, and the question in flight is by construction
+the one the agent judged most worth asking. Run 40da9337 was interrupted holding
+*"do you want real vendor accounts wired up, or adapters against sandboxes, or
+interfaces and fakes only?"*, resumed straight past it, planned mocks, and
+shipped six of seven integrations as `throw notConfigured()` — every task green.
+If you resume headlessly, with no terminal to answer in, the run still plans from
+the assignment, but each dropped question is named in the log and counted in the
+state-change reason rather than disappearing.
+
 ### `harness regroup [runId]`
 
 ```bash
@@ -892,6 +911,35 @@ Two obligations exist because a green run shipped a broken build:
   both sides and passes both suites; a fully implemented router that `app.ts`
   never mounts 404s for every user. Task-level QA cannot see either, by
   construction — each task is judged alone in its own worktree.
+- **The intent validator asks whether it could ship.** Separately from the seams,
+  it judges the tree as something that has to run somewhere for real: are the
+  third-party clients live or stubs, does anything actually *schedule* the
+  background work, is there a deployment artifact, do the credentials the live
+  path needs have a home, can the product send the mail it promises, and would a
+  failure ever be noticed. It judges these against what you asked for — a plan
+  that deliberately scoped live vendors out has no gap here — but silence is not
+  a scope decision.
+
+**Which integrations are real is decided at the plan gate, not discovered at the
+end.** A task that talks to a third party has to say in its acceptance criteria
+which side of the mock/live line it delivers, and the default is live. If live
+genuinely cannot be built, the spec says `Live is out of scope because …` and the
+interface-plus-fake becomes the honest deliverable. The plan summary then lists
+what will be faked, before you approve it:
+
+```
+External services — what this plan will actually talk to:
+  Built as a test double, with nothing in the criteria that reaches the vendor:
+    plaid-integration — Plaid integration
+      The suite makes no outbound HTTP call
+```
+
+That block exists because run 40da9337's plan contained exactly two lines like
+it — *"All seven vendor categories have an interface and a deterministic mock"*
+and *"The suite makes no outbound HTTP call"* — and both were approved without
+comment. Every integration task then passed QA **correctly**: a task is finished
+when its criteria are met, and a criterion no vendor call can fail is a task that
+ships without one.
 
 ### Using the indexer as a standalone MCP server
 

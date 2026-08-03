@@ -309,6 +309,38 @@ export class Store {
     return { verdict: parsed.verdict, gaps: parsed.gaps ?? [], summary: parsed.summary ?? "" };
   }
 
+  /**
+   * The intake conversation as far as it got, in order, with `answer: null` for
+   * a question the operator never came back to.
+   *
+   * Resume used to plan from the raw seed because the intake agent's session is
+   * gone and its brief with it. But the conversation itself is on the event log,
+   * and the unanswered tail is the expensive part: run 40da9337 was interrupted
+   * one question into "do you want real vendor accounts wired up, or adapters
+   * against sandboxes, or interfaces and fakes only?" — resumed straight past it,
+   * planned mocks, and shipped six of seven integrations as fail-closed stubs.
+   */
+  intakeTranscript(runId: string): { question: string; answer: string | null }[] {
+    const rows = this.db
+      .prepare("SELECT type, payload FROM events WHERE runId = ? AND type IN ('intake.question','intake.answered') ORDER BY seq")
+      .all(runId) as { type: string; payload: string }[];
+    const order: string[] = [];
+    const byQuestion = new Map<string, string | null>();
+    for (const row of rows) {
+      // `answer` is present on every intake.answered event by schema, and unread
+      // on the question rows.
+      const { question, answer } = JSON.parse(row.payload) as { question: string; answer: string };
+      if (!byQuestion.has(question)) {
+        order.push(question);
+        byQuestion.set(question, null);
+      }
+      // Asking again — a re-ask, a replayed session — must never turn a settled
+      // decision back into an open one.
+      if (row.type === "intake.answered") byQuestion.set(question, answer);
+    }
+    return order.map((question) => ({ question, answer: byQuestion.get(question)! }));
+  }
+
   /** Sequence number of the newest event of `type` for the run, or 0 if none. */
   /** The last thing the repo's CI said about this run's pull request. */
   ciStatus(runId: string): { prNumber: number; state: "passing" | "failing" | "pending" | "none"; failing: string[]; total: number } | null {
