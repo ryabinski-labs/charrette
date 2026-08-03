@@ -1,6 +1,7 @@
 import { z } from "zod";
+import { routingViolations } from "./providers.js";
 
-export const ModelRouting = z.object({
+export const ModelRoutingShape = z.object({
   intake: z.string().default("claude-opus-5"),
   planner: z.string().default("claude-opus-5"),
   worker: z.string().default("claude-sonnet-5"),
@@ -18,6 +19,23 @@ export const ModelRouting = z.object({
    * buy, and it is judgment rather than tool work, so: Opus.
    */
   reviewer: z.string().default("claude-opus-5"),
+});
+
+/**
+ * Any role may be pointed at another vendor except the ones `PINNED_ROLES`
+ * names — see providers.ts for why each is pinned.
+ *
+ * Enforced here, where the config is parsed, rather than where the role is
+ * dispatched. A run whose `prod` validator is misrouted would otherwise be
+ * discovered by the validator itself, after every worker had been paid for;
+ * this refuses at `harness run`, before the first agent spawns. The stored
+ * config of an existing run cannot trip it — nothing that violates this could
+ * ever have been written.
+ */
+export const ModelRouting = ModelRoutingShape.superRefine((models, ctx) => {
+  for (const message of routingViolations(models)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+  }
 });
 
 /**

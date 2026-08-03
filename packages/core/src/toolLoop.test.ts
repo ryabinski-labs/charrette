@@ -1,0 +1,252 @@
+import { describe, expect, it, vi } from "vitest";
+import type { LocalTool } from "./agentTools.js";
+import type { ProviderClient, ProviderTurn, TurnRequest } from "./providerClients.js";
+import { toolLoop, unsupportedSpec, type PromptSource } from "./toolLoop.js";
+
+const usage = { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 };
+const say = (text: string): ProviderTurn => ({ text, toolCalls: [], usage });
+const call = (name: string, input: Record<string, unknown> = {}, id = "c1"): ProviderTurn => ({ text: "", toolCalls: [{ id, name, input }], usage });
+
+/** A client that replays a fixed list of turns and records what it was sent. */
+function scriptedClient(turns: ProviderTurn[]): { client: ProviderClient; seen: TurnRequest[] } {
+  const seen: TurnRequest[] = [];
+  let i = 0;
+  const client: ProviderClient = async (req) => {
+    // The loop mutates its own message array, so snapshot it per call.
+    seen.push({ ...req, messages: req.messages.map((m) => ({ ...m })) });
+    return turns[Math.min(i++, turns.length - 1)]!;
+  };
+  return { client, seen };
+}
+
+/** A prompt source that hands over a fixed list and then ends the session. */
+function prompts(first: string, queued: string[] = []): PromptSource {
+  let sent = false;
+  return {
+    next: async () => {
+      if (sent) return null;
+      sent = true;
+      return first;
+    },
+    drain: () => queued.splice(0),
+  };
+}
+
+const spec = { model: "gpt-5.6-terra", systemPrompt: "you are a worker", cwd: "/tmp/nowhere" };
+const signal = new AbortController().signal;
+
+async function collect(gen: AsyncGenerator<Record<string, unknown>>): Promise<Record<string, unknown>[]> {
+  const out: Record<string, unknown>[] = [];
+  for await (const m of gen) out.push(m);
+  return out;
+}
+
+const noTools: LocalTool[] = [];
+
+describe("the loop the harness runs for non-Anthropic providers", () => {
+  it("yields the message shapes pool.ts already knows how to read", async () => {
+    const { client } = scriptedClient([say("all done")]);
+    const messages = await collect(toolLoop({ spec, prompts: prompts("go"), signal, client, toolsOverride: noTools }));
+
+    expect(messages.map((m) => m.type)).toEqual(["assistant", "result"]);
+    const assistant = messages[0] as { message: { content: unknown[]; usage: Record<string, number> } };
+    expect(assistant.message.content).toEqual([{ type: "text", text: "all done" }]);
+    // The usage keys are the SDK's, because that is what the ledger reads.
+    expect(assistant.message.usage).toEqual({ input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 });
+    expect(messages[1]).toMatchObject({ type: "result", subtype: "success", result: "all done" });
+  });
+
+  it("carries the system prompt and the operator's message into the first turn", async () => {
+    const { client, seen } = scriptedClient([say("done")]);
+    await collect(toolLoop({ spec, prompts: prompts("build the thing"), signal, client, toolsOverride: noTools }));
+    expect(seen[0]!.system).toBe("you are a worker");
+    expect(seen[0]!.messages).toEqual([{ role: "user", text: "build the thing" }]);
+  });
+
+  it("runs a requested tool and feeds the result back", async () => {
+    const ran: Record<string, unknown>[] = [];
+    const tool: LocalTool = {
+      name: "Read",
+      description: "read",
+      parameters: { type: "object", properties: {} },
+      run: async (input) => {
+        ran.push(input);
+        return "file contents";
+      },
+    };
+    const { client, seen } = scriptedClient([call("Read", { file_path: "a.ts" }), say("I read it")]);
+    const messages = await collect(toolLoop({ spec, prompts: prompts("go"), signal, client, toolsOverride: [tool] }));
+
+    expect(ran).toEqual([{ file_path: "a.ts" }]);
+    // The tool call reaches the bus as a tool_use block, same as on the SDK.
+    expect((messages[0] as { message: { content: { type: string; name: string }[] } }).message.content[0]).toMatchObject({ type: "tool_use", name: "Read" });
+    expect(seen[1]!.messages[2]).toEqual({ role: "tool", callId: "c1", name: "Read", text: "file contents" });
+  });
+
+  it("hands a throwing tool back as a result the agent can act on, not a dead session", async () => {
+    const tool: LocalTool = {
+      name: "Read",
+      description: "read",
+      parameters: { type: "object", properties: {} },
+      run: async () => {
+        throw new Error("ENOENT: no such file");
+      },
+    };
+    const { client, seen } = scriptedClient([call("Read"), say("I will try another path")]);
+    const messages = await collect(toolLoop({ spec, prompts: prompts("go"), signal, client, toolsOverride: [tool] }));
+    expect((seen[1]!.messages[2] as { text: string }).text).toContain("ENOENT");
+    expect(messages.at(-1)).toMatchObject({ subtype: "success" });
+  });
+
+  it("tells the model when it asks for a tool that does not exist", async () => {
+    const tool: LocalTool = { name: "Read", description: "read", parameters: {}, run: async () => "x" };
+    const { client, seen } = scriptedClient([call("WebSearch"), say("ok, without it then")]);
+    await collect(toolLoop({ spec, prompts: prompts("go"), signal, client, toolsOverride: [tool] }));
+    expect((seen[1]!.messages[2] as { text: string }).text).toContain("no tool named WebSearch");
+    expect((seen[1]!.messages[2] as { text: string }).text).toContain("Available: Read");
+  });
+
+  it("says so plainly when a role has no tools at all", async () => {
+    // A read-only role that hallucinates a shell should be told there is none,
+    // not handed an empty list it will read as a transient failure.
+    const { client, seen } = scriptedClient([call("Bash"), say("understood, no tools here")]);
+    await collect(toolLoop({ spec, prompts: prompts("go"), signal, client, toolsOverride: noTools }));
+    expect((seen[1]!.messages[2] as { text: string }).text).toContain("Available: (none)");
+  });
+
+  it("books each turn's usage on its own message and the total on the result", async () => {
+    // pool.ts accumulates per-turn usage so a session that dies mid-flight still
+    // books what it spent, then replaces that with the result's total. Both
+    // numbers have to be right or the run is billed twice or not at all.
+    const { client } = scriptedClient([call("Read"), say("done")]);
+    const tool: LocalTool = { name: "Read", description: "r", parameters: {}, run: async () => "x" };
+    const messages = await collect(toolLoop({ spec, prompts: prompts("go"), signal, client, toolsOverride: [tool] }));
+    const totals = messages.map((m) => (m as { message?: { usage?: { output_tokens: number } }; usage?: { output_tokens: number } }).message?.usage ?? (m as { usage: { output_tokens: number } }).usage);
+    expect(totals[0]!.output_tokens).toBe(5);
+    expect(totals[1]!.output_tokens).toBe(5);
+    // The result carries the sum of both turns, not a third charge.
+    expect(totals[2]!.output_tokens).toBe(10);
+  });
+});
+
+describe("mid-flight operator feedback", () => {
+  it("joins the conversation between tool rounds, without waiting for the agent to finish", async () => {
+    // The whole point of PromptStream: the operator can redirect a running
+    // agent. On the SDK the CLI does this; here the loop has to do it.
+    const queued = ["actually, use the sandbox client"];
+    const tool: LocalTool = { name: "Read", description: "r", parameters: {}, run: async () => "x" };
+    const { client, seen } = scriptedClient([call("Read"), say("understood")]);
+    await collect(toolLoop({ spec, prompts: prompts("go", queued), signal, client, toolsOverride: [tool] }));
+
+    expect(seen[1]!.messages.at(-1)).toEqual({ role: "user", text: "actually, use the sandbox client" });
+  });
+
+  it("keeps answering while the operator keeps talking", async () => {
+    const remaining = ["first message", "second message"];
+    const source: PromptSource = { next: async () => remaining.shift() ?? null, drain: () => [] };
+    const { client, seen } = scriptedClient([say("a"), say("b")]);
+    const messages = await collect(toolLoop({ spec, prompts: source, signal, client, toolsOverride: noTools }));
+    expect(messages.filter((m) => m.type === "result")).toHaveLength(2);
+    // The second exchange still has the first one in front of it.
+    expect(seen[1]!.messages).toHaveLength(3);
+  });
+});
+
+describe("the turn ceiling", () => {
+  it("asks for a final answer and reports error_max_turns, like the SDK does", async () => {
+    const tool: LocalTool = { name: "Read", description: "r", parameters: {}, run: async () => "x" };
+    // A model that will never stop asking for tools.
+    const client: ProviderClient = async (req) => (req.tools.length === 0 ? say("here is what I found") : call("Read"));
+    const messages = await collect(toolLoop({ spec: { ...spec, maxTurns: 2 }, prompts: prompts("go"), signal, client, toolsOverride: [tool] }));
+
+    const result = messages.at(-1) as { subtype: string; result: string };
+    expect(result.subtype).toBe("error_max_turns");
+    expect(result.result).toBe("here is what I found");
+  });
+
+  it("sends the wrap-up ask with no tools, so the model cannot keep calling them", async () => {
+    const tool: LocalTool = { name: "Read", description: "r", parameters: {}, run: async () => "x" };
+    const seen: TurnRequest[] = [];
+    const client: ProviderClient = async (req) => {
+      seen.push({ ...req, messages: req.messages.map((m) => ({ ...m })) });
+      return req.tools.length === 0 ? say("final") : call("Read");
+    };
+    await collect(toolLoop({ spec: { ...spec, maxTurns: 1 }, prompts: prompts("go"), signal, client, toolsOverride: [tool] }));
+    expect(seen.at(-1)!.tools).toEqual([]);
+    expect((seen.at(-1)!.messages.at(-1) as { text: string }).text).toContain("turn limit");
+  });
+
+  it("still ends the session when the model answers the wrap-up with nothing", async () => {
+    const tool: LocalTool = { name: "Read", description: "r", parameters: {}, run: async () => "x" };
+    const client: ProviderClient = async (req) => (req.tools.length === 0 ? say("") : call("Read"));
+    const messages = await collect(toolLoop({ spec: { ...spec, maxTurns: 1 }, prompts: prompts("go"), signal, client, toolsOverride: [tool] }));
+    expect((messages.at(-2) as { message: { content: unknown[] } }).message.content).toEqual([]);
+    expect(messages.at(-1)).toMatchObject({ subtype: "error_max_turns", result: "" });
+  });
+
+  it("stops when the session is aborted", async () => {
+    const abort = new AbortController();
+    const tool: LocalTool = { name: "Read", description: "r", parameters: {}, run: async () => "x" };
+    const client: ProviderClient = async () => {
+      abort.abort();
+      return call("Read");
+    };
+    const messages = await collect(toolLoop({ spec, prompts: prompts("go"), signal: abort.signal, client, toolsOverride: [tool] }));
+    // The turn that was already in flight is reported; nothing after it is.
+    expect(messages.filter((m) => m.type === "result")).toHaveLength(0);
+  });
+});
+
+describe("specs this transport cannot honour", () => {
+  it("accepts an ordinary worker spec", () => {
+    expect(unsupportedSpec({ ...spec, tools: ["Bash", "Read", "Write", "Edit"] })).toBeNull();
+    expect(unsupportedSpec(spec)).toBeNull();
+  });
+
+  it("refuses a role that needs in-process MCP tools", () => {
+    // intake asks the operator questions through an SDK-only tool. Without it
+    // the agent would invent the answers instead of asking — which is the
+    // failure that shipped fakes in run 40da9337.
+    expect(unsupportedSpec({ ...spec, mcpServers: { harness_intake: {} } })).toContain("in-process MCP tools");
+  });
+
+  it("ignores an empty mcpServers object", () => {
+    expect(unsupportedSpec({ ...spec, mcpServers: {} })).toBeNull();
+  });
+
+  it("names a tool it has no implementation for", () => {
+    expect(unsupportedSpec({ ...spec, tools: ["Read", "WebSearch"] })).toContain("WebSearch");
+  });
+});
+
+describe("building the client from the environment", () => {
+  it("uses the vendor the model name points at", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({ choices: [{ message: { content: "hi" } }] }),
+      text: async () => "",
+    })) as unknown as typeof globalThis.fetch;
+
+    await collect(
+      toolLoop({
+        spec: { ...spec, model: "gpt-5.6-terra" },
+        prompts: prompts("go"),
+        signal,
+        env: { OPENAI_API_KEY: "sk", HARNESS_RTK: "off" },
+        fetchImpl,
+        toolsOverride: noTools,
+      })
+    );
+    expect(String((fetchImpl as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]![0])).toContain("api.openai.com");
+  });
+
+  it("derives its tools from the spec when none are injected", async () => {
+    const { client, seen } = scriptedClient([say("done")]);
+    await collect(
+      toolLoop({ spec: { ...spec, tools: ["Read", "Glob"] }, prompts: prompts("go"), signal, client, env: { HARNESS_RTK: "off" } })
+    );
+    expect(seen[0]!.tools.map((t) => t.name)).toEqual(["Read", "Glob"]);
+  });
+});

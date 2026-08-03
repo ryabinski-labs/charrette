@@ -607,13 +607,15 @@ Run configuration is a zod-validated `RunConfig`
 | `workerMaxTurns` | `120` | — | ✅ | turns before the SDK cuts a worker off. A session that hits it is the most expensive kind of failure — it dies having done the most work — so hitting it raises the ceiling **for the whole run**, not just that task: the repository is the same size for all of them. |
 | `qaMaxTurns` | `90` | — | ✅ | the same knob for QA, raised the same way. A QA session that runs out of turns never writes its verdict. |
 | `taskWallClockMinutes` | `45` | — | ✅ | a task looping this long without being accepted opens a gate. Answering **any** gate re-arms the clock, so the bound measures unattended time rather than time since dispatch. |
-| `models.intake` | `claude-opus-5` | — | ✅ | this one talks to you; question quality is the whole value |
+| `models.intake` | `claude-opus-5` | — | ✅ | this one talks to you; question quality is the whole value. **Anthropic only** — see [Using other providers](#using-other-providers) |
 | `models.planner` | `claude-opus-5` | — | ✅ | planning quality dominates run cost efficiency |
 | `models.worker` | `claude-sonnet-5` | — | ✅ | |
-| `models.qa` | `claude-sonnet-5` | — | ✅ | |
-| `models.integrator` | `claude-sonnet-5` | — | ✅ | |
+| `models.qa` | `claude-sonnet-5` | — | ✅ | **Anthropic only** — its verdict decides whether a task merges |
+| `models.integrator` | `claude-sonnet-5` | — | ✅ | **not currently used** — integration is deterministic git work, not an agent session. Setting it has no effect. |
+| `models.advisor` | `claude-sonnet-5` | — | ✅ | drafts your answer when a task escalates |
+| `models.prod` | `claude-opus-5` | — | ✅ | **Anthropic only** — the last word on whether the run delivered the assignment |
 | `models.demo` | `claude-sonnet-5` | — | ✅ | starts the half-built product at a pit stop and drives it — mostly tool work |
-| `models.reviewer` | `claude-opus-5` | — | ✅ | judges the demo through one named lens; this is the judgment a pit stop exists to buy |
+| `models.reviewer` | `claude-opus-5` | — | ✅ | judges the demo through one named lens; this is the judgment a pit stop exists to buy. **Anthropic only** |
 | `pitStop.every` | `"epic"` | — | ✅ | when the run stops to show you what it built: `"epic"`, `"never"`, `{"tasks":5}`, `{"usd":100}`, `{"minutes":90}` — see [PITSTOP.md](./PITSTOP.md) |
 | `pitStop.reviewers` | `product-manager`, `critical-challenger`, `qa-agent` | — | ✅ | one short session per lens, by skill name; max 4, `[]` for none. This is the pit stop's price. |
 | `pitStop.demoMaxTurns` | `80` | — | ✅ | the demo agent has to start a product it has never seen; too low and its report says only "I could not start it" |
@@ -654,12 +656,64 @@ await controller.startRun("assignment", RunConfig.parse({
 Auto-approving Gate 1 like that removes the only cheap check on a bad plan. Use it
 for CI of the harness itself, not for real work.
 
+### Using other providers
+
+A model is a plain string, and the vendor is read from the name: `claude-*` goes
+to Anthropic, `gpt-*` to OpenAI, `gemini-*` to Google. Nothing else changes.
+
+```json
+{ "models": { "worker": "gpt-5.6-terra", "integrator": "gemini-3.5-flash-lite" } }
+```
+
+Export that vendor's key (`OPENAI_API_KEY`, `GEMINI_API_KEY`) and run. If the key
+is missing the run refuses to start rather than failing at the first dispatch of
+that role — `integrator` runs after every worker in the epic has been paid for.
+Spell the provider out as `openai/<model>` if you ever need a model whose name
+does not announce its family.
+
+**Four roles may not leave Anthropic**, and the run refuses to start if you move
+them:
+
+| Role | Why |
+|---|---|
+| `qa` | its verdict decides whether a task merges |
+| `reviewer` | its judgment is the thing a pit stop exists to buy |
+| `prod` | it is the last word on whether the run delivered the assignment |
+| `intake` | it asks you questions through an in-process tool only the Anthropic transport can expose |
+
+The first three are policy. A cheaper judge does not report that it judged worse
+— it reports PASS, and you find out at the pull request. The fourth is a
+capability: an intake agent that cannot ask would invent your answers instead.
+
+**What is different off Anthropic.** Those sessions do not run inside the Claude
+Agent SDK; the harness runs the tool loop itself and gives the agent Bash, Read,
+Write, Edit, Glob and Grep. Everything the run is accounted for by is unchanged
+— the ledger, the budget gate, the stall watchdog, the turn ceiling, the
+worktree sweep, and mid-flight feedback from the dashboard all behave the same.
+Three things do differ:
+
+- **The infrastructure guard still applies.** It is the same
+  [`infraMutation`](../packages/core/src/infraGuard.ts) check on the same
+  command, called before any shell runs. It is not optional on any transport.
+- **No resuming.** The OpenAI and Gemini APIs are stateless, so a re-dispatched
+  worker starts cold instead of re-attaching to its own conversation. The run
+  log says so when it happens.
+- **No `WebSearch`, `WebFetch`, or MCP tools.** A role configured to need one is
+  refused at the gate rather than left quietly unable to do its job.
+
+Prices for the routed models live in
+[`packages/core/src/budget.ts`](../packages/core/src/budget.ts). A model with no
+row is charged at the top tier — over-charging stops a run early, where
+under-charging would let a cap silently stop binding.
+
 ### Environment variables
 
 | Variable | Required | Meaning |
 |---|---|---|
 | `CLAUDE_CODE_OAUTH_TOKEN` | one of these | Claude Pro/Max subscription credential |
 | `ANTHROPIC_API_KEY` | one of these | Anthropic API credential; **wins if both are set** |
+| `OPENAI_API_KEY` | only if a role is routed to OpenAI | see [Using other providers](#using-other-providers) |
+| `GEMINI_API_KEY` | only if a role is routed to Google | `GOOGLE_API_KEY` also accepted |
 | `GITHUB_TOKEN` | no | enables issues + PRs; falls back to `gh auth token` |
 | `HARNESS_GITHUB_REPO` | no | `owner/repo`; falls back to `gh repo view` |
 

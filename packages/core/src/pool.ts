@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { query, type HookInput, type HookJSONOutput, type Options, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import { AgentRole } from "@harness/shared";
+import { AgentRole, providerFor } from "@harness/shared";
+import { toolLoop, unsupportedSpec, type PromptSource } from "./toolLoop.js";
 import { Bus } from "./bus.js";
 import { Store } from "./store.js";
 import { costUsd } from "./budget.js";
@@ -9,15 +10,9 @@ import { infraGuardHook } from "./infraGuard.js";
 import { reapUnder } from "./reaper.js";
 import { rtkHooks } from "./rtk.js";
 
-/**
- * How long a Bash command may run before the CLI backgrounds it — and, because
- * being backgrounded is fatal here, effectively how long a command may run at
- * all. The stock 120s is under what `npm test` takes in a mid-sized repo. 30
- * minutes covers test suites, installs and builds; a command that outruns even
- * that is hung, and stalling one worker until its turn cap is the cheap failure
- * next to killing the session outright.
- */
-export const BASH_TIMEOUT_MS = 30 * 60 * 1000;
+import { BASH_TIMEOUT_MS } from "./limits.js";
+
+export { BASH_TIMEOUT_MS };
 
 /**
  * A backgrounded shell kills the session it was started from, so keep shells in
@@ -206,11 +201,19 @@ export class PromptStream {
   private queue: SDKUserMessage[] = [];
   private wake: (() => void) | undefined;
   private closed = false;
+  /** The first prompt is delivered once, by whichever reader asks first. */
+  private firstSent = false;
 
   constructor(private first: string) {}
 
   private message(text: string): SDKUserMessage {
     return { type: "user", message: { role: "user", content: text }, parent_tool_use_id: null, session_id: "" };
+  }
+
+  private static textOf(m: SDKUserMessage): string {
+    // Every message in this queue was built by `message()` above, so the
+    // content is always a plain string. The union is the SDK's, not ours.
+    return m.message.content as string;
   }
 
   /** Queue a message for the live session. False once the stream has closed. */
@@ -238,7 +241,34 @@ export class PromptStream {
     this.wake?.();
   }
 
+  /**
+   * The same stdin, read the way the harness-run tool loop needs it: one
+   * blocking read for the next message, and a non-blocking drain for anything
+   * queued while the model was working. The SDK reads `stream()` instead — both
+   * sit on the same queue, and a session uses exactly one of them.
+   */
+  asSource(): PromptSource {
+    return {
+      next: async () => {
+        if (!this.firstSent) {
+          this.firstSent = true;
+          return this.first;
+        }
+        for (;;) {
+          if (this.queue.length) return PromptStream.textOf(this.queue.shift()!);
+          if (this.closed) return null;
+          await new Promise<void>((resolve) => {
+            this.wake = resolve;
+          });
+          this.wake = undefined;
+        }
+      },
+      drain: () => this.queue.splice(0).map(PromptStream.textOf),
+    };
+  }
+
   async *stream(): AsyncGenerator<SDKUserMessage> {
+    this.firstSent = true;
     yield this.message(this.first);
     for (;;) {
       if (this.queue.length) {
@@ -281,6 +311,17 @@ export class AgentPool {
   }
 
   async run(spec: AgentSpec): Promise<AgentResult> {
+    // Refuse an impossible pairing before the session row exists, so it reads
+    // as a configuration error at the top of the run rather than as an agent
+    // that behaved oddly halfway through one.
+    const unsupported = providerFor(spec.model) === "anthropic" ? null : unsupportedSpec(spec);
+    if (unsupported) {
+      throw new Error(
+        `the ${spec.role} role cannot run on ${spec.model}: ${unsupported}. ` +
+          `Point models.${spec.role} at an Anthropic model, or give this role a spec this transport can honour.`
+      );
+    }
+
     const sessionId = spec.sessionId ?? randomUUID();
     const abort = new AbortController();
     const now = Date.now();
@@ -291,6 +332,22 @@ export class AgentPool {
       .prepare("INSERT INTO sessions (id, runId, taskId, role, model, state, startedAt, build) VALUES (?,?,?,?,?,?,?,?)")
       .run(sessionId, spec.runId, spec.taskId ?? null, spec.role, spec.model, "running", now, harnessBuild());
     this.bus.publish({ type: "agent.spawned", runId: spec.runId, taskId: spec.taskId, sessionId, role: spec.role, model: spec.model, ts: now });
+
+    // A re-dispatched worker normally re-attaches to its own conversation. The
+    // OpenAI and Gemini APIs are stateless, so there is nothing to re-attach
+    // to and this session starts cold. Said out loud rather than dropped
+    // silently: the agent will re-explore the repo, and the extra turns it
+    // spends doing that are otherwise a mystery in the postmortem.
+    if (spec.resume && providerFor(spec.model) !== "anthropic") {
+      this.bus.publish({
+        type: "agent.log",
+        runId: spec.runId,
+        taskId: spec.taskId,
+        sessionId,
+        text: `starting cold: ${spec.model} has no resumable session, so the context from the earlier attempt is not carried over`,
+        ts: now,
+      });
+    }
 
     // The CLI's dying words. "Claude Code process exited with code 1" alone is
     // undiagnosable — the actual error only ever appears on the subprocess's
@@ -390,8 +447,18 @@ export class AgentPool {
         abort.abort();
       }
     }, 30_000);
+    // Which vendor answers is decided here and nowhere else. Everything below
+    // — usage booking, the stall watchdog, turn counting, the wrap-up message,
+    // mid-flight feedback, the reaper — reads the same message shapes either
+    // way, so a role moved to another provider changes what answers, not how
+    // the run is accounted for.
+    const source =
+      providerFor(spec.model) === "anthropic"
+        ? query({ prompt: stream.stream(), options })
+        : toolLoop({ spec, prompts: stream.asSource(), signal: abort.signal });
+
     try {
-      for await (const message of query({ prompt: stream.stream(), options })) {
+      for await (const message of source as AsyncIterable<{ type?: string } & Record<string, unknown>>) {
         lastMessageAt = Date.now();
         const sid = (message as { session_id?: string }).session_id;
         if (sid) sdkSessionId = sid;

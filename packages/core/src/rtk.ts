@@ -71,12 +71,50 @@ export function rtkBashRewriter(run: RtkRunner) {
 }
 
 /**
+ * How to reach rtk, or undefined when it is switched off or not installed.
+ * Both transports gate on this one answer so neither can be quietly rtk-less
+ * while the other is not.
+ */
+function rtkRunner(env: NodeJS.ProcessEnv, run?: RtkRunner): RtkRunner | undefined {
+  if (/^(off|0|false)$/i.test(env.HARNESS_RTK ?? "")) return undefined;
+  if (run) return run;
+  const rtkPath = onPath("rtk", env.PATH ?? "");
+  return rtkPath ? execRtkHook(rtkPath) : undefined;
+}
+
+/**
  * The PreToolUse hooks an agent session should run with: the rtk rewriter
  * when rtk is on PATH and not switched off, otherwise nothing.
  */
 export function rtkHooks(env: NodeJS.ProcessEnv = process.env, run?: RtkRunner): Options["hooks"] | undefined {
-  if (/^(off|0|false)$/i.test(env.HARNESS_RTK ?? "")) return undefined;
-  const rtkPath = run ? null : onPath("rtk", env.PATH ?? "");
-  if (!rtkPath && !run) return undefined;
-  return { PreToolUse: [{ matcher: "Bash", hooks: [rtkBashRewriter(run ?? execRtkHook(rtkPath!))] }] };
+  const runner = rtkRunner(env, run);
+  if (!runner) return undefined;
+  return { PreToolUse: [{ matcher: "Bash", hooks: [rtkBashRewriter(runner)] }] };
+}
+
+/**
+ * The same rewrite, for the transports that have no SDK hook to hang it on.
+ *
+ * Agents on OpenAI or Google run their tool loop inside the harness (toolLoop.ts),
+ * so there is no PreToolUse plumbing to register with — but there is no reason
+ * they should pay full price for `git log` when Anthropic sessions do not. This
+ * asks rtk exactly the same question through exactly the same rewriter, and
+ * answers with the original command whenever rtk declines, fails, or is absent.
+ */
+export function rtkCommandRewriter(
+  env: NodeJS.ProcessEnv = process.env,
+  run?: RtkRunner
+): ((command: string, signal?: AbortSignal) => Promise<string>) | undefined {
+  const runner = rtkRunner(env, run);
+  if (!runner) return undefined;
+  const rewrite = rtkBashRewriter(runner);
+  return async (command, signal) => {
+    const out = await rewrite(
+      { hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command } } as unknown as HookInput,
+      undefined,
+      { signal: signal ?? new AbortController().signal }
+    );
+    const updated = (out as { hookSpecificOutput?: { updatedInput?: { command?: unknown } } })?.hookSpecificOutput?.updatedInput?.command;
+    return typeof updated === "string" ? updated : command;
+  };
 }

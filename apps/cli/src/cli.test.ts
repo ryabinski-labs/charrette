@@ -58,6 +58,7 @@ const h = vi.hoisted(() => {
     RunControllerMock: vi.fn(),
     DashboardMock: vi.fn(),
     detectToolbeltMock: vi.fn(() => [] as { name: string }[]),
+    missingKeysMock: vi.fn(() => [] as string[]),
     ensureIgnoredMock: vi.fn(() => false),
     originSlugMock: vi.fn(async () => "acme/widgets" as string | null),
     detectChecksMock: vi.fn(() => ({ checks: ["npm test"], source: "package.json" })),
@@ -97,6 +98,10 @@ vi.mock("@harness/core", () => ({
   // Pinned, so the banner assertion is about the line existing rather than
   // about whatever commit this checkout happens to be on.
   harnessBuild: () => "0.0.1@7453d60",
+  // The rule this stands in for is unit-tested against the real implementation
+  // in core; here it exists so a test can prove `harness run` actually refuses
+  // when a routed provider has no key.
+  missingKeys: h.missingKeysMock,
   originSlug: h.originSlugMock,
   postmortem: h.postmortemMock,
   renderPostmortem: h.renderPostmortemMock,
@@ -226,6 +231,7 @@ beforeEach(() => {
   });
 
   h.detectToolbeltMock.mockReset().mockReturnValue([]);
+  h.missingKeysMock.mockReset().mockReturnValue([]);
   h.ensureIgnoredMock.mockReset().mockReturnValue(false);
   h.originSlugMock.mockReset().mockResolvedValue("acme/widgets");
   h.detectChecksMock.mockReset().mockReturnValue({ checks: ["npm test"], source: "package.json" });
@@ -264,6 +270,40 @@ describe("harness run — resolving what the run will actually do", () => {
     expect(banner).toContain("github     acme/widgets   (git remote)");
     expect(banner).toContain("prs        one rollup PR for the whole run   (default)");
     expect(banner).toContain("tools      none detected on PATH");
+  });
+
+  it("says nothing about models when every role is on the Anthropic default", async () => {
+    // A line that never changes is a line nobody reads.
+    await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard");
+    expect(printed()).not.toContain("models     ");
+  });
+
+  it("names each role that was moved to another vendor", async () => {
+    h.loadFileConfigMock.mockReturnValue({
+      config: { models: { worker: "gpt-5.6-terra", demo: "gemini-3.5-flash-lite" } },
+      path: "/repo/harness.config.json",
+    });
+    await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard");
+
+    const banner = printed();
+    expect(banner).toContain("worker→gpt-5.6-terra");
+    expect(banner).toContain("demo→gemini-3.5-flash-lite");
+    expect(banner).toContain("judging roles stay on Anthropic");
+  });
+
+  it("refuses the run when a routed provider has no key, before anything is spent", async () => {
+    // `integrator` runs after every worker in the epic has been paid for.
+    // Finding out there that the key was never exported wastes the epic.
+    h.missingKeysMock.mockReturnValue(["OPENAI_API_KEY is not set, but worker (gpt-5.6-terra) is routed to openai."]);
+    await expect(cli("run", "build a thing", "--repo", "/repo", "--no-dashboard")).rejects.toThrow(/OPENAI_API_KEY is not set/);
+    expect(h.RunControllerMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses a config that points a judging role off Anthropic", async () => {
+    // Enforced by the config schema itself, so it cannot be reached by any
+    // other entry point either.
+    h.loadFileConfigMock.mockReturnValue({ config: { models: { qa: "gpt-5.6-terra" } }, path: "/repo/harness.config.json" });
+    await expect(cli("run", "build a thing", "--repo", "/repo", "--no-dashboard")).rejects.toThrow(/pinned to Anthropic/);
   });
 
   it("says when the run will stop to show you what it built, and how often", async () => {
