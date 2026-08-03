@@ -1,5 +1,6 @@
 import { providerFor } from "@harness/shared";
 import { toolsFor, unsupportedTools, type LocalTool, type ToolContext } from "./agentTools.js";
+import { budgetFor, compact } from "./compact.js";
 import { clientFor, type Fetch, type LoopMessage, type ProviderClient, type Usage } from "./providerClients.js";
 import { rtkCommandRewriter } from "./rtk.js";
 
@@ -51,6 +52,8 @@ export interface ToolLoopOptions {
   /** Injected in tests, so a tool loop can be driven without touching a disk. */
   toolsOverride?: LocalTool[];
   execOverride?: ToolContext["exec"];
+  /** Characters of transcript to allow before compacting. Defaults per provider. */
+  contextBudget?: number;
 }
 
 /**
@@ -122,14 +125,40 @@ export async function* toolLoop(opts: ToolLoopOptions): AsyncGenerator<Record<st
 
   const messages: LoopMessage[] = [];
   const turnCap = spec.maxTurns ?? 100;
+  const budget = budgetFor(spec.model, opts.contextBudget);
   let turns = 0;
   let sinceResult = noUsage();
+
+  /**
+   * Bring the transcript under budget before it is sent, and say so.
+   *
+   * Compaction is not free — the agent loses detail it may still want — so it is
+   * reported rather than done quietly: an operator judging a worker's output
+   * needs to know it was working from an abridged record. `exhausted` is the
+   * case worth shouting about, because it means the protected material alone is
+   * over budget and the next request may be refused.
+   */
+  const fit = (): Record<string, unknown> | null => {
+    const result = compact(messages, budget);
+    // Nothing saved AND still over budget is the worst case, not a quiet one: it
+    // means the protected material alone does not fit and the request is about
+    // to be refused. Only a transcript that actually fits stays silent.
+    if (result.saved === 0 && !result.exhausted) return null;
+    messages.splice(0, messages.length, ...result.messages);
+    const note = result.exhausted
+      ? `compacted ${result.saved} characters of older tool output and the transcript is STILL over the ${budget}-character budget — the next request may be refused`
+      : `compacted ${result.saved} characters of older tool output to stay inside the ${budget}-character context budget`;
+    return { type: "harness_note", session_id: sessionId, text: note };
+  };
 
   for (let prompt = await prompts.next(); prompt !== null; prompt = await prompts.next()) {
     messages.push({ role: "user", text: prompt });
 
     for (;;) {
       if (signal.aborted) return;
+
+      const note = fit();
+      if (note) yield note;
 
       const turn = await client({
         model: spec.model,
@@ -181,6 +210,10 @@ export async function* toolLoop(opts: ToolLoopOptions): AsyncGenerator<Record<st
 
       if (turns >= turnCap) {
         messages.push({ role: "user", text: OUT_OF_TURNS });
+        // The wrap-up turn is the one that must not be refused: it is where a
+        // session that did all the work finally says what it found.
+        const wrapNote = fit();
+        if (wrapNote) yield wrapNote;
         const last = await client({ model: spec.model, system: spec.systemPrompt, messages, tools: [], maxOutputTokens: spec.maxOutputTokens, signal });
         turns++;
         add(sinceResult, last.usage);

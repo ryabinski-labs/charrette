@@ -181,6 +181,30 @@ describe("running a session on Google", () => {
   });
 });
 
+describe("a session that outgrows its context window", () => {
+  it("tells the operator on the bus, and does not book it as a model turn", async () => {
+    // A budget of 1 character forces compaction on the very first request, which
+    // is what a real session hits after tens of thousands of characters of tool
+    // output. What matters is that the operator hears about it.
+    stubOpenAI([said("done")]);
+    const result = await pool.run(spec({ contextBudget: 1 }));
+
+    const logs = events.filter((e): e is HarnessEvent & { text: string } => e.type === "agent.log");
+    expect(logs.some((l) => /over the 1-character budget/.test(l.text))).toBe(true);
+    // The note is bookkeeping, not a turn: one model call, one turn.
+    expect(result.turns).toBe(1);
+    expect(result.outcome).toBe("done");
+  });
+
+  it("stays silent when the transcript fits, which is the ordinary case", async () => {
+    stubOpenAI([said("done")]);
+    await pool.run(spec());
+
+    const logs = events.filter((e): e is HarnessEvent & { text: string } => e.type === "agent.log");
+    expect(logs.some((l) => /context budget|characters of older tool output/.test(l.text))).toBe(false);
+  });
+});
+
 describe("the pairings the harness refuses outright", () => {
   it("will not start a role whose tools this transport cannot provide", async () => {
     await expect(pool.run(spec({ tools: ["Read", "WebSearch"] }))).rejects.toThrow(/cannot run on gpt-5.6-terra.*WebSearch/s);
