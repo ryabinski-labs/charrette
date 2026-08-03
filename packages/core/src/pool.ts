@@ -116,6 +116,12 @@ export interface AgentSpec {
   mcpServers?: Options["mcpServers"];
   maxTurns?: number;
   /**
+   * Characters of transcript the harness-run loop may send before it compacts.
+   * Ignored on the Anthropic transport, which compacts its own. Defaults per
+   * provider; set it when a model's window is smaller than its family's.
+   */
+  contextBudget?: number;
+  /**
    * SDK session id to resume (AgentResult.sdkSessionId of an earlier session).
    * A worker re-dispatched after a QA rejection re-attaches to its own
    * conversation — everything it learned about the repo is still in context —
@@ -455,7 +461,7 @@ export class AgentPool {
     const source =
       providerFor(spec.model) === "anthropic"
         ? query({ prompt: stream.stream(), options })
-        : toolLoop({ spec, prompts: stream.asSource(), signal: abort.signal });
+        : toolLoop({ spec, prompts: stream.asSource(), signal: abort.signal, contextBudget: spec.contextBudget });
 
     try {
       for await (const message of source as AsyncIterable<{ type?: string } & Record<string, unknown>>) {
@@ -471,7 +477,18 @@ export class AgentPool {
           this.endSession(spec, sessionId, turns, cost, "killed", String(e));
           throw e;
         }
-        if (message.type === "assistant") {
+        if (message.type === "harness_note") {
+          // The tool loop reporting something it did to the transcript itself.
+          // Not a model turn: no usage, and it must not count toward the cap.
+          this.bus.publish({
+            type: "agent.log",
+            runId: spec.runId,
+            taskId: spec.taskId,
+            sessionId,
+            text: (message as { text: string }).text,
+            ts: Date.now(),
+          });
+        } else if (message.type === "assistant") {
           turns++;
           const u = (message as { message?: { usage?: Record<string, number | undefined> } }).message?.usage;
           if (u) {

@@ -43,6 +43,97 @@ async function collect(gen: AsyncGenerator<Record<string, unknown>>): Promise<Re
 
 const noTools: LocalTool[] = [];
 
+describe("keeping a long session inside the context window", () => {
+  /** A tool whose output is far larger than the budget under test. */
+  const bigTool = (chars: number): LocalTool[] => [
+    {
+      name: "Bash",
+      description: "run a command",
+      parameters: { type: "object", properties: {} },
+      run: async () => "x".repeat(chars),
+    } as unknown as LocalTool,
+  ];
+
+  it("sends the whole transcript untouched while it still fits", async () => {
+    const { client, seen } = scriptedClient([call("Bash"), say("done")]);
+    const messages = await collect(
+      toolLoop({ spec, prompts: prompts("go"), signal, client, toolsOverride: bigTool(100), contextBudget: 1_000_000 })
+    );
+
+    expect(messages.map((m) => m.type)).toEqual(["assistant", "assistant", "result"]);
+    expect((seen[1]!.messages[2] as { text: string }).text).toHaveLength(100);
+  });
+
+  it("compacts before the request rather than letting the provider refuse it", async () => {
+    // 20k per result is the realistic scale — agentTools clamps a single tool
+    // result at 30k — so the three protected exchanges leave room to get under.
+    const rounds = Array.from({ length: 8 }, (_, i) => call("Bash", {}, `c${i}`));
+    const { client, seen } = scriptedClient([...rounds, say("done")]);
+    await collect(
+      toolLoop({ spec, prompts: prompts("go"), signal, client, toolsOverride: bigTool(20_000), contextBudget: 100_000 })
+    );
+
+    const lastSent = seen[seen.length - 1]!.messages;
+    const chars = lastSent.reduce((n, m) => n + ("text" in m ? m.text.length : 0), 0);
+    expect(chars).toBeLessThanOrEqual(100_000);
+    // Without compaction this session would have sent 8 x 20k of tool output.
+    expect(chars).toBeLessThan(160_000);
+  });
+
+  it("tells the operator their agent is working from an abridged record", async () => {
+    const { client } = scriptedClient([call("Bash", {}, "c1"), call("Bash", {}, "c2"), call("Bash", {}, "c3"), call("Bash", {}, "c4"), call("Bash", {}, "c5"), say("done")]);
+    const messages = await collect(
+      toolLoop({ spec, prompts: prompts("go"), signal, client, toolsOverride: bigTool(60_000), contextBudget: 100_000 })
+    );
+
+    const notes = messages.filter((m) => m.type === "harness_note");
+    expect(notes.length).toBeGreaterThan(0);
+    expect(notes[0]).toMatchObject({ text: expect.stringMatching(/compacted \d+ characters of older tool output/) });
+  });
+
+  it("says plainly when compaction was not enough to get under the budget", async () => {
+    const { client } = scriptedClient([call("Bash", {}, "c1"), call("Bash", {}, "c2"), call("Bash", {}, "c3"), say("done")]);
+    const messages = await collect(
+      toolLoop({ spec, prompts: prompts("go"), signal, client, toolsOverride: bigTool(60_000), contextBudget: 1_000 })
+    );
+
+    const notes = messages.filter((m) => m.type === "harness_note") as { text: string }[];
+    expect(notes.some((n) => /STILL over the 1000-character budget/.test(n.text))).toBe(true);
+  });
+
+  it("never compacts what the operator wrote", async () => {
+    const instruction = "use the existing retry helper, do not add a new one";
+    const { client, seen } = scriptedClient([call("Bash", {}, "c1"), call("Bash", {}, "c2"), call("Bash", {}, "c3"), call("Bash", {}, "c4"), say("done")]);
+    await collect(
+      toolLoop({ spec, prompts: prompts(instruction), signal, client, toolsOverride: bigTool(60_000), contextBudget: 5_000 })
+    );
+
+    const lastSent = seen[seen.length - 1]!.messages;
+    expect(lastSent.filter((m) => m.role === "user").map((m) => (m as { text: string }).text)).toEqual([instruction]);
+  });
+
+  it("compacts before the wrap-up turn, which is the one that must not be refused", async () => {
+    const { client, seen } = scriptedClient([call("Bash", {}, "c1"), call("Bash", {}, "c2"), say("here is what I found")]);
+    const messages = await collect(
+      toolLoop({
+        spec: { ...spec, maxTurns: 2 },
+        prompts: prompts("go"),
+        signal,
+        client,
+        toolsOverride: bigTool(60_000),
+        contextBudget: 50_000,
+      })
+    );
+
+    expect(messages.some((m) => m.type === "harness_note")).toBe(true);
+    expect(messages[messages.length - 1]).toMatchObject({ type: "result", subtype: "error_max_turns" });
+    const wrapUp = seen[seen.length - 1]!.messages;
+    expect(wrapUp.filter((m) => m.role === "user").map((m) => (m as { text: string }).text)).toContain(
+      "[HARNESS] You have reached this session's turn limit. Stop calling tools and give your final answer now, in exactly the output format you were asked for."
+    );
+  });
+});
+
 describe("the loop the harness runs for non-Anthropic providers", () => {
   it("yields the message shapes pool.ts already knows how to read", async () => {
     const { client } = scriptedClient([say("all done")]);
