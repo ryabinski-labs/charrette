@@ -19,6 +19,7 @@ Pre-release walking skeleton (v0.0 per the PRD phasing) plus the v0.1 dashboard 
 - ✅ Budget caps enforced before every agent turn; live cost ledger
 - ✅ Skills discovery: lexical SKILL.md matching with SHA-256 provenance (also exposed as a stdio MCP server)
 - ✅ Localhost dashboard: live activity feed (what each agent is reading, editing, running), task board, cost meter, gate approval (127.0.0.1-only, bearer token, Origin/Host checks)
+- ✅ Pit stops: after every epic the run stops, a demo agent starts the half-built product and drives it, three named reviewers judge it, and you keep going, redirect the unbuilt tasks, re-plan them, or stop — [docs/PITSTOP.md](./docs/PITSTOP.md)
 - ⬜ Parallel workers, plan editing UI, OS sandboxing, semantic skill matching — see PRD §7
 
 ## Requirements
@@ -70,8 +71,36 @@ Then it asks what to build — and keeps asking until the answer is buildable:
 ```
 
 Answer with a number, press enter for the recommendation, or type anything else
-— free text always beats the options. The agreed brief, not your first sentence,
-is what the planner receives.
+— free text always beats the options (end a line with `\` to keep typing on the
+next one). The agreed brief, not your first sentence, is what the planner
+receives, and it asks about the things that are expensive to change later:
+scope, look and feel, stack, data, performance, security, how it ships.
+
+Then, every epic, it stops and shows you what it actually built:
+
+```
+# Pit stop 1 — the "Sign-in" epic is finished
+
+**It runs.** `pnpm dev` on :5173
+
+## What it did
+- ✓ **Sign in** — 302 to /home, session row written (signin.png)
+- ✗ **Download a pack** — GET /v1/pack/current → 404 (pack-404.png)
+
+## What it could NOT check
+- payments — no Stripe test keys on this machine
+
+## What the reviewers think
+### product-manager — DRIFTING
+- The pack screen has no content behind it
+> Is the map still in scope?
+
+What now?
+  enter          keep going
+  <anything>     send it to the 4 task(s) that have not run yet
+  replan <words> re-plan the remaining work around what you say
+  stop           park the run; `harness resume` picks it up where it is
+```
 
 Override any of it per run, or commit `harness.config.json` for per-repo defaults:
 

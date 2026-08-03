@@ -15,6 +15,17 @@ export interface IntakeUi {
   ask(question: IntakeQuestion): Promise<string>;
   /** Prose the agent emits between questions. */
   say(text: string): void;
+  /**
+   * One line per tool call, so the survey phase is not a blank screen. Optional
+   * — a transport that has nowhere to put it (a browser panel, a test) omits it.
+   */
+  activity?(text: string): void;
+  /**
+   * Whether the operator is waiting on the agent. The intake agent's first move
+   * is to read a repository, which is a long silence to sit through with no
+   * sign that anything is happening.
+   */
+  working?(on: boolean): void;
 }
 
 export interface IntakeRequest {
@@ -85,6 +96,8 @@ export async function runIntake(pool: AgentPool, bus: Bus, req: IntakeRequest): 
         ts: Date.now(),
       });
       const answer = await req.ui.ask(question);
+      // Their answer goes back to the agent, so from here they are waiting again.
+      req.ui.working?.(true);
       transcript.push({ question: question.question, answer, rationale: "" });
       bus.publish({
         type: "intake.answered",
@@ -98,12 +111,16 @@ export async function runIntake(pool: AgentPool, bus: Bus, req: IntakeRequest): 
     }
   );
 
-  // Forward the agent's prose to the chat transport instead of the generic event printer.
+  // Forward the agent's prose and its tool calls to the chat transport instead
+  // of the generic event printer.
   const unsubscribe = bus.subscribe(({ event }) => {
-    if (event.type === "agent.log" && event.sessionId === sessionId) req.ui.say(event.text);
+    if (!("sessionId" in event) || event.sessionId !== sessionId) return;
+    if (event.type === "agent.log") req.ui.say(event.text);
+    if (event.type === "agent.tool_use") req.ui.activity?.(`${event.tool} ${event.summary}`);
   });
 
   let resultText = "";
+  req.ui.working?.(true);
   try {
     const result = await pool.run({
       runId: req.runId,
@@ -125,6 +142,7 @@ export async function runIntake(pool: AgentPool, bus: Bus, req: IntakeRequest): 
     });
     resultText = result.resultText;
   } finally {
+    req.ui.working?.(false);
     unsubscribe();
   }
 

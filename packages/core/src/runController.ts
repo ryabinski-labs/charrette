@@ -15,14 +15,29 @@ import { isolationBlock, isolationEnv, taskIsolation } from "./isolation.js";
 import { reapUnder } from "./reaper.js";
 import { AgentPool, type AgentResult } from "./pool.js";
 import {
+  demoUnavailable,
+  pitStopDue,
+  renderPitStop,
+  type DemoReport,
+  type PitStop,
+  type PitStopDecision,
+  type PitStopDue,
+  type ReviewReport,
+} from "./pitstop.js";
+import {
   type AdvisorCheck,
   advisorAnswer,
   advisorPrompt,
   advisorSystemPrompt,
   conflictPrompt,
+  demoPrompt,
+  demoSystemPrompt,
   extractJson,
   extractSection,
   operatorFeedbackMessage,
+  replanPrompt,
+  reviewerPrompt,
+  reviewerSystemPrompt,
   plannerBreakdownSystemPrompt,
   plannerDocsSystemPrompt,
   plannerRepairPrompt,
@@ -60,6 +75,11 @@ const ROLE_SKILL_LENS: Record<string, string> = {
   intake: "product scope requirements brief stakeholder user customer decision trade-off out of scope",
   planner: "product roadmap requirements PRD scope prioritisation user story acceptance criteria decomposition milestone",
   qa: "QA quality assurance verify verification testing test end-to-end e2e regression review evidence security",
+  // The pit stop's two roles. The demo agent's job is to *run* the thing, so it
+  // reaches for the same playbooks QA does; the reviewer's job is to judge what
+  // the demo found against what the operator asked for.
+  demo: "QA end-to-end e2e run demo screenshot browser evidence smoke start local verify user journey",
+  reviewer: "product review critique scope user value quality risk evidence judgment",
   // Pulls the operator's own production-validation and QA playbooks in, so the
   // live check is run the way they would run it rather than improvised.
   prod: "production prod live deployed deployment validate validation smoke health monitoring uptime QA end-to-end e2e verify evidence release",
@@ -173,7 +193,42 @@ export interface GateHandler {
    * for non-interactive contexts.
    */
   resolveTaskGate?(gate: TaskGate): Promise<string | null>;
+  /**
+   * A pit stop: the run has stopped to show the operator the product running,
+   * and is asking whether it is still what they wanted (docs/PITSTOP.md).
+   *
+   * Optional, and its absence turns pit stops off entirely rather than making
+   * them non-interactive — a demo agent and three reviewers cost real money,
+   * and spending it to print a report nobody will answer is worse than not
+   * stopping at all.
+   */
+  resolvePitStop?(stop: PitStop): Promise<PitStopDecision>;
 }
+
+/** The demo agent's report, as it comes back over the wire. */
+const DemoJson = z.object({
+  started: z.boolean(),
+  howStarted: z.string().default(""),
+  summary: z.string().default(""),
+  journeys: z
+    .array(
+      z.object({
+        name: z.string(),
+        result: z.enum(["worked", "broken", "not-reachable"]),
+        evidence: z.string().default(""),
+      })
+    )
+    .default([]),
+  couldNotReach: z.array(z.string()).default([]),
+  artifacts: z.array(z.string()).default([]),
+});
+
+/** One reviewer's verdict on whether the run is still building the right thing. */
+const ReviewJson = z.object({
+  verdict: z.enum(["on-track", "drifting", "off-track"]),
+  findings: z.array(z.string()).default([]),
+  question: z.string().default(""),
+});
 
 export class RunController {
   private wt: WorktreeManager;
@@ -370,6 +425,12 @@ export class RunController {
       // whatever assignment is on record rather than re-interviewing.
       this.store.transitionRun(runId, "PLANNING", "resumed mid-intake");
       run = this.store.getRun(runId)!;
+    } else if (run.state === "PAUSED") {
+      // The only thing that parks a run rather than a task is an operator
+      // choosing "stop, I want to think" at a pit stop. Resuming is them having
+      // thought — the tasks and worktrees are exactly as they left them.
+      this.store.transitionRun(runId, "EXECUTING", "resumed after a pit stop");
+      run = this.store.getRun(runId)!;
     } else if (run.state === "BUDGET_HOLD") {
       // The cap that parked it is still in force: execution re-opens the budget
       // gate on the first check, giving the operator another chance to raise it.
@@ -393,21 +454,41 @@ export class RunController {
       }
       run = this.store.getRun(runId)!;
     }
-    if (run.state === "EXECUTING") {
-      await this.execute(runId);
-      this.store.transitionRun(runId, "INTEGRATING", "all tasks terminal");
-      run = this.store.getRun(runId)!;
-    }
-    if (run.state === "INTEGRATING") {
-      // Last step before any PR exists: does the merged whole do what was asked?
-      // Task-level QA cannot answer that — it judged each task against its own
-      // criteria, never the sum against the intent. Only after the verdict do the
-      // pull requests open, so a reviewer arrives with the gap list in hand.
-      await this.validateIntent(runId);
-      await this.openPrs(runId);
-      await this.awaitChecks(runId);
-      this.store.transitionRun(runId, "PR_REVIEW", this.outcome(runId).line);
-      run = this.store.getRun(runId)!;
+    // EXECUTING and INTEGRATING are a loop rather than two steps because the pit
+    // stop between the intent verdict and the first pull request can send the
+    // run back to work: an operator reading a FAIL is being shown it at the last
+    // moment where fixing it is still cheaper than a second run.
+    for (;;) {
+      if (run.state === "EXECUTING") {
+        if ((await this.execute(runId)) === "paused") {
+          this.store.transitionRun(runId, "PAUSED", "you stopped the run at a pit stop");
+          return;
+        }
+        this.store.transitionRun(runId, "INTEGRATING", "all tasks terminal");
+        run = this.store.getRun(runId)!;
+      }
+      if (run.state === "INTEGRATING") {
+        // Last step before any PR exists: does the merged whole do what was asked?
+        // Task-level QA cannot answer that — it judged each task against its own
+        // criteria, never the sum against the intent. Only after the verdict do the
+        // pull requests open, so a reviewer arrives with the gap list in hand.
+        await this.validateIntent(runId);
+        const after = await this.closingPitStop(runId);
+        if (after === "stop") {
+          this.store.transitionRun(runId, "PAUSED", "you stopped the run at a pit stop");
+          return;
+        }
+        if (after === "back-to-work") {
+          this.store.transitionRun(runId, "EXECUTING", "you sent the run back to work at a pit stop");
+          run = this.store.getRun(runId)!;
+          continue;
+        }
+        await this.openPrs(runId);
+        await this.awaitChecks(runId);
+        this.store.transitionRun(runId, "PR_REVIEW", this.outcome(runId).line);
+        run = this.store.getRun(runId)!;
+      }
+      break;
     }
     // A merge that already happened — an eager human merging the rollup while
     // the run was still finishing — is verified now rather than next resume.
@@ -1435,7 +1516,7 @@ export class RunController {
 
   // ---- execution ----
 
-  private async execute(runId: string): Promise<void> {
+  private async execute(runId: string): Promise<"complete" | "paused"> {
     const run = this.store.getRun(runId)!;
     await this.wt.ensureIntegrationBranch(runId);
     const skills = indexSkills(run.config.skillsDirs);
@@ -1485,10 +1566,20 @@ export class RunController {
     const working = () => [...inFlight.keys()].filter((id) => !this.gatedTasks.has(id)).length;
 
     for (;;) {
+      // A pit stop due while work is in flight stops *dispatching* and waits:
+      // the operator is being shown a product, and a tree with three workers
+      // half-way through their tasks is not one. Nothing is cancelled — the
+      // in-flight tasks finish, and the stop happens on the next pass.
+      const due = budgetStop ? null : this.pitStopReason(runId);
+      if (due && !inFlight.size) {
+        await this.issueSync;
+        if ((await this.pitStop(runId, due)) === "stop") return "paused";
+        continue;
+      }
       // Fill capacity. Re-listed per dispatch: a task that just merged may have
       // unblocked its dependents. Which runnable task goes next is `nextDispatch`
       // — the order decides what a budget cap leaves unbuilt.
-      while (!budgetStop && working() < cap) {
+      while (!budgetStop && !due && working() < cap) {
         const tasks = this.store.listTasks(runId);
         const ready = nextDispatch(tasks, new Set(inFlight.keys()));
         if (!ready) break;
@@ -1548,6 +1639,374 @@ export class RunController {
       break;
     }
     await this.issueSync;
+    return "complete";
+  }
+
+  // ---- pit stops (docs/PITSTOP.md) ----
+
+  /**
+   * Is a pit stop due, and why? Null when they are switched off, when this gate
+   * handler cannot ask (headless and test contexts — see `resolvePitStop`), or
+   * when no boundary has been crossed since the last one.
+   */
+  private pitStopReason(runId: string): PitStopDue | null {
+    const run = this.store.getRun(runId)!;
+    if (!this.gates.resolvePitStop || run.config.pitStop.every === "never") return null;
+    const merged = this.store.mergedTaskIds(runId);
+    return pitStopDue(
+      run.config.pitStop.every,
+      this.store.listEpics(runId),
+      this.store.listTasks(runId),
+      { spentUsd: this.store.spentUsd(runId), nowMs: Date.now(), mergedCount: merged.length },
+      this.store.pitStopHistory(runId, run.createdAt)
+    );
+  }
+
+  /**
+   * Stop, show the operator the product running, and do what they say.
+   *
+   * The order is deliberate: demo first, reviewers second, and the reviewers
+   * read the demo. A reviewer that has only read the diff is producing the same
+   * artifact the plan gate already produced — an opinion about a description.
+   */
+  private async pitStop(runId: string, due: PitStopDue): Promise<PitStopDecision["action"]> {
+    const run = this.store.getRun(runId)!;
+    const tasks = this.store.listTasks(runId);
+    const history = this.store.pitStopHistory(runId, run.createdAt);
+    const number = history.count + 1;
+    const dir = path.join(this.repoPath, ".harness", runId, "pitstops", String(number));
+    mkdirSync(dir, { recursive: true });
+
+    const byId = new Map(tasks.map((t) => [t.id, t]));
+    const mergedIds = this.store.mergedTaskIds(runId);
+    const line = (t: TaskRow) => `${t.title} (${t.id})`;
+    const mergedSince = mergedIds.slice(history.mergedAt).map((id) => byId.get(id)).filter((t): t is TaskRow => Boolean(t)).map(line);
+    const upcoming = tasks.filter((t) => t.state === "PENDING" || t.state === "READY").map(line);
+    const parked = tasks.filter((t) => t.state === "NEEDS_HUMAN").map((t) => `${line(t)} — ${t.errorSummary ?? this.store.taskStateReason(runId, t.id)}`);
+    const allMerged = mergedIds.map((id) => byId.get(id)).filter((t): t is TaskRow => Boolean(t)).map(line);
+
+    const spentUsd = this.store.spentUsd(runId);
+    // What the rest of the plan looks like at the rate the finished tasks set.
+    // Crude on purpose — the operator needs "this is heading for $600" long
+    // before they need a good estimate of exactly how much over it will be.
+    const done = tasks.filter((t) => ["MERGED", "NEEDS_HUMAN", "CANCELLED"].includes(t.state)).length;
+    const projectedUsd = done > 0 ? (spentUsd / done) * tasks.length : spentUsd;
+
+    const demo = await this.runDemo(runId, run, number, dir, allMerged.join("\n") || "(nothing yet)", upcoming.join("\n"));
+    const reviews = await this.runReviews(runId, run, demo, tasks, upcoming.join("\n"));
+    // Measured rather than estimated, and shown: a checkpoint whose price is
+    // invisible is one the operator cannot decide they do not want.
+    const afterUsd = this.store.spentUsd(runId);
+
+    const stop: PitStop = {
+      runId,
+      number,
+      reason: due.reason,
+      demo,
+      reviews,
+      merged: mergedSince,
+      upcoming,
+      parked,
+      spentUsd: afterUsd,
+      capUsd: run.config.budget.runCapUsd,
+      stopCostUsd: afterUsd - spentUsd,
+      projectedUsd,
+      intent: this.store.intentVerdict(runId),
+      artifactsDir: dir,
+      markdown: "",
+    };
+    stop.markdown = renderPitStop(stop);
+    writeFileSync(path.join(dir, "REPORT.md"), `${stop.markdown}\n`);
+    writeFileSync(path.join(dir, "pitstop.json"), JSON.stringify(stop, null, 2));
+
+    this.bus.publish({
+      type: "run.pitstop_opened",
+      runId,
+      stop: number,
+      reason: due.reason,
+      epicIds: due.epicIds,
+      mergedCount: mergedIds.length,
+      spentUsd: afterUsd,
+      artifactsDir: dir,
+      demoStarted: demo.started,
+      ts: Date.now(),
+    });
+
+    const decision = await this.gates.resolvePitStop!(stop);
+    const touched = await this.applyPitStop(runId, decision);
+    this.bus.publish({
+      type: "run.pitstop_resolved",
+      runId,
+      stop: number,
+      action: decision.action,
+      feedback: decision.feedback.slice(0, 2000),
+      tasks: touched,
+      ts: Date.now(),
+    });
+    return decision.action;
+  }
+
+  /**
+   * The pit stop between the intent verdict and the first pull request.
+   *
+   * It fires on a FAIL whatever the configured interval says (PITSTOP.md S6).
+   * Run ec40b527's validator was right about a broken endpoint seam and right
+   * that it had not looked for more of the same; both facts were printed once,
+   * at the end, to a terminal that had scrolled, and were rediscovered by a
+   * human hours later. A verdict the operator has to be lucky to read is not a
+   * verdict that was delivered.
+   */
+  private async closingPitStop(runId: string): Promise<"proceed" | "stop" | "back-to-work"> {
+    const run = this.store.getRun(runId)!;
+    if (!this.gates.resolvePitStop || run.config.pitStop.every === "never") return "proceed";
+    const verdict = this.store.intentVerdict(runId);
+    if (verdict?.verdict !== "FAIL") return "proceed";
+    // Only for a verdict nobody has been shown: a resumed run re-entering
+    // integration must not re-open the same pit stop it already answered.
+    if (this.store.lastEventSeq(runId, "run.pitstop_opened") > this.store.lastEventSeq(runId, "run.intent_verdict")) return "proceed";
+    const action = await this.pitStop(runId, { reason: "the intent check came back FAIL", epicIds: [] });
+    if (action === "stop") return "stop";
+    // Redirect and replan both put work back in the queue; continuing from here
+    // with tasks pending would open a pull request over an unfinished tree.
+    return action === "continue" ? "proceed" : "back-to-work";
+  }
+
+  /**
+   * Start the half-built product and drive it.
+   *
+   * Runs in the integration worktree, which is the only tree that holds every
+   * merged task. The demo agent is allowed to install, build and start things —
+   * that is the job — so the worktree is put back exactly as it was afterwards,
+   * whatever it did to it.
+   */
+  private async runDemo(
+    runId: string,
+    run: RunRow,
+    number: number,
+    dir: string,
+    mergedLines: string,
+    upcomingLines: string
+  ): Promise<DemoReport> {
+    let wtPath: string | null = null;
+    let head = "";
+    // Overwritten on both paths below. It starts as the failure report because
+    // that is what an unfinished demo *is*, and because a pit stop that cannot
+    // demo anything must still open.
+    let report = demoUnavailable("the demo agent did not run");
+    try {
+      wtPath = await this.wt.ensureIntegrationWorktree(runId);
+      head = (await git(wtPath, ["rev-parse", "HEAD"])).trim();
+      const skills = this.selectSkills(indexSkills(run.config.skillsDirs), "demo", run.assignment, run.config);
+      const result = await this.pool.run({
+        runId,
+        role: "demo",
+        model: run.config.models.demo,
+        systemPrompt: demoSystemPrompt(dir, toolbeltBlock(detectToolbelt(run.config.externalTools)), skillsBlock(skills)),
+        prompt: demoPrompt(run.assignment, mergedLines, upcomingLines),
+        cwd: wtPath,
+        disallowedTools: ["WebSearch"],
+        maxTurns: run.config.pitStop.demoMaxTurns,
+        // Its own port block and compose project, like a task worktree — a demo
+        // must not collide with whatever the operator has running.
+        env: isolationEnv(taskIsolation(runId, `pitstop-${number}`)),
+        // It starts servers, emulators and databases by design. Nothing it
+        // started outlives the pit stop.
+        reapOnEnd: true,
+        budgetCheck: () => this.checkBudget(runId),
+      });
+      report = DemoJson.parse(extractJson(result.resultText));
+    } catch (e) {
+      if (e instanceof BudgetExceeded) throw e;
+      report = demoUnavailable(String(e).slice(0, 300));
+    } finally {
+      // Whatever it changed in the tree goes back. The demo agent is told not to
+      // touch source, but "told not to" is not a mechanism, and the diff the
+      // operator eventually reviews is not the demo's to edit.
+      if (wtPath) await git(wtPath, ["reset", "--hard", head]).catch(() => "");
+    }
+    return report;
+  }
+
+  /**
+   * One short session per lens, in parallel, each reading the demo.
+   *
+   * Three named perspectives rather than one neutral summary: the drift a
+   * product lens sees and the drift a QA lens sees are different failures, and
+   * a single reviewer asked for both reliably returns neither.
+   */
+  private async runReviews(
+    runId: string,
+    run: RunRow,
+    demo: DemoReport,
+    tasks: TaskRow[],
+    upcomingLines: string
+  ): Promise<ReviewReport[]> {
+    const lenses = run.config.pitStop.reviewers;
+    if (!lenses.length) return [];
+    const indexed = indexSkills(run.config.skillsDirs);
+    const wtPath = await this.wt.ensureIntegrationWorktree(runId).catch(() => this.repoPath);
+    const taskLines = tasks.map((t) => `- ${t.title} (${t.id}): ${t.state}`).join("\n");
+    const demoText = JSON.stringify(demo, null, 2).slice(0, 6000);
+    const prd = this.planPrd(runId);
+    const settled = await Promise.all(
+      lenses.map(async (lens): Promise<ReviewReport | null> => {
+        try {
+          // The lens is a skill name, so it is looked up by name rather than
+          // scored: "review it as the product manager" and "review it as
+          // whatever the matcher thinks product management sounds like" are not
+          // the same instruction.
+          const skills = indexed.filter((s) => s.name === lens && verifyHash(s));
+          const result = await this.pool.run({
+            runId,
+            role: "reviewer",
+            model: run.config.models.reviewer,
+            systemPrompt: reviewerSystemPrompt(lens, toolbeltBlock(detectToolbelt(run.config.externalTools)), skillsBlock(skills)),
+            prompt: reviewerPrompt(lens, run.assignment, prd, demoText, taskLines, upcomingLines),
+            cwd: wtPath,
+            disallowedTools: ["Write", "Edit", "NotebookEdit", "WebSearch"],
+            maxTurns: 30,
+            budgetCheck: () => this.checkBudget(runId),
+          });
+          return { lens, ...ReviewJson.parse(extractJson(result.resultText)) };
+        } catch (e) {
+          if (e instanceof BudgetExceeded) throw e;
+          // A lens that failed is reported as a lens that failed. Dropping it
+          // silently would show the operator two opinions and imply three.
+          return { lens, verdict: "on-track", findings: [`(this reviewer did not finish: ${String(e).slice(0, 200)})`], question: "" };
+        }
+      })
+    );
+    return settled.filter((r): r is ReviewReport => r !== null);
+  }
+
+  /**
+   * Do what the operator said. Returns the tasks their words reached, which is
+   * what the resolved event records — "I redirected the run" and "I redirected
+   * the run and it landed on nothing" have to be distinguishable afterwards.
+   */
+  private async applyPitStop(runId: string, decision: PitStopDecision): Promise<string[]> {
+    const text = decision.feedback.trim();
+    if (decision.action === "continue" || decision.action === "stop" || !text) return [];
+    // Parked tasks are targets too. They are terminal for the scheduler, but not
+    // for the operator: `harness resume` offers each one back, and a queued note
+    // is waiting when it restarts. The alternative is that someone who writes
+    // about the parked half of the product at a pit stop writes into nothing,
+    // which is precisely the failure this whole feature exists to end.
+    const open = this.store.listTasks(runId).filter((t) => !["MERGED", "CANCELLED"].includes(t.state));
+    // A redirect with nothing left to redirect is the operator asking for work
+    // that no queued task can carry — the only reading that does anything is a
+    // re-plan, so do that rather than swallowing their words.
+    if (decision.action === "replan" || !open.length) return await this.replan(runId, text);
+    for (const t of open) {
+      this.store.queueFeedback(runId, t.id, operatorFeedbackMessage(text));
+      this.bus.publish({ type: "task.feedback", runId, taskId: t.id, text, delivery: "queued", ts: Date.now() });
+    }
+    return open.map((t) => t.id);
+  }
+
+  /**
+   * Re-plan the work that has not started, in the light of what the operator
+   * just saw (PITSTOP.md S3).
+   *
+   * Everything already built is immovable: merged tasks keep their ids, their
+   * branches, their issues and their place in the DAG, and only PENDING tasks —
+   * the ones no worker has ever touched — are replaced. A failure here falls
+   * back to attaching the operator's words to the existing tasks, because
+   * losing what they said is the one outcome worse than an unchanged plan.
+   */
+  private async replan(runId: string, words: string): Promise<string[]> {
+    const run = this.store.getRun(runId)!;
+    const tasks = this.store.listTasks(runId);
+    const epics = this.store.listEpics(runId);
+    const pending = tasks.filter((t) => t.state === "PENDING");
+    const keep = tasks.filter((t) => t.state !== "PENDING");
+    try {
+      const result = await this.pool.run({
+        runId,
+        role: "planner",
+        model: run.config.models.planner,
+        systemPrompt: plannerBreakdownSystemPrompt(skillsBlock(this.planSkills(runId))),
+        prompt: replanPrompt(
+          run.assignment,
+          this.planPrd(runId),
+          keep.map((t) => `- ${t.id}: ${t.title} [${t.state}]`).join("\n") || "(nothing yet)",
+          pending.map((t) => `- ${t.id}: ${t.title} — ${t.spec.slice(0, 200)}`).join("\n") || "(nothing)",
+          words,
+          epics.map((e) => `- ${e.id}: ${e.title}`).join("\n")
+        ),
+        cwd: this.repoPath,
+        tools: ["Read", "Glob", "Grep"],
+        maxTurns: 40,
+        maxOutputTokens: PLANNER_MAX_OUTPUT_TOKENS,
+        budgetCheck: () => this.checkBudget(runId),
+      });
+      const breakdown = PlanBreakdown.parse(extractJson(result.resultText));
+      const epicUnion = [
+        ...epics.map((e) => ({ id: e.id, title: e.title, summary: "" })),
+        ...breakdown.epics.filter((e) => !epics.some((x) => x.id === e.id)),
+      ];
+      const errors = validatePlanDag({
+        prdMarkdown: "x",
+        conventionsMarkdown: "x",
+        epics: epicUnion,
+        tasks: [
+          ...keep.map((t) => ({ ...t, touchedPaths: [], estimatedSize: "M" as const })),
+          ...breakdown.tasks,
+        ],
+      });
+      if (errors.length) throw new Error(`re-planned DAG is invalid: ${errors.join("; ")}`);
+      const replaced = new Set(breakdown.tasks.map((t) => t.id));
+      const dropped = pending.filter((t) => !replaced.has(t.id));
+      for (const t of dropped) {
+        this.store.transitionTask(runId, t.id, "CANCELLED", "replaced when you re-planned at a pit stop");
+        this.queueIssueSync(runId, t.id);
+      }
+      this.store.insertTasks(
+        runId,
+        epicUnion,
+        breakdown.tasks.map((t) => ({
+          id: t.id,
+          epicId: t.epicId,
+          title: t.title,
+          spec: t.spec,
+          acceptanceCriteria: t.acceptanceCriteria,
+          dependsOn: t.dependsOn,
+          state: "PENDING" as TaskState,
+          branch: null,
+          worktreePath: null,
+          githubIssueNumber: null,
+          prNumber: null,
+          qaIterations: 0,
+          respawns: 0,
+          assignedSkills: [],
+          errorSummary: null,
+        }))
+      );
+      await this.fileIssues(runId);
+      this.bus.publish({
+        type: "agent.log",
+        runId,
+        sessionId: "planner",
+        text: `re-planned at your pit stop: ${breakdown.tasks.length} task(s) queued, ${dropped.length} dropped`,
+        ts: Date.now(),
+      });
+      this.wakeScheduler();
+      return breakdown.tasks.map((t) => t.id);
+    } catch (e) {
+      if (e instanceof BudgetExceeded) throw e;
+      this.bus.publish({
+        type: "agent.log",
+        runId,
+        sessionId: "planner",
+        text: `could not re-plan (${String(e).slice(0, 200)}) — your words go to the queued tasks instead, so nothing you said is lost`,
+        ts: Date.now(),
+      });
+      for (const t of pending) {
+        this.store.queueFeedback(runId, t.id, operatorFeedbackMessage(words));
+        this.bus.publish({ type: "task.feedback", runId, taskId: t.id, text: words, delivery: "queued", ts: Date.now() });
+      }
+      return pending.map((t) => t.id);
+    }
   }
 
   /**

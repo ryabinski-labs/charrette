@@ -40,6 +40,8 @@ function wrap(text: string, indent = "  "): string {
     .join(`\n${indent}`);
 }
 
+const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 /**
  * Terminal transport for the intake conversation (the `IntakeUi` core expects).
  * Questions render as a numbered list with the recommendation marked; the
@@ -48,6 +50,60 @@ function wrap(text: string, indent = "  "): string {
  */
 export class TerminalChat implements IntakeUi {
   constructor(private rl: Prompter = createInterface({ input: process.stdin, output: process.stdout })) {}
+
+  /** Spinner state. Null whenever nothing is being waited on. */
+  private spinner: NodeJS.Timeout | null = null;
+  private since = 0;
+  private frame = 0;
+
+  /**
+   * The agent is thinking, or it is the operator's turn.
+   *
+   * A conversation where one side goes silent for ninety seconds with no sign
+   * of life reads as a hang, and the intake agent's first move is to survey a
+   * repository — which is exactly that long. The elapsed counter is the point:
+   * it says "still working", and it says how long you have been waiting.
+   */
+  working(on: boolean): void {
+    if (this.spinner) {
+      this.erase();
+      clearInterval(this.spinner);
+      this.spinner = null;
+    }
+    if (!on || !process.stdout.isTTY) return;
+    this.since = Date.now();
+    this.frame = 0;
+    this.spinner = setInterval(() => this.tick(), 120);
+    // Never the reason a finished process stays alive.
+    this.spinner.unref?.();
+  }
+
+  private tick(): void {
+    const seconds = Math.floor((Date.now() - this.since) / 1000);
+    const mark = SPINNER[this.frame++ % SPINNER.length]!;
+    process.stdout.write(`\r${dim(`${mark} thinking… ${seconds}s`)}\u001b[K`);
+  }
+
+  /**
+   * Wipe the spinner's line before anything else is written over it. Only when
+   * something is actually spinning: a terminal told NO_COLOR should not be sent
+   * control sequences it never needed either.
+   */
+  private erase(): void {
+    if (this.spinner) process.stdout.write("\r\u001b[K");
+  }
+
+  /**
+   * What the agent is doing, one dimmed line per tool call. Without it the
+   * survey phase is a blank screen; with it the operator can see it reading
+   * their README and knows the questions are about to be grounded in it.
+   */
+  activity(text: string): void {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    this.erase();
+    process.stdout.write(`  ${dim(`· ${trimmed.split("\n")[0]!.slice(0, WIDTH - 6)}`)}\n`);
+  }
 
   /** Read the opening assignment. Blank line ends a multi-line paragraph. */
   async promptSeed(withIntake = true): Promise<string> {
@@ -72,13 +128,38 @@ export class TerminalChat implements IntakeUi {
     return lines.join("\n").trim();
   }
 
+  /**
+   * One answer, which may run to several lines.
+   *
+   * A trailing backslash continues onto the next line, the way a shell does.
+   * The reason it exists: the answers that matter most here are the long ones —
+   * "here is the shape of the JSON I want back", a pasted error, three
+   * constraints — and a single-line reader silently truncates a paste at the
+   * first newline, taking the operator's first clause and discarding the rest.
+   */
+  private async readAnswer(): Promise<string> {
+    const parts: string[] = [];
+    for (;;) {
+      const line = await this.rl.question(cyan(parts.length ? "· " : "> "));
+      if (!line.endsWith("\\")) {
+        parts.push(line);
+        return parts.join("\n");
+      }
+      parts.push(line.slice(0, -1));
+    }
+  }
+
   say(text: string): void {
     const trimmed = text.trim();
     if (!trimmed) return;
+    this.erase();
     process.stdout.write(`\n${green("●")} ${wrap(trimmed, "  ")}\n`);
   }
 
   async ask(q: IntakeQuestion): Promise<string> {
+    // The agent has stopped thinking and it is the operator's turn; nothing
+    // should be spinning under the prompt they are typing into.
+    this.working(false);
     process.stdout.write("\n");
     if (q.detail) process.stdout.write(`${dim(wrap(q.detail, "  "))}\n\n`);
     process.stdout.write(`  ${bold(wrap(q.question, "  "))}\n`);
@@ -95,7 +176,7 @@ export class TerminalChat implements IntakeUi {
     }
 
     for (;;) {
-      const answer = (await this.rl.question(cyan("> "))).trim();
+      const answer = (await this.readAnswer()).trim();
       if (answer === "") {
         if (recommended >= 0) return q.options[recommended]!.label;
         continue; // an open question needs an actual answer

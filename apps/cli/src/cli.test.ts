@@ -254,6 +254,33 @@ describe("harness run — resolving what the run will actually do", () => {
     expect(banner).toContain("tools      none detected on PATH");
   });
 
+  it("says when the run will stop to show you what it built, and how often", async () => {
+    await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard");
+
+    expect(printed()).toContain("pit stops  after every epic   (default)");
+  });
+
+  it.each([
+    [{ tasks: 5 }, "every 5 merged tasks"],
+    [{ usd: 100 }, "every $100 spent"],
+    [{ minutes: 90 }, "every 90 minutes"],
+    ["epic", "after every epic"],
+  ])("reports the configured interval %j as %s", async (every, expected) => {
+    h.loadFileConfigMock.mockReturnValue({ config: { pitStop: { every } }, path: "/repo/harness.config.json" });
+
+    await cli("run", "x", "--repo", "/repo", "--no-dashboard");
+
+    expect(printed()).toContain(`pit stops  ${expected}   (harness.config.json)`);
+  });
+
+  it("says plainly what turning them off costs", async () => {
+    h.loadFileConfigMock.mockReturnValue({ config: { pitStop: { every: "never" } }, path: "/repo/harness.config.json" });
+
+    await cli("run", "x", "--repo", "/repo", "--no-dashboard");
+
+    expect(printed()).toContain("pit stops  off — nothing between the plan gate and the diff");
+  });
+
   it("prefers --check over anything the repo suggests", async () => {
     h.loadFileConfigMock.mockReturnValue({ config: { deterministicChecks: ["make ci"] }, path: "/repo/harness.config.json" });
 
@@ -698,6 +725,82 @@ describe("the terminal gates", () => {
     await expect(
       gatesGiven().resolveTaskGate!(GATE)
     ).resolves.toBe("y");
+  });
+});
+
+/** A pit stop with nothing filled in — each case overrides what it is about. */
+const STOP = {
+  runId: "run-1",
+  number: 1,
+  reason: 'the "Sign-in" epic is finished',
+  demo: { started: true, howStarted: "pnpm dev", summary: "", journeys: [], couldNotReach: [], artifacts: [] },
+  reviews: [],
+  merged: ["Sign in (task-a)"],
+  upcoming: ["The map (task-b)"],
+  parked: [],
+  spentUsd: 12,
+  capUsd: 100,
+  stopCostUsd: 1.5,
+  projectedUsd: 40,
+  intent: null,
+  artifactsDir: "/repo/.harness/run-1/pitstops/1",
+  markdown: "# Pit stop 1\n\n**It runs.** pnpm dev",
+};
+
+describe("the pit stop gate in the terminal", () => {
+  beforeEach(async () => {
+    await cli("run", "x", "--repo", "/repo", "--no-dashboard");
+    out.length = 0;
+  });
+
+  it("prints the report and says how many tasks a redirect would reach", async () => {
+    const { question, close } = answerOnce("");
+
+    await expect(gatesGiven().resolvePitStop!(STOP)).resolves.toEqual({ action: "continue", feedback: "" });
+    expect(printed()).toContain("**It runs.** pnpm dev");
+    expect(question.mock.calls[0]![0]).toContain("send it to the 1 task(s) that have not run yet");
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("says the parked tasks will get it too, since they do not restart on their own", async () => {
+    const { question } = answerOnce("");
+
+    await gatesGiven().resolvePitStop!({ ...STOP, parked: ["Entitlements (task-c) — needs DynamoDB"] });
+
+    expect(question.mock.calls[0]![0]).toContain("and to the 1 parked one(s) for when you revive them");
+  });
+
+  it("sends anything they type to the tasks that have not run yet", async () => {
+    answerOnce("drop the offline mode, nobody asked for it");
+
+    await expect(gatesGiven().resolvePitStop!(STOP)).resolves.toEqual({
+      action: "redirect",
+      feedback: "drop the offline mode, nobody asked for it",
+    });
+  });
+
+  it("re-plans when they say so, and keeps only what they said", async () => {
+    answerOnce("replan: build the map first, the packs can wait");
+
+    await expect(gatesGiven().resolvePitStop!(STOP)).resolves.toEqual({
+      action: "replan",
+      feedback: "build the map first, the packs can wait",
+    });
+  });
+
+  it("takes a bare replan without the colon too", async () => {
+    answerOnce("Replan the whole second epic around search");
+
+    await expect(gatesGiven().resolvePitStop!(STOP)).resolves.toEqual({
+      action: "replan",
+      feedback: "the whole second epic around search",
+    });
+  });
+
+  it("parks the run when they want to think", async () => {
+    answerOnce("STOP");
+
+    await expect(gatesGiven().resolvePitStop!(STOP)).resolves.toEqual({ action: "stop", feedback: "" });
   });
 });
 

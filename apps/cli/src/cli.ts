@@ -118,6 +118,30 @@ function makeController(repoPath: string, gateOverride?: (bus: Bus, store: Store
       if (gate.recommendation && answer.toLowerCase() === "y") return gate.recommendation;
       return answer || null;
     },
+    // Gate: pit stop. Everything above interrupts the operator about a problem;
+    // this one interrupts them about the product, which is the only question
+    // they actually wanted to be asked.
+    async resolvePitStop(stop) {
+      process.stdout.write(`\n${stop.markdown}\n\n`);
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      const answer = (
+        await rl.question(
+          `What now?\n` +
+            `  enter          keep going\n` +
+            `  <anything>     send it to the ${stop.upcoming.length} task(s) that have not run yet` +
+            (stop.parked.length ? `, and to the ${stop.parked.length} parked one(s) for when you revive them` : "") +
+            `\n` +
+            `  replan <words> re-plan the remaining work around what you say\n` +
+            `  stop           park the run; \`harness resume\` picks it up where it is\n> `
+        )
+      ).trim();
+      rl.close();
+      if (!answer) return { action: "continue", feedback: "" };
+      if (answer.toLowerCase() === "stop") return { action: "stop", feedback: "" };
+      const replan = /^replan\b[:\s]*/i.exec(answer);
+      if (replan) return { action: "replan", feedback: answer.slice(replan[0].length).trim() };
+      return { action: "redirect", feedback: answer };
+    },
   };
   const gates = gateOverride ? gateOverride(bus, store) : terminalGates;
   return { controller: new RunController(store, bus, pool, github, gates, repoPath), store, bus };
@@ -302,6 +326,21 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
   const budgetFrom = fromCli("runCap") || fromCli("taskCap") ? "flags" : file.budget ? via : "defaults";
   banner.push(`budget     run $${runCapUsd} · task $${taskCapUsd}   (${budgetFrom})`);
 
+  const every = file.pitStop?.every ?? "epic";
+  banner.push(
+    every === "never"
+      ? `pit stops  off — nothing between the plan gate and the diff   (${via})`
+      : `pit stops  ${
+          every === "epic"
+            ? "after every epic"
+            : "tasks" in every
+              ? `every ${every.tasks} merged tasks`
+              : "usd" in every
+                ? `every $${every.usd} spent`
+                : `every ${every.minutes} minutes`
+        }   (${file.pitStop?.every ? via : "default"})`
+  );
+
   const skillsDirs = (file.skillsDirs ?? DEFAULT_SKILLS_DIRS).map(expandHome);
   banner.push(`skills     ${skillsDirs.join(" · ")}   (${file.skillsDirs ? via : "defaults"})`);
 
@@ -342,6 +381,7 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
     taskWallClockMinutes: file.taskWallClockMinutes,
     models: file.models,
     budget: { runCapUsd, taskCapUsd },
+    pitStop: file.pitStop,
     skillsDirs,
     skillRouting: file.skillRouting,
     roleSkills: file.roleSkills,

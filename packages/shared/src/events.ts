@@ -36,6 +36,31 @@ export const HarnessEvent = z.discriminatedUnion("type", [
     failing: z.array(z.string()).default([]),
     total: z.number().int().default(0),
   }),
+  // A pit stop: the run stopped to show the operator what it has built so far.
+  // `epicIds` are the epics this stop covers, and they are what stops a second
+  // pit stop firing for the same finished epic — so this event is the whole of
+  // the trigger's memory, which is why it survives a resume for free.
+  z.object({
+    ...base,
+    type: z.literal("run.pitstop_opened"),
+    stop: z.number().int(),
+    reason: z.string(),
+    epicIds: z.array(z.string()).default([]),
+    mergedCount: z.number().int(),
+    spentUsd: z.number(),
+    /** Where the demo's screenshots, logs and report were written. */
+    artifactsDir: z.string().default(""),
+    demoStarted: z.boolean().default(false),
+  }),
+  z.object({
+    ...base,
+    type: z.literal("run.pitstop_resolved"),
+    stop: z.number().int(),
+    action: z.enum(["continue", "redirect", "replan", "stop"]),
+    feedback: z.string().default(""),
+    /** Tasks the operator's words were attached to. */
+    tasks: z.array(z.string()).default([]),
+  }),
   // What the deploy triggered by the human's merge did. The CI status judged the
   // pull request; this judges the merge commit on the base branch — the first
   // thing that reflects whether the change actually reached anyone.

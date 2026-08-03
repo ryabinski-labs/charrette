@@ -84,6 +84,55 @@ beforeEach(() => {
 
 const typed = (type: string) => events.filter((e) => e.type === type);
 
+describe("showing the operator that something is happening", () => {
+  it("marks the wait, narrates the tool calls, and stops when it is their turn", async () => {
+    const log: string[] = [];
+    const ui = {
+      ask: async () => "per API key",
+      say: (t: string) => void log.push(`say:${t}`),
+      working: (on: boolean) => void log.push(`working:${on}`),
+      activity: (t: string) => void log.push(`activity:${t}`),
+    };
+    const { pool } = poolThat(BRIEF(), async (spec) => {
+      bus.publish({ type: "agent.tool_use", runId: "r1", sessionId: spec.sessionId!, tool: "Read", summary: "package.json", ts: 1 });
+      bus.publish({ type: "agent.log", runId: "r1", sessionId: spec.sessionId!, text: "Two ways to do this.", ts: 2 });
+      await askHandler()({ question: "What is the limit keyed on?" });
+    });
+
+    await runIntake(pool, bus, request({ ui }));
+
+    // The survey is a long silence with nothing on the screen otherwise, and
+    // the answer going back to the agent starts another one.
+    expect(log).toEqual([
+      "working:true",
+      "activity:Read package.json",
+      "say:Two ways to do this.",
+      "working:true",
+      "working:false",
+    ]);
+  });
+
+  it("ignores another session's traffic", async () => {
+    const log: string[] = [];
+    const ui = { ask: async () => "", say: () => undefined, activity: (t: string) => void log.push(t) };
+    const { pool } = poolThat(BRIEF(), async () => {
+      bus.publish({ type: "agent.tool_use", runId: "r1", sessionId: "some-worker", tool: "Bash", summary: "npm test", ts: 1 });
+    });
+
+    await runIntake(pool, bus, request({ ui }));
+
+    expect(log).toEqual([]);
+  });
+
+  it("works just as well for a transport that has nowhere to show any of it", async () => {
+    const { pool } = poolThat(BRIEF(), async (spec) => {
+      bus.publish({ type: "agent.tool_use", runId: "r1", sessionId: spec.sessionId!, tool: "Read", summary: "x", ts: 1 });
+    });
+
+    await expect(runIntake(pool, bus, request())).resolves.toMatchObject({ goal: "add rate limiting" });
+  });
+});
+
 describe("asking the operator a question", () => {
   it("puts the question, records the answer, and announces both", async () => {
     const asked: IntakeQuestion[] = [];
