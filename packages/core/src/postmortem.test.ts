@@ -61,6 +61,11 @@ const session = (store: Store, id: string, state: string, costUsd: number) =>
     .prepare("INSERT INTO sessions (id, runId, taskId, role, model, state, startedAt, costUsd) VALUES (?,?,?,?,?,?,?,?)")
     .run(id, "run-1", null, "worker", "claude-sonnet-5", state, 1, costUsd);
 
+const built = (store: Store, id: string, build: string, startedAt: number) =>
+  store.db
+    .prepare("INSERT INTO sessions (id, runId, taskId, role, model, state, startedAt, build) VALUES (?,?,?,?,?,?,?,?)")
+    .run(id, "run-1", null, "worker", "claude-sonnet-5", "done", startedAt, build);
+
 describe("why a run produced what it produced", () => {
   it("names the intake question nobody answered", () => {
     const { store, bus } = run();
@@ -158,6 +163,7 @@ describe("why a run produced what it produced", () => {
     expect(text).not.toContain("could pass without");
     expect(text).not.toContain("Spend by how");
     expect(text).not.toContain("The finished run");
+    expect(text).not.toContain("Ran under harness");
     expect(text).toContain("0 gate(s), 0h waiting on you.");
   });
 
@@ -184,5 +190,59 @@ describe("why a run produced what it produced", () => {
     bus.publish({ type: "run.plan_intent_verdict", runId: "run-1", verdict: "PASS", gaps: [], summary: "ok", ts: 1 });
 
     expect(renderPostmortem(postmortem(store, "run-1"))).not.toContain("would not deliver");
+  });
+});
+
+/**
+ * Which harness ran this. Establishing that run 40da9337 never used the
+ * per-worktree isolation fix took an hour of comparing `git log` against process
+ * start times in `.harness/harness.log`; the run's own record could not say.
+ */
+describe("which harness build the run used", () => {
+  it("names the one build in a single line when there was only one", () => {
+    const { store } = run();
+    built(store, "s1", "0.0.1@7453d60", 1);
+    built(store, "s2", "0.0.1@7453d60", 2);
+
+    expect(postmortem(store, "run-1").builds).toEqual([{ build: "0.0.1@7453d60", sessions: 2, first: 1, last: 2 }]);
+    expect(renderPostmortem(postmortem(store, "run-1"))).toContain("Ran under harness 0.0.1@7453d60 — all 2 session(s).");
+  });
+
+  it("refuses to guess for a run recorded before the build was stamped", () => {
+    const { store } = run();
+    session(store, "s1", "done", 5);
+
+    const text = renderPostmortem(postmortem(store, "run-1"));
+    expect(text).toContain("the run predates the stamp");
+    expect(text).not.toContain("Ran under harness");
+  });
+
+  it("shows the split, earliest first, when a fix landed mid-run", () => {
+    // 40da9337's shape: the process started at 11:47 and carried the run past a
+    // 14:33 commit it could not load. Two builds here means the two halves of a
+    // run like that are visible instead of being read as one harness.
+    const { store } = run();
+    built(store, "s1", "0.0.1@62fb7b0", Date.UTC(2026, 7, 2, 11, 47));
+    built(store, "s2", "0.0.1@62fb7b0", Date.UTC(2026, 7, 2, 12, 30));
+    built(store, "s3", "0.0.1@7453d60", Date.UTC(2026, 7, 2, 22, 48));
+
+    const p = postmortem(store, "run-1");
+    expect(p.builds.map((b) => [b.build, b.sessions])).toEqual([
+      ["0.0.1@62fb7b0", 2],
+      ["0.0.1@7453d60", 1],
+    ]);
+    const text = renderPostmortem(p);
+    expect(text).toContain("This run spanned 2 harness builds.");
+    expect(text).toContain("the process loads its build once and cannot reload it");
+    expect(text).toContain("0.0.1@62fb7b0           2 session(s)   2026-08-02 11:47 → 2026-08-02 12:30");
+    expect(text).toContain("0.0.1@7453d60           1 session(s)   2026-08-02 22:48 → 2026-08-02 22:48");
+  });
+
+  it("labels the unstamped half of a run that was resumed under a newer harness", () => {
+    const { store } = run();
+    session(store, "s1", "done", 5);
+    built(store, "s2", "0.0.1@7453d60", 9);
+
+    expect(renderPostmortem(postmortem(store, "run-1"))).toContain("(not recorded)");
   });
 });

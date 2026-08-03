@@ -4,6 +4,7 @@ import { AgentRole } from "@harness/shared";
 import { Bus } from "./bus.js";
 import { Store } from "./store.js";
 import { costUsd } from "./budget.js";
+import { harnessBuild } from "./build.js";
 import { infraGuardHook } from "./infraGuard.js";
 import { reapUnder } from "./reaper.js";
 import { rtkHooks } from "./rtk.js";
@@ -284,8 +285,11 @@ export class AgentPool {
     const abort = new AbortController();
     const now = Date.now();
     this.store.db
-      .prepare("INSERT INTO sessions (id, runId, taskId, role, model, state, startedAt) VALUES (?,?,?,?,?,?,?)")
-      .run(sessionId, spec.runId, spec.taskId ?? null, spec.role, spec.model, "running", now);
+      // The build is stamped here rather than on the run, because a run outlives
+      // the process that started it: `resume` picks it up under whatever is
+      // installed then, and only the session knows which fixes it could have had.
+      .prepare("INSERT INTO sessions (id, runId, taskId, role, model, state, startedAt, build) VALUES (?,?,?,?,?,?,?,?)")
+      .run(sessionId, spec.runId, spec.taskId ?? null, spec.role, spec.model, "running", now, harnessBuild());
     this.bus.publish({ type: "agent.spawned", runId: spec.runId, taskId: spec.taskId, sessionId, role: spec.role, model: spec.model, ts: now });
 
     // The CLI's dying words. "Claude Code process exited with code 1" alone is

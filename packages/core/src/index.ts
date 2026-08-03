@@ -1,6 +1,7 @@
 export * from "./store.js";
 export * from "./bus.js";
 export * from "./budget.js";
+export * from "./build.js";
 export * from "./deps.js";
 export * from "./git.js";
 export * from "./isolation.js";

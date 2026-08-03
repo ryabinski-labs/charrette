@@ -94,6 +94,9 @@ vi.mock("@harness/core", () => ({
   RunController: h.RunControllerMock,
   detectToolbelt: h.detectToolbeltMock,
   ensureIgnored: h.ensureIgnoredMock,
+  // Pinned, so the banner assertion is about the line existing rather than
+  // about whatever commit this checkout happens to be on.
+  harnessBuild: () => "0.0.1@7453d60",
   originSlug: h.originSlugMock,
   postmortem: h.postmortemMock,
   renderPostmortem: h.renderPostmortemMock,
@@ -253,6 +256,9 @@ describe("harness run — resolving what the run will actually do", () => {
 
     const banner = printed();
     expect(banner).toContain("repo       /repo");
+    // Which harness this is, before anything is spent — the same string every
+    // session it spawns is stamped with.
+    expect(banner).toContain("build      0.0.1@7453d60");
     expect(banner).toContain("checks     npm test   (auto-detected from package.json)");
     expect(banner).toContain("budget     run $30 · task $10   (defaults)");
     expect(banner).toContain("github     acme/widgets   (git remote)");

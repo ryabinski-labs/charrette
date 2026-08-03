@@ -32,6 +32,8 @@ export interface Postmortem {
   /** Total wall-clock the run spent waiting on the operator, in hours. */
   blockedHours: number;
   gates: number;
+  /** Which harness build each session ran under, earliest first. */
+  builds: { build: string; sessions: number; first: number; last: number }[];
 }
 
 /** Criteria that assert a double, or assert that nothing is called. */
@@ -79,6 +81,13 @@ export function postmortem(store: Store, runId: string): Postmortem {
       .all(runId) as { cause: string; sessions: number; usd: number }[]
   ).filter((r) => r.usd > 0);
 
+  const builds = store.db
+    .prepare(
+      `SELECT build, COUNT(*) AS sessions, MIN(startedAt) AS first, MAX(startedAt) AS last
+       FROM sessions WHERE runId = ? GROUP BY build ORDER BY first`
+    )
+    .all(runId) as Postmortem["builds"];
+
   const gateRows = store.db
     .prepare(
       `SELECT o.ts AS opened, (SELECT MIN(r.ts) FROM events r WHERE r.runId = o.runId AND r.taskId IS o.taskId
@@ -99,6 +108,7 @@ export function postmortem(store: Store, runId: string): Postmortem {
     spend,
     blockedHours: Math.round((blockedMs / 3_600_000) * 10) / 10,
     gates: gateRows.length,
+    builds,
   };
 }
 
@@ -172,6 +182,37 @@ export function renderPostmortem(p: Postmortem): string {
     out.push("");
   }
 
-  out.push(`${p.gates} gate(s), ${p.blockedHours}h waiting on you.`);
+  out.push(...renderBuilds(p.builds), `${p.gates} gate(s), ${p.blockedHours}h waiting on you.`);
   return out.join("\n");
+}
+
+/** `2026-08-02 14:33` in UTC — short enough to line up, precise enough to compare against a commit. */
+function stamp(ts: number): string {
+  return new Date(ts).toISOString().slice(0, 16).replace("T", " ");
+}
+
+/**
+ * Which harness ran this. One line when the answer is one build, and a table
+ * when it is not — a run whose sessions carry two builds did not run one
+ * harness, and every finding above it has to be read per-build.
+ */
+function renderBuilds(builds: Postmortem["builds"]): string[] {
+  if (!builds.length) return [];
+  if (builds.length === 1) {
+    const only = builds[0]!;
+    return [
+      only.build
+        ? `Ran under harness ${only.build} — all ${only.sessions} session(s).`
+        : `The harness did not record its build for these ${only.sessions} session(s): the run predates the stamp, so which fixes it ran cannot be read off this record.`,
+      "",
+    ];
+  }
+  return [
+    `This run spanned ${builds.length} harness builds. A fix reaches a session only if it was in the`,
+    "build that session started under — the process loads its build once and cannot reload it:",
+    ...builds.map(
+      (b) => `  ${(b.build || "(not recorded)").padEnd(20)} ${String(b.sessions).padStart(4)} session(s)   ${stamp(b.first)} → ${stamp(b.last)}`
+    ),
+    "",
+  ];
 }

@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   startedAt INTEGER NOT NULL, endedAt INTEGER, turns INTEGER NOT NULL DEFAULT 0,
   inputTokens INTEGER NOT NULL DEFAULT 0, outputTokens INTEGER NOT NULL DEFAULT 0,
   cacheReadTokens INTEGER NOT NULL DEFAULT 0, cacheWriteTokens INTEGER NOT NULL DEFAULT 0,
-  costUsd REAL NOT NULL DEFAULT 0, lastHeartbeatAt INTEGER
+  costUsd REAL NOT NULL DEFAULT 0, lastHeartbeatAt INTEGER,
+  build TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS events (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -117,6 +118,8 @@ export interface SessionRow {
   endedAt: number | null;
   turns: number;
   costUsd: number;
+  /** The harness build this session was spawned under; "" before it was recorded. */
+  build: string;
 }
 
 export class InvalidTransition extends Error {}
@@ -155,13 +158,21 @@ export class Store {
    * is what lets this be a plain idempotent sweep rather than a version ladder.
    */
   private migrate(): void {
-    const added: Record<string, string> = {
-      touchedPaths: "TEXT NOT NULL DEFAULT '[]'",
-      estimatedSize: "TEXT NOT NULL DEFAULT 'M'",
+    const added: Record<string, Record<string, string>> = {
+      tasks: {
+        touchedPaths: "TEXT NOT NULL DEFAULT '[]'",
+        estimatedSize: "TEXT NOT NULL DEFAULT 'M'",
+      },
+      // Empty rather than 'unknown': the sessions of a run that predates this
+      // column are not a build the postmortem should name, and the report says
+      // so in its own words.
+      sessions: { build: "TEXT NOT NULL DEFAULT ''" },
     };
-    const have = new Set((this.db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[]).map((c) => c.name));
-    for (const [name, decl] of Object.entries(added)) {
-      if (!have.has(name)) this.db.exec(`ALTER TABLE tasks ADD COLUMN ${name} ${decl}`);
+    for (const [table, columns] of Object.entries(added)) {
+      const have = new Set((this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name));
+      for (const [name, decl] of Object.entries(columns)) {
+        if (!have.has(name)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${decl}`);
+      }
     }
   }
 
@@ -462,7 +473,7 @@ export class Store {
 
   listSessions(runId: string): SessionRow[] {
     return this.db
-      .prepare("SELECT id, taskId, role, model, state, startedAt, endedAt, turns, costUsd FROM sessions WHERE runId = ? ORDER BY startedAt")
+      .prepare("SELECT id, taskId, role, model, state, startedAt, endedAt, turns, costUsd, build FROM sessions WHERE runId = ? ORDER BY startedAt")
       .all(runId) as unknown as SessionRow[];
   }
 

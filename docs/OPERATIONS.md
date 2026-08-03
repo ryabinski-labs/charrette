@@ -298,6 +298,7 @@ you, and prints exactly what it resolved before spending anything:
 
 ```
   repo       /Users/you/code/my-app
+  build      0.0.1@7453d60
   checks     pnpm run typecheck · pnpm run lint · pnpm run test   (auto-detected from package.json scripts via pnpm)
   budget     run $30 · task $10   (defaults)
   skills     /Users/you/.claude/skills · /Users/you/skills   (defaults)
@@ -307,6 +308,14 @@ you, and prints exactly what it resolved before spending anything:
 
 Read that banner before answering anything. If `checks` says `none`, QA has no
 hard signal and you should add one with `--check`.
+
+`build` is the harness itself: its version and the commit it was built from,
+with a trailing `+` when the checkout had uncommitted changes. Every session
+this run spawns is stamped with that same string, so a postmortem months later
+can say which fixes the run actually had. It is fixed at process start —
+**building a fix while a run is executing does not reach that run**, because
+Node loaded its build when the process started and cannot reload it. To give an
+in-flight run a fix, stop it, build, and `harness resume`.
 
 Then it asks what to build, and keeps asking until the assignment is unambiguous:
 
@@ -506,6 +515,7 @@ outcome:
 - **the end-of-run verdict**, and how many of its gaps became tasks
 - **tasks whose acceptance criteria never require anything to leave the process** — a task is finished when its criteria are met, so one of these was free to ship a stub
 - **spend grouped by how the session ended**, and the hours the run spent waiting on you
+- **which harness build each session ran under** — one line when the run used one build, and a table when it did not, because a run whose sessions carry two builds did not run one harness
 
 Run against 40da9337 it prints, first line of the report:
 
