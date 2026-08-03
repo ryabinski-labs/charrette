@@ -262,6 +262,142 @@ describe("task-escalation gate", () => {
   });
 });
 
+describe("the pit stop gate", () => {
+  const started: Dashboard[] = [];
+  afterEach(async () => {
+    for (const d of started.splice(0)) await d.stop();
+  });
+
+  const STOP = {
+    runId: "r1",
+    number: 2,
+    reason: 'the "Sign-in" epic is finished',
+    demo: { started: true, howStarted: "pnpm dev on :5173", summary: "", journeys: [], couldNotReach: ["payments"], artifacts: [] },
+    reviews: [],
+    merged: ["Sign in (task-a)"],
+    upcoming: ["The map (task-b)"],
+    parked: [],
+    spentUsd: 41.5,
+    capUsd: 120,
+    projectedUsd: 98,
+    intent: null,
+    artifactsDir: "/repo/.harness/r1/pitstops/2",
+    markdown: "# Pit stop 2\n\n**It runs.** pnpm dev on :5173",
+  };
+
+  async function withOpenStop() {
+    const dash = dashboard();
+    started.push(dash);
+    const url = await dash.start();
+    const pending = dash.resolvePitStop(STOP);
+    const post = (body: unknown) =>
+      fetch(new URL("/api/gates/pitstop", url), {
+        method: "POST",
+        headers: { authorization: `Bearer ${dash.token}`, "content-type": "application/json", connection: "close" },
+        body: JSON.stringify(body),
+      });
+    return { dash, url, pending, post };
+  }
+
+  it("puts the whole report in the state the page renders", async () => {
+    const { dash, url } = await withOpenStop();
+
+    const res = await fetch(new URL("/api/state", url), { headers: { authorization: `Bearer ${dash.token}`, connection: "close" } });
+
+    const body = (await res.json()) as { pitStop: { number: number; markdown: string; upcoming: string[] } | null };
+    expect(body.pitStop!.number).toBe(2);
+    expect(body.pitStop!.markdown).toContain("It runs.");
+    // "Stop before you build X" is only sayable by someone shown X.
+    expect(body.pitStop!.upcoming).toEqual(["The map (task-b)"]);
+  });
+
+  it("continues the run on keep going, with nothing written", async () => {
+    const { pending, post } = await withOpenStop();
+
+    expect((await post({ action: "continue" })).status).toBe(200);
+
+    await expect(pending).resolves.toEqual({ action: "continue", feedback: "" });
+  });
+
+  it("carries their words through on a redirect", async () => {
+    const { pending, post } = await withOpenStop();
+
+    expect((await post({ action: "redirect", feedback: "drop the offline mode" })).status).toBe(200);
+
+    await expect(pending).resolves.toEqual({ action: "redirect", feedback: "drop the offline mode" });
+  });
+
+  it("refuses a redirect or a re-plan with an empty box", async () => {
+    const { pending, post } = await withOpenStop();
+
+    // An empty box submitted by accident would spend a planner session on no
+    // instruction at all.
+    expect((await post({ action: "replan", feedback: "  " })).status).toBe(400);
+    expect((await post({ action: "stop" })).status).toBe(200);
+    await expect(pending).resolves.toEqual({ action: "stop", feedback: "" });
+  });
+
+  it("rejects an action it does not have", async () => {
+    const { post } = await withOpenStop();
+
+    expect((await post({ action: "delete-everything" })).status).toBe(400);
+  });
+
+  it("refuses a request that names no action at all", async () => {
+    const { pending, post } = await withOpenStop();
+
+    // Defaulting a missing action to "keep going" would spend the operator's
+    // one checkpoint on a click they never made.
+    expect((await post({ feedback: "something" })).status).toBe(400);
+    // Still open, so the real answer still lands.
+    expect((await post({ action: "stop" })).status).toBe(200);
+    await expect(pending).resolves.toEqual({ action: "stop", feedback: "" });
+  });
+
+  it("answers 409 when nothing is waiting", async () => {
+    const dash = dashboard();
+    started.push(dash);
+    const url = await dash.start();
+
+    const res = await fetch(new URL("/api/gates/pitstop", url), {
+      method: "POST",
+      headers: { authorization: `Bearer ${dash.token}`, "content-type": "application/json", connection: "close" },
+      body: JSON.stringify({ action: "continue" }),
+    });
+
+    expect(res.status).toBe(409);
+  });
+
+  it("rejects an unauthenticated resolution", async () => {
+    const { url } = await withOpenStop();
+
+    const res = await fetch(new URL("/api/gates/pitstop", url), {
+      method: "POST",
+      headers: { "content-type": "application/json", connection: "close" },
+      body: JSON.stringify({ action: "stop" }),
+    });
+
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects a cross-origin resolution", async () => {
+    const { url } = await withOpenStop();
+
+    const res = await fetch(new URL("/api/gates/pitstop", url), {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${started.at(-1)!.token}`,
+        "content-type": "application/json",
+        origin: "https://evil.example",
+        connection: "close",
+      },
+      body: JSON.stringify({ action: "stop" }),
+    });
+
+    expect(res.status).toBe(403);
+  });
+});
+
 describe("the page itself", () => {
   it("names the repository, not just the product", () => {
     // A hex run id is a resume handle; the folder is what the operator can say.

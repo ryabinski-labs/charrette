@@ -1,7 +1,8 @@
 # Pit stops — showing the operator what exists, while there is still budget to change it
 
-Status: proposed. Owner: operator. Written after run `ec40b527` (icelandcopilot-companion)
-and run `40da9337` (billing-app).
+Status: **built**. Owner: operator. Written after run `ec40b527` (icelandcopilot-companion)
+and run `40da9337` (billing-app); implemented on top of that, with the three open
+questions answered at the bottom.
 
 ## The problem, in two runs
 
@@ -177,12 +178,48 @@ honest, accurate findings that arrived too late to act on; that is the defect.
   like any other — the run parks and `harness resume` picks it up, and the wall
   clock credit that already exists for task gates applies here too.
 
-## Open questions
+## Open questions, answered
 
-1. Should a pit stop block the whole run, or only the tasks in the demoed epic?
-   Blocking everything is simpler and matches the plan gate; blocking one epic keeps
-   the other workers busy but shows the operator a moving target.
-2. Does the demo agent get to write anything — a Playwright script, a seed fixture —
-   or is it strictly read-and-run? Writing makes better demos and muddies the diff.
-3. Where do artifacts live? `.harness/<runId>/pitstops/<n>/` is the obvious answer;
-   they must not end up in the operator's commits (`.harness/` is already ignored).
+**1. Does a pit stop block the whole run, or only the demoed epic?**
+The whole run — but nothing is interrupted to make it happen. When a stop comes
+due the scheduler stops *dispatching* and lets the in-flight tasks finish, so
+the tree the operator is shown is settled rather than half-written by three
+workers. Blocking one epic would have shown them a moving target and made
+"stop before you build X" unanswerable, because X might already be underway.
+
+**2. May the demo agent write?**
+Yes, and it is put back. It may install, build and write scratch files under its
+artifact directory, because a demo that cannot `pnpm install` is a demo that
+cannot start anything. The integration worktree is then hard-reset to the commit
+it was on before the demo started, whatever the agent did to it — "told not to
+touch the source" is not a mechanism, and the diff the operator eventually
+reviews is not the demo's to edit.
+
+**3. Where do the artifacts live?**
+`.harness/<runId>/pitstops/<n>/`, holding `REPORT.md` (what the operator read),
+`pitstop.json` (the whole payload) and whatever the demo captured. `.harness/`
+is already in the target repo's `.gitignore`, so none of it reaches a commit.
+
+## What was built
+
+| Piece | Where |
+| --- | --- |
+| Trigger, report rendering | `packages/core/src/pitstop.ts` |
+| Demo + reviewers + the operator's decision | `RunController.pitStop` |
+| Re-planning the unstarted work (S3) | `RunController.replan` |
+| The prompts | `demoSystemPrompt`, `reviewerSystemPrompt`, `replanPrompt` |
+| Terminal gate | `apps/cli/src/cli.ts` |
+| Dashboard gate | `POST /api/gates/pitstop`, the `#pitstop` panel |
+
+Two decisions worth naming, because neither is in the stories above:
+
+- **A gate handler that cannot ask turns pit stops off.** Headless and test
+  contexts have nowhere to put the question, and spending a demo session plus
+  three reviewers to print a report nobody will answer is worse than not
+  stopping. `resolvePitStop` is optional on `GateHandler`; its absence is off.
+- **`"never"` means never, including for a FAIL verdict.** S6 says a recorded
+  FAIL opens a pit stop regardless of the configured interval, and it does —
+  regardless of the *cadence*. An operator who wrote `"never"` has said they do
+  not want to be charged for this, and honouring that is worth more than
+  enforcing the story literally. The FAIL still reaches them in the closing
+  report, which is where it reached them before.

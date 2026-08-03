@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import { SUBPROJECT_DIRS } from "@harness/core";
+import { PitStopConfig } from "@harness/shared";
 
 export const CONFIG_FILENAME = "harness.config.json";
 
@@ -137,6 +138,12 @@ export const FileConfig = z
         taskCapUsd: z.number().positive().optional(),
       })
       .optional(),
+    /**
+     * How often the run stops to demo what it has built and ask you whether it
+     * is still what you wanted (docs/PITSTOP.md). Defaults to every epic.
+     * `{"pitStop":{"every":"never"}}` turns it off.
+     */
+    pitStop: PitStopConfig.partial().optional(),
     skillsDirs: z.array(z.string()).optional(),
     /**
      * Which skills a class of work gets, by name. Declaring this replaces the

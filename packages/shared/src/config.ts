@@ -10,7 +10,54 @@ export const ModelRouting = z.object({
   advisor: z.string().default("claude-sonnet-5"),
   /** Judges the deployed system against the assignment. The last word, so: Opus. */
   prod: z.string().default("claude-opus-5"),
+  /** Starts the half-built product at a pit stop and drives it. Mostly tool work. */
+  demo: z.string().default("claude-sonnet-5"),
+  /**
+   * Reads the demo through one named lens and says whether the run is still
+   * building the right thing. This is the judgment the whole pit stop exists to
+   * buy, and it is judgment rather than tool work, so: Opus.
+   */
+  reviewer: z.string().default("claude-opus-5"),
 });
+
+/**
+ * How often the run stops and shows the operator what it has built.
+ *
+ * `"epic"` is the default because it is the only boundary that is about the
+ * product rather than the run: a count, a budget or a clock can cut an epic in
+ * half and demo something that was never meant to stand alone. The others exist
+ * for plans whose epics are too coarse to be a useful checkpoint.
+ */
+export const PitStopEvery = z.union([
+  z.literal("epic"),
+  z.literal("never"),
+  z.object({ tasks: z.number().int().min(1) }),
+  z.object({ usd: z.number().positive() }),
+  z.object({ minutes: z.number().int().min(1) }),
+]);
+export type PitStopEvery = z.infer<typeof PitStopEvery>;
+
+export const PitStopConfig = z.object({
+  every: PitStopEvery.default("epic"),
+  /**
+   * The lenses the built product is reviewed through, by skill name. Each one is
+   * a separate short session, so this is also the pit stop's price: three lenses
+   * is three reviews. Skills absent from `skillsDirs` still get their lens — the
+   * name alone tells the reviewer which hat to wear — but they read far better
+   * with the operator's own playbook in front of them.
+   */
+  reviewers: z
+    .array(z.string())
+    .max(4)
+    .default(["product-manager", "critical-challenger", "qa-agent"]),
+  /**
+   * The demo agent's turn ceiling. It has to start a product it has never seen
+   * and drive it, which is the expensive half of a pit stop; a ceiling that is
+   * too low produces a report that says only "I could not start it".
+   */
+  demoMaxTurns: z.number().int().min(20).max(200).default(80),
+});
+export type PitStopConfig = z.infer<typeof PitStopConfig>;
 
 export const Budget = z.object({
   runCapUsd: z.number().positive().default(30),
@@ -61,6 +108,17 @@ export const RunConfig = z.object({
   taskWallClockMinutes: z.number().int().min(5).default(45),
   models: ModelRouting.default({}),
   budget: Budget.default({}),
+  /**
+   * How often the run stops, demos what it has built, and asks the operator
+   * whether it is still the thing they wanted. See docs/PITSTOP.md.
+   *
+   * On by default, at every epic boundary. The two runs that motivated this
+   * both produced accurate findings — a broken endpoint seam, a $721 tree
+   * nobody could describe — that arrived only after the money was spent, and
+   * the harness had no checkpoint between "approve this plan" and "here is the
+   * diff". `{"pitStop":{"every":"never"}}` restores that.
+   */
+  pitStop: PitStopConfig.default({}),
   skillsDirs: z.array(z.string()).default([]),
   /**
    * Skills bound to a class of work, by name, ahead of any scoring.

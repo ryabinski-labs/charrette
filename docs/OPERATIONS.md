@@ -515,6 +515,7 @@ typo surfaces immediately.
   "chat": true,
   "skillsDirs": ["~/.claude/skills", "~/skills"],
   "qaIterationCap": 3,
+  "pitStop": { "every": "epic" },
   "models": { "planner": "claude-opus-5", "worker": "claude-sonnet-5" }
 }
 ```
@@ -537,6 +538,11 @@ Run configuration is a zod-validated `RunConfig`
 | `models.worker` | `claude-sonnet-5` | — | ✅ | |
 | `models.qa` | `claude-sonnet-5` | — | ✅ | |
 | `models.integrator` | `claude-sonnet-5` | — | ✅ | |
+| `models.demo` | `claude-sonnet-5` | — | ✅ | starts the half-built product at a pit stop and drives it — mostly tool work |
+| `models.reviewer` | `claude-opus-5` | — | ✅ | judges the demo through one named lens; this is the judgment a pit stop exists to buy |
+| `pitStop.every` | `"epic"` | — | ✅ | when the run stops to show you what it built: `"epic"`, `"never"`, `{"tasks":5}`, `{"usd":100}`, `{"minutes":90}` — see [PITSTOP.md](./PITSTOP.md) |
+| `pitStop.reviewers` | `product-manager`, `critical-challenger`, `qa-agent` | — | ✅ | one short session per lens, by skill name; max 4, `[]` for none. This is the pit stop's price. |
+| `pitStop.demoMaxTurns` | `80` | — | ✅ | the demo agent has to start a product it has never seen; too low and its report says only "I could not start it" |
 | `budget.runCapUsd` | `30` | `--run-cap` | ✅ | checked **before every agent turn** |
 | `budget.taskCapUsd` | `10` | `--task-cap` | ✅ | |
 | `skillsDirs` | `~/.claude/skills`, `~/skills` | — | ✅ | |

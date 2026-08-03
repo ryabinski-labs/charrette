@@ -310,6 +310,48 @@ export class Store {
     return { url: p.url, verdict: p.verdict, findings: p.findings ?? [], summary: p.summary ?? "" };
   }
 
+  /** The run's epics, in plan order. */
+  listEpics(runId: string): { id: string; title: string }[] {
+    return this.db.prepare("SELECT id, title FROM epics WHERE runId = ? ORDER BY ord").all(runId) as { id: string; title: string }[];
+  }
+
+  /** Tasks whose work reached the integration branch, in the order it landed. */
+  mergedTaskIds(runId: string): string[] {
+    const rows = this.db
+      .prepare("SELECT taskId FROM events WHERE runId = ? AND type = 'git.merged' ORDER BY seq")
+      .all(runId) as { taskId: string }[];
+    return rows.map((r) => r.taskId);
+  }
+
+  /**
+   * What this run's pit stops have already covered.
+   *
+   * Read back out of the event log rather than held on the controller, so a run
+   * resumed in a new process keeps its cadence: the epics already demoed do not
+   * get demoed again, and a `{usd: 100}` or `{minutes: 90}` interval measures
+   * from the last stop rather than from process start. `startedAtMs` is the
+   * baseline for a run that has not stopped yet.
+   */
+  pitStopHistory(runId: string, startedAtMs: number): { count: number; demoedEpics: string[]; mergedAt: number; spentAt: number; atMs: number } {
+    const rows = this.db
+      .prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.pitstop_opened' ORDER BY seq")
+      .all(runId) as { payload: string }[];
+    const demoedEpics: string[] = [];
+    let mergedAt = 0;
+    let spentAt = 0;
+    let atMs = startedAtMs;
+    for (const r of rows) {
+      // Every field is present: the payload column holds the event exactly as
+      // the schema parsed it, and `epicIds` carries a default.
+      const p = JSON.parse(r.payload) as { epicIds: string[]; mergedCount: number; spentUsd: number; ts: number };
+      demoedEpics.push(...p.epicIds);
+      mergedAt = p.mergedCount;
+      spentAt = p.spentUsd;
+      atMs = p.ts;
+    }
+    return { count: rows.length, demoedEpics, mergedAt, spentAt, atMs };
+  }
+
   lastEventSeq(runId: string, type: string): number {
     const row = this.db.prepare("SELECT MAX(seq) s FROM events WHERE runId = ? AND type = ?").get(runId, type) as { s: number | null };
     return row.s ?? 0;

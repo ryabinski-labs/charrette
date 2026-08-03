@@ -33,13 +33,27 @@ export const TaskState = z.enum([
 ]);
 export type TaskState = z.infer<typeof TaskState>;
 
-export const AgentRole = z.enum(["intake", "planner", "worker", "qa", "integrator", "validator", "advisor", "prod"]);
+export const AgentRole = z.enum([
+  "intake",
+  "planner",
+  "worker",
+  "qa",
+  "integrator",
+  "validator",
+  "advisor",
+  "prod",
+  // Pit stops: `demo` starts the half-built product and drives it; `reviewer`
+  // reads what the demo found through one named lens and says whether the run
+  // is still building the right thing.
+  "demo",
+  "reviewer",
+]);
 export type AgentRole = z.infer<typeof AgentRole>;
 
 export const SessionState = z.enum(["running", "done", "interrupted", "killed"]);
 export type SessionState = z.infer<typeof SessionState>;
 
-export const GateKind = z.enum(["plan", "integration-conflict", "budget", "task-escalation"]);
+export const GateKind = z.enum(["plan", "integration-conflict", "budget", "task-escalation", "pit-stop"]);
 export type GateKind = z.infer<typeof GateKind>;
 
 export const GateState = z.enum(["open", "approved", "rejected"]);
@@ -52,7 +66,11 @@ export const RUN_TRANSITIONS: Record<RunState, RunState[]> = {
   PLANNING: ["PLAN_REVIEW", "FAILED", "PAUSED", "ABORTED"],
   PLAN_REVIEW: ["EXECUTING", "PLANNING", "ABORTED"],
   EXECUTING: ["INTEGRATING", "PAUSED", "BUDGET_HOLD", "FAILED", "ABORTED"],
-  INTEGRATING: ["PR_REVIEW", "PAUSED", "BUDGET_HOLD", "FAILED", "ABORTED"],
+  // INTEGRATING -> EXECUTING: the pit stop the validator's FAIL opens sits here,
+  // between the verdict and the first pull request. An operator who reads that
+  // verdict and asks for the gap to be fixed has to be able to send the run back
+  // to work — the alternative is closing it and starting another.
+  INTEGRATING: ["PR_REVIEW", "EXECUTING", "PAUSED", "BUDGET_HOLD", "FAILED", "ABORTED"],
   // A finished run is not a dead run: `resume` reopens it when tasks parked
   // (back to EXECUTING via the escalation gate) or merged work never got its
   // pull requests (back to INTEGRATING to retry them).

@@ -161,6 +161,151 @@ describe("what the chat puts on the screen", () => {
   });
 });
 
+describe("multi-line answers", () => {
+  it("joins lines a trailing backslash continues", async () => {
+    const chat = new TerminalChat(scripted(["give me back JSON: \\", "  {id, name} \\", "  and nothing else"]));
+
+    // A single-line reader silently truncates a pasted answer at the first
+    // newline, keeping the operator's first clause and dropping the rest.
+    expect(await chat.ask({ question: "What shape?", detail: "", options: [] })).toBe(
+      "give me back JSON: \n  {id, name} \n  and nothing else"
+    );
+  });
+
+  it("switches the prompt on the continuation lines", async () => {
+    capture();
+    const question = vi.fn(async (p: string) => (p.includes("·") ? "second" : "first \\"));
+
+    await new TerminalChat({ question, close: () => {} }).ask({ question: "?", detail: "", options: [] });
+
+    expect(question.mock.calls.map((c) => c[0])).toEqual(["> ", "· "]);
+    vi.restoreAllMocks();
+  });
+});
+
+describe("showing that the agent is still working", () => {
+  const realIsTty = process.stdout.isTTY;
+
+  afterEach(() => {
+    process.stdout.isTTY = realIsTty;
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("counts the seconds while the operator waits", () => {
+    vi.useFakeTimers();
+    process.stdout.isTTY = true;
+    const shown = capture();
+    const chat = new TerminalChat(scripted([]));
+
+    chat.working(true);
+    vi.advanceTimersByTime(2_400);
+    chat.working(false);
+
+    // The intake agent's first move is to read a repository; a terminal that
+    // shows nothing for that long reads as a hang.
+    expect(shown()).toContain("thinking… 2s");
+  });
+
+  it("cycles the spinner rather than redrawing one frame", () => {
+    vi.useFakeTimers();
+    process.stdout.isTTY = true;
+    const shown = capture();
+    const chat = new TerminalChat(scripted([]));
+
+    chat.working(true);
+    vi.advanceTimersByTime(360);
+    chat.working(false);
+
+    expect(new Set(shown().match(/[\u2800-\u28ff]/g)).size).toBeGreaterThan(1);
+  });
+
+  it("stops the old spinner before starting a new one", () => {
+    vi.useFakeTimers();
+    process.stdout.isTTY = true;
+    capture();
+    const chat = new TerminalChat(scripted([]));
+
+    chat.working(true);
+    chat.working(true);
+    vi.advanceTimersByTime(200);
+    chat.working(false);
+
+    // Two intervals writing over each other would double the frame rate and
+    // leave one of them running for the rest of the process.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("writes nothing at all when nobody is watching a terminal", () => {
+    vi.useFakeTimers();
+    process.stdout.isTTY = false;
+    const shown = capture();
+
+    new TerminalChat(scripted([])).working(true);
+    vi.advanceTimersByTime(1_000);
+
+    expect(shown()).toBe("");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("clears the spinner's line before the agent speaks over it", () => {
+    vi.useFakeTimers();
+    process.stdout.isTTY = true;
+    const shown = capture();
+    const chat = new TerminalChat(scripted([]));
+
+    chat.working(true);
+    vi.advanceTimersByTime(200);
+    chat.say("Two ways to do this.");
+
+    expect(shown()).toContain("\r\u001b[K");
+    expect(shown()).toContain("Two ways to do this.");
+  });
+
+  it("stops spinning when it becomes the operator's turn", async () => {
+    vi.useFakeTimers();
+    process.stdout.isTTY = true;
+    capture();
+    const chat = new TerminalChat(scripted(["an answer"]));
+
+    chat.working(true);
+    await chat.ask({ question: "?", detail: "", options: [] });
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("what the agent is doing", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("prints one dimmed line per tool call", () => {
+    const shown = capture();
+
+    new TerminalChat(scripted([])).activity("Read package.json");
+
+    expect(shown()).toContain("· Read package.json");
+  });
+
+  it("keeps it to one line, however much the tool had to say", () => {
+    const shown = capture();
+
+    new TerminalChat(scripted([])).activity("Grep fastify\nline two\nline three");
+
+    expect(shown().trimEnd().split("\n").length).toBe(1);
+    expect(shown()).not.toContain("line two");
+  });
+
+  it("says nothing for an empty tool summary", () => {
+    const shown = capture();
+
+    new TerminalChat(scripted([])).activity("   ");
+
+    expect(shown()).toBe("");
+  });
+});
+
 describe("colour", () => {
   const realIsTty = process.stdout.isTTY;
   const realNoColor = process.env.NO_COLOR;

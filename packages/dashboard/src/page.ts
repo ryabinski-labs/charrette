@@ -38,7 +38,7 @@ export const PAGE_HTML = `<!doctype html>
       radial-gradient(1100px 420px at 72% -12%, rgba(102,178,255,.055), transparent 70%),
       radial-gradient(900px 380px at 8% 108%, rgba(75,213,131,.03), transparent 70%),
       repeating-linear-gradient(0deg, transparent 0 2px, rgba(232,237,244,.012) 2px 3px); }
-  header, .shell, #gate, #budget, #taskgates { position:relative; z-index:1; }
+  header, .shell, #gate, #budget, #taskgates, #pitstop { position:relative; z-index:1; }
   ::selection { background:rgba(102,178,255,.28); }
 
   header { display:flex; align-items:center; gap:.75rem; padding:.65rem 1.25rem;
@@ -198,10 +198,10 @@ export const PAGE_HTML = `<!doctype html>
   .hide-tool .k-tool, .hide-say .k-say, .hide-state .k-state,
   .hide-cost .k-cost, .hide-git .k-git { display:none; }
 
-  #gate, #budget, #taskgates { display:none; flex:none; border-bottom:1px solid var(--amber);
+  #gate, #budget, #taskgates, #pitstop { display:none; flex:none; border-bottom:1px solid var(--amber);
     background:linear-gradient(180deg, #191307, #140f06); border-left:3px solid var(--amber);
     padding:.9rem 1.25rem; }
-  #gate h2, #budget h2, #taskgates h2 { color:var(--amber); }
+  #gate h2, #budget h2, #taskgates h2, #pitstop h2 { color:var(--amber); }
   #taskgates .tg { border:1px solid var(--line); border-radius:6px; background:var(--sunken); padding:.6rem .8rem; margin:.5rem 0; }
   #taskgates .tg b { font-size:.9rem; }
   #taskgates .tg .why { color:var(--mute); font-size:.82rem; white-space:pre-wrap; margin:.3rem 0;
@@ -210,6 +210,18 @@ export const PAGE_HTML = `<!doctype html>
   #taskgates .tg .rec { font-size:.82rem; border-left:2px solid var(--amber); padding:.15rem 0 .15rem .5rem;
     margin:.3rem 0; white-space:pre-wrap; }
   #budget p { margin:.35rem 0 .6rem; font-size:.88rem; }
+  /* The pit stop is the one gate whose payload is worth reading in full, so it
+     gets the height a report needs rather than the height a notice needs. */
+  #pitstop .report { max-height:52vh; overflow:auto; background:var(--sunken); border-radius:6px;
+                     padding:.7rem 1rem; margin:.4rem 0 .7rem; font-size:.88rem; line-height:1.55; }
+  #pitstop .report h3 { color:var(--amber); font-size:1rem; margin:.9rem 0 .3rem; }
+  #pitstop .report h4, #pitstop .report h5, #pitstop .report h6 { color:var(--fg); font-size:.9rem; margin:.7rem 0 .2rem; }
+  #pitstop .report p { margin:.3rem 0; }
+  #pitstop .report ul { margin:.2rem 0 .5rem; padding-left:1.1rem; }
+  #pitstop .report li { margin:.12rem 0; }
+  #pitstop .report blockquote { margin:.35rem 0; padding-left:.6rem; border-left:2px solid var(--amber);
+                                color:var(--mute); }
+  #pitstop textarea { width:100%; }
   #budget input { background:var(--sunken); color:var(--fg); border:1px solid var(--line); border-radius:6px;
                   padding:.42rem .55rem; font:inherit; width:9rem; margin-right:.5rem; }
   #gate .plan { display:flex; gap:.4rem; flex-wrap:wrap; margin-bottom:.6rem; max-height:26vh; overflow-y:auto; }
@@ -273,6 +285,18 @@ export const PAGE_HTML = `<!doctype html>
 <section id="taskgates" aria-labelledby="taskgates-h">
   <h2 id="taskgates-h">A task hit its cap &mdash; your answer keeps it moving</h2>
   <div id="taskgate-list"></div>
+</section>
+
+<section id="pitstop" aria-labelledby="pitstop-h">
+  <h2 id="pitstop-h">Pit stop &mdash; here is what exists so far</h2>
+  <div id="pitstop-report" class="report"></div>
+  <textarea id="pitstop-feedback" rows="3" aria-label="What you want changed"
+            placeholder="What should change? (goes to every task that has not run yet)"></textarea>
+  <button onclick="resolvePitStop('continue')">Looks right &mdash; keep going</button>
+  <button onclick="resolvePitStop('redirect')">Send this to the remaining tasks</button>
+  <button onclick="resolvePitStop('replan')">Re-plan the rest around this</button>
+  <button class="reject" onclick="resolvePitStop('stop')">Stop &mdash; I want to think</button>
+  <p id="pitstop-error" style="color:var(--red)" role="alert"></p>
 </section>
 
 <section id="budget" aria-labelledby="budget-h">
@@ -932,6 +956,8 @@ const openedAt = Date.now();
  * half-written answer.
  */
 let taskGateSig = "";
+/** The last pit stop rendered, so the 5s refresh does not redraw it under you. */
+let pitStopShown = 0;
 const notifiedGates = new Set();
 
 function renderTaskGates(gates) {
@@ -1002,6 +1028,68 @@ function notifyTaskGates(gates) {
   }
 }
 
+/**
+ * Render the pit stop report.
+ *
+ * A deliberately small markdown subset — headings, bullets, quotes, bold — put
+ * on the page as text nodes rather than innerHTML. Every word of it was written
+ * by an agent reading a repository this dashboard has no reason to trust, and a
+ * report is not worth a script injection.
+ */
+function renderReport(box, md) {
+  box.textContent = "";
+  let list = null;
+  for (const raw of (md || "").split("\\n")) {
+    const line = raw.trimEnd();
+    if (!line.trim()) { list = null; continue; }
+    const bullet = /^[-*] (.*)$/.exec(line);
+    if (bullet) {
+      if (!list) { list = el("ul"); box.append(list); }
+      list.append(bold(el("li"), bullet[1]));
+      continue;
+    }
+    list = null;
+    const head = /^(#{1,4}) (.*)$/.exec(line);
+    if (head) { box.append(bold(el("h" + Math.min(head[1].length + 2, 6)), head[2])); continue; }
+    const quote = /^> (.*)$/.exec(line);
+    if (quote) { box.append(bold(el("blockquote"), quote[1])); continue; }
+    box.append(bold(el("p"), line));
+  }
+}
+
+/** Split on **bold** runs, appending each as its own text node or <b>. */
+function bold(node, text) {
+  const parts = text.split(/\\*\\*/);
+  for (let i = 0; i < parts.length; i++) {
+    if (!parts[i]) continue;
+    node.append(i % 2 ? el("b", null, parts[i]) : document.createTextNode(parts[i]));
+  }
+  return node;
+}
+
+async function resolvePitStop(action) {
+  const res = await fetch("/api/gates/pitstop", {
+    method: "POST",
+    headers: Object.assign({ "content-type": "application/json" }, headers),
+    body: JSON.stringify({ action: action, feedback: $("pitstop-feedback").value }),
+  });
+  if (res.ok) { $("pitstop-feedback").value = ""; $("pitstop-error").textContent = ""; }
+  else $("pitstop-error").textContent = (await res.json().catch(() => ({}))).error || "could not resolve the pit stop";
+  refresh();
+}
+
+/** The one interruption that is not about something going wrong. */
+function notify(title, body) {
+  const where = repoName() || "harness";
+  titleOverride = where + " \\u00b7 pit stop";
+  document.title = titleOverride;
+  if (!notifyOn || Notification.permission !== "granted") return;
+  try {
+    const note = new Notification(where + " \\u2014 " + title, { body: body, tag: "harness-" + title });
+    note.onclick = () => window.focus();
+  } catch (e) {}
+}
+
 function notifyRunState(ev) {
   const n = NOTIFY[ev.to];
   if (!n) return;
@@ -1068,6 +1156,13 @@ async function refresh() {
     taskGateSig = sig;
     renderTaskGates(tg);
     notifyTaskGates(tg);
+  }
+  const ps = data.pitStop;
+  $("pitstop").style.display = ps ? "block" : "none";
+  if (ps && ps.number !== pitStopShown) {
+    pitStopShown = ps.number;
+    renderReport($("pitstop-report"), ps.markdown);
+    notify("Pit stop " + ps.number, ps.reason + " \\u2014 come and look");
   }
   const bg = data.budgetGate;
   $("budget").style.display = bg ? "block" : "none";
