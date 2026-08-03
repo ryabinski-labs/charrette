@@ -27,6 +27,24 @@ describe("pricing a model nobody has priced", () => {
     expect(table.in).toBeGreaterThan(0);
   });
 
+  it("prices the non-Anthropic models a run can now be pointed at", () => {
+    // Caps are enforced from costUsd, so a routed-to model with no row here
+    // spends money the budget gate cannot see. These are the published
+    // standard-tier prices, not the batch or flex ones — the harness sends
+    // interactive requests, and batch prices would under-charge.
+    expect(priceFor("gpt-5.6-terra")).toEqual({ in: 2, out: 12 });
+    expect(priceFor("gpt-5.6-sol")).toEqual({ in: 5, out: 30 });
+    expect(priceFor("gpt-5.6-luna")).toEqual({ in: 0.2, out: 1.2 });
+    expect(priceFor("gemini-3.5-flash-lite")).toEqual({ in: 0.3, out: 2.5 });
+  });
+
+  it("prices a model the same whether or not the config spells out its provider", () => {
+    // The config accepts both spellings for the same model, so both must cost
+    // the same — otherwise the run is billed differently for a cosmetic choice.
+    expect(priceFor("openai/gpt-5.6-terra")).toEqual({ in: 2, out: 12 });
+    expect(priceFor("google:gemini-3.5-flash-lite")).toEqual({ in: 0.3, out: 2.5 });
+  });
+
   it("prices something it has never heard of at the top tier, never under", () => {
     // Under-pricing an unknown model is how a budget cap silently stops binding.
     expect(priceFor("some-future-model")).toEqual({ in: 5, out: 25 });

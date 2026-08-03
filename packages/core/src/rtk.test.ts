@@ -1,6 +1,6 @@
 import type { HookInput } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it } from "vitest";
-import { rtkBashRewriter, rtkHooks } from "./rtk.js";
+import { rtkBashRewriter, rtkCommandRewriter, rtkHooks } from "./rtk.js";
 
 const bash = (command: string): HookInput =>
   ({
@@ -73,5 +73,46 @@ describe("rtkHooks", () => {
   it("hooks Bash when a runner exists", () => {
     const hooks = rtkHooks({}, async () => "{}");
     expect(hooks?.PreToolUse).toEqual([{ matcher: "Bash", hooks: [expect.any(Function)] }]);
+  });
+});
+
+describe("rtkCommandRewriter — the same deal for transports with no SDK hook", () => {
+  it("is off under exactly the same conditions as the hook", () => {
+    // Agents on OpenAI or Gemini must not end up quietly rtk-less, or quietly
+    // rtk-ful when the operator switched it off, just because they take a
+    // different code path to the same shell.
+    expect(rtkCommandRewriter({ PATH: "/definitely/not/a/dir" })).toBeUndefined();
+    expect(rtkCommandRewriter({ HARNESS_RTK: "off" }, async () => "{}")).toBeUndefined();
+  });
+
+  it("returns rtk's rewrite for a command it knows", async () => {
+    const rewrite = rtkCommandRewriter({}, async () => rtkSays("rtk git status"))!;
+    expect(await rewrite("git status")).toBe("rtk git status");
+  });
+
+  it("returns the original when rtk declines to rewrite it", async () => {
+    const rewrite = rtkCommandRewriter({}, async () => "{}")!;
+    expect(await rewrite("npm test")).toBe("npm test");
+  });
+
+  it("returns the original when rtk fails, because a broken rtk must not cost a command", async () => {
+    const rewrite = rtkCommandRewriter({}, async () => {
+      throw new Error("rtk is not installed after all");
+    })!;
+    expect(await rewrite("npm test")).toBe("npm test");
+  });
+
+  it("passes the caller's abort signal through", async () => {
+    const signals: (AbortSignal | undefined)[] = [];
+    const rewrite = rtkCommandRewriter({}, async (_json, signal) => {
+      signals.push(signal);
+      return "{}";
+    })!;
+    const controller = new AbortController();
+    await rewrite("git log", controller.signal);
+    expect(signals[0]).toBe(controller.signal);
+    // And works without one.
+    await rewrite("git log");
+    expect(signals[1]).toBeInstanceOf(AbortSignal);
   });
 });

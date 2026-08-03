@@ -40,6 +40,10 @@ your own attention, against the repo rather than against the task count.
   `CLAUDE_CODE_OAUTH_TOKEN` (Claude Pro/Max — run `claude setup-token`) or
   `ANTHROPIC_API_KEY`
 - Optional: `GITHUB_TOKEN` (fine-grained, single repo: contents/issues/PRs write) + `HARNESS_GITHUB_REPO=owner/repo`
+- Optional: `OPENAI_API_KEY` / `GEMINI_API_KEY`, if you point a role at another
+  vendor — `"models": {"worker": "gpt-5.6-terra"}`. The judging roles (`qa`,
+  `reviewer`, `prod`) and `intake` stay on Anthropic; see
+  [Using other providers](docs/OPERATIONS.md#using-other-providers)
 
 ## Usage
 

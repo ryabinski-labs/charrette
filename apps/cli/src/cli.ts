@@ -2,8 +2,8 @@ import { Command } from "commander";
 import { createInterface } from "node:readline/promises";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { RunConfig } from "@harness/shared";
-import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, detectToolbelt, ensureIgnored, harnessBuild, originSlug, postmortem, renderPostmortem } from "@harness/core";
+import { RunConfig, providerFor } from "@harness/shared";
+import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, detectToolbelt, ensureIgnored, harnessBuild, missingKeys, originSlug, postmortem, renderPostmortem } from "@harness/core";
 import { Dashboard } from "@harness/dashboard";
 import { promptForNewCap } from "./budget.js";
 import {
@@ -398,6 +398,23 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
     deployTimeoutMinutes: file.deployTimeoutMinutes,
     externalTools: file.externalTools,
   });
+
+  // A role pointed at another vendor needs that vendor's key before anything
+  // is spent, not at the moment that role is first dispatched. `demo` first
+  // runs at a pit stop, after every worker in the epic has been paid for;
+  // discovering there that OPENAI_API_KEY was never exported wastes the epic.
+  const missing = missingKeys(config.models);
+  if (missing.length) {
+    throw new Error(`${missing.join(" ")} Export the key, or point that role back at an Anthropic model.`);
+  }
+
+  // Say who answers for what, but only when it is not the all-Anthropic default:
+  // a line that never changes is a line nobody reads.
+  const offAnthropic = Object.entries(config.models).filter(([, model]) => providerFor(model) !== "anthropic");
+  if (offAnthropic.length) {
+    banner.push(`models     ${offAnthropic.map(([role, model]) => `${role}→${model}`).join(" · ")}   (judging roles stay on Anthropic)`);
+  }
+
   if (filePath) banner.push(`config     ${CONFIG_FILENAME}`);
   return { repo, config, dashboard, dashboardPort, chat, banner };
 }
