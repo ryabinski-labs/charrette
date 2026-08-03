@@ -3,7 +3,7 @@ import { createInterface } from "node:readline/promises";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { RunConfig } from "@harness/shared";
-import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, detectToolbelt, ensureIgnored, originSlug, postmortem, renderPostmortem } from "@harness/core";
+import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, detectToolbelt, ensureIgnored, harnessBuild, originSlug, postmortem, renderPostmortem } from "@harness/core";
 import { Dashboard } from "@harness/dashboard";
 import { promptForNewCap } from "./budget.js";
 import {
@@ -293,7 +293,10 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
   const { config: file, path: filePath } = loadFileConfig(repo);
   const fromCli = (name: string): boolean => cmd.getOptionValueSource(name) === "cli";
   const via = filePath ? CONFIG_FILENAME : "";
-  const banner: string[] = [`repo       ${repo}`];
+  // Which harness this is, at the one moment the operator can still act on it.
+  // Every session this run spawns is stamped with the same string, so a
+  // postmortem months later can say which fixes it actually had.
+  const banner: string[] = [`repo       ${repo}`, `build      ${harnessBuild()}`];
 
   let checks: string[];
   let checksFrom: string;

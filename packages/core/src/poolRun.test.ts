@@ -8,6 +8,7 @@ vi.mock("./reaper.js", () => ({ reapUnder: reapUnderMock }));
 
 import { Bus } from "./bus.js";
 import { Store } from "./store.js";
+import { harnessBuild } from "./build.js";
 import { AgentPool, PromptStream, type AgentSpec } from "./pool.js";
 
 /**
@@ -131,6 +132,10 @@ describe("running an agent session", () => {
     expect(row.outputTokens).toBe(50);
     expect(row.cacheReadTokens).toBe(10);
     expect(row.cacheWriteTokens).toBe(5);
+    // Which harness spawned it. A run outlives the process that started it, so
+    // this is the only record of which fixes this session could have had.
+    expect(row.build).toBe(harnessBuild());
+    expect(row.build).not.toBe("");
   });
 
   it("announces the session, its output, its tool calls and its end", async () => {

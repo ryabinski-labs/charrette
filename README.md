@@ -21,7 +21,7 @@ Pre-release walking skeleton (v0.0 per the PRD phasing) plus the v0.1 dashboard 
 - ✅ An interrupted conversation is picked up where it stopped: `resume` re-asks the question nobody answered instead of planning around it
 - ✅ The plan gate says which external services the plan intends to build for real and which it intends to fake, before a worker is paid — and which of deployment, sign-in, visual design and failure-visibility your brief asked for that no task owns at all
 - ✅ The same intent question is asked of the **plan**, not only the result: could this plan, executed perfectly, deliver the assignment? Gaps reach you at the gate and the planner on a reject
-- ✅ `harness postmortem` — why a run produced what it produced: questions nobody answered, verdicts and whether they were heeded, tasks that could pass without anything leaving the process, spend by how sessions died
+- ✅ `harness postmortem` — why a run produced what it produced: questions nobody answered, verdicts and whether they were heeded, tasks that could pass without anything leaving the process, spend by how sessions died, and which harness build each session ran under — because a fix built while a run is executing never reaches it
 - ✅ Skills discovery: lexical SKILL.md matching with SHA-256 provenance (also exposed as a stdio MCP server)
 - ✅ Localhost dashboard: live activity feed (what each agent is reading, editing, running), task board, cost meter, gate approval (127.0.0.1-only, bearer token, Origin/Host checks)
 - ✅ Pit stops: after every epic the run stops, a demo agent starts the half-built product and drives it, three named reviewers judge it, and you keep going, redirect the unbuilt tasks, re-plan them, or stop — [docs/PITSTOP.md](./docs/PITSTOP.md)
