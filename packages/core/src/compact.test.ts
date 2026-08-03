@@ -3,7 +3,7 @@ import { BUDGETS, budgetFor, compact, messageChars, protectedFrom, transcriptCha
 import type { LoopMessage } from "./providerClients.js";
 
 const user = (text: string): LoopMessage => ({ role: "user", text });
-const assistant = (text: string, toolCalls: { id: string; name: string; input: unknown }[] = []): LoopMessage => ({
+const assistant = (text: string, toolCalls: { id: string; name: string; input: Record<string, unknown> }[] = []): LoopMessage => ({
   role: "assistant",
   text,
   toolCalls,
@@ -27,8 +27,8 @@ describe("messageChars", () => {
     expect(calling).toBeGreaterThan(bare);
   });
 
-  it("treats a tool call with no input as an empty object rather than throwing", () => {
-    expect(messageChars(assistant("", [{ id: "c1", name: "Bash", input: undefined }]))).toBe("Bash".length + 2);
+  it("counts an empty tool input as the two characters it serialises to", () => {
+    expect(messageChars(assistant("", [{ id: "c1", name: "Bash", input: {} }]))).toBe("Bash".length + 2);
   });
 
   it("counts a tool result by its text", () => {

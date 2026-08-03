@@ -63,7 +63,7 @@ const TAIL = 400;
 
 export function messageChars(m: LoopMessage): number {
   if (m.role === "assistant") {
-    return m.text.length + m.toolCalls.reduce((n, c) => n + c.name.length + JSON.stringify(c.input ?? {}).length, 0);
+    return m.text.length + m.toolCalls.reduce((n, c) => n + c.name.length + JSON.stringify(c.input).length, 0);
   }
   return m.text.length;
 }
