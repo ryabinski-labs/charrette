@@ -7,6 +7,7 @@ export * from "./deps.js";
 export * from "./git.js";
 export * from "./isolation.js";
 export * from "./memory.js";
+export * from "./outputCeiling.js";
 export * from "./reaper.js";
 export * from "./github.js";
 export * from "./intake.js";
