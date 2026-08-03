@@ -3,7 +3,7 @@ import { createInterface } from "node:readline/promises";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { RunConfig } from "@harness/shared";
-import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, detectToolbelt, ensureIgnored, originSlug } from "@harness/core";
+import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, detectToolbelt, ensureIgnored, originSlug, postmortem, renderPostmortem } from "@harness/core";
 import { Dashboard } from "@harness/dashboard";
 import { promptForNewCap } from "./budget.js";
 import {
@@ -599,6 +599,22 @@ export function buildProgram(): Command {
           ? `Closed ${res.closed.length} superseded pull request${res.closed.length === 1 ? "" : "s"}: ${res.closed.map((n) => `#${n}`).join(", ")}\n`
           : "No per-task pull requests needed closing.\n"
       );
+    });
+
+  program
+    .command("postmortem")
+    .argument("[runId]", "the run to explain (default: the most recent)")
+    .description("why a run produced what it produced — unanswered questions, verdicts, and where the money went")
+    .option("-r, --repo <path>", "target repo (default: the git repo containing the cwd)", process.cwd())
+    .action(async (runIdArg: string | undefined, opts: { repo: string }) => {
+      const repo = resolveRepoRoot(opts.repo);
+      const { store } = makeController(repo);
+      const runId = runIdArg ?? store.listRuns()[0]?.id;
+      if (!runId || !store.getRun(runId)) {
+        process.stdout.write(runIdArg ? `No run ${runIdArg} in this repo.\n` : "No runs yet.\n");
+        return;
+      }
+      process.stdout.write(`${renderPostmortem(postmortem(store, runId))}\n`);
     });
 
   program

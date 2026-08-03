@@ -95,7 +95,10 @@ const worker = (spec: AgentSpec, nth: number) => (commit(spec.cwd, `w-${path.bas
 const plannerSaying = (...later: string[]) => (_s: AgentSpec, nth: number) => (nth === 1 ? DOCS : (later[nth - 2] ?? dag([{ id: "task-a" }])));
 
 /** The mid-run trigger effectively off, so only the closing pit stop fires. */
-const BASE = { deterministicChecks: [] as string[], waitForChecks: false, maxParallelWorkers: 1, pitStop: { every: { tasks: 99 } } };
+// The plan-intent check is off in this file: it spawns a validator at the plan
+// gate, and these fixtures sequence the validator by call number to drive the
+// END-of-run verdict, which is what they are actually about.
+const BASE = { deterministicChecks: [] as string[], waitForChecks: false, maxParallelWorkers: 1, pitStop: { every: { tasks: 99 } }, planIntentCheck: false };
 
 function build(opts: { repoPath: string; pool: AgentPool; decide?: (stop: PitStop) => PitStopDecision }) {
   const store = new Store(":memory:");

@@ -90,7 +90,10 @@ function rolePool(answers: Partial<Record<string, Answer>>) {
 const worker = (spec: AgentSpec, nth: number) => (commit(spec.cwd, `w-${path.basename(spec.cwd)}-${nth}.txt`), "did the work");
 const planner = (_s: AgentSpec, nth: number) => (nth === 1 ? DOCS : dag());
 
-const BASE = { deterministicChecks: [] as string[], waitForChecks: false, maxParallelWorkers: 1, pitStop: { every: "never" as const } };
+// The plan-intent check is off in this file: it spawns a validator at the plan
+// gate, and these fixtures sequence the validator by call number to drive the
+// END-of-run verdict, which is what they are actually about.
+const BASE = { deterministicChecks: [] as string[], waitForChecks: false, maxParallelWorkers: 1, pitStop: { every: "never" as const }, planIntentCheck: false };
 
 function build(opts: { repoPath: string; pool: AgentPool }) {
   const store = new Store(":memory:");

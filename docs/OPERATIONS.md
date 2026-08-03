@@ -490,6 +490,34 @@ If you resume headlessly, with no terminal to answer in, the run still plans fro
 the assignment, but each dropped question is named in the log and counted in the
 state-change reason rather than disappearing.
 
+### `harness postmortem [runId]`
+
+```bash
+harness postmortem            # the most recent run
+harness postmortem 40da9337   # a specific one
+```
+
+Answers the question `status` does not: **why is this what I got?** Local queries
+only — no agent, no cost. It reports, in the order that most often explains the
+outcome:
+
+- **intake questions with no answer on record**, because the plan was made without them
+- **the plan-gate verdict**, and whether the plan was sent back or approved anyway
+- **the end-of-run verdict**, and how many of its gaps became tasks
+- **tasks whose acceptance criteria never require anything to leave the process** — a task is finished when its criteria are met, so one of these was free to ship a stub
+- **spend grouped by how the session ended**, and the hours the run spent waiting on you
+
+Run against 40da9337 it prints, first line of the report:
+
+```
+1 intake question(s) went unanswered, so the plan was made without them:
+  - For "all the integrations" — do you want real vendor accounts wired up, or
+    production-shaped adapters running against sandboxes with no real money movement?
+```
+
+That one line is the whole explanation for a $773.55 run that shipped six of
+seven integrations as stubs. Working it out by hand took an hour of SQL.
+
 ### `harness regroup [runId]`
 
 ```bash
@@ -919,6 +947,22 @@ Two obligations exist because a green run shipped a broken build:
   failure ever be noticed. It judges these against what you asked for — a plan
   that deliberately scoped live vendors out has no gap here — but silence is not
   a scope decision.
+
+**The plan is checked against the assignment before it is built.** The harness
+has always asked "does the sum of this do what was asked?" — but at the end, of
+the merged result, when the answer costs a whole run. It now asks the same
+question of the plan, for about a dollar, and puts the answer in the plan
+summary:
+
+```
+What this plan would not deliver, read against your assignment:
+  - provider-layer's only criterion asks for a deterministic mock for all seven
+    vendor categories, and no task requires a call to any vendor.
+```
+
+It never blocks — approving accepts it as the scope. Rejecting sends the list
+back to the planner along with whatever you said. Turn it off with
+`planIntentCheck: false` if you would rather be the only thing reading the plan.
 
 **Which integrations are real is decided at the plan gate, not discovered at the
 end.** A task that talks to a third party has to say in its acceptance criteria

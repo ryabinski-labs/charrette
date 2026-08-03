@@ -25,6 +25,9 @@ export const HarnessEvent = z.discriminatedUnion("type", [
   // The validator's answer to "did the merged result do what the operator asked?",
   // recorded before any pull request is opened.
   z.object({ ...base, type: z.literal("run.intent_verdict"), verdict: z.enum(["PASS", "FAIL"]), gaps: z.array(z.string()).default([]), summary: z.string().default("") }),
+  // The same judgment, made of the plan instead of the result, at the gate where
+  // acting on it costs a re-plan rather than a run.
+  z.object({ ...base, type: z.literal("run.plan_intent_verdict"), verdict: z.enum(["PASS", "FAIL"]), gaps: z.array(z.string()).default([]), summary: z.string().default("") }),
   // What the repo's own CI said about the pull request the run opened. The
   // deterministic checks run in a worktree on one task's branch; this is the
   // first thing that judges the merged whole the way the repo actually judges it.

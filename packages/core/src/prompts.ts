@@ -52,6 +52,52 @@ ${skills}`;
 }
 
 /**
+ * Judge the plan against the assignment, before a worker is dispatched.
+ *
+ * The harness has always checked its *output* against intent — but at
+ * INTEGRATING, when every dollar is already spent. Run 40da9337's plan could not
+ * possibly have satisfied "fully implement this product, including all the
+ * integrations": `provider-layer`'s criteria asked for "an interface and a
+ * deterministic mock" for all seven vendor categories and no task anywhere
+ * required a vendor call. That was legible in the plan, for about a dollar,
+ * thirty-seven hours and $773.55 before anyone found out.
+ *
+ * This is deliberately not a code-quality review. The plan is prose; the only
+ * question is entailment.
+ */
+export function planIntentSystemPrompt(): string {
+  return `You are checking a plan against the assignment it is meant to fulfil, before any of it is built.
+
+You are not reviewing the plan's quality, its ordering, its sizing or its engineering choices. You are answering exactly one question: **if every task in this plan were executed perfectly and passed its own acceptance criteria, would the operator have what they asked for?**
+
+That question has teeth because acceptance criteria are the contract. A worker builds to them and QA checks them literally, so anything the assignment implies but the criteria do not require is something this run will not produce — and nobody will notice until the end, if at all.
+
+Look for:
+- **Scope the assignment asks for that no task owns.** Walk the assignment clause by clause and find the task for each. A clause with no task is a gap, and "fully", "all", "end to end" and "production" are clauses.
+- **Criteria that a hollow implementation satisfies.** The task is named for a capability, and every criterion is met by something that does not have it: an integration whose criteria never reach the vendor, a job whose criteria never require it to be scheduled, a UI whose criteria never require it to render, an export whose criteria stop at generating the file. Name the criterion.
+- **Verbs the plan quietly downgraded.** "Implement X" became "define the interface for X"; "deploy" became "write the deployment config"; "migrate" became "write the migration". Sometimes right — say so if the plan states the reason — but never silently.
+- **The run-time nobody planned.** If the assignment implies something that runs somewhere, is there a task for the entrypoint, the schedule, the deployment artifact, the configuration? A plan of pure library code satisfies a brief that asked for a service only by accident.
+- **Assumptions standing in for decisions.** A choice the operator never made, resolved in the plan by default rather than by them, on anything expensive to change later.
+
+Do NOT report: a task you would have written differently, a missing test you would have wanted, sizing, dependency order, or anything you cannot tie to a specific thing the assignment asked for. A gate that lists everything is a gate the operator stops reading, and their attention is the scarcest thing here.
+
+Each gap must be one or two sentences, name the task id or the clause it concerns, and say what would be missing at the end.
+
+Your FINAL message must be exactly one JSON object inside a \`\`\`json fence:
+{"verdict":"PASS","summary":string}
+or
+{"verdict":"FAIL","summary":string,"gaps":[string]}`;
+}
+
+/** The assignment, the PRD and every task's contract, for the plan-intent check. */
+export function planIntentPrompt(assignment: string, prd: string, tasks: TaskRow[]): string {
+  const lines = tasks
+    .map((t) => `### ${t.id} — ${t.title}\n${t.spec}\nAcceptance criteria:\n${t.acceptanceCriteria.map((c) => `- ${c}`).join("\n")}`)
+    .join("\n\n");
+  return `<assignment>\n${assignment}\n</assignment>\n\n<prd>\n${prd.slice(0, 20_000)}\n</prd>\n\n<plan>\n${lines}\n</plan>\n\nWould this plan, executed perfectly, deliver the assignment?`;
+}
+
+/**
  * What an interrupted intake conversation already established, for the agent
  * picking it back up.
  *
