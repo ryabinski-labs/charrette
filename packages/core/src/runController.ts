@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
-import { Plan, PlanBreakdown, PlannedTask, QaVerdict, RunConfig, TaskState, briefToAssignment, validatePlanDag } from "@harness/shared";
+import { Plan, PlanBatch, PlanBreakdown, PlannedEpic, PlannedTask, QaVerdict, RunConfig, TaskState, briefToAssignment, validatePlanDag } from "@harness/shared";
 import { indexSkills, matchSkills, verifyHash, type IndexedSkill } from "@harness/skills-mcp";
 import { Bus } from "./bus.js";
 import { BudgetExceeded } from "./budget.js";
@@ -14,7 +14,7 @@ import { GitHubAdapter, type PrRef } from "./github.js";
 import { runIntake, type IntakeUi } from "./intake.js";
 import { isolationBlock, isolationEnv, taskIsolation } from "./isolation.js";
 import { observeChecks } from "./memory.js";
-import { ceilingNote, sdkCeiling } from "./outputCeiling.js";
+import { ceilingNote, grantedTokens, sdkCeiling } from "./outputCeiling.js";
 import { reapUnder } from "./reaper.js";
 import { AgentPool, type AgentResult } from "./pool.js";
 import {
@@ -42,8 +42,10 @@ import {
   reviewerPrompt,
   reviewerSystemPrompt,
   plannerBreakdownSystemPrompt,
+  plannerContinuePrompt,
   plannerDocsSystemPrompt,
   plannerRepairPrompt,
+  tasksPerMessage,
   qaSystemPrompt,
   qaTaskPrompt,
   skillsBlock,
@@ -171,6 +173,26 @@ const ProdVerdict = z.object({
  * budget — the split works on any SDK version.
  */
 const PLANNER_MAX_OUTPUT_TOKENS = 64_000;
+
+/**
+ * How many messages the DAG may take. At the smallest batch this module will
+ * ask for, eight messages is several hundred tasks — far past the point where a
+ * planner is decomposing rather than enumerating. It is a stop, not a target.
+ */
+const MAX_DAG_BATCHES = 8;
+
+/** The first few schema complaints, named by field, for a planner to act on. */
+function issueSummary(error: z.ZodError): string {
+  return (
+    error.issues
+      .slice(0, 5)
+      // `extractJson` has already guaranteed an object, so every issue has a key
+      // to name; "(root)" is for a schema that grows a root-level rule.
+      /* v8 ignore next */
+      .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+      .join("; ")
+  );
+}
 
 /**
  * Did the session die against the output-token ceiling rather than produce bad
@@ -1576,7 +1598,19 @@ export class RunController {
     throw this.planFailed(runId, attempts, lastReason, lastPath);
   }
 
-  /** Phase B: the DAG. No tools — the survey happened in phase A and is quoted back. */
+  /**
+   * Phase B: the DAG. No tools — the survey happened in phase A and is quoted back.
+   *
+   * The DAG comes back in as many messages as it takes. A task costs about 500
+   * tokens of JSON, a real plan runs to forty of them, and the SDK caps one
+   * message at a figure it picks by model and does not negotiate — 32k for a
+   * model it does not recognise, which today means every default planner. The
+   * rule this replaces told the planner to emit "fewer, larger tasks" when the
+   * plan would not fit, trading away the one thing a DAG exists for.
+   *
+   * A plan that fits still arrives in one message, exactly as before: the
+   * continuation only happens when the planner itself says there is more.
+   */
   private async planBreakdown(runId: string, docs: Pick<Plan, "prdMarkdown" | "conventionsMarkdown">, feedback: string): Promise<PlanBreakdown> {
     const run = this.store.getRun(runId)!;
     const attempts = 3;
@@ -1588,66 +1622,114 @@ export class RunController {
     // told. Without this it names `touchedPaths` from the PRD's vocabulary and
     // invents paths for files that already exist a directory away.
     const files = await repoFileList(this.repoPath);
+    const ceiling = await sdkCeiling(run.config.models.planner);
+    const perMessage = tasksPerMessage(grantedTokens(ceiling, PLANNER_MAX_OUTPUT_TOKENS));
 
     for (let attempt = 1; attempt <= attempts; attempt++) {
       // Only the first attempt restates the PRD. A rejected breakdown is a shape
       // problem, so later attempts repair the previous JSON — re-deriving the
       // decomposition three times is what made one failed planning phase cost $3.34.
       const repair = attempt > 1 && lastOutput.length > 0;
-      const result = await this.pool.run({
-        runId,
-        role: "planner",
-        model: run.config.models.planner,
-        systemPrompt: plannerBreakdownSystemPrompt(skillsBlock(this.planSkills(runId))),
-        prompt: repair
-          ? plannerRepairPrompt(lastOutput, lastReason, lastTruncated)
-          : `Assignment:\n${run.assignment}\n${feedback ? `\nOperator feedback on the previous plan:\n${feedback}\n` : ""}\n\nYou have already surveyed the repository and written these documents. Do not use any tools.\n\n<prd>\n${docs.prdMarkdown}\n</prd>\n\n<conventions>\n${docs.conventionsMarkdown}\n</conventions>\n${
-              files
-                ? `\n<repository-files>\n${files}\n</repository-files>\n\nThese are the files that exist today. Put the real ones under \`touchedPaths\` — a path you invent for a file that already exists is a task pointed at nothing, and two tasks naming the same file by different paths will collide instead of depending on each other. Only invent a path for a file the assignment genuinely requires and the repository does not have.\n`
-                : ""
-            }\nEmit the epic/task DAG as JSON.`,
-        cwd: this.repoPath,
-        tools: [],
-        allowedTools: [],
-        maxTurns: 4,
-        maxOutputTokens: PLANNER_MAX_OUTPUT_TOKENS,
-        budgetCheck: () => this.checkBudget(runId),
-      });
-      lastOutput = result.resultText;
-      lastTruncated = outputTruncated(result.resultText, result.errorDetail);
-      // Always keep the raw output: an unusable plan is expensive, and diagnosing
-      // it from a one-line error is impossible.
-      lastPath = this.saveAttempt(path.join(this.repoPath, ".harness", runId), `dag-${attempt}`, result.resultText);
+      const epics: PlannedEpic[] = [];
+      const tasks: PlannedTask[] = [];
+      let resume: string | undefined;
+      let reason = "";
+      let outcome: AgentResult["outcome"] = "done";
+      let errorDetail: string | undefined;
 
-      // Three distinct failures with three distinct fixes — never collapse them
-      // into one message.
-      try {
-        const parsed = PlanBreakdown.safeParse(extractJson(result.resultText));
-        if (parsed.success) {
-          const errors = validatePlanDag({ ...docs, ...parsed.data });
-          if (errors.length === 0) return parsed.data;
-          lastReason = `the plan is not a valid DAG: ${errors.join("; ")}`;
-        } else {
-          const issues = parsed.error.issues
-            .slice(0, 5)
-            // `extractJson` has already guaranteed an object, so every issue has a
-          // key to name; "(root)" is for a schema that grows a root-level rule.
-          /* v8 ignore next */
-          .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
-            .join("; ");
-          lastReason = `the breakdown does not match the required shape: ${issues}`;
+      // Each pass through here is one message of the DAG. Every way out is an
+      // explicit break or the return: an attempt ends when the planner says the
+      // plan is complete, when a message cannot be read, or at the cap.
+      for (let batch = 1; ; batch++) {
+        const result = await this.pool.run({
+          runId,
+          role: "planner",
+          model: run.config.models.planner,
+          systemPrompt: plannerBreakdownSystemPrompt(skillsBlock(this.planSkills(runId)), perMessage),
+          resume,
+          prompt:
+            batch > 1
+              ? plannerContinuePrompt(epics, tasks, perMessage)
+              : repair
+                ? plannerRepairPrompt(lastOutput, lastReason, lastTruncated)
+                : `Assignment:\n${run.assignment}\n${feedback ? `\nOperator feedback on the previous plan:\n${feedback}\n` : ""}\n\nYou have already surveyed the repository and written these documents. Do not use any tools.\n\n<prd>\n${docs.prdMarkdown}\n</prd>\n\n<conventions>\n${docs.conventionsMarkdown}\n</conventions>\n${
+                    files
+                      ? `\n<repository-files>\n${files}\n</repository-files>\n\nThese are the files that exist today. Put the real ones under \`touchedPaths\` — a path you invent for a file that already exists is a task pointed at nothing, and two tasks naming the same file by different paths will collide instead of depending on each other. Only invent a path for a file the assignment genuinely requires and the repository does not have.\n`
+                      : ""
+                  }\nEmit the epic/task DAG as JSON.`,
+          cwd: this.repoPath,
+          tools: [],
+          allowedTools: [],
+          maxTurns: 4,
+          maxOutputTokens: PLANNER_MAX_OUTPUT_TOKENS,
+          budgetCheck: () => this.checkBudget(runId),
+        });
+        // The continuation resumes the same conversation when the transport
+        // offers a handle; when it does not, `plannerContinuePrompt` carries
+        // enough of the plan for the next message to stand on its own.
+        resume = result.sdkSessionId;
+        lastOutput = result.resultText;
+        lastTruncated = outputTruncated(result.resultText, result.errorDetail);
+        outcome = result.outcome;
+        errorDetail = result.errorDetail;
+        // Always keep the raw output: an unusable plan is expensive, and diagnosing
+        // it from a one-line error is impossible. The first message of an attempt
+        // keeps the name it has always had; continuations extend it.
+        lastPath = this.saveAttempt(path.join(this.repoPath, ".harness", runId), batch > 1 ? `dag-${attempt}-${batch}` : `dag-${attempt}`, result.resultText);
+
+        const read = this.readBatch(result.resultText, lastTruncated);
+        if ("reason" in read) {
+          reason = read.reason;
+          break;
         }
-      } catch (e) {
-        lastReason = lastTruncated
-          ? "the breakdown ran past the output-token limit and was cut off mid-JSON — it is too long to emit in one message"
-          // Only `extractJson` and `JSON.parse` throw in here, and both throw
-          // Errors — the String() arm is for a future throw that does not.
-          /* v8 ignore next */
-          : `the breakdown JSON could not be read: ${(e instanceof Error ? e.message : String(e)).slice(0, 300)}`;
+        epics.push(...read.batch.epics);
+        tasks.push(...read.batch.tasks);
+        if (!read.batch.more) {
+          // The whole DAG is in. Shape and DAG validity are judged on the
+          // assembled plan, never on a batch — a `dependsOn` edge is only
+          // dangling once every message that could have satisfied it is in.
+          const parsed = PlanBreakdown.safeParse({ epics, tasks });
+          if (!parsed.success) {
+            reason = `the breakdown does not match the required shape: ${issueSummary(parsed.error)}`;
+            break;
+          }
+          const errors = validatePlanDag({ ...docs, ...parsed.data });
+          if (errors.length) {
+            reason = `the plan is not a valid DAG: ${errors.join("; ")}`;
+            break;
+          }
+          return parsed.data;
+        }
+        if (batch === MAX_DAG_BATCHES) {
+          // A planner that keeps saying "more" past this is not decomposing, it
+          // is enumerating. Better a named failure than an unbounded spend.
+          reason = `the breakdown was still unfinished after ${MAX_DAG_BATCHES} messages (${tasks.length} tasks so far) — it is too large to plan in one pass`;
+          break;
+        }
       }
-      lastReason = this.failedAttempt(runId, attempt, lastReason, lastPath, result.outcome, result.errorDetail);
+
+      lastReason = this.failedAttempt(runId, attempt, reason, lastPath, outcome, errorDetail);
     }
     throw this.planFailed(runId, attempts, lastReason, lastPath);
+  }
+
+  /** One message of the DAG, or the reason it was unusable. */
+  private readBatch(text: string, truncated: boolean): { batch: PlanBatch } | { reason: string } {
+    let json: unknown;
+    try {
+      json = extractJson(text);
+    } catch (e) {
+      return {
+        reason: truncated
+          ? "the breakdown ran past the output-token limit and was cut off mid-JSON — it is too long to emit in one message"
+          : // Only `extractJson` and `JSON.parse` throw in here, and both throw
+            // Errors — the String() arm is for a future throw that does not.
+            /* v8 ignore next */
+            `the breakdown JSON could not be read: ${(e instanceof Error ? e.message : String(e)).slice(0, 300)}`,
+      };
+    }
+    const parsed = PlanBatch.safeParse(json);
+    return parsed.success ? { batch: parsed.data } : { reason: `the breakdown does not match the required shape: ${issueSummary(parsed.error)}` };
   }
 
   /** Record a rejected planner attempt; returns the reason the next attempt is told. */

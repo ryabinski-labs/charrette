@@ -207,6 +207,131 @@ describe("planner output truncation", () => {
   });
 });
 
+/**
+ * A task's JSON costs about 500 tokens and a real plan runs to forty of them,
+ * against a per-message ceiling the SDK picks by model and does not negotiate —
+ * 32k for one it does not recognise, which today is every default planner. The
+ * rule this replaced told the planner to emit "fewer, larger tasks" when the
+ * plan would not fit, which pays for a channel limit with the only thing the DAG
+ * exists for.
+ */
+describe("a DAG too big for one message", () => {
+  const epic = { id: "epic-e", title: "E", summary: "s" };
+  const task = (id: string, dependsOn: string[] = []) => ({
+    id,
+    epicId: "epic-e",
+    title: id,
+    spec: "s",
+    acceptanceCriteria: ["x"],
+    dependsOn,
+    touchedPaths: [],
+    estimatedSize: "S" as const,
+  });
+  const batch = (body: object) => "```json\n" + JSON.stringify(body) + "\n```";
+
+  it("asks for the rest instead of settling for what fit in one message", async () => {
+    const { controller, store } = harness([
+      DOCS,
+      batch({ epics: [epic], tasks: [task("task-a")], more: true }),
+      batch({ tasks: [task("task-b")], more: false }),
+    ]);
+    await controller.startRun("do a thing", RunConfig.parse({ planIntentCheck: false })).catch(() => undefined);
+    const runId = (store.db.prepare("SELECT id FROM runs").get() as { id: string }).id;
+    expect(store.listTasks(runId).map((t) => t.id)).toEqual(["task-a", "task-b"]);
+  });
+
+  it("still takes a plan that fits in one message, in one message", async () => {
+    // The continuation only happens when the planner says there is more, so a
+    // small plan costs exactly what it did before this existed.
+    const { controller, calls } = harness([DOCS, dagJson()]);
+    await controller.startRun("do a thing", RunConfig.parse({ planIntentCheck: false })).catch(() => undefined);
+    expect(calls()).toBe(2);
+  });
+
+  it("carries the ids already emitted into the continuation", async () => {
+    // `dependsOn` has to point at ids from an earlier message. A continuation
+    // that cannot see them invents an edge to a task under another name, which
+    // validates as dangling and throws the whole plan away.
+    const { controller, specs } = harness([
+      DOCS,
+      batch({ epics: [epic], tasks: [task("task-a")], more: true }),
+      batch({ tasks: [task("task-b", ["task-a"])], more: false }),
+    ]);
+    await controller.startRun("do a thing", RunConfig.parse({ planIntentCheck: false })).catch(() => undefined);
+    expect(specs[2]!.prompt).toContain("task-a (epic-e)");
+    expect(specs[2]!.prompt).toContain("epic-e: E");
+    expect(specs[2]!.prompt).not.toContain("<prd>"); // and not the documents a second time
+  });
+
+  it("judges the DAG once the whole plan is in, not one message at a time", async () => {
+    // `task-b` depends on `task-a`, which arrived in an earlier message. Checked
+    // per message this is a dangling edge; checked on the assembled plan it is
+    // the ordinary case.
+    const { controller, store } = harness([
+      DOCS,
+      batch({ epics: [epic], tasks: [task("task-a")], more: true }),
+      batch({ tasks: [task("task-b", ["task-a"])], more: false }),
+    ]);
+    await controller.startRun("do a thing", RunConfig.parse({ planIntentCheck: false })).catch(() => undefined);
+    const runId = (store.db.prepare("SELECT id FROM runs").get() as { id: string }).id;
+    expect(store.getRun(runId)!.state).not.toBe("FAILED");
+  });
+
+  it("rejects a plan whose last message leaves it invalid", async () => {
+    const { controller, events } = harness([
+      DOCS,
+      batch({ epics: [epic], tasks: [task("task-a")], more: true }),
+      batch({ tasks: [task("task-b", ["ghost"])], more: false }),
+    ]);
+    await controller.startRun("do a thing", CONFIG).catch(() => undefined);
+    const first = events.find((e) => e.type === "run.plan_attempt_failed");
+    expect(first!.reason).toMatch(/depends on unknown task ghost/);
+  });
+
+  it("rejects a plan that finishes with no epic to hang the tasks on", async () => {
+    // The shape is only checkable on the assembled whole: a continuation message
+    // legitimately carries no epics, and the first message is what must.
+    const { controller } = harness([DOCS, batch({ tasks: [task("task-a")], more: false })]);
+    await expect(controller.startRun("do a thing", CONFIG)).rejects.toThrow(/does not match the required shape: epics/);
+  });
+
+  it("names the field when a message is JSON but not a batch", async () => {
+    // Every field of a batch has a default, so an object is nearly always
+    // readable — which makes the one thing that is not, a field of the wrong
+    // type, worth naming rather than reporting as unparseable text.
+    const { controller } = harness([DOCS, batch({ epics: [epic], tasks: "all of them" })]);
+    await expect(controller.startRun("do a thing", CONFIG)).rejects.toThrow(/does not match the required shape: tasks/);
+  });
+
+  it("stops after eight messages rather than paying for an endless plan", async () => {
+    // A planner that keeps saying "more" is enumerating, not decomposing.
+    const { controller, calls } = harness([DOCS, batch({ epics: [epic], tasks: [task("task-a")], more: true })]);
+    await expect(controller.startRun("do a thing", CONFIG)).rejects.toThrow(/still unfinished after 8 messages/);
+    expect(calls()).toBe(1 + 8 * 3); // phase A, then eight messages per attempt
+  });
+
+  it("keeps every message of the DAG on disk under its own name", async () => {
+    const { controller, repo, store } = harness([
+      DOCS,
+      batch({ epics: [epic], tasks: [task("task-a")], more: true }),
+      batch({ tasks: [task("task-b")], more: false }),
+    ]);
+    await controller.startRun("do a thing", RunConfig.parse({ planIntentCheck: false })).catch(() => undefined);
+    const runId = (store.db.prepare("SELECT id FROM runs").get() as { id: string }).id;
+    const files = readdirSync(attemptsDir(repo, runId));
+    expect(files).toContain("planner-attempt-dag-1.txt");
+    expect(files).toContain("planner-attempt-dag-1-2.txt");
+  });
+
+  it("tells the planner how many tasks it may put in one message", async () => {
+    const { controller, specs } = harness([DOCS, dagJson()]);
+    await controller.startRun("do a thing", CONFIG).catch(() => undefined);
+    // The planner runs on a model this SDK does not recognise, so the ceiling is
+    // the SDK's 32k default rather than the 64000 the harness asked for.
+    expect(specs[1]!.systemPrompt).toContain("AT MOST 32 tasks");
+  });
+});
+
 describe("agent confinement", () => {
   it("gives the planner read-only tools — allowedTools alone does not restrict", async () => {
     const { controller, specs } = harness(["nope"]);

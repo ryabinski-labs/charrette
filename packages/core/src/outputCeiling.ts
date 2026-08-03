@@ -148,6 +148,18 @@ export function forgetCeilingTable(): void {
 }
 
 /**
+ * How much output the harness may actually plan around.
+ *
+ * The request is still a ceiling of its own — asking for 64000 does not get more
+ * than 64000 even from a model that would allow it — and a ceiling that could
+ * not be read means taking the request at face value, which is what the harness
+ * did before it could read one.
+ */
+export function grantedTokens(ceiling: OutputCeiling | undefined, asked: number): number {
+  return Math.min(ceiling?.cap ?? asked, asked);
+}
+
+/**
  * What the operator is told when the SDK will grant less than the harness asked for.
  *
  * Undefined when there is nothing to say — the ceiling could not be read, or it

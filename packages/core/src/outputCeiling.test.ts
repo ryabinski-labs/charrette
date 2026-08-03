@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { ceilingNote, ceilingTable, forgetCeilingTable, modelCeiling, sdkCeiling, type CeilingTable } from "./outputCeiling.js";
+import { ceilingNote, ceilingTable, forgetCeilingTable, grantedTokens, modelCeiling, sdkCeiling, type CeilingTable } from "./outputCeiling.js";
 
 /** The shape the SDK minifies its ceiling chain into, with the pieces that matter. */
 function chain(body: string): string {
@@ -145,6 +145,15 @@ describe("what the operator is told about it", () => {
     // silence — a reassurance printed every run is a line nobody reads.
     expect(ceilingNote(modelCeiling(table, "claude-sonnet-4-5"), 64_000)).toBeUndefined();
     expect(ceilingNote(modelCeiling(table, "claude-opus-4"), 32_000)).toBeUndefined();
+  });
+
+  it("plans around what was granted, and around the request when nothing was read", () => {
+    // An unreadable SDK leaves the harness exactly where it was before it could
+    // read one: taking its own request at face value.
+    expect(grantedTokens(modelCeiling(table, "claude-opus-5"), 64_000)).toBe(32_000);
+    expect(grantedTokens(modelCeiling(table, "claude-opus-4-5"), 64_000)).toBe(64_000);
+    expect(grantedTokens(modelCeiling(table, "claude-opus-4-5"), 16_000)).toBe(16_000);
+    expect(grantedTokens(undefined, 64_000)).toBe(64_000);
   });
 
   it("says nothing when the ceiling could not be read", () => {

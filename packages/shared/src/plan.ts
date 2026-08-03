@@ -40,6 +40,25 @@ export type Plan = z.infer<typeof Plan>;
 export const PlanBreakdown = Plan.pick({ epics: true, tasks: true });
 export type PlanBreakdown = z.infer<typeof PlanBreakdown>;
 
+/**
+ * One message's worth of the DAG.
+ *
+ * Even split from the prose, the DAG has no bound on it: a task's JSON costs
+ * around 500 tokens and a real plan runs to forty of them, against a per-message
+ * ceiling the SDK sets by model and does not negotiate. The old rule told the
+ * planner to emit "fewer, larger tasks" when it would not fit — which trades the
+ * only thing the DAG is for, parallelism, against a channel limit.
+ *
+ * So the planner emits what fits and says whether there is more. `epics` is
+ * empty on every message after the first, and `more` false ends the sequence.
+ */
+export const PlanBatch = z.object({
+  epics: z.array(PlannedEpic).default([]),
+  tasks: z.array(PlannedTask).default([]),
+  more: z.boolean().default(false),
+});
+export type PlanBatch = z.infer<typeof PlanBatch>;
+
 /** Validate DAG shape: unique ids, no dangling deps, no cycles. Returns error strings (empty = valid). */
 export function validatePlanDag(plan: Plan): string[] {
   const errors: string[] = [];
