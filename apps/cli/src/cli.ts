@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { createInterface } from "node:readline/promises";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { RunConfig, providerFor } from "@harness/shared";
+import { ModelRoutingShape, RunConfig, providerFor } from "@harness/shared";
 import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, detectToolbelt, ensureIgnored, harnessBuild, missingKeys, originSlug, postmortem, renderPostmortem } from "@harness/core";
 import { Dashboard } from "@harness/dashboard";
 import { promptForNewCap } from "./budget.js";
@@ -259,6 +259,7 @@ interface RunOpts {
   dashboard?: boolean;
   port?: string;
   chat?: boolean;
+  model?: string[];
 }
 
 interface Resolved {
@@ -382,7 +383,9 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
     workerMaxTurns: file.workerMaxTurns,
     workerRespawnCap: file.workerRespawnCap,
     taskWallClockMinutes: file.taskWallClockMinutes,
-    models: file.models,
+    // The flag wins over the file: it is the thing you reach for when the run
+    // in front of you needs to get cheaper right now.
+    models: { ...file.models, ...modelOverrides(opts.model) },
     budget: { runCapUsd, taskCapUsd },
     pitStop: file.pitStop,
     skillsDirs,
@@ -426,6 +429,30 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
  * one per case: commander keeps parsed option values on the command objects,
  * and a shared instance would carry one test's flags into the next.
  */
+/** Gathers a repeatable option into an array. */
+const collect = (value: string, previous: string[]) => [...previous, value];
+
+/**
+ * Parse repeated `--model role=model` pairs into a partial routing table.
+ *
+ * A typo has to be loud. `--model wroker=gpt-5.6-terra` that quietly did
+ * nothing would leave the operator watching an expensive run they thought they
+ * had just made cheap, which is the exact situation this flag exists for.
+ */
+export function modelOverrides(pairs: string[] = []): Record<string, string> {
+  const roles = Object.keys(ModelRoutingShape.shape);
+  const out: Record<string, string> = {};
+  for (const pair of pairs) {
+    const eq = pair.indexOf("=");
+    const role = eq < 0 ? "" : pair.slice(0, eq).trim();
+    const model = eq < 0 ? "" : pair.slice(eq + 1).trim();
+    if (!role || !model) throw new Error(`--model expects role=model, got "${pair}"`);
+    if (!roles.includes(role)) throw new Error(`--model: no role called "${role}". Roles: ${[...roles].sort().join(", ")}`);
+    out[role] = model;
+  }
+  return out;
+}
+
 export function buildProgram(): Command {
   const program = new Command();
   program.name("harness").description("Multi-agent development harness: assignment in, reviewed PRs out");
@@ -444,6 +471,7 @@ export function buildProgram(): Command {
     .option("--port <n>", "pin the dashboard port (default: the first free port from 4777)")
     .option("--chat", "talk the assignment through with an intake agent first (default when no assignment is given)")
     .option("--no-chat", "skip the conversation; plan directly from the assignment")
+    .option("-m, --model <role=model>", "route one role to a model, e.g. worker=gpt-5.6-terra; repeatable", collect, [])
     .action(async (assignment: string | undefined, opts: RunOpts, cmd: Command) => {
       const { repo, config, dashboard: wantDashboard, dashboardPort, chat: wantChat, banner } = resolveRun(cmd, opts, assignment);
       const dash = makeDashboardFactory(wantDashboard, dashboardPort);
@@ -494,7 +522,8 @@ export function buildProgram(): Command {
     .option("--dashboard", "serve the monitoring dashboard and resolve gates there (default)")
     .option("--no-dashboard", "run headless; resolve gates in this terminal")
     .option("--port <n>", "pin the dashboard port (default: the first free port from 4777)")
-    .action(async (runIdArg: string | undefined, opts: { repo: string; dashboard?: boolean; port?: string }, cmd: Command) => {
+    .option("-m, --model <role=model>", "re-route one role for the rest of the run, e.g. worker=gpt-5.6-terra; repeatable", collect, [])
+    .action(async (runIdArg: string | undefined, opts: { repo: string; dashboard?: boolean; port?: string; model?: string[] }, cmd: Command) => {
       const repo = resolveRepoRoot(opts.repo);
       const file = loadFileConfig(repo).config;
       const fromCli = (name: string) => cmd.getOptionValueSource(name) === "cli";
@@ -570,6 +599,33 @@ export function buildProgram(): Command {
         if (!existing || !file[key] || JSON.stringify(file[key]) === JSON.stringify(existing.config[key])) continue;
         store.patchRunConfig(runId, { [key]: file[key] } as Partial<RunConfig>);
         process.stdout.write(`${key} updated from ${CONFIG_FILENAME} for the remaining tasks\n`);
+      }
+      // Which model answers for each role, for the rest of the run.
+      //
+      // This is the knob an operator reaches for mid-run, and usually for one
+      // reason: the budget is going faster than the work is. The remaining
+      // tasks are exactly the ones that can still be made cheaper, so a routing
+      // table frozen at run start is frozen at the least useful moment. The
+      // flag wins over the file, because `--model worker=gpt-5.6-terra` on the
+      // resume line is the whole point — nobody wants to edit JSON to stop a
+      // run from spending.
+      //
+      // The pinned roles hold here too: `patchRunConfig` re-parses the whole
+      // config, so a judge cannot be moved off Anthropic by the back door.
+      if (existing) {
+        const wanted = { ...file.models, ...modelOverrides(opts.model) };
+        const changed = Object.entries(wanted).filter(([role, model]) => model !== existing.config.models[role as keyof typeof existing.config.models]);
+        if (changed.length) {
+          const models = { ...existing.config.models, ...Object.fromEntries(changed) };
+          const missing = missingKeys(models);
+          if (missing.length) {
+            throw new Error(`${missing.join(" ")} Export the key, or route that role somewhere else.`);
+          }
+          store.patchRunConfig(runId, { models });
+          for (const [role, model] of changed) {
+            process.stdout.write(`${role} re-routed for the rest of the run: ${existing.config.models[role as keyof typeof existing.config.models]} → ${model}\n`);
+          }
+        }
       }
       // Setting prodUrl on a run that already finished is what extends it past the
       // pull request: the next resume follows the deploy and checks production.

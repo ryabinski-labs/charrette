@@ -667,9 +667,32 @@ to Anthropic, `gpt-*` to OpenAI, `gemini-*` to Google. Nothing else changes.
 
 Export that vendor's key (`OPENAI_API_KEY`, `GEMINI_API_KEY`) and run. If the key
 is missing the run refuses to start rather than failing at the first dispatch of
-that role — `integrator` runs after every worker in the epic has been paid for.
-Spell the provider out as `openai/<model>` if you ever need a model whose name
-does not announce its family.
+that role — `demo` first runs at a pit stop, after the whole epic has been paid
+for. Spell the provider out as `openai/<model>` if you ever need a model whose
+name does not announce its family.
+
+**The default is all-Anthropic.** Nothing routes anywhere else unless you say so.
+
+#### Changing it mid-run
+
+You do not have to decide at the start. `--model` works on `run` and on
+`resume`, and on `resume` it re-routes the roles for **the rest of the run**:
+
+```bash
+harness resume --model worker=gpt-5.6-terra --model demo=gemini-3.5-flash-lite
+```
+
+This is the knob for the run that is spending faster than it is building. The
+tasks still queued are the only ones that can still be made cheaper, so a
+routing table frozen at run start is frozen at the least useful moment. Editing
+`models` in `harness.config.json` and resuming does the same thing; the flag wins
+over the file, because nobody wants to edit JSON to stop a run from spending.
+
+Only the roles you name change — the rest keep what the run already had. A
+misspelled role is an error, not a silent no-op, and the pinned roles below and
+the key check both still apply, so `resume` refuses the same things `run` does.
+Completed tasks are never re-executed, so re-routing only ever affects work that
+has not happened yet.
 
 **Four roles may not leave Anthropic**, and the run refuses to start if you move
 them:
