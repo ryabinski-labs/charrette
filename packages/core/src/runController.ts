@@ -48,6 +48,8 @@ import {
   prodValidatorSystemPrompt,
   validatorPrompt,
   validatorSystemPrompt,
+  planIntentPrompt,
+  planIntentSystemPrompt,
   workerResumePrompt,
   workerSystemPrompt,
   workerTaskPrompt,
@@ -507,12 +509,18 @@ export class RunController {
         this.persistPlan(runId, plan);
         this.store.transitionRun(runId, "PLAN_REVIEW");
       }
-      const gate = await this.gates.resolvePlanGate(this.planPrd(runId), this.planSummary(runId));
+      // Asked here, where a gap is worth a re-plan, rather than only at
+      // INTEGRATING, where the same answer costs a whole run.
+      const shortfall = await this.checkPlanIntent(runId);
+      const gate = await this.gates.resolvePlanGate(this.planPrd(runId), `${this.planSummary(runId)}${shortfall}`);
       if (gate.approved) {
         await this.fileIssues(runId);
         this.store.transitionRun(runId, "EXECUTING", "plan approved");
       } else {
-        planFeedback = gate.feedback;
+        // The operator's words first — they saw the shortfall and are answering
+        // it — with the finding appended so a re-plan closes it even when they
+        // rejected for some other reason entirely.
+        planFeedback = `${gate.feedback}${shortfall}`;
         this.store.transitionRun(runId, "PLANNING", "plan rejected");
       }
       run = this.store.getRun(runId)!;
@@ -567,6 +575,63 @@ export class RunController {
       const closed = await this.verify(runId);
       const now = this.store.getRun(runId)!;
       if (closed && now.state === "VERIFYING") this.store.transitionRun(runId, "DONE", this.outcome(runId).line);
+    }
+  }
+
+  /**
+   * Ask whether the plan could deliver the assignment, before anyone builds it.
+   *
+   * The harness already asks this question — at INTEGRATING, of the merged
+   * result, which is the most expensive moment it could possibly be asked. Run
+   * 40da9337's answer arrived after 37 hours and $773.55, and every gap in it
+   * was legible in the plan: seven vendor categories whose acceptance criteria
+   * asked for "an interface and a deterministic mock", under an assignment that
+   * said "including all the integrations".
+   *
+   * Returns a block to append to what the operator reads at the gate, and to the
+   * feedback a rejected plan carries back to the planner. Empty on PASS, on a
+   * check that could not complete, and when the operator has turned it off —
+   * this informs the gate, it never blocks it. The decision stays theirs.
+   */
+  private async checkPlanIntent(runId: string): Promise<string> {
+    const run = this.store.getRun(runId)!;
+    if (!run.config.planIntentCheck) return "";
+    const tasks = this.store.listTasks(runId);
+    try {
+      const result = await this.pool.run({
+        runId,
+        role: "validator",
+        model: run.config.models.qa,
+        systemPrompt: planIntentSystemPrompt(),
+        prompt: planIntentPrompt(run.assignment, this.planPrd(runId), tasks),
+        cwd: this.repoPath,
+        // Prose against prose. Reading the repository is the planner's job and
+        // it has already been paid for; this is the cheap half of the check.
+        tools: [],
+        allowedTools: [],
+        maxTurns: 12,
+        budgetCheck: () => this.checkBudget(runId),
+      });
+      const verdict = IntentVerdict.parse(extractJson(result.resultText));
+      this.bus.publish({ type: "run.plan_intent_verdict", runId, verdict: verdict.verdict, gaps: verdict.gaps, summary: verdict.summary, ts: Date.now() });
+      if (verdict.verdict === "PASS" || !verdict.gaps.length) return "";
+      return [
+        "",
+        "",
+        "What this plan would not deliver, read against your assignment:",
+        ...verdict.gaps.map((g) => `  - ${g}`),
+        "",
+        "Every task here can pass its own acceptance criteria and still leave the",
+        "above missing, because those criteria are the whole contract a worker",
+        "builds to and QA checks. Rejecting sends this back to the planner with",
+        "the list attached; approving accepts it as the scope.",
+      ].join("\n");
+    } catch (e) {
+      if (e instanceof BudgetExceeded) throw e;
+      // A plan that could not be checked is still a plan the operator may
+      // approve. Say the check did not happen rather than implying it passed.
+      this.bus.publish({ type: "agent.log", runId, sessionId: "validator", text: `the plan-intent check did not complete: ${String(e).slice(0, 300)}`, ts: Date.now() });
+      return "\n\nThe plan-intent check did not complete, so nothing has compared this plan to your assignment.";
     }
   }
 

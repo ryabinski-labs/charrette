@@ -135,6 +135,22 @@ export const RunConfig = z.object({
    * behaviour of reporting the verdict and stopping there.
    */
   intentFixRounds: z.number().int().min(0).max(3).default(1),
+  /**
+   * Ask, at the plan gate, whether this plan could deliver the assignment at all
+   * — before a worker is dispatched.
+   *
+   * The same question is already asked at the end of every run, and asking it
+   * there is what makes the answer expensive. Run 40da9337's plan gave every one
+   * of seven vendor categories acceptance criteria that a deterministic mock
+   * satisfies, against an assignment that said "including all the integrations".
+   * Nothing was wrong with the execution; the plan promised less than the brief
+   * and no one compared them until $773.55 later. One agent call at the gate is
+   * roughly a dollar.
+   *
+   * Off restores the old behaviour: the operator reads the plan and is the only
+   * thing standing between a hollow plan and a run that faithfully builds it.
+   */
+  planIntentCheck: z.boolean().default(true),
   skillsDirs: z.array(z.string()).default([]),
   /**
    * Skills bound to a class of work, by name, ahead of any scoring.

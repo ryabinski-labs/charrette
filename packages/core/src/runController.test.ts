@@ -144,7 +144,9 @@ describe("planning failure diagnostics", () => {
     const prd = ["# PRD", "```json", '{"posts":[]}', "```"].join("\n");
     const docs = `<prd>\n${prd}\n</prd>\n<conventions>\nuse vitest\n</conventions>`;
     const { controller, repo, store, calls } = harness([docs, dagJson()]);
-    await controller.startRun("do a thing", CONFIG).catch(() => undefined);
+    // The subject here is that the PRD parses; the plan-intent check would add a
+    // third agent call and make the count say nothing about that.
+    await controller.startRun("do a thing", RunConfig.parse({ planIntentCheck: false })).catch(() => undefined);
     const runId = (store.db.prepare("SELECT id FROM runs").get() as { id: string }).id;
 
     expect(calls()).toBe(2); // accepted first time in both phases — no wasted Opus call

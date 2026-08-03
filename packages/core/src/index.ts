@@ -9,6 +9,7 @@ export * from "./github.js";
 export * from "./intake.js";
 export * from "./pitstop.js";
 export * from "./pool.js";
+export * from "./postmortem.js";
 export * from "./prompts.js";
 export * from "./qa.js";
 export * from "./runController.js";

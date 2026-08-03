@@ -180,8 +180,39 @@ describe("a budget stop reaching each stage that must let it through", () => {
     });
     ref.store = store;
 
+    // The plan-intent check shares the validator role and runs first, so with it
+    // on the cap would trip at the plan gate and never reach the stage under
+    // test. It has its own case below.
     await expect(
-      controller.startRun("build a thing", RunConfig.parse({ ...BASE, prodUrl: "https://app.example.com", budget: { runCapUsd: 22, taskCapUsd: 1000 } }))
+      controller.startRun(
+        "build a thing",
+        RunConfig.parse({ ...BASE, planIntentCheck: false, prodUrl: "https://app.example.com", budget: { runCapUsd: 22, taskCapUsd: 1000 } })
+      )
+    ).rejects.toThrow(/budget exceeded/);
+  });
+
+  it("stops the run rather than being swallowed by the plan-intent check", async () => {
+    // This one catches too — an unchecked plan is still a plan the operator may
+    // approve — so it has the same way of hiding a budget stop as the others.
+    const dir = repo();
+    const { pool, ref } = rolePool(
+      {
+        planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS() : dagJson()),
+        worker,
+        qa: () => QA_PASS,
+        validator: () => "",
+      },
+      { bill: 5 }
+    );
+    const { controller, store } = build({
+      repoPath: dir,
+      pool,
+      gates: { async resolveBudgetGate() { return null; } },
+    });
+    ref.store = store;
+
+    await expect(
+      controller.startRun("build a thing", RunConfig.parse({ ...BASE, budget: { runCapUsd: 3, taskCapUsd: 1000 } }))
     ).rejects.toThrow(/budget exceeded/);
   });
 

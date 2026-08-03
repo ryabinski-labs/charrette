@@ -79,6 +79,10 @@ const h = vi.hoisted(() => {
     promptSeedMock: vi.fn(async () => "seed from the conversation"),
     chatCloseMock: vi.fn(),
     TerminalChatMock: vi.fn(),
+    // The report's content is settled in postmortem.test.ts; what the CLI owes
+    // is picking the right run and saying so when there is none.
+    postmortemMock: vi.fn((_store: unknown, runId: string) => ({ runId })),
+    renderPostmortemMock: vi.fn((p: { runId: string }) => `Run ${p.runId} [state] — assignment`),
   };
 });
 
@@ -91,6 +95,8 @@ vi.mock("@harness/core", () => ({
   detectToolbelt: h.detectToolbeltMock,
   ensureIgnored: h.ensureIgnoredMock,
   originSlug: h.originSlugMock,
+  postmortem: h.postmortemMock,
+  renderPostmortem: h.renderPostmortemMock,
 }));
 vi.mock("@harness/dashboard", () => ({ Dashboard: h.DashboardMock }));
 vi.mock("./defaults.js", async (importOriginal) => {
@@ -1097,6 +1103,46 @@ describe("harness regroup", () => {
 
     expect(printed()).toBe("No run with pull requests to regroup.\n");
     expect(h.controllerMethods.regroupPrs).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Diagnosing run 40da9337 took an hour of ad-hoc SQL against its harness.db.
+ * The answer — an intake question asked and never answered — was two lines of
+ * it, and nothing in the product would have shown it.
+ */
+describe("harness postmortem", () => {
+  it("explains the most recent run when given no id", async () => {
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "PR_REVIEW", assignment: "build it" }]);
+    h.storeMethods.getRun.mockReturnValue({ id: "run-1", state: "PR_REVIEW", assignment: "build it", config: {} });
+
+    await cli("postmortem", "--repo", "/repo");
+
+    expect(printed()).toContain("Run run-1 [state]");
+  });
+
+  it("explains a named run", async () => {
+    h.storeMethods.getRun.mockReturnValue({ id: "run-x", state: "DONE", assignment: "a thing", config: {} });
+
+    await cli("postmortem", "run-x", "--repo", "/repo");
+
+    expect(printed()).toContain("Run run-x [state]");
+  });
+
+  it("says so when the repo has never been run", async () => {
+    h.storeMethods.listRuns.mockReturnValue([]);
+
+    await cli("postmortem", "--repo", "/repo");
+
+    expect(printed()).toBe("No runs yet.\n");
+  });
+
+  it("names the run it could not find rather than the generic message", async () => {
+    h.storeMethods.getRun.mockReturnValue(undefined);
+
+    await cli("postmortem", "nope", "--repo", "/repo");
+
+    expect(printed()).toBe("No run nope in this repo.\n");
   });
 });
 

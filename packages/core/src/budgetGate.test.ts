@@ -195,4 +195,51 @@ describe("budget hold", () => {
     // Declined, so it stays held — and BUDGET_HOLD is what `resume` continues from.
     expect(store.getRun(runId)!.state).toBe("BUDGET_HOLD");
   });
+
+  it("does not re-ask a second worker's way into a gate the operator already declined", async () => {
+    // Two workers in flight, both over the cap. The first opens the gate; the
+    // second must not queue a duplicate of a question already answered "no" —
+    // it stops on the held state instead. Otherwise declining once costs the
+    // operator one modal per running session.
+    const repo = gitRepo();
+    const store = new Store(":memory:");
+    const bus = new Bus(store);
+    const dag = JSON.stringify({
+      epics: [{ id: "epic-e", title: "E", summary: "s" }],
+      tasks: ["task-a", "task-b"].map((id) => ({
+        id, epicId: "epic-e", title: id, spec: "s", acceptanceCriteria: ["x"],
+        dependsOn: [], touchedPaths: [], estimatedSize: "S" as const,
+      })),
+    });
+    const { pool } = spendingPool(store, 0.6, [DOCS, `\`\`\`json\n${dag}\n\`\`\``, "worker done"]);
+    let asked = 0;
+    const controller = new RunController(
+      store,
+      bus,
+      pool,
+      new GitHubAdapter(undefined, undefined),
+      {
+        async resolvePlanGate() {
+          return { approved: true, feedback: "" };
+        },
+        async resolveBudgetGate() {
+          asked++;
+          // Hold the decision open long enough for the other worker to arrive at
+          // its own check and find the run already held.
+          await new Promise((r) => setTimeout(r, 20));
+          return null;
+        },
+      },
+      repo
+    );
+    const config = RunConfig.parse({
+      budget: { runCapUsd: 1.1, taskCapUsd: 100 },
+      deterministicChecks: [],
+      maxParallelWorkers: 2,
+      planIntentCheck: false,
+    });
+
+    await expect(controller.startRun("do a thing", config)).rejects.toThrow(/budget exceeded/);
+    expect(asked).toBe(1);
+  }, 30_000);
 });

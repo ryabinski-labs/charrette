@@ -497,7 +497,9 @@ describe("judging the merged whole without a base to diff against", () => {
     });
     const { controller, store } = build({ repoPath: dir, pool });
 
-    const runId = await controller.startRun("build a thing", RunConfig.parse({ deterministicChecks: [] }));
+    // The plan-intent check shares the validator role, and this counts validators
+    // to prove the end-of-run one still ran.
+    const runId = await controller.startRun("build a thing", RunConfig.parse({ deterministicChecks: [], planIntentCheck: false }));
 
     expect(store.getRun(runId)!.config.baseBranch).toBe("");
     // It still judges the merged whole — it just cannot show a diffstat.
