@@ -3,7 +3,7 @@ import { createInterface } from "node:readline/promises";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { ModelRoutingShape, RunConfig, providerFor } from "@harness/shared";
-import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, detectToolbelt, ensureIgnored, harnessBuild, missingKeys, originSlug, postmortem, renderPostmortem } from "@harness/core";
+import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, detectToolbelt, ensureIgnored, harnessBuild, missingKeys, originSlug, postmortem, renderPostmortem, repoUnusable } from "@harness/core";
 import { Dashboard } from "@harness/dashboard";
 import { promptForNewCap } from "./budget.js";
 import {
@@ -453,6 +453,23 @@ export function modelOverrides(pairs: string[] = []): Record<string, string> {
   return out;
 }
 
+/**
+ * Refuse to start in a repository no run can be built in, before a token is
+ * spent on it.
+ *
+ * Printed rather than thrown: the reason is several lines and the line that
+ * matters is the command to run, while the crash log renders only an error's
+ * first line. The exit code still fails, so a script wrapping the harness can
+ * tell.
+ */
+async function repoBlocked(repoPath: string): Promise<boolean> {
+  const why = await repoUnusable(repoPath);
+  if (!why) return false;
+  process.stdout.write(`\n${why}\n`);
+  process.exitCode = 1;
+  return true;
+}
+
 export function buildProgram(): Command {
   const program = new Command();
   program.name("harness").description("Multi-agent development harness: assignment in, reviewed PRs out");
@@ -473,6 +490,7 @@ export function buildProgram(): Command {
     .option("--no-chat", "skip the conversation; plan directly from the assignment")
     .option("-m, --model <role=model>", "route one role to a model, e.g. worker=gpt-5.6-terra; repeatable", collect, [])
     .action(async (assignment: string | undefined, opts: RunOpts, cmd: Command) => {
+      if (await repoBlocked(resolveRepoRoot(opts.repo))) return;
       const { repo, config, dashboard: wantDashboard, dashboardPort, chat: wantChat, banner } = resolveRun(cmd, opts, assignment);
       const dash = makeDashboardFactory(wantDashboard, dashboardPort);
       const { controller, store } = makeController(repo, dash.gateOverride);
@@ -525,6 +543,7 @@ export function buildProgram(): Command {
     .option("-m, --model <role=model>", "re-route one role for the rest of the run, e.g. worker=gpt-5.6-terra; repeatable", collect, [])
     .action(async (runIdArg: string | undefined, opts: { repo: string; dashboard?: boolean; port?: string; model?: string[] }, cmd: Command) => {
       const repo = resolveRepoRoot(opts.repo);
+      if (await repoBlocked(repo)) return;
       const file = loadFileConfig(repo).config;
       const fromCli = (name: string) => cmd.getOptionValueSource(name) === "cli";
       const wantDashboard = fromCli("dashboard") ? opts.dashboard === true : file.dashboard ?? true;

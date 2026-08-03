@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -480,5 +480,68 @@ describe("what a finished run leaves on disk", () => {
     const prd = path.join(dir, ".harness", runId, "PRD.md");
     expect(existsSync(prd)).toBe(true);
     expect(readFileSync(prd, "utf8")).toContain("Build the thing");
+  });
+});
+
+describe("telling the breakdown which files the repository already has", () => {
+  /** Commits a few files on top of the fixture repo, so there is a real tree to list. */
+  function withFiles(dir: string, files: string[]): void {
+    for (const f of files) {
+      mkdirSync(path.dirname(path.join(dir, f)), { recursive: true });
+      writeFileSync(path.join(dir, f), "x\n");
+    }
+    execFileSync("git", ["add", "-A"], { cwd: dir, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "files"], { cwd: dir, stdio: "ignore" });
+  }
+
+  /** Every prompt the planner was given, in the order it was asked. */
+  async function plannerPrompts(dir: string): Promise<string[]> {
+    const { pool, specs } = rolePool({
+      planner: (s) => (s.prompt.includes("PRD") ? dagJson() : DOCS),
+      worker: () => "did the work",
+      qa: () => QA_PASS,
+    });
+    const { controller } = build({ repoPath: dir, pool });
+    await controller.startRun("build a thing", RunConfig.parse({ deterministicChecks: [] }));
+    return specs.filter((s) => s.role === "planner").map((s) => s.prompt);
+  }
+
+  it("names the tracked files in the phase that has no tools", async () => {
+    const dir = repo();
+    withFiles(dir, ["src/auth/session.ts", "src/db/client.ts"]);
+
+    const breakdown = (await plannerPrompts(dir)).find((p) => p.includes("PRD"))!;
+    expect(breakdown).toContain("<repository-files>");
+    expect(breakdown).toContain("src/auth/session.ts");
+    expect(breakdown).toContain("src/db/client.ts");
+  });
+
+  it("tells it what the list is for, so the paths it emits are the ones that exist", async () => {
+    const dir = repo();
+    withFiles(dir, ["src/auth/session.ts"]);
+
+    const breakdown = (await plannerPrompts(dir)).find((p) => p.includes("PRD"))!;
+    expect(breakdown).toContain("touchedPaths");
+  });
+
+  it("leaves the survey phase alone — it has Read, Glob and Grep and can look", async () => {
+    const dir = repo();
+    withFiles(dir, ["src/auth/session.ts"]);
+
+    const survey = (await plannerPrompts(dir)).find((p) => !p.includes("PRD"))!;
+    expect(survey).not.toContain("<repository-files>");
+  });
+
+  it("says nothing about files when the repository tracks none", async () => {
+    // A repository with one commit and nothing in it still plans; it just has
+    // no file list to offer, and an empty block would only be noise.
+    const dir = mkdtempSync(path.join(tmpdir(), "harness-ctl-"));
+    made.push(dir, `${dir}-wt`);
+    for (const args of [["init", "-b", "main"], ["config", "user.email", "t@example.invalid"], ["config", "user.name", "T"], ["commit", "--allow-empty", "-m", "first"]]) {
+      execFileSync("git", args, { cwd: dir, stdio: "ignore" });
+    }
+
+    const breakdown = (await plannerPrompts(dir)).find((p) => p.includes("PRD"))!;
+    expect(breakdown).not.toContain("<repository-files>");
   });
 });

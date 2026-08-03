@@ -60,6 +60,7 @@ const h = vi.hoisted(() => {
     detectToolbeltMock: vi.fn(() => [] as { name: string }[]),
     missingKeysMock: vi.fn(() => [] as string[]),
     ensureIgnoredMock: vi.fn(() => false),
+    repoUnusableMock: vi.fn(async () => null as string | null),
     originSlugMock: vi.fn(async () => "acme/widgets" as string | null),
     detectChecksMock: vi.fn(() => ({ checks: ["npm test"], source: "package.json" })),
     loadFileConfigMock: vi.fn(() => ({ config: {} as Record<string, unknown>, path: null as string | null })),
@@ -95,6 +96,9 @@ vi.mock("@harness/core", () => ({
   RunController: h.RunControllerMock,
   detectToolbelt: h.detectToolbeltMock,
   ensureIgnored: h.ensureIgnoredMock,
+  // The rule itself is unit-tested against real repositories in core; here it
+  // stands in so a test can prove `run` and `resume` actually stop.
+  repoUnusable: h.repoUnusableMock,
   // Pinned, so the banner assertion is about the line existing rather than
   // about whatever commit this checkout happens to be on.
   harnessBuild: () => "0.0.1@7453d60",
@@ -233,6 +237,7 @@ beforeEach(() => {
   h.detectToolbeltMock.mockReset().mockReturnValue([]);
   h.missingKeysMock.mockReset().mockReturnValue([]);
   h.ensureIgnoredMock.mockReset().mockReturnValue(false);
+  h.repoUnusableMock.mockReset().mockResolvedValue(null);
   h.originSlugMock.mockReset().mockResolvedValue("acme/widgets");
   h.detectChecksMock.mockReset().mockReturnValue({ checks: ["npm test"], source: "package.json" });
   h.loadFileConfigMock.mockReset().mockReturnValue({ config: {}, path: null });
@@ -459,6 +464,60 @@ describe("harness run — resolving what the run will actually do", () => {
     await cli("run", "x", "--repo", "/repo", "--no-dashboard");
 
     expect(printed()).toContain("WARNING    2 runs are still open in this repo: run-a (EXECUTING), run-c (PLANNING)");
+  });
+});
+
+describe("a repository no run can be built in", () => {
+  const WHY = "/repo is a git repository with no commits, so there is nothing for a worktree to branch from.\n\n  git add -A && git commit -m \"initial commit\"";
+  // Restored between cases: a failed exit code left behind would fail the whole
+  // test process, whatever the rest of the suite did.
+  let exitCode: typeof process.exitCode;
+
+  beforeEach(() => {
+    exitCode = process.exitCode;
+  });
+  afterEach(() => {
+    process.exitCode = exitCode;
+  });
+
+  it("stops `run` before the intake agent is paid for", async () => {
+    h.repoUnusableMock.mockResolvedValue(WHY);
+    await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard");
+
+    expect(printed()).toContain("no commits");
+    // Not one of these: no store opened, no .harness written, nothing spent.
+    expect(h.RunControllerMock).not.toHaveBeenCalled();
+    expect(h.controllerMethods.startRun).not.toHaveBeenCalled();
+    expect(h.armCrashLogMock).not.toHaveBeenCalled();
+  });
+
+  it("prints the command that fixes it, all of it", async () => {
+    h.repoUnusableMock.mockResolvedValue(WHY);
+    await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard");
+    // The whole reason, not its first line — that is why this is printed and
+    // not thrown, since the crash log renders only an error's opening line.
+    expect(printed()).toContain('git add -A && git commit -m "initial commit"');
+  });
+
+  it("fails the exit code, so a script wrapping the harness can tell", async () => {
+    h.repoUnusableMock.mockResolvedValue(WHY);
+    await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("stops `resume` too — a resumed run needs a worktree just as much", async () => {
+    h.repoUnusableMock.mockResolvedValue(WHY);
+    await cli("resume", "--repo", "/repo", "--no-dashboard");
+
+    expect(printed()).toContain("no commits");
+    expect(h.controllerMethods.resume).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("asks about the repository root, not the directory the operator happened to be in", async () => {
+    h.resolveRepoRootMock.mockReturnValue("/repo/root");
+    await cli("run", "build a thing", "--repo", "/repo/sub/dir", "--no-dashboard");
+    expect(h.repoUnusableMock).toHaveBeenCalledWith("/repo/root");
   });
 });
 
