@@ -1,3 +1,4 @@
+import type { PlannedEpic, PlannedTask } from "@harness/shared";
 import { TaskRow } from "./store.js";
 
 /**
@@ -171,7 +172,39 @@ ${skills}`;
  * Planning phase B: the DAG only. Runs with no tools — the survey already happened
  * in phase A and its output is handed back in the prompt.
  */
-export function plannerBreakdownSystemPrompt(skills = ""): string {
+/**
+ * What one task's JSON costs, measured rather than guessed: the 42-task plan of
+ * run 3ae58e02 serialises to 69,875 characters, or 1,664 per task — call it 500
+ * tokens with the fence and the escaping.
+ */
+const TASK_TOKENS = 500;
+
+/**
+ * How much of the ceiling is left for task JSON once everything else has been
+ * paid for: the epics, the fence, and the model's own thinking, which is charged
+ * against the same per-message budget. Half is not conservatism. Phase B of run
+ * 3ae58e02 emitted 19.4k tokens of JSON — well inside a 32k ceiling — and still
+ * came back "response exceeded the 32000 output token maximum", because the
+ * reasoning that produced it was spent out of the same allowance.
+ */
+const TASK_BUDGET_SHARE = 0.5;
+
+/**
+ * Enough tasks that a batch is worth the round trip. A ceiling low enough to
+ * push below this is one no plan will fit through anyway, and emitting two tasks
+ * at a time would spend more on repeated context than it saves.
+ */
+const MIN_TASKS_PER_MESSAGE = 5;
+
+/**
+ * How many tasks the planner may put in one message, given what the SDK will
+ * actually let it emit. See `sdkCeiling` for why that is not what was asked for.
+ */
+export function tasksPerMessage(ceiling: number): number {
+  return Math.max(MIN_TASKS_PER_MESSAGE, Math.floor((ceiling * TASK_BUDGET_SHARE) / TASK_TOKENS));
+}
+
+export function plannerBreakdownSystemPrompt(skills = "", perMessage = tasksPerMessage(64_000)): string {
   return `You are the planning agent of a multi-agent development harness. This is the second of two steps: turn an approved PRD into the task DAG that parallel worker agents will implement independently.
 
 Rules:
@@ -183,11 +216,35 @@ Rules:
 - Acceptance criteria for a UI task must be settleable by looking at the rendered screen, because that is how they will be checked. "Uses the design system" cannot be judged; "the sign-in screen shows the product logo and wordmark, and its primary button uses the palette's primary colour from the design tokens" can. Name the screen, the state, and the viewport where it matters.
 - A task that integrates an external service must say, in its acceptance criteria, which side of the mock/live line it delivers — and the default is live. Write criteria that pin a real client against the vendor's sandbox or documented test mode, or contract tests against recorded fixtures of real responses. If live genuinely cannot be built (no account, no credentials, no sandbox, the operator scoped it out), say so IN THE SPEC in one sentence beginning "Live is out of scope because", and the interface-plus-fake becomes the honest deliverable. What must never happen is the third thing: a task called \`stripe-integration\` whose every criterion is satisfied by a deterministic fake, passing QA and shipping a \`throw notConfigured()\`. Criteria like "the suite makes no outbound HTTP call" or "each vendor category has a deterministic mock" describe the test strategy, not the deliverable — they belong alongside a criterion that pins the real path, never instead of one.
 - Acceptance criteria for an infrastructure task must be checkable WITHOUT provisioning anything, because nothing in this harness may apply to a real account. Write them against \`terraform validate\`/\`plan\`, \`cdk synth\`, \`helm template\`, \`kubectl --dry-run=server\`, a policy or scanning tool, or a property of the rendered output ("the plan creates exactly one bucket, with versioning and SSE-KMS enabled and no public access"). A criterion whose only proof is a deployed resource cannot be judged and will park the task.
-- The whole DAG must fit in one message. If the PRD is genuinely too large for that, emit fewer, larger tasks covering the whole scope rather than an exhaustive list that gets cut off — a truncated DAG is worth nothing.
+- Emit AT MOST ${perMessage} tasks in one message. If the plan needs more, emit the first ${perMessage}, set \`"more": true\`, and you will be asked to continue — the remaining tasks are not lost and nothing is repeated. Never merge tasks or drop scope to fit a message: the message is not the limit, and a DAG made coarser to fit one is a plan that gave up its parallelism for nothing.
 - Your FINAL message must be exactly one JSON object inside a \`\`\`json fence with the shape:
 { "epics": [{"id": kebab, "title": string, "summary": string}],
-  "tasks": [{"id": kebab, "epicId": kebab, "title": string, "spec": markdown, "acceptanceCriteria": [string], "dependsOn": [taskId], "touchedPaths": [string], "estimatedSize": "S"|"M"|"L"}] }
+  "tasks": [{"id": kebab, "epicId": kebab, "title": string, "spec": markdown, "acceptanceCriteria": [string], "dependsOn": [taskId], "touchedPaths": [string], "estimatedSize": "S"|"M"|"L"}],
+  "more": boolean }
 ${skills}`;
+}
+
+/**
+ * Ask for the next batch of tasks.
+ *
+ * It restates the epics and every task id already emitted rather than relying on
+ * the resumed conversation alone. The ids are what `dependsOn` has to point at,
+ * and a continuation that cannot see them invents edges to tasks that exist
+ * under another name — which validates as a dangling dependency and throws the
+ * whole plan away. Ids and titles are cheap; the specs are not restated.
+ */
+export function plannerContinuePrompt(epics: PlannedEpic[], emitted: PlannedTask[], perMessage: number): string {
+  return `Continue the breakdown. You have emitted ${emitted.length} tasks so far.
+
+<epics>
+${epics.map((e) => `${e.id}: ${e.title}`).join("\n")}
+</epics>
+
+<tasks-already-emitted>
+${emitted.map((t) => `${t.id} (${t.epicId}): ${t.title}`).join("\n")}
+</tasks-already-emitted>
+
+Emit the NEXT tasks — at most ${perMessage}, none of the above repeated, \`"epics"\` omitted. \`dependsOn\` may point at any id listed above or at another task in this message. Set \`"more": true\` if tasks still remain after these, \`false\` if this completes the plan.`;
 }
 
 /**
