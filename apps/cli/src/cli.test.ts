@@ -740,6 +740,7 @@ const STOP = {
   parked: [],
   spentUsd: 12,
   capUsd: 100,
+  stopCostUsd: 1.5,
   projectedUsd: 40,
   intent: null,
   artifactsDir: "/repo/.harness/run-1/pitstops/1",
@@ -759,6 +760,14 @@ describe("the pit stop gate in the terminal", () => {
     expect(printed()).toContain("**It runs.** pnpm dev");
     expect(question.mock.calls[0]![0]).toContain("send it to the 1 task(s) that have not run yet");
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("says the parked tasks will get it too, since they do not restart on their own", async () => {
+    const { question } = answerOnce("");
+
+    await gatesGiven().resolvePitStop!({ ...STOP, parked: ["Entitlements (task-c) — needs DynamoDB"] });
+
+    expect(question.mock.calls[0]![0]).toContain("and to the 1 parked one(s) for when you revive them");
   });
 
   it("sends anything they type to the tasks that have not run yet", async () => {

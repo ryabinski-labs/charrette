@@ -137,6 +137,7 @@ const STOP: Omit<PitStop, "markdown"> = {
   parked: ["Entitlements (task-b) — the check needs DynamoDB running"],
   spentUsd: 41.5,
   capUsd: 120,
+  stopCostUsd: 3.75,
   projectedUsd: 98.25,
   intent: null,
   artifactsDir: "/repo/.harness/run1/pitstops/2",
@@ -211,6 +212,16 @@ describe("the report the operator reads", () => {
     const md = renderPitStop(STOP);
 
     expect(md).toContain("Spent **$41.50** of $120.00; the whole plan projects to about **$98.25**");
+  });
+
+  it("says what the checkpoint itself cost", () => {
+    // A price the operator cannot see is one they cannot decide against, and
+    // `{"pitStop":{"every":"never"}}` is the decision.
+    expect(renderPitStop(STOP)).toContain("This pit stop cost $3.75 of that");
+  });
+
+  it("says how parked work gets the words, since it does not restart on its own", () => {
+    expect(renderPitStop(STOP)).toContain("`harness resume` asks about each one");
   });
 
   it("drops the projection when there is nothing left to project", () => {

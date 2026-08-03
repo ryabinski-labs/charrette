@@ -128,7 +128,9 @@ function makeController(repoPath: string, gateOverride?: (bus: Bus, store: Store
         await rl.question(
           `What now?\n` +
             `  enter          keep going\n` +
-            `  <anything>     send it to the ${stop.upcoming.length} task(s) that have not run yet\n` +
+            `  <anything>     send it to the ${stop.upcoming.length} task(s) that have not run yet` +
+            (stop.parked.length ? `, and to the ${stop.parked.length} parked one(s) for when you revive them` : "") +
+            `\n` +
             `  replan <words> re-plan the remaining work around what you say\n` +
             `  stop           park the run; \`harness resume\` picks it up where it is\n> `
         )

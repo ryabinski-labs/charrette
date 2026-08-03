@@ -1694,6 +1694,9 @@ export class RunController {
 
     const demo = await this.runDemo(runId, run, number, dir, allMerged.join("\n") || "(nothing yet)", upcoming.join("\n"));
     const reviews = await this.runReviews(runId, run, demo, tasks, upcoming.join("\n"));
+    // Measured rather than estimated, and shown: a checkpoint whose price is
+    // invisible is one the operator cannot decide they do not want.
+    const afterUsd = this.store.spentUsd(runId);
 
     const stop: PitStop = {
       runId,
@@ -1704,8 +1707,9 @@ export class RunController {
       merged: mergedSince,
       upcoming,
       parked,
-      spentUsd,
+      spentUsd: afterUsd,
       capUsd: run.config.budget.runCapUsd,
+      stopCostUsd: afterUsd - spentUsd,
       projectedUsd,
       intent: this.store.intentVerdict(runId),
       artifactsDir: dir,
@@ -1722,7 +1726,7 @@ export class RunController {
       reason: due.reason,
       epicIds: due.epicIds,
       mergedCount: mergedIds.length,
-      spentUsd,
+      spentUsd: afterUsd,
       artifactsDir: dir,
       demoStarted: demo.started,
       ts: Date.now(),
@@ -1883,7 +1887,12 @@ export class RunController {
   private async applyPitStop(runId: string, decision: PitStopDecision): Promise<string[]> {
     const text = decision.feedback.trim();
     if (decision.action === "continue" || decision.action === "stop" || !text) return [];
-    const open = this.store.listTasks(runId).filter((t) => !["MERGED", "NEEDS_HUMAN", "CANCELLED"].includes(t.state));
+    // Parked tasks are targets too. They are terminal for the scheduler, but not
+    // for the operator: `harness resume` offers each one back, and a queued note
+    // is waiting when it restarts. The alternative is that someone who writes
+    // about the parked half of the product at a pit stop writes into nothing,
+    // which is precisely the failure this whole feature exists to end.
+    const open = this.store.listTasks(runId).filter((t) => !["MERGED", "CANCELLED"].includes(t.state));
     // A redirect with nothing left to redirect is the operator asking for work
     // that no queued task can carry — the only reading that does anything is a
     // re-plan, so do that rather than swallowing their words.

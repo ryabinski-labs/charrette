@@ -128,6 +128,15 @@ export interface PitStop {
   parked: string[];
   spentUsd: number;
   capUsd: number;
+  /**
+   * What this pit stop itself cost — the demo session plus the reviewers.
+   *
+   * Shown because it is spent out of the same cap as the work, and because a
+   * checkpoint whose price is invisible is one the operator cannot decide to
+   * turn off. `{"pitStop":{"every":"never"}}` is the answer to a number they
+   * do not like, and they can only reach for it if they can see the number.
+   */
+  stopCostUsd: number;
   /** What the whole plan looks like it will cost at the current rate. */
   projectedUsd: number;
   intent: { verdict: "PASS" | "FAIL"; gaps: string[]; summary: string } | null;
@@ -214,6 +223,7 @@ export function renderPitStop(stop: Omit<PitStop, "markdown">): string {
     "",
     `- Spent **$${stop.spentUsd.toFixed(2)}** of $${stop.capUsd.toFixed(2)}` +
       (stop.projectedUsd > stop.spentUsd ? `; the whole plan projects to about **$${stop.projectedUsd.toFixed(2)}**` : ""),
+    `- This pit stop cost $${stop.stopCostUsd.toFixed(2)} of that`,
     ""
   );
   const list = (title: string, items: string[], empty: string) => {
@@ -222,7 +232,13 @@ export function renderPitStop(stop: Omit<PitStop, "markdown">): string {
     lines.push("");
   };
   list("Merged since the last look", stop.merged, "nothing");
-  if (stop.parked.length) list("Parked, waiting on you", stop.parked, "nothing");
+  if (stop.parked.length) {
+    list("Parked, waiting on you", stop.parked, "nothing");
+    // Anything written here reaches a parked task, but only when it starts
+    // again — and only `harness resume` starts it. Saying so is the difference
+    // between an operator who reopens them and one who assumes this did.
+    lines.push("These do not restart on their own: `harness resume` asks about each one, and anything you write here is waiting for them when it does.", "");
+  }
   list("Not built yet, in this order", stop.upcoming, "nothing — this is the whole plan");
 
   if (stop.demo.artifacts.length) {

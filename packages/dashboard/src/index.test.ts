@@ -279,6 +279,7 @@ describe("the pit stop gate", () => {
     parked: [],
     spentUsd: 41.5,
     capUsd: 120,
+    stopCostUsd: 3.75,
     projectedUsd: 98,
     intent: null,
     artifactsDir: "/repo/.harness/r1/pitstops/2",
