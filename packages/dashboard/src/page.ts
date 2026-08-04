@@ -248,9 +248,13 @@ export const PAGE_HTML = `<!doctype html>
   #fb textarea { margin:.4rem 0 .3rem; font-size:.85rem; }
   #fb button { font-size:.82rem; padding:.32rem .8rem; }
   #fb small { color:var(--dim); font-size:.75rem; }
-  details summary { cursor:pointer; color:var(--dim); font-size:.8rem; }
+  /* .15rem of padding takes the row from 20px to the 24px WCAG 2.2 asks of a
+     pointer target, which matters most on the phone layout where these are the
+     only things on the panel worth tapping. */
+  details summary { cursor:pointer; color:var(--dim); font-size:.8rem; padding:.15rem 0; }
   details pre { background:var(--sunken); padding:.55rem; border-radius:6px; overflow:auto; max-height:26vh;
                 font:12px/1.5 ui-monospace,monospace; white-space:pre-wrap; }
+  details pre:focus-visible { outline:2px solid var(--blue); outline-offset:2px; }
 
   /* Below the split, the viewport-locked layout stops helping: let the page scroll. */
   @media (max-width:900px) {
@@ -260,6 +264,10 @@ export const PAGE_HTML = `<!doctype html>
     .side { overflow:visible; }
     .feed { margin-top:1rem; }
     #log { flex:none; height:65vh; }
+    /* The cap earns its keep only while the panel is pinned to the viewport. Once
+       the page itself scrolls, it just buries a long assignment in a 219px window
+       nested inside a scrolling page — two scrollbars to read one paragraph. */
+    details pre { max-height:none; }
   }
 </style>
 </head>
@@ -278,7 +286,10 @@ export const PAGE_HTML = `<!doctype html>
 <section id="gate" aria-labelledby="gate-h">
   <h2 id="gate-h">Gate 1 — approve the plan?</h2>
   <div class="plan" id="gate-tasks"></div>
-  <details><summary>Full PRD</summary><pre id="gate-prd"></pre></details>
+  <!-- tabindex on the scroller for the same reason as the assignment below: it is
+       the only way a keyboard reaches a scroll region with nothing focusable in it. -->
+  <details><summary>Full PRD</summary>
+    <pre id="gate-prd" tabindex="0" role="group" aria-label="Full PRD"></pre></details>
   <textarea id="gate-feedback" rows="2" aria-label="Feedback for the planner"
             placeholder="What should change? (sent to the planner on reject)"></textarea>
   <button onclick="resolveGate(true)">Approve &amp; build</button>
@@ -891,21 +902,75 @@ function phaseHint(state) {
   return "No tasks yet.";
 }
 
+/**
+ * The run panel is the one place on this page meant to be read at length: the
+ * assignment is a paragraph the operator opens, scrolls, and copies out of.
+ * Nothing in it actually moves except the elapsed clock, so rebuilding it on
+ * every 5s poll could only ever take something away — the disclosure snapped
+ * shut, the <pre> jumped back to the top, and a selection made it about two
+ * words before being wiped mid-drag. So: rebuild on the facts, tick the clock.
+ */
+let runInfoSig = "";
+/** Elapsed-clock nodes from the last build, retargeted in place by the poll. */
+let runAges = [];
+/** Assignments the operator opened. Survives the rare rebuild, for the same
+ *  reason openTasks does on the board. */
+const openAssignments = new Set();
+
+function tickRunAges() {
+  for (const a of runAges) a.node.textContent = dur(Date.now() - a.createdAt) + " ago";
+}
+
 function renderRunInfo() {
+  // Every field this panel prints, so a real change still redraws it and a
+  // poll that changed only the spend does not.
+  const sig = runs.map((run) => [
+    run.id, run.repoPath, run.integrationBranch, run.createdAt, run.assignment,
+    run.config.deterministicChecks.join(","), run.config.qaIterationCap,
+    run.config.budget.taskCapUsd,
+  ].join("\\u0000")).join("\\u0001");
+  if (sig === runInfoSig) { tickRunAges(); return; }
+  runInfoSig = sig;
+
   const box = $("runinfo");
   box.textContent = "";
+  runAges = [];
   if (!runs.length) { box.append(el("div", "empty", "No active runs.")); return; }
   for (const run of runs) {
     const meta = el("div", "empty", run.repoPath);
     meta.style.fontSize = ".76rem";
     box.append(meta);
-    const line2 = el("div", "empty", run.integrationBranch + " \\u00b7 started " + dur(Date.now() - run.createdAt) + " ago");
+    const line2 = el("div", "empty", run.integrationBranch + " \\u00b7 started ");
+    const age = el("span", null, dur(Date.now() - run.createdAt) + " ago");
+    line2.append(age);
+    runAges.push({ node: age, createdAt: run.createdAt });
     line2.style.fontSize = ".76rem";
     line2.style.marginBottom = ".4rem";
     box.append(line2);
     const d = el("details");
-    d.append(el("summary", null, "Assignment the planner received"));
-    d.append(el("pre", null, run.assignment));
+    d.open = openAssignments.has(run.id);
+    d.addEventListener("toggle", () => {
+      if (d.open) openAssignments.add(run.id);
+      else openAssignments.delete(run.id);
+    });
+    const sum = el("summary", null, "Assignment the planner received");
+    // The run panel is the last thing in the sidebar, so opening it unfolds a
+    // block mostly below the fold — half the assignment and the whole checks
+    // line. Scrolled from the click rather than the toggle event: a rebuild
+    // that restores an open disclosure fires toggle too, and must not move
+    // the page under someone who is reading somewhere else.
+    sum.addEventListener("click", () => {
+      requestAnimationFrame(() => { if (d.open) d.scrollIntoView({ block: "nearest" }); });
+    });
+    d.append(sum);
+    const pre = el("pre", null, run.assignment);
+    // A scroll region with no focusable content is reachable by keyboard in
+    // Chrome and Firefox and nowhere else, so the assignment is unreadable
+    // without a mouse in Safari unless it is in the tab order itself.
+    pre.tabIndex = 0;
+    pre.setAttribute("role", "group");
+    pre.setAttribute("aria-label", "Assignment the planner received");
+    d.append(pre);
     box.append(d);
     const cfg = el("div", "empty", "checks: " + (run.config.deterministicChecks.join(" \\u00b7 ") || "none") +
       "  \\u00b7  QA cap " + run.config.qaIterationCap + "  \\u00b7  task cap $" + run.config.budget.taskCapUsd);
