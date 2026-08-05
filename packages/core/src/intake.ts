@@ -3,6 +3,7 @@ import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { Brief, IntakeQuestion, RunConfig } from "@harness/shared";
 import { Bus } from "./bus.js";
+import type { IssueRead } from "./github.js";
 import { AgentPool } from "./pool.js";
 import { extractJson, intakeSystemPrompt, resumedIntakeBlock } from "./prompts.js";
 
@@ -48,9 +49,64 @@ export interface IntakeRequest {
    * agent has to ask again before it asks anything new.
    */
   prior?: { question: string; answer: string | null }[];
+  /**
+   * Reads an issue or pull request off GitHub for the agent. Omitted when GitHub
+   * is not configured — and then the tool is not offered and the prompt does not
+   * mention it, because a tool that can only ever fail is worse than no tool.
+   */
+  readIssue?: (number: number, slug?: string) => Promise<IssueRead | null>;
 }
 
 const ASK_TOOL = "mcp__harness_intake__ask_user";
+const READ_ISSUE_TOOL = "mcp__harness_intake__read_issue";
+
+/**
+ * Pull an issue number, and the repo it belongs to, out of however the operator
+ * happened to write it: a URL pasted from the browser, `owner/repo#480` copied
+ * from a cross-repo reference, or a bare `#480` meaning this run's repo.
+ *
+ * Anything else is `null` — an unparseable reference has to be reported as such,
+ * because the alternative is fetching some other issue and presenting it as the
+ * one that was asked for.
+ */
+export function parseIssueRef(reference: string): { number: number; slug?: string } | null {
+  const text = reference.trim();
+  const url = /github\.com\/([^/\s]+\/[^/\s]+)\/(?:issues|pull)\/(\d+)/.exec(text);
+  if (url) return { slug: url[1]!, number: Number(url[2]) };
+  const qualified = /^([^\s/]+\/[^\s/#]+)#(\d+)$/.exec(text);
+  if (qualified) return { slug: qualified[1]!, number: Number(qualified[2]) };
+  const bare = /^#?(\d+)$/.exec(text);
+  if (bare) return { number: Number(bare[1]) };
+  return null;
+}
+
+/**
+ * A miss is reported as a miss. The agent's next move — ask the operator to
+ * paste it — is the right one, and it can only make it if it is told plainly
+ * that nothing came back rather than handed an empty issue.
+ */
+function renderOrExplain(issue: IssueRead | null, ref: { number: number; slug?: string }): string {
+  if (issue) return renderIssue(issue);
+  const where = ref.slug ? `${ref.slug}#${ref.number}` : `#${ref.number}`;
+  return `${where} could not be read — it does not exist, or this run's GitHub token cannot see it. Ask the operator to paste the contents instead.`;
+}
+
+/** The issue as prose, because that is the shape the agent reasons about. */
+function renderIssue(issue: IssueRead): string {
+  const head =
+    `${issue.slug}#${issue.number} — ${issue.title}\n` +
+    `state: ${issue.state}   opened by: ${issue.author}` +
+    (issue.labels.length ? `   labels: ${issue.labels.join(", ")}` : "") +
+    `\n${issue.url}\n\n${issue.body || "(no description)"}`;
+  // What was left behind is said out loud. An agent that thinks it has read the
+  // whole thread will write a brief as though the last word on it was the one
+  // it happened to stop at.
+  const more = issue.omittedComments ? ` (${issue.omittedComments} more not shown — read them at the URL above)` : "";
+  if (!issue.comments.length) return more ? `${head}\n\n--- thread not shown${more} ---` : head;
+  return `${head}\n\n--- ${issue.comments.length} comment(s)${more} ---\n${issue.comments
+    .map((c) => `@${c.author}:\n${c.body}`)
+    .join("\n\n")}`;
+}
 
 /**
  * Run the intake conversation and return the brief the planner will receive.
@@ -121,6 +177,25 @@ export async function runIntake(pool: AgentPool, bus: Bus, req: IntakeRequest): 
     }
   );
 
+  // Built only when there is something behind it, so the tool list the agent
+  // sees is the truth about what this run can reach.
+  const readIssue = !req.readIssue ? null : tool(
+    "read_issue",
+    "Read a GitHub issue or pull request — title, description, labels and comments. Use this whenever the operator refers to one, rather than asking them to paste it.",
+    {
+      reference: z
+        .string()
+        .describe('The issue, however the operator wrote it: "480", "#480", "owner/repo#480", or its github.com URL.'),
+    },
+    async (args) => {
+      const ref = parseIssueRef(args.reference);
+      const text = !ref
+        ? `Could not read an issue number out of "${args.reference}". Use a number, owner/repo#number, or the issue URL.`
+        : renderOrExplain(await req.readIssue!(ref.number, ref.slug), ref);
+      return { content: [{ type: "text" as const, text }] };
+    }
+  );
+
   // Forward the agent's prose and its tool calls to the chat transport instead
   // of the generic event printer.
   const unsubscribe = bus.subscribe(({ event }) => {
@@ -137,7 +212,7 @@ export async function runIntake(pool: AgentPool, bus: Bus, req: IntakeRequest): 
       sessionId,
       role: "intake",
       model: req.config.models.intake,
-      systemPrompt: intakeSystemPrompt(req.skillsBlock ?? ""),
+      systemPrompt: intakeSystemPrompt(req.skillsBlock ?? "", Boolean(req.readIssue)),
       prompt:
         `The operator wants:\n\n${req.seed}\n\n` +
         `Survey the repository at your working directory, then ask what you need to. ` +
@@ -146,8 +221,13 @@ export async function runIntake(pool: AgentPool, bus: Bus, req: IntakeRequest): 
       cwd: req.repoPath,
       // The intake agent talks to a human about a repo it may only read.
       tools: ["Read", "Glob", "Grep"],
-      allowedTools: ["Read", "Glob", "Grep", ASK_TOOL],
-      mcpServers: { harness_intake: createSdkMcpServer({ name: "harness_intake", tools: [askUser] }) },
+      allowedTools: ["Read", "Glob", "Grep", ASK_TOOL, ...(readIssue ? [READ_ISSUE_TOOL] : [])],
+      mcpServers: {
+        harness_intake: createSdkMcpServer({
+          name: "harness_intake",
+          tools: readIssue ? [askUser, readIssue] : [askUser],
+        }),
+      },
       maxTurns: 60,
       budgetCheck: req.budgetCheck,
     });

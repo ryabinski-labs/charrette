@@ -43,7 +43,23 @@ function fakeOctokit() {
   return {
     rest: api,
     graphql: vi.fn(async () => ({})),
-    paginate: vi.fn(async (fn: (p: unknown) => Promise<{ data: unknown[] }>, params: unknown) => (await fn(params)).data),
+    paginate: Object.assign(
+      vi.fn(async (fn: (p: unknown) => Promise<{ data: unknown[] }>, params: unknown) => (await fn(params)).data),
+      {
+        // The real `paginate.iterator` yields one page at a time so a caller can
+        // stop early. Endpoints here answer with everything at once, so a test
+        // that wants several pages sets `pages` on the endpoint instead.
+        iterator: vi.fn((fn: { pages?: unknown[][] } & ((p: unknown) => Promise<{ data: unknown[] }>), params: unknown) => ({
+          async *[Symbol.asyncIterator]() {
+            if (fn.pages) {
+              for (const data of fn.pages) yield { data };
+              return;
+            }
+            yield { data: (await fn(params)).data };
+          },
+        })),
+      }
+    ),
   };
 }
 
@@ -89,6 +105,7 @@ describe("an adapter with nothing configured", () => {
     await expect(adapter.mergedSha(1)).resolves.toBeNull();
     await expect(adapter.checksForRef("sha")).resolves.toBeNull();
     await expect(adapter.closePR(1, "why")).resolves.toBe(false);
+    await expect(adapter.readIssue(1)).resolves.toBeNull();
   });
 
   it("is enabled once both halves are there", () => {
@@ -255,6 +272,204 @@ describe("reading what an operator wrote on an issue", () => {
     api.rest.issues.listComments.mockRejectedValue(new Error("410 Gone"));
 
     await expect(adapter.commentOnIssue(9, "merged", "it merged")).resolves.toBe(true);
+  });
+});
+
+/**
+ * The read half of an issue the harness did *not* file. This is how a request
+ * that is nothing but a link — "implement owner/repo#480" — becomes a brief
+ * without the operator retyping the specification into a terminal.
+ */
+describe("reading an issue somebody else wrote", () => {
+  const FULL = {
+    number: 480,
+    html_url: "https://github.com/owner/repo/issues/480",
+    title: "Conflict engine misses overlapping holds",
+    state: "open",
+    user: { login: "operator" },
+    labels: [{ name: "bug" }, "regression", { name: "" }, { id: 3 }],
+    body: "  Two holds on the same slot both settle.  ",
+  };
+
+  it("returns the issue, its labels and its thread", async () => {
+    const { adapter, api } = adapterWith();
+    api.rest.issues.get.mockResolvedValue({ data: FULL });
+    api.rest.issues.listComments.mockResolvedValue({
+      data: [{ user: { login: "operator" }, body: "  only when both are pending  " }],
+    });
+
+    await expect(adapter.readIssue(480)).resolves.toEqual({
+      slug: "owner/repo",
+      number: 480,
+      url: "https://github.com/owner/repo/issues/480",
+      title: "Conflict engine misses overlapping holds",
+      state: "open",
+      author: "operator",
+      // A label can come back as a bare string, and one with no usable name is
+      // not a label — it would otherwise render as an empty entry in the list.
+      labels: ["bug", "regression"],
+      body: "Two holds on the same slot both settle.",
+      comments: [{ author: "operator", body: "only when both are pending" }],
+      omittedComments: 0,
+    });
+    expect(api.rest.issues.get).toHaveBeenCalledWith({ owner: "owner", repo: "repo", issue_number: 480 });
+  });
+
+  /** An operator's link routinely points at a repo that is not the run's. */
+  it("reads a different repository when the reference names one", async () => {
+    const { adapter, api } = adapterWith();
+    api.rest.issues.get.mockResolvedValue({ data: FULL });
+
+    await expect(adapter.readIssue(480, "other/project")).resolves.toMatchObject({ slug: "other/project" });
+    expect(api.rest.issues.get).toHaveBeenCalledWith({ owner: "other", repo: "project", issue_number: 480 });
+  });
+
+  it("ignores a slug that is not owner/repo and stays on the run's own", async () => {
+    const { adapter, api } = adapterWith();
+    api.rest.issues.get.mockResolvedValue({ data: FULL });
+
+    await expect(adapter.readIssue(480, "nonsense")).resolves.toMatchObject({ slug: "owner/repo" });
+  });
+
+  /**
+   * Null, not a throw and not an empty issue: private, deleted and mistyped all
+   * arrive the same way, and the caller has to be able to say "I could not read
+   * it" rather than hand an agent a blank specification.
+   */
+  it("returns nothing when the issue cannot be read", async () => {
+    const { adapter, api } = adapterWith();
+    api.rest.issues.get.mockRejectedValue(new Error("404 Not Found"));
+
+    await expect(adapter.readIssue(480)).resolves.toBeNull();
+  });
+
+  it("still returns the issue when only its thread fails", async () => {
+    const { adapter, api } = adapterWith();
+    api.rest.issues.get.mockResolvedValue({ data: FULL });
+    api.rest.issues.listComments.mockRejectedValue(new Error("410 Gone"));
+
+    await expect(adapter.readIssue(480)).resolves.toMatchObject({ comments: [] });
+  });
+
+  it("fills in the gaps a sparse issue leaves and drops the harness's own comments", async () => {
+    const { adapter, api } = adapterWith();
+    api.rest.issues.get.mockResolvedValue({
+      data: { number: 5, html_url: "u", title: "t", state: "closed", user: null, labels: [], body: null },
+    });
+    api.rest.issues.listComments.mockResolvedValue({
+      data: [
+        { user: { login: "operator" }, body: "merged\n\n<!-- harness-comment -->" },
+        { user: null, body: "from a deleted account" },
+        { user: { login: "x" }, body: null },
+      ],
+    });
+
+    await expect(adapter.readIssue(5)).resolves.toEqual({
+      slug: "owner/repo",
+      number: 5,
+      url: "u",
+      title: "t",
+      state: "closed",
+      author: "someone",
+      labels: [],
+      body: "",
+      comments: [{ author: "someone", body: "from a deleted account" }],
+      omittedComments: 0,
+    });
+  });
+});
+
+/**
+ * The bound on a thread, found by QA rather than by reasoning: the first widely
+ * referenced public issue this was pointed at — octocat/Hello-World#1 — has
+ * 2,500 comments, and reading it returned 275,000 characters, roughly 69,000
+ * tokens, after 7.8 seconds of paging. The intake agent gets sixty turns and
+ * carries everything it has read in the cached prefix of every one of them, so
+ * a single `read_issue` call on a busy issue was enough to swamp the
+ * conversation it was fetched for.
+ */
+describe("how much of a long thread comes back", () => {
+  const HEAD = { number: 1, html_url: "u", title: "t", state: "open", user: { login: "a" }, labels: [], body: "b" };
+  const say = (n: number, body: string) => Array.from({ length: n }, (_, i) => ({ user: { login: `u${i}` }, body }));
+
+  function withThread(pages: unknown[][], total: number) {
+    const { adapter, api } = adapterWith();
+    api.rest.issues.get.mockResolvedValue({ data: { ...HEAD, comments: total } });
+    Object.assign(api.rest.issues.listComments, { pages });
+    return { adapter, api };
+  }
+
+  it("stops after three pages and says how many it left on GitHub", async () => {
+    const { adapter, api } = withThread([say(100, "x"), say(100, "x"), say(100, "x"), say(100, "x"), say(100, "x")], 500);
+
+    const issue = await adapter.readIssue(1);
+
+    expect(issue!.comments).toHaveLength(300);
+    expect(issue!.omittedComments).toBe(200);
+    // Three pages fetched, not twenty-five: the cost is in the requests too.
+    expect(api.paginate.iterator).toHaveBeenCalledOnce();
+  });
+
+  it("stops on the character budget when a handful of comments are enormous", async () => {
+    const { adapter } = withThread([say(10, "y".repeat(15_000))], 10);
+
+    const issue = await adapter.readIssue(1);
+
+    // Two fit inside 40,000 characters; the third would not.
+    expect(issue!.comments).toHaveLength(2);
+    expect(issue!.omittedComments).toBe(8);
+  });
+
+  it("reads a thread that fits whole and claims nothing was left out", async () => {
+    const { adapter } = withThread([say(3, "short")], 3);
+
+    const issue = await adapter.readIssue(1);
+
+    expect(issue!.comments).toHaveLength(3);
+    expect(issue!.omittedComments).toBe(0);
+  });
+
+  /**
+   * Skipped comments are still counted as read. Otherwise an issue whose thread
+   * is nothing but the harness's own status updates would report them as
+   * unread, and send the agent looking for words that are not there.
+   */
+  it("does not report the harness's own comments as left behind", async () => {
+    const { adapter } = withThread([[{ user: { login: "a" }, body: "merged\n\n<!-- harness-comment -->" }]], 1);
+
+    const issue = await adapter.readIssue(1);
+
+    expect(issue!.comments).toEqual([]);
+    expect(issue!.omittedComments).toBe(0);
+  });
+
+  it("keeps what it read when the thread fails partway through", async () => {
+    const { adapter, api } = adapterWith();
+    api.rest.issues.get.mockResolvedValue({ data: { ...HEAD, comments: 200 } });
+    api.paginate.iterator.mockImplementation(() => ({
+      // eslint-disable-next-line require-yield
+      async *[Symbol.asyncIterator]() {
+        yield { data: say(2, "read before it broke") };
+        throw new Error("410 Gone");
+      },
+    }));
+
+    const issue = await adapter.readIssue(1);
+
+    expect(issue!.comments).toHaveLength(2);
+    expect(issue!.omittedComments).toBe(198);
+  });
+
+  /** An issue GitHub reports no comment count for still returns what it has. */
+  it("copes with a missing comment count", async () => {
+    const { adapter, api } = adapterWith();
+    api.rest.issues.get.mockResolvedValue({ data: HEAD });
+    Object.assign(api.rest.issues.listComments, { pages: [say(2, "x")] });
+
+    const issue = await adapter.readIssue(1);
+
+    expect(issue!.comments).toHaveLength(2);
+    expect(issue!.omittedComments).toBe(0);
   });
 });
 

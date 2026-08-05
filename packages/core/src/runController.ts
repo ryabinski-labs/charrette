@@ -348,6 +348,10 @@ export class RunController {
       budgetCheck: () => this.checkBudget(runId),
       // Matched on the seed — the only text that exists this early.
       skillsBlock: skillsBlock(this.selectSkills(indexSkills(run.config.skillsDirs), "intake", seed, run.config)),
+      // The seed is very often "implement <issue link>". The harness holds a
+      // token that can fetch it; before this the intake agent could not, and
+      // asked the operator to paste an issue back at the tool that files them.
+      readIssue: this.github.enabled ? this.github.readIssue.bind(this.github) : undefined,
       prior,
     });
     const assignment = briefToAssignment(brief);
