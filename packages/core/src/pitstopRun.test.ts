@@ -44,10 +44,28 @@ const commit = (cwd: string, file: string) => {
 const DOCS = "<prd>\n# PRD — Build the thing\n</prd>\n<conventions>\nuse vitest\n</conventions>";
 const QA_PASS = '```json\n{"verdict":"PASS","notes":"ok"}\n```';
 const INTENT_PASS = '```json\n{"verdict":"PASS","gaps":[],"summary":"ok"}\n```';
-const DEMO_OK =
-  '```json\n{"started":true,"howStarted":"pnpm dev on :5173","summary":"sign-in works",' +
-  '"journeys":[{"name":"Sign in","result":"worked","evidence":"302 to /home"}],' +
-  '"couldNotReach":["payments — no test keys"],"artifacts":["signin.png"]}\n```';
+/** The artifact directory the demo agent's own system prompt tells it to use. */
+const artifactsDir = (spec: AgentSpec) => spec.systemPrompt.match(/into (.+?) \(it already exists\)/)![1]!;
+
+const demoJson = (artifacts: { file: string; shows: string }[]) =>
+  "```json\n" +
+  JSON.stringify({
+    started: true,
+    howStarted: "pnpm dev on :5173",
+    summary: "sign-in works",
+    journeys: [{ name: "Sign in", result: "worked", evidence: "302 to /home" }],
+    couldNotReach: ["payments — no test keys"],
+    artifacts,
+  }) +
+  "\n```";
+
+const SIGNIN_EVIDENCE = { file: "signin.har", shows: "the sign-in POST and its 302, with the session cookie set" };
+
+/** A demo agent that writes the evidence it claims to have captured. */
+const demoOk = (spec: AgentSpec) => {
+  writeFileSync(path.join(artifactsDir(spec), SIGNIN_EVIDENCE.file), '{"log":{"entries":[{"request":{}}]}}');
+  return demoJson([SIGNIN_EVIDENCE]);
+};
 const REVIEW_OK = '```json\n{"verdict":"on-track","findings":[],"question":""}\n```';
 
 /** Two epics, so the first can finish while the second still has work to do. */
@@ -133,7 +151,7 @@ function build(opts: {
   return { controller, store, events, stops };
 }
 
-const ROLES = { planner: planner(twoEpicPlan), worker, qa: () => QA_PASS, validator: () => INTENT_PASS, demo: () => DEMO_OK, reviewer: () => REVIEW_OK };
+const ROLES = { planner: planner(twoEpicPlan), worker, qa: () => QA_PASS, validator: () => INTENT_PASS, demo: demoOk, reviewer: () => REVIEW_OK };
 
 describe("stopping at an epic boundary", () => {
   it("shows the operator the product running, and what it could not reach", async () => {
@@ -187,6 +205,17 @@ describe("stopping at an epic boundary", () => {
     expect(readFileSync(path.join(stopDir, "REPORT.md"), "utf8")).toContain("# Pit stop 1");
     // .harness is already ignored, so none of this reaches the operator's diff.
     expect(existsSync(path.join(stopDir, "pitstop.json"))).toBe(true);
+  });
+
+  it("shows the operator what each file is for, and nothing it did not check", async () => {
+    const dir = repo();
+    const { pool } = rolePool(ROLES);
+    const { controller, stops } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a thing", RunConfig.parse(BASE));
+
+    expect(stops[0]!.demo.artifacts).toEqual([SIGNIN_EVIDENCE]);
+    expect(stops[0]!.markdown).toContain(`- \`${SIGNIN_EVIDENCE.file}\` — ${SIGNIN_EVIDENCE.shows}`);
   });
 
   it("records the stop so a resumed run does not demo the same epic twice", async () => {
@@ -267,7 +296,7 @@ describe("a demo that goes wrong", () => {
       // change the diff the operator will eventually review.
       demo: (spec) => {
         writeFileSync(path.join(spec.cwd, "README.md"), "the demo agent scribbled here\n");
-        return DEMO_OK;
+        return demoOk(spec);
       },
     });
     const { controller } = build({ repoPath: dir, pool });
@@ -302,6 +331,116 @@ describe("a demo that goes wrong", () => {
 
     expect(specs.some((s) => s.role === "reviewer")).toBe(false);
     expect(stops[0]!.reviews).toEqual([]);
+  });
+});
+
+/**
+ * An operator was handed a pit stop whose evidence was a screenshot of one flat
+ * white rectangle and a homepage nobody had attached a claim to. The demo agent
+ * had even said, four paragraphs up, that the capture came back blank. Nothing
+ * between it and the operator ever opened the files.
+ */
+describe("evidence that does not survive being looked at", () => {
+  const missing = () => demoJson([{ file: "signin.png", shows: "the signed-in home page" }]);
+
+  it("asks the demo agent again, with the product still up, before showing anybody", async () => {
+    const dir = repo();
+    // First answer offers a file it never wrote; the retake writes one.
+    const { pool, specs } = rolePool({ ...ROLES, demo: (spec, nth) => (nth === 1 ? missing() : demoOk(spec)) });
+    const { controller, stops } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a thing", RunConfig.parse({ ...BASE, pitStop: { every: { tasks: 2 } } }));
+
+    const demos = specs.filter((s) => s.role === "demo");
+    expect(demos.length).toBe(2);
+    // Resumed, and resumed onto *its own* first session: the expensive half of
+    // a demo is standing the product up, and the second turn is only about the
+    // evidence. The fake pool hands back `sdk<n>` for the nth session it runs.
+    expect(demos[1]!.resume).toBe(`sdk${specs.indexOf(demos[0]!) + 1}`);
+    expect(demos[1]!.cwd).toBe(demos[0]!.cwd);
+    expect(demos[1]!.prompt).toContain("signin.png");
+    expect(demos[1]!.prompt).toContain("not written to the artifact directory");
+    expect(demos[1]!.maxTurns).toBeLessThan(RunConfig.parse(BASE).pitStop.demoMaxTurns);
+    // And what the operator finally sees is the file that exists.
+    expect(stops[0]!.demo.artifacts).toEqual([SIGNIN_EVIDENCE]);
+  });
+
+  it("strikes what is still not evidence, and files it under what was not checked", async () => {
+    const dir = repo();
+    const { pool } = rolePool({ ...ROLES, demo: () => missing() });
+    const { controller, stops } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a thing", RunConfig.parse({ ...BASE, pitStop: { every: { tasks: 2 } } }));
+
+    const stop = stops[0]!;
+    expect(stop.demo.artifacts).toEqual([]);
+    expect(stop.markdown).not.toContain("## Evidence");
+    // Struck, not deleted: an operator shown neither the file nor the failure
+    // assumes the surface was covered.
+    expect(stop.markdown).toContain("## What it could NOT check");
+    expect(stop.markdown).toContain("the signed-in home page");
+    expect(stop.markdown).toContain("struck from the evidence by the harness");
+  });
+
+  it("keeps a file the agent listed with no idea what it proves out of the evidence", async () => {
+    const dir = repo();
+    const { pool } = rolePool({
+      ...ROLES,
+      demo: (spec) => {
+        writeFileSync(path.join(artifactsDir(spec), "shot.har"), "{}");
+        // The shape the old prompt asked for: a bare filename.
+        return demoJson(["shot.har" as unknown as { file: string; shows: string }]);
+      },
+    });
+    const { controller, stops } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a thing", RunConfig.parse({ ...BASE, pitStop: { every: { tasks: 2 } } }));
+
+    // Lenient at the parser — the rest of the report survives — strict at the gate.
+    expect(stops[0]!.demo.started).toBe(true);
+    expect(stops[0]!.demo.artifacts).toEqual([]);
+    expect(stops[0]!.markdown).toContain("no statement of what it shows");
+  });
+
+  it("does not accept a file the demo agent did not produce", async () => {
+    const dir = repo();
+    // Anything outside the pit stop's own directory is not evidence this demo
+    // captured, whatever it says about it.
+    const { pool } = rolePool({
+      ...ROLES,
+      demo: () => demoJson([{ file: "../../../../etc/hosts", shows: "the host is resolving the API" }]),
+    });
+    const { controller, stops } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a thing", RunConfig.parse({ ...BASE, pitStop: { every: { tasks: 2 } } }));
+
+    expect(stops[0]!.demo.artifacts).toEqual([]);
+    expect(stops[0]!.markdown).toContain("not written to the artifact directory");
+  });
+
+  it("does not spend a second demo session on a report that has no evidence at all", async () => {
+    const dir = repo();
+    const { pool, specs } = rolePool({ ...ROLES, demo: () => demoJson([]) });
+    const { controller, stops } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a thing", RunConfig.parse({ ...BASE, pitStop: { every: { tasks: 2 } } }));
+
+    expect(specs.filter((s) => s.role === "demo").length).toBe(1);
+    expect(stops[0]!.demo.started).toBe(true);
+  });
+
+  it("keeps the first report when the retake comes back as something else", async () => {
+    const dir = repo();
+    const { pool } = rolePool({ ...ROLES, demo: (spec, nth) => (nth === 1 ? missing() : "I had another look and it is fine") });
+    const { controller, stops } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a thing", RunConfig.parse({ ...BASE, pitStop: { every: { tasks: 2 } } }));
+
+    // The journeys are real findings; losing them to a failed retake of one
+    // screenshot would be a worse trade than the blank file was.
+    expect(stops[0]!.demo.started).toBe(true);
+    expect(stops[0]!.demo.journeys.map((j) => j.name)).toEqual(["Sign in"]);
+    expect(stops[0]!.demo.artifacts).toEqual([]);
   });
 });
 

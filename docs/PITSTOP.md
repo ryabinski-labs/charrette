@@ -102,11 +102,34 @@ the `visual-qa-agent` skill — against the integration branch, told to:
 1. Start the product the way the repo's own README says to start it.
 2. Drive the journeys the merged tasks claim to deliver, end to end.
 3. Capture evidence: screenshots for anything rendered, request/response pairs for
-   anything served, command output for anything CLI.
+   anything served, command output for anything CLI — each one with the claim it
+   backs, in a sentence.
 4. Say plainly what it could not reach, and why.
 
 Point 4 is the one that matters. The value of `ec40b527`'s validator was not that
 it passed or failed — it was that it said *which* parts it had not checked.
+
+### What counts as evidence
+
+Run `da8325bd`'s second pit stop offered two files. One was a 1082×2202 white
+rectangle — the mobile page had never painted — and the other was a screenshot of
+a homepage with nothing attached saying what it was for. The demo agent had even
+admitted the blank capture, four paragraphs into its summary. Nothing between it
+and the operator ever opened the files.
+
+So the harness opens them (`evidence.ts`). Every artifact the demo agent lists is
+read before the report renders, and one that is not there, is empty, is an image
+of a single flat colour, or arrives with no claim attached is **not evidence**.
+When a retake could fix it, the demo session is resumed — the product it started
+is still up, so this costs a handful of turns rather than a second demo — with
+the faults named. Whatever still fails is struck from the evidence list and
+reappears under *What it could NOT check*, saying what was struck and why: an
+operator shown neither the file nor the failure assumes the surface was covered.
+
+The demo agent is told the same rule and told how to satisfy it, so the usual
+path is that it never reaches the gate: look at every screenshot with Read before
+listing it, and a blank one means the page had not painted or the device
+descriptor pinned a browser that is not installed.
 
 The gate payload carries:
 
@@ -123,7 +146,10 @@ The gate payload carries:
 or transcripts of the product actually running, not a description of it.
 *Acceptance:* the gate payload contains at least one artifact produced by executing
 the merged code; when the demo agent could not start the product, the payload says
-so in its first line rather than showing nothing.
+so in its first line rather than showing nothing. Every artifact it lists has been
+opened by the harness and carries the claim it backs; a blank capture, a file that
+was never written, or one offered without a claim is struck from the evidence and
+reported as something the pit stop did not check.
 
 **S2 — Redirect the remaining work.** As an operator, I write what I want changed,
 and the tasks that have not run yet receive it.

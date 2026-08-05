@@ -1,4 +1,5 @@
 import type { PitStopEvery, TaskState } from "@harness/shared";
+import type { ArtifactClaim } from "./evidence.js";
 
 /**
  * Pit stops: the checkpoint between "approve this plan" and "here is the diff".
@@ -98,8 +99,14 @@ export interface DemoReport {
    * what nobody read.
    */
   couldNotReach: string[];
-  /** Files written under the pit stop's artifact directory. */
-  artifacts: string[];
+  /**
+   * Files written under the pit stop's artifact directory, each with the claim
+   * it backs. A file without a claim is not evidence — the operator who opened
+   * a bare `01-marketing-home-desktop.png` could not say what it was for — and
+   * neither is a file the harness inspected and found blank. Both are struck
+   * before this is rendered; see evidence.ts.
+   */
+  artifacts: ArtifactClaim[];
   summary: string;
 }
 
@@ -242,7 +249,16 @@ export function renderPitStop(stop: Omit<PitStop, "markdown">): string {
   list("Not built yet, in this order", stop.upcoming, "nothing — this is the whole plan");
 
   if (stop.demo.artifacts.length) {
-    lines.push("## Evidence", "", ...stop.demo.artifacts.map((a) => `- ${a}`), "", `All of it: ${stop.artifactsDir}`, "");
+    // Never a bare filename: the operator opens these to settle a question, and
+    // a list of names does not say which question each one settles.
+    lines.push(
+      "## Evidence",
+      "",
+      ...stop.demo.artifacts.map((a) => `- \`${a.file}\` — ${a.shows}`),
+      "",
+      `All of it: ${stop.artifactsDir}`,
+      ""
+    );
   }
   return lines.join("\n").trimEnd();
 }

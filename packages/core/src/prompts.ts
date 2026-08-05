@@ -650,9 +650,10 @@ Procedure:
 2. Start it. Install and build if that is what it takes. Give it a fair attempt — a missing dependency you can install is not a reason to give up.
 3. Drive the journeys the merged work claims to deliver, end to end, the way a user would: real request, real page, real handler, real store. A unit test passing is not a demo.
 4. Capture evidence as you go into ${artifactsDir} (it already exists): screenshots for anything rendered, saved request/response pairs for anything served, command output for anything CLI. Name the files for what they show. Photograph every rendered surface at desktop width and again at mobile width, and capture the empty and error states wherever you can reach them — a design reviewer reads this pit stop after you and can only judge what you photographed. A surface you described but did not capture is a surface nobody reviewed.
-5. Say plainly what you could NOT reach, and why.
+5. LOOK AT EVERY SCREENSHOT YOU TAKE, with Read, before you list it. A capture that is one flat colour is a failed capture, not a picture of the product: the page had not painted (add \`--wait-for-timeout=3000\`, or wait for a selector), or the device descriptor pinned a browser that is not installed (stay on chromium devices — \`--viewport-size=390,844\` needs no descriptor at all). Retake it. The harness inspects every image you list and strikes the blank ones, so a blank file costs you the surface entirely: it is reported to the operator as a width you did not check.
+6. Say plainly what you could NOT reach, and why.
 
-Step 5 is the most valuable thing you produce. A demo that honestly says "sign-in works, the map screen does not exist yet, and I could not test payments without Stripe keys" is worth more than one that quietly shows only the parts that worked. Never imply coverage you do not have. Never invent a journey you did not run.
+Step 6 is the most valuable thing you produce. A demo that honestly says "sign-in works, the map screen does not exist yet, and I could not test payments without Stripe keys" is worth more than one that quietly shows only the parts that worked. Never imply coverage you do not have. Never invent a journey you did not run.
 
 Rules:
 - Do not modify the repository. You may create scratch files under ${artifactsDir} and install dependencies, but the working tree must be clean of source changes when you finish — the operator's diff is not yours to touch. Anything you do change there will be discarded.
@@ -666,9 +667,11 @@ Your FINAL message must be exactly one JSON object inside a \`\`\`json fence:
  "summary":string,
  "journeys":[{"name":string,"result":"worked"|"broken"|"not-reachable","evidence":string}],
  "couldNotReach":[string],
- "artifacts":[string]}
+ "artifacts":[{"file":string,"shows":string}]}
 
-howStarted is the command(s) that worked, or the specific reason nothing did. Each journey's evidence is what you actually observed — the status code, the text on the screen, the row that changed — plus the artifact file that shows it. artifacts lists the files you wrote, relative to ${artifactsDir}.`;
+howStarted is the command(s) that worked, or the specific reason nothing did. Each journey's evidence is what you actually observed — the status code, the text on the screen, the row that changed — plus the artifact file that shows it.
+
+artifacts lists the files you wrote, relative to ${artifactsDir}, each with the claim it backs. \`shows\` is what a reader learns by opening that file, in one sentence: "the pricing page" is not a claim, "the pricing table at 1440px with the three unenforced rows gone" is. A file you cannot write a claim for is a file that proves nothing — leave it out.`;
 }
 
 export function demoPrompt(assignment: string, mergedLines: string, upcomingLines: string): string {
@@ -679,6 +682,31 @@ What has merged so far — this is what you are demoing:
 ${mergedLines}
 
 ${upcomingLines ? `Not built yet, so do not go looking for it:\n${upcomingLines}\n\n` : ""}Start the product and drive what exists. Then report.`;
+}
+
+/**
+ * One more turn at the evidence, with the stack still up.
+ *
+ * Sent only when the harness inspected the files and something it was handed is
+ * not evidence — a blank capture, a file that was never written, one offered
+ * with no claim. Resumed rather than restarted, because the expensive half of a
+ * demo is standing the product up and that has already been paid for.
+ */
+export function demoEvidenceReaskPrompt(faults: string[]): string {
+  return `Stop. The harness opened the files you listed as evidence and these are not evidence:
+
+${faults.map((f) => `- ${f}`).join("\n")}
+
+The product you started is still running — this is the same session, nothing has been torn down.
+
+Fix what can be fixed, now, at the source:
+- A blank or flat image is a failed capture. Take it again, waiting for the page to paint (\`--wait-for-timeout=3000\`), on a chromium device or a plain \`--viewport-size=WIDTH,HEIGHT\`. Then Read the file and confirm you can see the product in it before you list it again.
+- A file that is not there was never written. Write it, or drop it.
+- A file with no claim needs the one sentence a reader would learn from opening it.
+
+Anything you still cannot produce, drop from artifacts and say so in couldNotReach instead — as the surface nobody photographed, not as a file nobody can use. Do not re-drive journeys you already ran and do not start new work; this turn is about the evidence only.
+
+Reply with the complete report JSON again, in the same shape, with everything you established the first time still in it.`;
 }
 
 /**

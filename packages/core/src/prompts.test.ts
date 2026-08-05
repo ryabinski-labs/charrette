@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   INTERFACE_STANDARD,
   advisorPrompt,
+  demoEvidenceReaskPrompt,
   demoSystemPrompt,
   extractJson,
   plannerBreakdownSystemPrompt,
@@ -244,6 +245,37 @@ describe("what the demo agent photographs", () => {
     expect(p).toMatch(/at desktop width and again at mobile width/);
     expect(p).toMatch(/capture the empty and error states/);
     expect(p).toMatch(/A surface you described but did not capture is a surface nobody reviewed/);
+  });
+
+  it("makes it look at its own screenshots, and says what a blank one costs", () => {
+    // A pit stop shipped a 1082x2202 white rectangle as evidence of a mobile
+    // page. The agent knew — it said so, four paragraphs into its summary — and
+    // listed the file anyway.
+    const p = demoSystemPrompt("/tmp/artifacts");
+    expect(p).toMatch(/LOOK AT EVERY SCREENSHOT YOU TAKE, with Read, before you list it/);
+    expect(p).toMatch(/one flat colour is a failed capture/);
+    // Told how to fix it, not just that it is forbidden: both failures the
+    // harness has actually seen — an unpainted page, and a device descriptor
+    // pinning a browser that is not installed.
+    expect(p).toContain("--wait-for-timeout=3000");
+    expect(p).toContain("--viewport-size=390,844");
+    expect(p).toMatch(/The harness inspects every image you list/);
+  });
+
+  it("asks for the claim each file backs, not a list of filenames", () => {
+    const p = demoSystemPrompt("/tmp/artifacts");
+    expect(p).toContain('"artifacts":[{"file":string,"shows":string}]');
+    expect(p).toMatch(/what a reader learns by opening that file/);
+    expect(p).toMatch(/A file you cannot write a claim for is a file that proves nothing/);
+  });
+
+  it("sends the retake back with the faults named and the stack still up", () => {
+    const p = demoEvidenceReaskPrompt(["mobile.png — 390x844 of a single colour — the page never painted"]);
+    expect(p).toContain("mobile.png");
+    expect(p).toMatch(/the same session, nothing has been torn down/);
+    // And the way out of a retake that fails again: say it, do not ship it.
+    expect(p).toMatch(/drop from artifacts and say so in couldNotReach/);
+    expect(p).toMatch(/Do not re-drive journeys you already ran/);
   });
 });
 

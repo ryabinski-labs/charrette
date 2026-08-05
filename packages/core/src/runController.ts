@@ -27,12 +27,14 @@ import {
   type PitStopDue,
   type ReviewReport,
 } from "./pitstop.js";
+import { checkEvidence, evidenceFaults, retryableFaults, strikeEvidence, type EvidenceCheck } from "./evidence.js";
 import {
   type AdvisorCheck,
   advisorAnswer,
   advisorPrompt,
   advisorSystemPrompt,
   conflictPrompt,
+  demoEvidenceReaskPrompt,
   demoPrompt,
   demoSystemPrompt,
   extractJson,
@@ -152,6 +154,15 @@ const MAX_SKILLS_PER_ROLE = 4;
  * and each attempt costs a worker session and a QA session.
  */
 const CONFLICT_FIX_ATTEMPTS = 1;
+
+/**
+ * Turns the demo agent gets to repair its evidence, resumed with the product
+ * still running. Enough to retake a handful of screenshots and look at them;
+ * far too few to start driving the product again, which is the point — this
+ * turn buys the picture the operator was about to be handed blank, not a
+ * second demo.
+ */
+const EVIDENCE_REASK_TURNS = 12;
 
 /** The validator's judgment of the merged whole against the operator's intent. */
 const IntentVerdict = z.object({
@@ -285,7 +296,18 @@ const DemoJson = z.object({
     )
     .default([]),
   couldNotReach: z.array(z.string()).default([]),
-  artifacts: z.array(z.string()).default([]),
+  // A bare string is still accepted so that a demo agent which ignored the
+  // shape does not lose its whole report to a parse error. It arrives with no
+  // claim attached, which the evidence gate then strikes — lenient at the
+  // parser, strict at the gate.
+  artifacts: z
+    .array(
+      z.union([
+        z.string().transform((file) => ({ file, shows: "" })),
+        z.object({ file: z.string(), shows: z.string().default("") }),
+      ])
+    )
+    .default([]),
 });
 
 /** One reviewer's verdict on whether the run is still building the right thing. */
@@ -2168,38 +2190,96 @@ export class RunController {
     // that is what an unfinished demo *is*, and because a pit stop that cannot
     // demo anything must still open.
     let report = demoUnavailable("the demo agent did not run");
+    let checks: EvidenceCheck[] = [];
     try {
       wtPath = await this.wt.ensureIntegrationWorktree(runId);
       head = (await git(wtPath, ["rev-parse", "HEAD"])).trim();
       const skills = this.selectSkills(indexSkills(run.config.skillsDirs), "demo", run.assignment, run.config);
-      const result = await this.pool.run({
+      const common = {
         runId,
-        role: "demo",
+        role: "demo" as const,
         model: run.config.models.demo,
         systemPrompt: demoSystemPrompt(dir, toolbeltBlock(detectToolbelt(run.config.externalTools)), skillsBlock(skills)),
-        prompt: demoPrompt(run.assignment, mergedLines, upcomingLines),
         cwd: wtPath,
         disallowedTools: ["WebSearch"],
-        maxTurns: run.config.pitStop.demoMaxTurns,
         // Its own port block and compose project, like a task worktree — a demo
         // must not collide with whatever the operator has running.
         env: isolationEnv(taskIsolation(runId, `pitstop-${number}`)),
-        // It starts servers, emulators and databases by design. Nothing it
-        // started outlives the pit stop.
-        reapOnEnd: true,
         budgetCheck: () => this.checkBudget(runId),
+      };
+      const result = await this.pool.run({
+        ...common,
+        prompt: demoPrompt(run.assignment, mergedLines, upcomingLines),
+        maxTurns: run.config.pitStop.demoMaxTurns,
+        // The product stays up between the two attempts below — re-capturing a
+        // blank screenshot against a torn-down stack is not a retry, it is a
+        // second demo. The sweep runs from this method's `finally` instead.
+        reapOnEnd: false,
       });
       report = DemoJson.parse(extractJson(result.resultText));
+      checks = this.inspectDemoEvidence(dir, report);
+
+      // One resumed turn, and only when a retake could plausibly fix it. The
+      // expensive half of a demo is standing the product up, and that is
+      // already paid for; what is being bought here is the screenshot the
+      // operator was going to be handed blank.
+      if (retryableFaults(checks) && result.outcome === "done" && result.sdkSessionId) {
+        this.bus.publish({
+          type: "agent.log",
+          runId,
+          sessionId: result.sessionId,
+          text: `evidence rejected, asking the demo agent again: ${evidenceFaults(checks).join("; ").slice(0, 500)}`,
+          ts: Date.now(),
+        });
+        const retry = await this.pool.run({
+          ...common,
+          prompt: demoEvidenceReaskPrompt(evidenceFaults(checks)),
+          resume: result.sdkSessionId,
+          maxTurns: EVIDENCE_REASK_TURNS,
+        });
+        // A re-ask that comes back unparseable leaves the first report standing:
+        // its journeys are real findings, and losing them to a failed retake of
+        // a screenshot would be a worse trade than the blank file was.
+        try {
+          const second = DemoJson.parse(extractJson(retry.resultText));
+          report = second;
+          checks = this.inspectDemoEvidence(dir, second);
+        } catch {
+          // keep the first report and its checks
+        }
+      }
     } catch (e) {
       if (e instanceof BudgetExceeded) throw e;
       report = demoUnavailable(String(e).slice(0, 300));
+      checks = [];
     } finally {
+      // It starts servers, emulators and databases by design. Nothing it
+      // started outlives the pit stop — including across a re-ask that never
+      // happened, or one that crashed.
+      if (wtPath) await reapUnder(wtPath).catch(() => []);
       // Whatever it changed in the tree goes back. The demo agent is told not to
       // touch source, but "told not to" is not a mechanism, and the diff the
       // operator eventually reviews is not the demo's to edit.
       if (wtPath) await git(wtPath, ["reset", "--hard", head]).catch(() => "");
     }
-    return report;
+    // Whatever survived the second look is what the operator is shown as
+    // evidence; the rest is filed under what this pit stop did not verify.
+    return checks.length ? strikeEvidence(report, checks) : report;
+  }
+
+  /** Read every file the demo agent offered and decide which of them are evidence. */
+  private inspectDemoEvidence(dir: string, report: DemoReport): EvidenceCheck[] {
+    return checkEvidence(report.artifacts, (file) => {
+      // Confined to the pit stop's own directory: an agent that lists
+      // `../../README.md` is not offering evidence it produced.
+      const full = path.resolve(dir, file);
+      if (full !== dir && !full.startsWith(dir + path.sep)) return null;
+      try {
+        return readFileSync(full);
+      } catch {
+        return null;
+      }
+    });
   }
 
   /**
