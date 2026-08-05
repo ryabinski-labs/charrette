@@ -23,11 +23,12 @@ import { AgentPool, PromptStream, type AgentSpec } from "./pool.js";
 
 type Message = Record<string, unknown>;
 
-const assistant = (opts: { text?: string; tool?: string; usage?: Record<string, number>; content?: unknown } = {}): Message => ({
+const assistant = (opts: { text?: string; tool?: string; usage?: Record<string, number>; content?: unknown; stop?: string } = {}): Message => ({
   type: "assistant",
   session_id: "sdk-session-1",
   message: {
     ...(opts.usage ? { usage: opts.usage } : {}),
+    ...(opts.stop ? { stop_reason: opts.stop } : {}),
     content:
       opts.content !== undefined
         ? opts.content
@@ -389,17 +390,38 @@ describe("a session that dies before it reports", () => {
     await expect(pool.run(spec())).rejects.toMatchObject({ cause: original });
   });
 
-  it("books nothing twice when a result had already settled the bill", async () => {
+  it("keeps the answer when the session dies after giving it, and books it once", async () => {
+    // SDK 0.3 delivers the result and then throws restating it, so a session
+    // that hit its turn ceiling raises where it used to return. Propagating
+    // that costs the caller a partial answer it can still use — for intake,
+    // the whole conversation, since `parseBrief`'s fallback never runs.
     queryMock.mockImplementation(() => (async function* () {
       yield assistant();
-      yield result({ total_cost_usd: 0.3 });
-      throw new Error("died after reporting");
+      yield result({ subtype: "error_max_turns", errors: ["Reached maximum number of turns (1)"], result: "half an answer", total_cost_usd: 0.3 });
+      throw new Error("Claude Code returned an error result: Reached maximum number of turns (1)");
     })());
 
-    await expect(pool.run(spec())).rejects.toThrow("died after reporting");
+    const res = await pool.run(spec());
 
+    expect(res.resultText).toBe("half an answer");
+    expect(res.outcome).toBe("error");
+    expect(res.errorDetail).toContain("error_max_turns");
     // One ledger row: the result's. Nothing was pending when it died.
     expect(store.db.prepare("SELECT COUNT(*) AS n FROM ledger").get()).toEqual({ n: 1 });
+    expect(sessionRow(res.sessionId)).toMatchObject({ state: "error" });
+    expect(typed("agent.log").map((e) => (e as { text: string }).text).join("\n")).toContain("had already answered");
+  });
+
+  it("still reports a session that died before it answered", async () => {
+    // The distinction that makes the rule safe: nothing was delivered, so
+    // there is nothing to keep and the caller has to hear about it.
+    queryMock.mockImplementation(() => (async function* () {
+      yield assistant();
+      throw new Error("died before reporting");
+    })());
+
+    await expect(pool.run(spec())).rejects.toThrow("died before reporting");
+    expect(sessionRow((store.db.prepare("SELECT id FROM sessions").get() as { id: string }).id)).toMatchObject({ state: "interrupted" });
   });
 });
 
@@ -474,6 +496,155 @@ describe("the wrap-up message", () => {
 
     expect(typed("agent.log").at(-1)).toMatchObject({ text: "approaching the turn limit (1/1) — asked for a final answer now" });
   });
+});
+
+describe("a turn cut off at the output ceiling", () => {
+  /**
+   * Run a session whose `turn`th message comes back at the ceiling, letting
+   * anything queued reach the stream before the result settles it.
+   */
+  function truncatedAt(turn: number, sent: string[], before?: () => void): void {
+    queryMock.mockImplementation((args: { prompt: AsyncGenerator<{ message: { content: string } }> }) => (async function* () {
+      void (async () => {
+        for await (const m of args.prompt) sent.push(m.message.content);
+      })();
+      for (let i = 1; i <= turn; i++) {
+        if (i === turn) before?.();
+        yield assistant(i === turn ? { text: "half a plan", stop: "max_tokens" } : {});
+      }
+      await new Promise((r) => setImmediate(r));
+      yield result({ result: "half a plan" });
+    })());
+  }
+
+  it("does not send the wrap-up message after it, which the API refuses to accept", async () => {
+    // The production failure, exactly: a 4-turn cap wraps up at turn 3, and turn
+    // 3 was the one that hit the ceiling. Appending anything to a turn that
+    // stopped at `max_tokens` is a 400 — the thinking blocks of the latest
+    // assistant message have to come back as they were, and a truncated turn's
+    // cannot be — which exits the CLI and took a whole planning phase with it.
+    const sent: string[] = [];
+    truncatedAt(3, sent);
+
+    await pool.run(spec({ maxTurns: 4 }));
+
+    expect(sent).toEqual(["build the thing"]);
+    expect(typed("agent.log").map((e) => (e as { text: string }).text).join("\n")).not.toContain("[HARNESS]");
+  });
+
+  it("still sends the wrap-up when the turn ended normally", async () => {
+    // The guard must not cost the feature it sits inside: a session that is
+    // merely near its ceiling is exactly who the wrap-up message is for.
+    const sent: string[] = [];
+    queryMock.mockImplementation((args: { prompt: AsyncGenerator<{ message: { content: string } }> }) => (async function* () {
+      void (async () => {
+        for await (const m of args.prompt) sent.push(m.message.content);
+      })();
+      for (let i = 0; i < 3; i++) yield assistant({ stop: "end_turn" });
+      await new Promise((r) => setImmediate(r));
+      yield result();
+    })());
+
+    await pool.run(spec({ maxTurns: 4 }));
+
+    expect(sent[1]).toMatch(/\[HARNESS\] You are near this session's turn limit/);
+  });
+
+  it("reports the truncation, so a caller can tell it from a badly written answer", async () => {
+    // Downstream the two are identical — both end in text that will not parse —
+    // and they need opposite retries: one asks for better JSON, the other for a
+    // shorter message. `outputTruncated` in runController reads this string.
+    const res = await runTruncated();
+
+    expect(res.outcome).toBe("error");
+    expect(res.errorDetail).toContain("max_tokens");
+    expect(res.resultText).toBe("half a plan");
+  });
+
+  it("keeps the SDK's own verdict when it had one", async () => {
+    // A session that hit the turn ceiling *and* truncated is reported as the
+    // turn ceiling, which is the wall the operator can actually raise.
+    const sent: string[] = [];
+    queryMock.mockImplementation(() => (async function* () {
+      yield assistant({ text: "half", stop: "max_tokens" });
+      await new Promise((r) => setImmediate(r));
+      yield result({ subtype: "error_max_turns" });
+    })());
+    void sent;
+
+    const res = await pool.run(spec({ maxTurns: 1 }));
+
+    expect(res.errorDetail).toContain("error_max_turns");
+  });
+
+  it("does not call an errored session successful just because the subtype says so", async () => {
+    // The shape SDK 0.3.222 actually returns when a message runs past the
+    // ceiling, copied from a live probe: subtype "success", `is_error` set, and
+    // the API's complaint sitting where the agent's answer should be. Read as a
+    // clean result it becomes a planner attempt graded on the error text.
+    scriptedSdk([
+      assistant({ text: "half a plan" }),
+      {
+        type: "result",
+        session_id: "sdk-session-1",
+        subtype: "success",
+        is_error: true,
+        result: "API Error: Claude's response exceeded the 1024 output token maximum. To configure this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable",
+        usage: { input_tokens: 2, output_tokens: 4096 },
+      },
+    ]);
+
+    const res = await pool.run(spec());
+
+    expect(res.outcome).toBe("error");
+    expect(res.errorDetail).toContain("output token maximum");
+  });
+
+  it("refuses operator feedback afterwards, so it queues for the next session instead", async () => {
+    // `inject` returning null is what makes the controller persist the feedback
+    // rather than report it delivered to a session that can never read it.
+    let injected: unknown = "not tried";
+    const sent: string[] = [];
+    queryMock.mockImplementation((args: { prompt: AsyncGenerator<{ message: { content: string } }> }) => (async function* () {
+      void (async () => {
+        for await (const m of args.prompt) sent.push(m.message.content);
+      })();
+      yield assistant({ text: "half a plan", stop: "max_tokens" });
+      injected = pool.inject("run1", "task1", "also check the migrations");
+      await new Promise((r) => setImmediate(r));
+      yield result();
+    })());
+
+    await pool.run(spec());
+
+    expect(injected).toBeNull();
+    expect(sent).toEqual(["build the thing"]);
+  });
+
+  it("says what it could not deliver, rather than dropping it silently", async () => {
+    // Feedback written a moment before the ceiling landed is feedback the
+    // operator believes arrived. Whether it can still be recalled depends on
+    // whether the transport had already picked it up — here it had not — but
+    // when it can be, saying so beats a message that quietly went nowhere.
+    queryMock.mockImplementation(() => (async function* () {
+      pool.inject("run1", "task1", "also check the migrations");
+      yield assistant({ text: "half a plan", stop: "max_tokens" });
+      await new Promise((r) => setImmediate(r));
+      yield result();
+    })());
+
+    await pool.run(spec());
+
+    const logs = typed("agent.log").map((e) => (e as { text: string }).text);
+    expect(logs.some((t) => t.includes("undelivered") && t.includes("also check the migrations"))).toBe(true);
+    expect(logs.some((t) => t.includes("output ceiling") && t.includes("nothing more can be said"))).toBe(true);
+  });
+
+  async function runTruncated() {
+    const sent: string[] = [];
+    truncatedAt(1, sent);
+    return pool.run(spec({ maxOutputTokens: 64_000 }));
+  }
 });
 
 describe("the stall watchdog", () => {

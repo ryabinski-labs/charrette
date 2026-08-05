@@ -8,29 +8,33 @@ import type { AgentPool, AgentResult, AgentSpec } from "./pool.js";
 import { RunController } from "./runController.js";
 import { Store } from "./store.js";
 import { RunConfig } from "@harness/shared";
+import { BudgetExceeded } from "./budget.js";
+import { tasksPerMessage } from "./prompts.js";
 
 /** A pool that replays canned planner outputs instead of calling the API. */
-function fakePool(outputs: string[], outcome: AgentResult["outcome"] = "done", errorDetail?: string) {
+function fakePool(outputs: string[], outcome: AgentResult["outcome"] = "done", errorDetail?: string, dies: (call: number) => Error | undefined = () => undefined) {
   const specs: AgentSpec[] = [];
   let i = 0;
   const pool = {
     async run(spec: AgentSpec): Promise<AgentResult> {
       specs.push(spec);
+      const death = dies(i);
       const resultText = outputs[Math.min(i, outputs.length - 1)]!;
       i++;
+      if (death) throw death;
       return { sessionId: `s${i}`, resultText, costUsd: 0, turns: 1, outcome, errorDetail };
     },
   };
   return { pool: pool as unknown as AgentPool, specs, calls: () => i };
 }
 
-function harness(outputs: string[], outcome?: AgentResult["outcome"], errorDetail?: string) {
+function harness(outputs: string[], outcome?: AgentResult["outcome"], errorDetail?: string, dies?: (call: number) => Error | undefined) {
   const repo = mkdtempSync(path.join(tmpdir(), "harness-plan-"));
   const store = new Store(":memory:");
   const bus = new Bus(store);
   const events: { type: string; reason?: string }[] = [];
   bus.subscribe(({ event }) => events.push(event as { type: string; reason?: string }));
-  const { pool, specs, calls } = fakePool(outputs, outcome, errorDetail);
+  const { pool, specs, calls } = fakePool(outputs, outcome, errorDetail, dies);
   const controller = new RunController(
     store,
     bus,
@@ -323,12 +327,91 @@ describe("a DAG too big for one message", () => {
     expect(files).toContain("planner-attempt-dag-1-2.txt");
   });
 
-  it("tells the planner how many tasks it may put in one message", async () => {
+  it("tells the planner how many tasks it may put in one message, and asks for the room to write them", async () => {
     const { controller, specs } = harness([DOCS, dagJson()]);
     await controller.startRun("do a thing", CONFIG).catch(() => undefined);
-    // The planner runs on a model this SDK does not recognise, so the ceiling is
-    // the SDK's 32k default rather than the 64000 the harness asked for.
-    expect(specs[1]!.systemPrompt).toContain("AT MOST 32 tasks");
+    // Both numbers come from the SDK's own registry for this model, so they
+    // cannot drift apart: the budget the message is given and the size the
+    // planner is told to write for are the same figure. When the SDK could not
+    // be read at all, both fall back to the harness's own 64000.
+    const asked = specs[1]!.maxOutputTokens!;
+    expect(asked).toBeGreaterThanOrEqual(64_000);
+    expect(specs[1]!.systemPrompt).toContain(`AT MOST ${tasksPerMessage(asked)} tasks`);
+  });
+});
+
+describe("what the operator is told about the output ceiling", () => {
+  it("warns when the installed SDK has never heard of the planner's model", async () => {
+    // The silent failure this exists for: the SDK hands an unlisted model 32k
+    // however high the request, the message is cut off mid-JSON, and the retry
+    // — with nothing to tell it otherwise — asks the planner to write less.
+    const { controller, events } = harness([DOCS, dagJson()]);
+    const config = RunConfig.parse({ planIntentCheck: false, models: { planner: "claude-opus-99-imaginary" } });
+
+    await controller.startRun("do a thing", config).catch(() => undefined);
+
+    const warning = events.find((e) => e.type === "agent.log" && (e as { text?: string }).text?.includes("output ceiling"));
+    expect((warning as { text: string } | undefined)?.text).toMatch(/does not list claude-opus-99-imaginary/);
+  });
+
+  it("says nothing when the model is one the SDK knows", async () => {
+    // Silence is the signal that the request was granted. A line printed every
+    // run is a line nobody reads.
+    const { controller, events } = harness([DOCS, dagJson()]);
+
+    await controller.startRun("do a thing", RunConfig.parse({ planIntentCheck: false })).catch(() => undefined);
+
+    expect(events.some((e) => e.type === "agent.log" && (e as { text?: string }).text?.includes("output ceiling"))).toBe(false);
+  });
+});
+
+describe("a planner session that dies before it answers", () => {
+  /** How the CLI reports its own subprocess dying — the shape that killed run da8325bd. */
+  const died = () => new Error("Claude Code process exited with code 1");
+
+  it("costs the attempt, not the run", async () => {
+    // The first phase-B message died; the retry is what the attempt loop is
+    // for. Before this the throw went straight past three attempts, out of
+    // `startRun`, and ended the run with `harness: fatal` — discarding an
+    // intake and a PRD that had already been paid for.
+    const { controller, store } = harness([DOCS, dagJson()], undefined, undefined, (call) => (call === 1 ? died() : undefined));
+
+    // Planning is the subject; the run goes on to want a real git repo, which
+    // this temp directory is not.
+    await controller.startRun("do a thing", RunConfig.parse({ planIntentCheck: false })).catch(() => undefined);
+
+    const runId = (store.db.prepare("SELECT id FROM runs").get() as { id: string }).id;
+    expect(store.listTasks(runId).map((t) => t.id)).toEqual(["task-a"]);
+  });
+
+  it("costs the attempt in phase A too", async () => {
+    // The pool answers by call number, so the dead first call still consumes
+    // the first canned output: phase A's retry is the second DOCS.
+    const { controller, store } = harness([DOCS, DOCS, dagJson()], undefined, undefined, (call) => (call === 0 ? died() : undefined));
+
+    await controller.startRun("do a thing", RunConfig.parse({ planIntentCheck: false })).catch(() => undefined);
+
+    const runId = (store.db.prepare("SELECT id FROM runs").get() as { id: string }).id;
+    expect(store.listTasks(runId)).toHaveLength(1);
+  });
+
+  it("says the session died, rather than blaming the plan it never wrote", async () => {
+    // "the breakdown JSON could not be read" would send the next planner off to
+    // write better JSON for a message that was never emitted.
+    const { controller, events } = harness([DOCS, dagJson()], undefined, undefined, (call) => (call > 0 ? died() : undefined));
+
+    await expect(controller.startRun("do a thing", CONFIG)).rejects.toThrow(/planner session died before it answered/);
+    expect(events.filter((e) => e.type === "run.plan_attempt_failed")).toHaveLength(3);
+  });
+
+  it("does not retry the operator's budget cap, which was reached on purpose", async () => {
+    // Three attempts against a cap the operator set would spend three times the
+    // number they set. A budget stop is a decision, not a failure.
+    const { controller } = harness([DOCS, dagJson()], undefined, undefined, (call) =>
+      call === 1 ? new BudgetExceeded("run", 12, 10, "run1") : undefined
+    );
+
+    await expect(controller.startRun("do a thing", CONFIG)).rejects.toThrow(BudgetExceeded);
   });
 });
 

@@ -6,17 +6,17 @@ import path from "node:path";
  * How much the installed agent SDK will actually let a model emit in one message.
  *
  * `maxOutputTokens` is a request, not a grant. The SDK clamps every message to a
- * per-model ceiling chosen by substring match, and a model it has never heard of
- * falls through to 32k however high `CLAUDE_CODE_MAX_OUTPUT_TOKENS` is set. In
- * 0.1.77 the table keys are `3-5`, `claude-3-opus`, `claude-3-sonnet`,
- * `claude-3-haiku`, `opus-4-5`, `opus-4`, `sonnet-4`, `haiku-4` — so
- * `claude-opus-5` matches nothing and is handed the default.
+ * per-model ceiling, and a model it has never heard of falls through to a default
+ * — 32k — however high `CLAUDE_CODE_MAX_OUTPUT_TOKENS` is set.
  *
- * That is a silent failure, and it cost a real run: the planner asked for 64k,
- * was given 32k, and phase B died mid-JSON with "response exceeded the 32000
- * output token maximum". Nothing in the harness had said the request was refused,
- * so the retry told the planner to *write less* — advice that would have been
- * right if the plan were genuinely too big and was wrong here.
+ * That is a silent failure, and it has cost real runs twice. The first time, the
+ * planner asked for 64k, was given 32k, and phase B died mid-JSON; nothing had
+ * said the request was refused, so the retry told the planner to *write less* —
+ * advice that would have been right if the plan were genuinely too big and was
+ * wrong here. The second time was worse: the truncated turn was followed by the
+ * harness's own wrap-up message, which the API refuses to accept after a
+ * `max_tokens` stop, and the 400 took the whole run down (see the `max_tokens`
+ * branch in `pool.run`).
  *
  * ## Why this reads the SDK's own table rather than keeping a copy
  *
@@ -27,6 +27,15 @@ import path from "node:path";
  * The parse is deliberately shallow and every failure is silent: a bundle whose
  * shape has changed yields no table, and no table yields no claim.
  *
+ * ## What the table looks like now
+ *
+ * Through 0.1.x it was a minified if/else chain of substring tests. From 0.2 the
+ * bundle carries a real model registry instead — one entry per model, each with
+ * `max_output_tokens:{default,upper}` — which is both easier to read and worth
+ * more: `upper` is what the model will emit *when asked*, and it is higher than
+ * the default for every current model. `claude-opus-5` defaults to 64k and
+ * allows 128k, so a planner that asks gets twice the plan per message.
+ *
  * ## Why this warns rather than refuses to start
  *
  * The harness already survives the clamp — planning is split in two precisely so
@@ -36,110 +45,107 @@ import path from "node:path";
  * model. What was missing was never the failure, it was the explanation.
  */
 
-/** One arm of the SDK's ceiling chain: any of these substrings means this cap. */
-export interface CeilingRule {
-  match: string[];
-  cap: number;
+/** One model's output limits, as the SDK's own registry states them. */
+export interface ModelLimits {
+  /** What the model emits per message when nothing asks for more. */
+  standard: number;
+  /** The most it will emit when `CLAUDE_CODE_MAX_OUTPUT_TOKENS` asks for it. */
+  upper: number;
 }
 
-/** The SDK's per-model output ceilings, as read from the installed bundle. */
+/** The SDK's per-model output registry, as read from the installed bundle. */
 export interface CeilingTable {
-  rules: CeilingRule[];
-  /** What a model matching no rule is given. */
-  fallback: number;
-}
-
-/** What the installed SDK will grant one model. */
-export interface OutputCeiling {
-  model: string;
-  cap: number;
-  /**
-   * Whether a rule actually matched. False means the cap is the SDK's fallback —
-   * which may be generous enough by accident, and still says the SDK does not
-   * know this model.
-   */
-  recognized: boolean;
+  /** Model id → limits, longest id first so a dated alias matches its family. */
+  models: { id: string; limits: ModelLimits }[];
 }
 
 /**
- * The minified chain is `if(Q.includes("3-5"))B=8192;else if(...)B=4096;…;else
- * B=32000`, immediately before the env-var clamp. Anchoring on the env var
- * rather than on the function name is what makes this survive a re-minify:
- * identifiers are regenerated every build, the environment variable is not.
- */
-const CLAMP_ANCHOR = ".validate(process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS)";
-
-/** Enough of the bundle to hold the chain, small enough to hold nothing else. */
-const CHAIN_WINDOW = 800;
-
-/** Below this many arms it is not the table, it is a coincidence that parsed. */
-const MIN_RULES = 3;
-
-/**
- * Read the ceiling chain out of an SDK bundle.
+ * What the installed SDK will grant one model — or why that is not known.
  *
- * Returns undefined for any bundle that does not contain a chain of the expected
- * shape — a newer SDK that computes ceilings some other way says nothing rather
- * than guessing, which is the whole point of reading it instead of assuming it.
+ * The two unknowns are kept apart because they call for opposite advice. An
+ * unreadable table is the harness's problem and the operator can do nothing
+ * about it, so it says nothing. A model the table does not list is the
+ * operator's problem and entirely fixable: upgrade the SDK.
+ */
+export type CeilingReading =
+  | ({ known: true; model: string } & ModelLimits)
+  | { known: false; model: string; reason: "unlisted" | "unreadable" };
+
+/**
+ * Entries look like `{id:"claude-opus-5",…,max_output_tokens:{default:64000,upper:128000},…}`.
+ * Splitting on the id key rather than matching across it is what keeps one
+ * entry's limits from being read onto the entry before it, which is the failure
+ * that would matter: a confident wrong number for a model nobody checked.
+ */
+const ENTRY_ANCHOR = '{id:"';
+
+/** Below this many models it is not the registry, it is a coincidence that parsed. */
+const MIN_MODELS = 5;
+
+/**
+ * Read the model registry out of an SDK bundle.
+ *
+ * Returns undefined for any bundle that does not contain a registry of the
+ * expected shape — a newer SDK that states ceilings some other way says nothing
+ * rather than guessing, which is the whole point of reading it instead of
+ * assuming it.
  */
 export function ceilingTable(bundle: string): CeilingTable | undefined {
-  const anchor = bundle.indexOf(CLAMP_ANCHOR);
-  if (anchor < 0) return undefined;
-  // From the `.toLowerCase()` that starts the chain to the clamp that ends it.
-  const before = bundle.slice(Math.max(0, anchor - CHAIN_WINDOW), anchor);
-  const start = before.lastIndexOf(".toLowerCase()");
-  if (start < 0) return undefined;
-  const chain = before.slice(start);
-
-  const rules: CeilingRule[] = [];
-  let fallback: number | undefined;
-  let assigned: string | undefined;
-  for (const arm of chain.split(/\belse\b/)) {
-    const match = [...arm.matchAll(/\.includes\("([^"]+)"\)/g)].map((m) => m[1]!);
-    const assignment = arm.match(/([A-Za-z_$][\w$]*)=(\d+)/);
-    // An arm whose ceiling is not a plain number cannot be reproduced here, and
-    // a table silently missing one arm is worse than no table: it answers
-    // confidently and wrongly for exactly the model that arm was written for.
-    if (!assignment) return undefined;
-    // Every arm must assign the same variable. If they do not, this is not one
-    // chain and the window has caught something else alongside it.
-    assigned ??= assignment[1];
-    if (assignment[1] !== assigned) return undefined;
-    if (match.length) rules.push({ match, cap: Number(assignment[2]) });
-    else fallback = Number(assignment[2]);
+  const models: { id: string; limits: ModelLimits }[] = [];
+  const seen = new Set<string>();
+  for (const chunk of bundle.split(ENTRY_ANCHOR).slice(1)) {
+    const id = /^(claude-[a-z0-9.\-]+)"/.exec(chunk)?.[1];
+    if (!id || seen.has(id)) continue;
+    // Only within this entry: the split guarantees the next model's numbers are
+    // in the next chunk, so a model whose entry omits the field is skipped
+    // rather than given its neighbour's ceiling.
+    const limits = /max_output_tokens:\{default:(\d+),upper:(\d+)\}/.exec(chunk);
+    if (!limits) continue;
+    seen.add(id);
+    models.push({ id, limits: { standard: Number(limits[1]), upper: Number(limits[2]) } });
   }
-  if (rules.length < MIN_RULES || fallback === undefined) return undefined;
-  return { rules, fallback };
+  if (models.length < MIN_MODELS) return undefined;
+  // Longest first, so `claude-opus-4-5-20251101` matches `claude-opus-4-5`
+  // rather than stopping at a shorter id that happens to be a prefix of it.
+  models.sort((a, b) => b.id.length - a.id.length);
+  return { models };
 }
 
-/** Apply the table the way the SDK does: first matching substring, else the fallback. */
-export function modelCeiling(table: CeilingTable, model: string): OutputCeiling {
+/**
+ * Apply the table the way the SDK does: the model's own entry, found by the id
+ * it starts with. Dated aliases (`…-20251101`) and suffixed variants (`…[1m]`)
+ * are the same model as far as the output ceiling is concerned.
+ */
+export function modelCeiling(table: CeilingTable | undefined, model: string): CeilingReading {
+  if (!table) return { known: false, model, reason: "unreadable" };
   const lower = model.toLowerCase();
-  const hit = table.rules.find((r) => r.match.some((m) => lower.includes(m)));
-  return { model, cap: hit?.cap ?? table.fallback, recognized: Boolean(hit) };
+  const hit = table.models.find((m) => lower.startsWith(m.id));
+  return hit ? { known: true, model, ...hit.limits } : { known: false, model, reason: "unlisted" };
 }
 
 let cached: Promise<CeilingTable | undefined> | undefined;
 
-/** Where the SDK's bundle lives, next to the entry point the harness imports. */
+/**
+ * Where the SDK's bundle lives. It is the entry point the harness already
+ * imports: through 0.1.x the registry sat in a sibling `cli.js`, and from 0.2
+ * the entry itself carries it.
+ */
 function bundlePath(): string {
-  const entry = createRequire(import.meta.url).resolve("@anthropic-ai/claude-agent-sdk");
-  return path.join(path.dirname(entry), "cli.js");
+  return createRequire(import.meta.url).resolve("@anthropic-ai/claude-agent-sdk");
 }
 
 /**
- * The installed SDK's ceiling for one model, or undefined if it could not be read.
+ * The installed SDK's ceiling for one model.
  *
- * The bundle is ten megabytes and does not change while the harness runs, so it
- * is read once per process. Never throws: an SDK that cannot be resolved, read,
- * or parsed produces no opinion.
+ * The bundle is a megabyte and does not change while the harness runs, so it is
+ * read once per process. Never throws: an SDK that cannot be resolved, read, or
+ * parsed produces no opinion.
  */
-export async function sdkCeiling(model: string, load = () => readFile(bundlePath(), "utf8")): Promise<OutputCeiling | undefined> {
+export async function sdkCeiling(model: string, load = () => readFile(bundlePath(), "utf8")): Promise<CeilingReading> {
   cached ??= load()
     .then(ceilingTable)
     .catch(() => undefined);
-  const table = await cached;
-  return table && modelCeiling(table, model);
+  return modelCeiling(await cached, model);
 }
 
 /** Forget the cached bundle. Tests only; a process never installs a second SDK. */
@@ -148,27 +154,41 @@ export function forgetCeilingTable(): void {
 }
 
 /**
- * How much output the harness may actually plan around.
- *
- * The request is still a ceiling of its own — asking for 64000 does not get more
- * than 64000 even from a model that would allow it — and a ceiling that could
- * not be read means taking the request at face value, which is what the harness
- * did before it could read one.
+ * How much output the harness may plan around: what it asked for, or the model's
+ * ceiling when that is lower. A ceiling that could not be read means taking the
+ * request at face value, which is what the harness did before it could read one.
  */
-export function grantedTokens(ceiling: OutputCeiling | undefined, asked: number): number {
-  return Math.min(ceiling?.cap ?? asked, asked);
+export function grantedTokens(reading: CeilingReading, asked: number): number {
+  return reading.known ? Math.min(reading.upper, asked) : asked;
 }
 
 /**
- * What the operator is told when the SDK will grant less than the harness asked for.
+ * How much to actually ask for per message.
  *
- * Undefined when there is nothing to say — the ceiling could not be read, or it
- * is high enough that the request stands. Silence here means the request was
- * honoured, which is why it has to be silence and not a reassurance nobody reads.
+ * Everything the model allows, because there is no reason to leave half a plan's
+ * worth of it on the table — a message that fits is a message that does not have
+ * to be split, repaired, or continued. `fallback` is for a model the SDK does
+ * not list, where asking for more than it grants is harmless and asking for less
+ * than it grants is not.
  */
-export function ceilingNote(ceiling: OutputCeiling | undefined, asked: number, role = "the planner"): string | undefined {
-  if (!ceiling || ceiling.cap >= asked) return undefined;
-  const head = `output ceiling: ${role} asks for ${asked} tokens per message and the installed agent SDK will give ${ceiling.cap}`;
-  if (ceiling.recognized) return `${head} — ${ceiling.model} is capped there and long output will be cut off mid-message`;
-  return `${head}, because it does not recognise ${ceiling.model} and falls back to its default — upgrade @anthropic-ai/claude-agent-sdk, or expect long output to be cut off mid-message`;
+export function requestTokens(reading: CeilingReading, fallback: number): number {
+  return reading.known ? reading.upper : fallback;
+}
+
+/**
+ * What the operator is told about the ceiling, or undefined when there is
+ * nothing worth saying. Silence means the request was honoured, which is why it
+ * has to be silence and not a reassurance nobody reads.
+ */
+export function ceilingNote(reading: CeilingReading, asked: number, role = "the planner"): string | undefined {
+  if (reading.known) {
+    if (reading.upper >= asked) return undefined;
+    return `output ceiling: ${role} asks for ${asked} tokens per message and ${reading.model} tops out at ${reading.upper} — long output will be cut off mid-message`;
+  }
+  // Nothing the operator can act on, so nothing is said.
+  if (reading.reason === "unreadable") return undefined;
+  return (
+    `output ceiling: the installed agent SDK does not list ${reading.model} in its model table, so it will fall back to its own default — 32000 tokens per message on every version so far — ` +
+    `however high ${role} asks. Upgrade @anthropic-ai/claude-agent-sdk, or expect long output to be cut off mid-message.`
+  );
 }
