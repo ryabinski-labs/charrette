@@ -1,4 +1,5 @@
 import type { HookInput, HookJSONOutput } from "@anthropic-ai/claude-agent-sdk";
+import { MAX_NESTING, invocation, rawTokens, segments, stripHeredocBodies, stripQuoted, unquote } from "./shellParse.js";
 
 /**
  * Stop an agent provisioning, mutating or destroying real infrastructure.
@@ -39,146 +40,46 @@ import type { HookInput, HookJSONOutput } from "@anthropic-ai/claude-agent-sdk";
  * that; this catches the direct invocation, which is what agents actually write.
  */
 
-/** Shell separators that start a fresh command, when they are not inside quotes. */
-const SEPARATOR = /^(?:\|\||&&|;|\||&|\n)/;
-
-/** Remove quoted spans so prose about a command never reads as the command. */
-function stripQuoted(segment: string): string {
-  return segment.replace(/'[^']*'/g, " ").replace(/"[^"]*"/g, " ");
-}
-
-/**
- * Drop the bodies of any heredocs, keeping the lines that are actually commands.
- *
- * An infra task writes deployment runbooks, and a runbook lists `terraform apply`
- * on a line of its own because that is what a human runs. Read as a script, that
- * document is an apply; blocking it would stop the harness documenting the very
- * work it is allowed to do.
- */
-function stripHeredocBodies(command: string): string {
-  const lines = command.split("\n");
-  const kept: string[] = [];
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i]!;
-    kept.push(line);
-    i++;
-    // Each heredoc opened on this line consumes a body, in the order opened.
-    for (const m of line.matchAll(/<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/g)) {
-      while (i < lines.length && lines[i]!.trim() !== m[2]!) i++;
-      i++; // and the terminator line itself
-    }
-  }
-  return kept.join("\n");
-}
-
-/**
- * The commands one Bash invocation actually runs.
- *
- * Quote-aware, because a naive split is wrong in the direction that matters for
- * ordinary work: `echo "kubectl delete && kubectl apply -f x" >> notes.md` is
- * one command that runs neither of them.
- */
-function segments(command: string): string[] {
-  const out: string[] = [];
-  let current = "";
-  let quote: string | null = null;
-  const flush = () => {
-    if (current.trim()) out.push(current);
-    current = "";
-  };
-  for (let i = 0; i < command.length; i++) {
-    const ch = command[i]!;
-    if (quote) {
-      current += ch;
-      if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      quote = ch;
-      current += ch;
-      continue;
-    }
-    const sep = SEPARATOR.exec(command.slice(i));
-    if (sep) {
-      flush();
-      i += sep[0].length - 1;
-      continue;
-    }
-    current += ch;
-  }
-  flush();
-  return out;
-}
-
-/** Whitespace-separated tokens, with quoted spans held together. */
-function rawTokens(segment: string): string[] {
-  // `segments()` only yields segments with non-whitespace in them, so the match
-  // cannot come back null — the fallback is for the type, not for a real input.
-  /* v8 ignore next */
-  return segment.match(/(?:[^\s'"]|'[^']*'|"[^"]*")+/g) ?? [];
-}
-
-const unquote = (token: string) =>
-  /^(['"]).*\1$/s.test(token) ? token.slice(1, -1) : token;
-
-/** Binaries that only prefix another command; the interesting one is behind them. */
-const WRAPPERS = new Set(["sudo", "doas", "env", "timeout", "nohup", "nice", "ionice", "stdbuf", "command", "xargs", "time"]);
-const SHELLS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
-/** A short-option bundle taking an argument must end in the option letter: `-c`, `-lc`. */
-const DASH_C = /^-{1,2}[a-zA-Z]*c$/;
-
 type Resolved = { bin: string; words: string[]; flags: string[] } | { inline: string };
 
 /**
- * What a segment actually invokes, seeing past environment assignments, wrapper
- * binaries and an inline `-c` script.
+ * What a segment actually invokes, split into the verbs and the flags this
+ * guard reasons about.
+ *
+ * Quoted spans are thrown away rather than unquoted: everything here is matched
+ * against a fixed vocabulary of verbs and dry-run flags, and a quoted argument
+ * is a value — a bucket name, a message, a path — never one of them.
  */
 function resolve(segment: string): Resolved | null {
-  const tokens = rawTokens(segment);
-  let i = 0;
-  for (;;) {
-    while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]!)) i++;
-    const token = tokens[i];
-    if (!token) return null;
-    // `split` always yields at least one element, so `pop` cannot be undefined.
-    /* v8 ignore next */
-    const bin = unquote(token).split("/").pop() ?? "";
-    if (WRAPPERS.has(bin)) {
-      i++;
-      // Skip the wrapper's own arguments: its flags, `-u <user>`, and the bare
-      // duration `timeout`/`nice` take before the command they wrap.
-      while (i < tokens.length) {
-        const t = tokens[i]!;
-        if (/^-{1,2}(u|user|n|adjustment)$/.test(t)) i += 2;
-        else if (t.startsWith("-") || /^\d+(\.\d+)?[smhd]?$/.test(t)) i++;
-        else break;
-      }
-      continue;
-    }
-    const rest = tokens.slice(i + 1);
-    if (SHELLS.has(bin)) {
-      const c = rest.findIndex((t) => DASH_C.test(t));
-      if (c !== -1) {
-        const script = rest.slice(c + 1).find((t) => !t.startsWith("-"));
-        if (script) return { inline: unquote(script) };
-      }
-    }
-    const words: string[] = [];
-    const flags: string[] = [];
-    for (const t of rest) {
-      const clean = stripQuoted(t).trim();
-      if (!clean) continue;
-      (clean.startsWith("-") ? flags : words).push(clean);
-    }
-    return { bin, words, flags };
+  const found = invocation(segment);
+  if (!found || "inline" in found) return found;
+  const words: string[] = [];
+  const flags: string[] = [];
+  for (const t of found.args) {
+    const clean = stripQuoted(t).trim();
+    if (!clean) continue;
+    (clean.startsWith("-") ? flags : words).push(clean);
   }
+  return { bin: found.bin, words, flags };
 }
 
 const has = (flags: string[], re: RegExp) => flags.some((f) => re.test(f));
 
 /** A dry run is the whole point of these tools — never block one. */
 const DRY_RUN = /^--dry-run(=(client|server|none)?)?$|^--validate-only\b|^--what-if\b|^--preview\b/;
+
+/**
+ * Whether a command anywhere in this line asks its tool not to do the thing.
+ *
+ * Exported because this guard is not the only place the answer matters:
+ * `repeatable` has to decide whether re-running a command would change
+ * anything, and `kubectl --dry-run=server apply` changes nothing however many
+ * times it runs. Two regexes for one question is how two guards come to
+ * disagree, which is the reason the lexer under them is shared.
+ */
+export function hasDryRun(command: string): boolean {
+  return rawTokens(command).some((t) => DRY_RUN.test(unquote(t)));
+}
 
 type Check = (t: { words: string[]; flags: string[] }) => string | null;
 
@@ -276,8 +177,7 @@ const INSTEAD: Record<string, string> = {
  * `terraform plan && terraform apply` is an apply.
  */
 export function infraMutation(command: string, depth = 0): { what: string; instead: string } | null {
-  // `bash -c "bash -c ..."` is nobody's idiom, but the recursion needs a floor.
-  if (depth > 3) return null;
+  if (depth > MAX_NESTING) return null;
   for (const segment of segments(stripHeredocBodies(command))) {
     const resolved = resolve(segment);
     if (!resolved) continue;
