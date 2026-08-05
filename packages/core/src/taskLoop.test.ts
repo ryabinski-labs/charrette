@@ -99,7 +99,7 @@ function executing(opts: {
   config?: Partial<Parameters<typeof RunConfig.parse>[0]>;
   guidance?: string | null;
   github?: GitHubAdapter;
-  tasks?: { id: string; dependsOn?: string[]; touchedPaths?: string[] }[];
+  tasks?: { id: string; dependsOn?: string[]; touchedPaths?: string[]; completionProbe?: string }[];
 }): Built {
   const store = new Store(":memory:");
   const bus = new Bus(store);
@@ -151,6 +151,7 @@ function executing(opts: {
       assignedSkills: [],
       errorSummary: null,
       touchedPaths: t.touchedPaths ?? [],
+      completionProbe: t.completionProbe ?? "",
       estimatedSize: "M" as const,
     }))
   );
@@ -169,6 +170,148 @@ const logs = (events: HarnessEvent[]) =>
   events.filter((e): e is HarnessEvent & { text: string } => e.type === "agent.log").map((e) => e.text);
 
 const workerPrompts = (specs: AgentSpec[]) => specs.filter((s) => s.role === "worker").map((s) => s.prompt);
+
+/**
+ * Run da8325bd, Goal 8: a task scoped to remove an unenforced claim from the
+ * product's pricing surfaces removed it from one page and left it on twenty
+ * others. Nothing was broken — the criterion it was given was met, and QA
+ * passed it correctly. A probe is the same criterion in a form that has no
+ * half-satisfied reading.
+ */
+describe("a task whose definition of done is a command", () => {
+  const SWEEP = "! grep -q unenforced claims.txt";
+
+  it("sends the worker back until the probe passes, and spends no QA before it does", async () => {
+    const dir = repo();
+    const { pool, counts } = rolePool({
+      worker: (spec, nth) => {
+        // The first attempt does real, committed work and still leaves the
+        // claim behind — the exact shape that used to merge.
+        commitInWorktree(spec.cwd, "claims.txt", nth === 1 ? "unenforced claim\n" : "enforced claim\n");
+        return "did the work";
+      },
+      qa: () => QA_PASS,
+    });
+    const { controller, store, events, runId } = executing({
+      repoPath: dir,
+      pool,
+      tasks: [{ id: "task-a", completionProbe: SWEEP }],
+    });
+
+    await controller.resume(runId);
+
+    expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
+    expect(counts.worker).toBe(2);
+    // The first iteration never reached QA: the probe is checked before a
+    // reviewer is paid to read a diff that is not finished.
+    expect(counts.qa).toBe(1);
+    expect(logs(events).some((t) => t.includes(`completion probe failed: ${SWEEP}`))).toBe(true);
+  });
+
+  it("tells the worker to finish the job, not to edit the probe", async () => {
+    const dir = repo();
+    const { pool, specs } = rolePool({
+      worker: (spec, nth) => {
+        commitInWorktree(spec.cwd, "claims.txt", nth === 1 ? "unenforced claim\n" : "enforced claim\n");
+        return "did the work";
+      },
+      qa: () => QA_PASS,
+    });
+    const { controller, runId } = executing({ repoPath: dir, pool, tasks: [{ id: "task-a", completionProbe: SWEEP }] });
+
+    await controller.resume(runId);
+
+    const second = workerPrompts(specs)[1] as string;
+    expect(second).toContain("completion probe still fails");
+    expect(second).toContain(SWEEP);
+    expect(second).toContain("Do not change or delete the probe");
+  });
+
+  it("escalates to the operator when the probe never passes, naming the command", async () => {
+    const dir = repo();
+    const { pool } = rolePool({
+      // Each attempt commits something real and still leaves the claim behind.
+      worker: (spec, nth) => (commitInWorktree(spec.cwd, "claims.txt", `unenforced claim, attempt ${nth}\n`), "did the work"),
+      qa: () => QA_PASS,
+    });
+    const { controller, store, gates, runId } = executing({
+      repoPath: dir,
+      pool,
+      tasks: [{ id: "task-a", completionProbe: SWEEP }],
+    });
+
+    await controller.resume(runId);
+
+    expect(store.getTask(runId, "task-a")!.state).toBe("NEEDS_HUMAN");
+    expect(gates.at(-1)!.why).toContain("the completion probe still fails");
+    expect(gates.at(-1)!.why).toContain("not finished everywhere it was scoped to reach");
+  });
+
+  it("tells QA the probe passed, so it reviews correctness rather than coverage", async () => {
+    const dir = repo();
+    const { pool, specs } = rolePool({
+      worker: (spec) => (commitInWorktree(spec.cwd, "claims.txt", "enforced claim\n"), "did the work"),
+      qa: () => QA_PASS,
+    });
+    const { controller, runId } = executing({ repoPath: dir, pool, tasks: [{ id: "task-a", completionProbe: SWEEP }] });
+
+    await controller.resume(runId);
+
+    const qaPrompt = specs.find((s) => s.role === "qa")!.prompt as string;
+    expect(qaPrompt).toContain("completion probe passes");
+    expect(qaPrompt).toContain("says nothing about whether the change is correct");
+  });
+
+  it("runs nothing extra for the ordinary task that has no probe", async () => {
+    const dir = repo();
+    const { pool, counts } = rolePool({
+      worker: (spec) => (commitInWorktree(spec.cwd, "work.txt", "done\n"), "did the work"),
+      qa: () => QA_PASS,
+    });
+    const { controller, store, events, runId } = executing({ repoPath: dir, pool });
+
+    await controller.resume(runId);
+
+    expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
+    expect(counts.worker).toBe(1);
+    expect(logs(events).some((t) => t.includes("completion probe"))).toBe(false);
+  });
+});
+
+describe("what the plan said a task would touch", () => {
+  it("puts the files it never changed in front of QA", async () => {
+    const dir = repo();
+    const { pool, specs } = rolePool({
+      worker: (spec) => (commitInWorktree(spec.cwd, "a.txt", "done\n"), "did the work"),
+      qa: () => QA_PASS,
+    });
+    const { controller, events, runId } = executing({
+      repoPath: dir,
+      pool,
+      tasks: [{ id: "task-a", touchedPaths: ["a.txt", "b.txt", "c.txt"] }],
+    });
+
+    await controller.resume(runId);
+
+    const qaPrompt = specs.find((s) => s.role === "qa")!.prompt as string;
+    expect(qaPrompt).toContain("Declared in the plan and NOT changed: b.txt, c.txt");
+    expect(qaPrompt).toContain("merges half-done");
+    expect(logs(events).some((t) => t.includes("never changed: b.txt, c.txt"))).toBe(true);
+  });
+
+  it("says nothing when the diff matches the plan", async () => {
+    const dir = repo();
+    const { pool, specs } = rolePool({
+      worker: (spec) => (commitInWorktree(spec.cwd, "a.txt", "done\n"), "did the work"),
+      qa: () => QA_PASS,
+    });
+    const { controller, runId } = executing({ repoPath: dir, pool, tasks: [{ id: "task-a", touchedPaths: ["a.txt"] }] });
+
+    await controller.resume(runId);
+
+    expect(specs.find((s) => s.role === "qa")!.prompt as string).not.toContain("Declared in the plan");
+  });
+});
 
 describe("a worker that runs out of turns", () => {
   it("gets more of them on the next dispatch rather than the same wall", async () => {
@@ -368,9 +511,11 @@ describe("a task that keeps going and going", () => {
     const { pool, specs } = rolePool({
       worker: (spec, nth) => {
         // The first pass burns two hours of wall clock, then finishes cleanly
-        // once the operator has answered.
+        // once the operator has answered. Every pass commits, and commits
+        // something different: a branch that carries nothing never reaches QA
+        // at all now, and a second identical commit is not a commit.
         if (nth === 1) offset = 2 * 60 * 60 * 1000;
-        else commitInWorktree(spec.cwd, "work.txt", "done\n");
+        commitInWorktree(spec.cwd, "work.txt", `attempt ${nth}\n`);
         return "did the work";
       },
       advisor: () => "",

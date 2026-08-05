@@ -156,7 +156,7 @@ describe("budget hold", () => {
   const DAG = JSON.stringify({
     epics: [{ id: "epic-e", title: "E", summary: "s" }],
     tasks: [
-      { id: "task-a", epicId: "epic-e", title: "A", spec: "s", acceptanceCriteria: ["x"], dependsOn: [], touchedPaths: [], estimatedSize: "S" },
+      { id: "task-a", epicId: "epic-e", title: "A", spec: "s", acceptanceCriteria: ["x"], dependsOn: [], touchedPaths: [], completionProbe: "", estimatedSize: "S" },
     ],
   });
 
@@ -208,7 +208,7 @@ describe("budget hold", () => {
       epics: [{ id: "epic-e", title: "E", summary: "s" }],
       tasks: ["task-a", "task-b"].map((id) => ({
         id, epicId: "epic-e", title: id, spec: "s", acceptanceCriteria: ["x"],
-        dependsOn: [], touchedPaths: [], estimatedSize: "S" as const,
+        dependsOn: [], touchedPaths: [], completionProbe: "", estimatedSize: "S" as const,
       })),
     });
     const { pool } = spendingPool(store, 0.6, [DOCS, `\`\`\`json\n${dag}\n\`\`\``, "worker done"]);

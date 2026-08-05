@@ -222,10 +222,11 @@ Rules:
 - Acceptance criteria for a UI task must be settleable by looking at the rendered screen, because that is how they will be checked. "Uses the design system" cannot be judged; "the sign-in screen shows the product logo and wordmark, and its primary button uses the palette's primary colour from the design tokens" can. Name the screen, the state, and the viewport where it matters.
 - A task that integrates an external service must say, in its acceptance criteria, which side of the mock/live line it delivers — and the default is live. Write criteria that pin a real client against the vendor's sandbox or documented test mode, or contract tests against recorded fixtures of real responses. If live genuinely cannot be built (no account, no credentials, no sandbox, the operator scoped it out), say so IN THE SPEC in one sentence beginning "Live is out of scope because", and the interface-plus-fake becomes the honest deliverable. What must never happen is the third thing: a task called \`stripe-integration\` whose every criterion is satisfied by a deterministic fake, passing QA and shipping a \`throw notConfigured()\`. Criteria like "the suite makes no outbound HTTP call" or "each vendor category has a deterministic mock" describe the test strategy, not the deliverable — they belong alongside a criterion that pins the real path, never instead of one.
 - Acceptance criteria for an infrastructure task must be checkable WITHOUT provisioning anything, because nothing in this harness may apply to a real account. Write them against \`terraform validate\`/\`plan\`, \`cdk synth\`, \`helm template\`, \`kubectl --dry-run=server\`, a policy or scanning tool, or a property of the rendered output ("the plan creates exactly one bucket, with versioning and SSE-KMS enabled and no public access"). A criterion whose only proof is a deployed resource cannot be judged and will park the task.
+- If a task's definition of done is "everywhere", give it a \`completionProbe\`: ONE shell command, run in the task's worktree, that exits non-zero while the job is unfinished and zero when it is complete. Sweeps are the case — a claim removed from every surface that makes it, a helper gone from every call site, an option renamed across the codebase — because prose criteria cannot express them. "The unenforced claim is removed from the pricing surfaces" is satisfied, as written, by editing one page, and a reviewer sent to check it will read the page the task named rather than the twenty it did not. \`! rg -q "Multi-agent priority" frontend/src\` cannot be half-satisfied. Rules: it must be a read — searching, counting, listing, compiling, testing — and never something that writes, deploys or provisions; it must pass only because the work was done, so \`true\` and \`exit 0\` are worthless; and it must be runnable from the repository root with what the repository already has. Leave it \`""\` for the ordinary task whose criteria are settled by looking at one place. It does not replace acceptanceCriteria — write both.
 - Emit AT MOST ${perMessage} tasks in one message. If the plan needs more, emit the first ${perMessage}, set \`"more": true\`, and you will be asked to continue — the remaining tasks are not lost and nothing is repeated. Never merge tasks or drop scope to fit a message: the message is not the limit, and a DAG made coarser to fit one is a plan that gave up its parallelism for nothing.
 - Your FINAL message must be exactly one JSON object inside a \`\`\`json fence with the shape:
 { "epics": [{"id": kebab, "title": string, "summary": string}],
-  "tasks": [{"id": kebab, "epicId": kebab, "title": string, "spec": markdown, "acceptanceCriteria": [string], "dependsOn": [taskId], "touchedPaths": [string], "estimatedSize": "S"|"M"|"L"}],
+  "tasks": [{"id": kebab, "epicId": kebab, "title": string, "spec": markdown, "acceptanceCriteria": [string], "dependsOn": [taskId], "touchedPaths": [string], "completionProbe": string, "estimatedSize": "S"|"M"|"L"}],
   "more": boolean }
 ${skills}`;
 }
@@ -396,6 +397,39 @@ If you conclude the merge is fundamentally wrong and cannot be resolved this way
 }
 
 /**
+ * Handed to the worker when its branch carries nothing.
+ *
+ * Two different mistakes land here and they need different instructions. A
+ * branch with no commits is usually work that was done and never committed, or
+ * committed somewhere else — in run da8325bd a worker wrote three commits into
+ * the primary repository's own checkout instead of its worktree, and its branch
+ * stayed exactly as it was created. A branch that has commits but changes no
+ * files is the rarer one: an empty commit, or a change and its own revert.
+ *
+ * Neither is a failure of the work, so the prompt does not ask for a redesign.
+ * It asks the worker to find out where its changes went, which is a question it
+ * can answer in two commands and nobody else can answer at all.
+ */
+export function emptyBranchPrompt(branch: string, commits: number): string {
+  return `Your branch \`${branch}\` delivers nothing: ${
+    commits === 0
+      ? "it has no commits on it at all."
+      : `it has ${commits} commit${commits === 1 ? "" : "s"}, and together they change no files.`
+  } Nothing you did can be reviewed, and nothing can be merged, so this cannot be finished as it stands.
+
+This is almost never a problem with the work itself — the work is usually written and simply not on this branch. Before you change any code, find out where it went:
+
+1. \`git status\` and \`git log --oneline -20\` in THIS directory. You are in a git worktree; this directory is the only place your commits count.
+2. \`git stash list\` — uncommitted work that was stashed and never restored.
+3. If your changes are present as uncommitted edits, commit them. That is the whole fix.
+4. If the files you edited are not here at all, you edited them somewhere else. Do not go looking outside this worktree for them and do not commit anything outside it — every path you need is under this directory. Re-apply the change here.
+
+Only if you find that the work genuinely was never done should you build it, starting from the task's acceptance criteria.
+
+Commit before you finish. A summary describing changes that are not committed on this branch is the failure you are reading about.`;
+}
+
+/**
  * Wraps unprompted operator feedback before it is injected into a live session
  * as a user message. The format reminder matters: worker and QA sessions both
  * end in a structured final message, and a bare interjection tempts the agent
@@ -457,12 +491,15 @@ export function qaTaskPrompt(
   workerSummary: string,
   diffStat: string,
   operatorNote?: string,
-  inheritedFailures: string[] = []
+  inheritedFailures: string[] = [],
+  /** What the plan expected of this task, where that differs from what arrived (pathDrift.ts). */
+  planNotes = ""
 ): string {
   return `Task under review: ${task.title}
 
 Acceptance criteria:
 ${task.acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n")}
+${planNotes ? `\n${planNotes}\n` : ""}
 
 Worker's summary:
 ${workerSummary}
@@ -667,11 +704,14 @@ Your FINAL message must be exactly one JSON object inside a \`\`\`json fence:
  "summary":string,
  "journeys":[{"name":string,"result":"worked"|"broken"|"not-reachable","evidence":string}],
  "couldNotReach":[string],
- "artifacts":[{"file":string,"shows":string}]}
+ "artifacts":[{"file":string,"shows":string}],
+ "commands":[{"command":string,"shows":string}]}
 
 howStarted is the command(s) that worked, or the specific reason nothing did. Each journey's evidence is what you actually observed — the status code, the text on the screen, the row that changed — plus the artifact file that shows it.
 
-artifacts lists the files you wrote, relative to ${artifactsDir}, each with the claim it backs. \`shows\` is what a reader learns by opening that file, in one sentence: "the pricing page" is not a claim, "the pricing table at 1440px with the three unenforced rows gone" is. A file you cannot write a claim for is a file that proves nothing — leave it out.`;
+artifacts lists the files you wrote, relative to ${artifactsDir}, each with the claim it backs. \`shows\` is what a reader learns by opening that file, in one sentence: "the pricing page" is not a claim, "the pricing table at 1440px with the three unenforced rows gone" is. A file you cannot write a claim for is a file that proves nothing — leave it out.
+
+commands lists the commands whose RESULT you are offering as proof — the suite you ran, the type check, the request you made — each with what passing it settles. Write the command exactly as you ran it, from the repository root. The harness runs every one of them again before the operator reads your report, and prints only the ones that pass a second time; the rest are reported as claims nobody could confirm, with your command beside them. So do not list a command you did not run, do not tidy one up into something you did not type, and leave out anything whose second run would not mean the same thing — a request that writes, an install, a migration. "The tests pass" in your summary and nothing in this list is a claim the operator has no way to check, and it will read as one.`;
 }
 
 export function demoPrompt(assignment: string, mergedLines: string, upcomingLines: string): string {
@@ -796,7 +836,7 @@ Re-plan only the not-started work in the light of what they said. Drop tasks the
 
 Your FINAL message must be exactly one JSON object inside a \`\`\`json fence, with the same shape the plan uses:
 {"epics":[{"id":string,"title":string,"summary":string}],
- "tasks":[{"id":string,"epicId":string,"title":string,"spec":string,"acceptanceCriteria":[string],"dependsOn":[string],"touchedPaths":[string],"estimatedSize":"S"|"M"|"L"}]}
+ "tasks":[{"id":string,"epicId":string,"title":string,"spec":string,"acceptanceCriteria":[string],"dependsOn":[string],"touchedPaths":[string],"completionProbe":string,"estimatedSize":"S"|"M"|"L"}]}
 Emit every epic a task references, including existing ones you reuse. Emit only the replacement tasks — never the merged ones.`;
 }
 

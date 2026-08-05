@@ -76,6 +76,17 @@ function rolePool(answers: Partial<Record<string, string | ((spec: AgentSpec) =>
       // The real pool checks the budget on every message; a fake that never
       // does leaves the run-wide cap unexercised for every role.
       await spec.budgetCheck?.();
+      // A worker has to leave something on its branch. A branch that changes no
+      // file is not reviewed or merged at all now, so a fake that only returns
+      // text would park every task and none of the paths below would be reached.
+      if (spec.role === "worker") {
+        writeFileSync(path.join(spec.cwd, `w-${specs.length}.txt`), "work\n");
+        execFileSync("git", ["add", "-A"], { cwd: spec.cwd, stdio: "ignore" });
+        execFileSync("git", ["-c", "user.email=w@example.invalid", "-c", "user.name=W", "commit", "-m", "wip"], {
+          cwd: spec.cwd,
+          stdio: "ignore",
+        });
+      }
       const answer = answers[spec.role];
       const resultText = typeof answer === "function" ? answer(spec) : (answer ?? "");
       return { sessionId: `s${specs.length}`, resultText, costUsd: 0, turns: 1, outcome };

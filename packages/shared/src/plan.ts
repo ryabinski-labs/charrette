@@ -9,6 +9,23 @@ export const PlannedTask = z.object({
   acceptanceCriteria: z.array(z.string().min(1)).min(1),
   dependsOn: z.array(z.string()).default([]),
   touchedPaths: z.array(z.string()).default([]),
+  /**
+   * One shell command that exits zero exactly when this task is finished, run
+   * in the task's worktree. Empty when the task has no such command.
+   *
+   * Acceptance criteria are prose, adjudicated by an agent reading the diff,
+   * and that works until a criterion is about *everywhere*: "the unenforced
+   * claim is removed from the pricing surfaces" is satisfied, as written, by
+   * removing it from one page. In run da8325bd that is exactly what shipped —
+   * one page changed, twenty others left as they were, QA correctly passing it
+   * because the criterion it was given had been met.
+   *
+   * A probe is the same criterion in a form that cannot be partially satisfied:
+   * `! rg -q "Multi-agent priority" frontend/src`. It is not a substitute for
+   * criteria and most tasks do not need one; it exists for the class of work
+   * where "done" means a search comes back empty.
+   */
+  completionProbe: z.string().default(""),
   estimatedSize: z.enum(["S", "M", "L"]),
 });
 export type PlannedTask = z.infer<typeof PlannedTask>;

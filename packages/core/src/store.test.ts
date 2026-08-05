@@ -59,7 +59,7 @@ describe("Store run lifecycle", () => {
       [{
         id: "a", epicId: "e1", title: "A", spec: "s", acceptanceCriteria: ["ok"], dependsOn: [],
         state: "PENDING", branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null,
-        qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [], estimatedSize: "M",
+        qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [], completionProbe: "", estimatedSize: "M",
       }]
     );
     store.transitionTask("run1", "a", "READY");
@@ -192,7 +192,7 @@ describe("what a task remembers about the plan that made it", () => {
     id, epicId: "e1", title: id, spec: "s", acceptanceCriteria: ["ok"], dependsOn: [],
     state: "PENDING" as TaskState, branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null,
     qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null,
-    touchedPaths: [] as string[], estimatedSize: "M" as const, ...over,
+    touchedPaths: [] as string[], completionProbe: "", estimatedSize: "M" as const, ...over,
   });
 
   it("keeps the files and the size the planner named", () => {
@@ -238,7 +238,7 @@ describe("what previous runs in this repository cost", () => {
   const merged = (id: string, size: "S" | "M" | "L") => ({
     id, epicId: "e1", title: id, spec: "s", acceptanceCriteria: ["ok"], dependsOn: [],
     state: "MERGED" as TaskState, branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null,
-    qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [] as string[], estimatedSize: size,
+    qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [] as string[], completionProbe: "", estimatedSize: size,
   });
   const spend = (store: Store, runId: string, usd: number) =>
     store.recordUsage({ runId, sessionId: `s-${runId}-${usd}`, model: "claude-sonnet-5", inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: usd });

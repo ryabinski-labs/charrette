@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { promisify } from "node:util";
 import { z } from "zod";
 import { Plan, PlanBatch, PlanBreakdown, PlannedEpic, PlannedTask, QaVerdict, RunConfig, TaskState, briefToAssignment, validatePlanDag } from "@harness/shared";
 import { indexSkills, matchSkills, verifyHash, type IndexedSkill } from "@harness/skills-mcp";
@@ -12,7 +14,7 @@ import { nextDispatch } from "./dispatchOrder.js";
 import { git, repoFileList, WorktreeManager } from "./git.js";
 import { GitHubAdapter, type PrRef } from "./github.js";
 import { runIntake, type IntakeUi } from "./intake.js";
-import { isolationBlock, isolationEnv, taskIsolation } from "./isolation.js";
+import { composeDown, isolationBlock, isolationEnv, taskIsolation } from "./isolation.js";
 import { observeChecks } from "./memory.js";
 import { ceilingNote, grantedTokens, requestTokens, sdkCeiling } from "./outputCeiling.js";
 import { reapUnder } from "./reaper.js";
@@ -27,7 +29,18 @@ import {
   type PitStopDue,
   type ReviewReport,
 } from "./pitstop.js";
-import { checkEvidence, evidenceFaults, retryableFaults, strikeEvidence, type EvidenceCheck } from "./evidence.js";
+import {
+  checkCommands,
+  checkEvidence,
+  evidenceFaults,
+  repeatable,
+  retryableFaults,
+  strikeCommands,
+  strikeEvidence,
+  type CommandCheck,
+  type EvidenceCheck,
+  type Rerun,
+} from "./evidence.js";
 import {
   type AdvisorCheck,
   advisorAnswer,
@@ -37,6 +50,7 @@ import {
   demoEvidenceReaskPrompt,
   demoPrompt,
   demoSystemPrompt,
+  emptyBranchPrompt,
   extractJson,
   extractSection,
   operatorFeedbackMessage,
@@ -61,12 +75,16 @@ import {
   workerSystemPrompt,
   workerTaskPrompt,
 } from "./prompts.js";
+import { usableProbe } from "./completionProbe.js";
+import { hasDrift, pathDrift, renderDrift } from "./pathDrift.js";
 import { confirmFailures, runDeterministicChecks, splitInheritedFailures, type CheckResult } from "./qa.js";
 import { estimatePlan, renderEstimate } from "./estimate.js";
 import { renderIntegrations, scanIntegrations } from "./integrationScan.js";
 import { renderProduction, scanProduction } from "./productionScan.js";
 import { detectToolbelt, toolbeltBlock } from "./toolbelt.js";
 import { Store, TaskRow, type RunRow } from "./store.js";
+
+const execFileP = promisify(execFile);
 
 const FULL_TEXT_SKILL_TOKEN_LIMIT = 1500; // PERF-4
 const MAX_FULL_TEXT_SKILLS = 2;
@@ -100,6 +118,7 @@ function pendingRow(t: PlannedTask): Omit<TaskRow, "runId"> {
     errorSummary: null,
     touchedPaths: t.touchedPaths,
     estimatedSize: t.estimatedSize,
+    completionProbe: usableProbe(t.completionProbe),
   };
 }
 
@@ -154,6 +173,24 @@ const MAX_SKILLS_PER_ROLE = 4;
  * and each attempt costs a worker session and a QA session.
  */
 const CONFLICT_FIX_ATTEMPTS = 1;
+
+/**
+ * How many times a task may come back with a branch that changes nothing
+ * before it is parked, whatever the operator says.
+ *
+ * Every other bound in this loop is reset by an answer at the gate, because an
+ * answer changes the conditions the previous failures happened under — a new
+ * instruction really can make failing checks pass. An empty branch is the one
+ * case where that reasoning does not hold: nothing was produced, so nothing
+ * about the attempt can be different, and `askOrPark` resets both the
+ * iteration count and the wall clock. An operator who keeps answering would
+ * keep the task in a loop that no bound in this method can end.
+ *
+ * So this one is counted separately and never reset. Reaching it means the
+ * task cannot commit to its own branch, which is not a question more attempts
+ * answer.
+ */
+const EMPTY_DELIVERY_ATTEMPTS = 4;
 
 /**
  * Turns the demo agent gets to repair its evidence, resumed with the product
@@ -305,6 +342,18 @@ const DemoJson = z.object({
       z.union([
         z.string().transform((file) => ({ file, shows: "" })),
         z.object({ file: z.string(), shows: z.string().default("") }),
+      ])
+    )
+    .default([]),
+  // Same shape and the same reasoning: a bare command string parses, arrives
+  // with no claim attached, and is struck by the gate rather than losing the
+  // whole report. Absent entirely is a demo that offered no command as proof,
+  // which is a fact about the demo and not a parse error.
+  commands: z
+    .array(
+      z.union([
+        z.string().transform((command) => ({ command, shows: "" })),
+        z.object({ command: z.string(), shows: z.string().default("") }),
       ])
     )
     .default([]),
@@ -771,6 +820,10 @@ export class RunController {
       // be worth a conflict.
       dependsOn: i === 0 ? [] : [`intent-fix-${round}-${i}`],
       touchedPaths: [],
+      // The validator reports a gap in prose; it is not asked for a command,
+      // and inventing one here would be the harness guessing at a check it has
+      // no basis for.
+      completionProbe: "",
       estimatedSize: "M",
     }));
     this.store.insertTasks(runId, [...this.store.listEpics(runId), INTENT_FIX_EPIC], queued.map(pendingRow));
@@ -2140,7 +2193,59 @@ export class RunController {
       tasks: touched,
       ts: Date.now(),
     });
+    await this.sweepRunResources(runId, `pit stop ${number}`);
     return decision.action;
+  }
+
+  /**
+   * Give the machine back, at every pit stop.
+   *
+   * A pit stop is the one moment in a run when nothing is mid-flight: the
+   * operator has just answered, no worker is dispatched yet, and everything a
+   * finished task started is by definition finished with. It is the only place
+   * a sweep is both safe and worth doing.
+   *
+   * What accumulates is real. Agents are told to tear down what they start and
+   * a session that hits its turn ceiling, dies, or is killed by the budget gate
+   * never gets to; run 40da9337 ended with 37 orphaned processes across five
+   * already-merged worktrees, two of them thirteen hours old, all still writing
+   * to a database the live tasks were reading. Containers are worse than
+   * processes because they hold ports and volumes as well as memory, and a
+   * thirty-task run leaves thirty stacks behind.
+   *
+   * Nothing here can touch anything that is not this run's: compose projects
+   * are named from this run's own task ids, and the process sweep is confined
+   * to this run's worktree directory. Failures are logged and swallowed —
+   * reclaiming disk is not worth ending a run over.
+   */
+  private async sweepRunResources(runId: string, why: string): Promise<void> {
+    const tasks = this.store.listTasks(runId);
+    // Every task's stack, plus the pit stops' own — the demo agent starts the
+    // product too, and under a project of its own.
+    const projects = [
+      ...tasks.map((t) => taskIsolation(runId, t.id).composeProject),
+      ...Array.from({ length: this.store.pitStopHistory(runId, 0).count + 1 }, (_, i) => taskIsolation(runId, `pitstop-${i + 1}`).composeProject),
+    ];
+    const [stacks, processes] = await Promise.all([
+      composeDown(projects, async (bin, args) => (await execFileP(bin, args, { timeout: 120_000 })).stdout).catch(() => [] as string[]),
+      reapUnder(path.join(this.wt.worktreeRoot(), runId)).catch(() => [] as unknown[]),
+    ]);
+    await this.wt.pruneAndReconcile().catch(() => undefined);
+    if (!stacks.length && !processes.length) return;
+    this.bus.publish({
+      type: "agent.log",
+      runId,
+      sessionId: "integrator",
+      text:
+        `swept after ${why}: ` +
+        [
+          stacks.length ? `${stacks.length} container stack${stacks.length === 1 ? "" : "s"} still up and brought down (${stacks.slice(0, 5).join(", ")}${stacks.length > 5 ? ", …" : ""})` : "",
+          processes.length ? `${processes.length} orphaned process${processes.length === 1 ? "" : "es"} killed` : "",
+        ]
+          .filter(Boolean)
+          .join("; "),
+      ts: Date.now(),
+    });
   }
 
   /**
@@ -2191,6 +2296,7 @@ export class RunController {
     // demo anything must still open.
     let report = demoUnavailable("the demo agent did not run");
     let checks: EvidenceCheck[] = [];
+    let commandChecks: CommandCheck[] = [];
     try {
       wtPath = await this.wt.ensureIntegrationWorktree(runId);
       head = (await git(wtPath, ["rev-parse", "HEAD"])).trim();
@@ -2248,10 +2354,15 @@ export class RunController {
           // keep the first report and its checks
         }
       }
+      // Before the stack comes down in `finally`: a claim like "the health
+      // endpoint returns 200" is only checkable while the product it was made
+      // about is still running.
+      commandChecks = await this.verifyDemoCommands(runId, wtPath, report);
     } catch (e) {
       if (e instanceof BudgetExceeded) throw e;
       report = demoUnavailable(String(e).slice(0, 300));
       checks = [];
+      commandChecks = [];
     } finally {
       // It starts servers, emulators and databases by design. Nothing it
       // started outlives the pit stop — including across a re-ask that never
@@ -2264,7 +2375,55 @@ export class RunController {
     }
     // Whatever survived the second look is what the operator is shown as
     // evidence; the rest is filed under what this pit stop did not verify.
-    return checks.length ? strikeEvidence(report, checks) : report;
+    const withFiles = checks.length ? strikeEvidence(report, checks) : report;
+    return commandChecks.length ? strikeCommands(withFiles, commandChecks) : withFiles;
+  }
+
+  /**
+   * How many of a demo's claimed commands the harness will repeat.
+   *
+   * Each one can be a full test suite, and a demo that lists a dozen would turn
+   * a checkpoint into a second CI run. Anything past the cap is reported as
+   * unverified rather than quietly dropped — a truncated list that reads as a
+   * complete one is the failure this whole module exists to stop.
+   */
+  private static readonly MAX_VERIFIED_COMMANDS = 6;
+
+  /**
+   * Run the demo's own claimed commands again, in the worktree it ran them in.
+   *
+   * "I ran the suite and it is green" has until now reached the operator as a
+   * fact on the strength of an agent having typed it. The claims that survive
+   * this are the ones a second run agreed with; the rest move to what the pit
+   * stop could not check, with the command printed beside them so the operator
+   * can run it themselves.
+   */
+  private async verifyDemoCommands(runId: string, wtPath: string, report: DemoReport): Promise<CommandCheck[]> {
+    const claims = report.commands ?? [];
+    if (!claims.length || !wtPath) return [];
+    const runnable = [...new Set(claims.map((c) => c.command.trim()).filter((c) => c && repeatable(c).ok))];
+    const willRun = runnable.slice(0, RunController.MAX_VERIFIED_COMMANDS);
+    const results = new Map<string, Rerun>();
+    // Serially: these are suites, and a pit stop that runs six of them at once
+    // on the machine the operator is using is its own kind of failure.
+    for (const command of willRun) {
+      const out = await runDeterministicChecks(wtPath, [command]);
+      results.set(command, { ok: out.ok, output: out.failures[0]?.output ?? "" });
+    }
+    if (runnable.length > willRun.length) {
+      this.bus.publish({
+        type: "agent.log",
+        runId,
+        sessionId: "integrator",
+        text: `the demo claimed ${runnable.length} commands; the harness re-ran the first ${willRun.length} and reported the rest as unverified`,
+        ts: Date.now(),
+      });
+    }
+    return checkCommands(
+      claims,
+      (command) => results.get(command) ?? null,
+      `the harness re-runs at most ${RunController.MAX_VERIFIED_COMMANDS} commands per pit stop, and this one was past that`
+    );
   }
 
   /** Read every file the demo agent offered and decide which of them are evidence. */
@@ -2652,6 +2811,8 @@ export class RunController {
     let workerTurns = run.config.workerMaxTurns;
     /** Merges handed back to the worker so far; past the cap it is the operator's. */
     let conflictFixes = 0;
+    /** Branches that arrived carrying nothing. Never reset — see EMPTY_DELIVERY_ATTEMPTS. */
+    let emptyDeliveries = 0;
     /**
      * Why the last iteration was sent back, verbatim — QA's reasons, or the
      * failing check's output.
@@ -2723,6 +2884,11 @@ export class RunController {
           (qaFeedback ? `${qaFeedback}\n\n` : "") +
           `The operator sent feedback on this task — follow it over anything that contradicts it:\n${queuedFeedback}`;
       }
+      // The operator's own checkout, sampled either side of the session. The
+      // worktree guard denies the direct forms of writing there; this is what
+      // notices when something indirect got through, while there is still a
+      // named task and a live session to attribute it to.
+      const primaryBefore = await this.wt.primaryHead();
       try {
         const worker = await this.pool.run({
           runId,
@@ -2767,6 +2933,67 @@ export class RunController {
         }
         lastRejection = `The worker session died before finishing (respawn ${respawns} of ${run.config.workerRespawnCap}): ${String(e).slice(0, 500)}`;
         qaFeedback = `Previous session was interrupted (${String(e).slice(0, 200)}). Inspect git log in this worktree and continue.`;
+        continue;
+      }
+
+      const primaryAfter = await this.wt.primaryHead();
+      if (primaryBefore && primaryAfter && primaryBefore !== primaryAfter) {
+        this.bus.publish({
+          type: "agent.log",
+          runId,
+          taskId,
+          sessionId: workerSession ?? taskId,
+          text:
+            `the primary repository moved while this task was working: ${primaryBefore} -> ${primaryAfter}. ` +
+            `No agent should write there — work committed to the operator's own checkout is on a branch this run will never merge or report.`,
+          ts: Date.now(),
+        });
+      }
+
+      // Before anything is spent reviewing it: does this branch carry work?
+      //
+      // Nothing downstream can tell. The checks run against the worktree, which
+      // looks fine whether or not the task committed to it; QA reviews a diff
+      // that is empty and has no criterion telling it that emptiness is a
+      // failure; and `git merge` reports success on a branch with no commits.
+      // So an empty delivery used to travel the whole pipeline and come out the
+      // far end labelled MERGED — three times in run da8325bd, once for work
+      // the operator was told had shipped.
+      const delta = await this.wt.taskBranchDelta(runId, taskId);
+      if (!delta.files.length) {
+        emptyDeliveries++;
+        if (emptyDeliveries > EMPTY_DELIVERY_ATTEMPTS) {
+          this.park(
+            runId,
+            taskId,
+            `the task branch is still empty after ${emptyDeliveries} attempts: nothing has been committed to ${this.wt.branchName(runId, taskId)}, ` +
+              `so there is nothing to review or merge. Check whether the work was written somewhere other than the worktree.`
+          );
+          return;
+        }
+        const iterations = task.qaIterations + 1;
+        this.store.updateTask(runId, taskId, { qaIterations: iterations });
+        this.bus.publish({
+          type: "agent.log",
+          runId,
+          taskId,
+          sessionId: workerSession ?? taskId,
+          text: `nothing to review: ${this.wt.branchName(runId, taskId)} changes no file against ${this.wt.integrationBranch(runId)} (${delta.commits} commit${delta.commits === 1 ? "" : "s"})`,
+          ts: Date.now(),
+        });
+        qaFeedback = emptyBranchPrompt(this.wt.branchName(runId, taskId), delta.commits);
+        lastRejection = `The branch was empty: ${delta.commits} commit${delta.commits === 1 ? "" : "s"}, no files changed against the integration branch.`;
+        // The task stays WORKING and is re-dispatched, exactly as a failed
+        // deterministic check is: nothing has been reviewed, so there is no
+        // verdict to record and no state to leave the task in but the one it
+        // is already in.
+        if (iterations >= run.config.qaIterationCap) {
+          const guidance = await ask(
+            `the task branch is still empty after ${iterations} attempts — nothing is committed to ${this.wt.branchName(runId, taskId)}, so there is nothing to review or merge`
+          );
+          if (guidance === null) return;
+          qaFeedback = `The operator looked at the empty branch and says — follow it over anything that contradicts it:\n${guidance}\n\n${qaFeedback}`;
+        }
         continue;
       }
 
@@ -2833,8 +3060,62 @@ export class RunController {
         continue;
       }
 
+      // The task's own definition of done, in a form that cannot be partly
+      // satisfied. Run after the repo's checks and before QA: a probe is about
+      // this task alone, so there is no base to compare it against and nothing
+      // to inherit — it either passes on this branch or the task is not
+      // finished. Most tasks have none, and cost nothing here.
+      if (task.completionProbe) {
+        const probe = await runDeterministicChecks(wt.path, [task.completionProbe]);
+        if (!probe.ok) {
+          const output = probe.failures[0]?.output ?? "";
+          qaFeedback =
+            `This task's completion probe still fails. The probe is the task's own definition of done, and it does not depend on ` +
+            `which files you happened to edit — it passes when the job is complete everywhere and fails while any of it is left:\n\n` +
+            `$ ${task.completionProbe}\n${output}\n\n` +
+            `Do not change or delete the probe. Finish the work it is looking for. If you believe the probe itself is wrong, say so plainly in your summary and explain why, rather than editing it.`;
+          lastRejection = `The completion probe failed: ${task.completionProbe}\n${output.slice(-1500)}`;
+          const iterations = task.qaIterations + 1;
+          this.store.updateTask(runId, taskId, { qaIterations: iterations });
+          this.bus.publish({
+            type: "agent.log",
+            runId,
+            taskId,
+            sessionId: workerSession ?? taskId,
+            text: `completion probe failed: ${task.completionProbe}`,
+            ts: Date.now(),
+          });
+          if (iterations >= run.config.qaIterationCap) {
+            const guidance = await ask(
+              `the completion probe still fails after ${iterations} attempts — the task is not finished everywhere it was scoped to reach:\n\n$ ${task.completionProbe}\n${output.slice(-1500)}`
+            );
+            if (guidance === null) return;
+            qaFeedback = `The operator looked at the failing probe and says — follow it over anything that contradicts it:\n${guidance}\n\n${qaFeedback}`;
+          }
+          continue;
+        }
+      }
+
       this.store.transitionTask(runId, taskId, "QA");
       const diffStat = await git(wt.path, ["diff", "--stat", `${this.wt.integrationBranch(runId)}...HEAD`]).catch(() => "unavailable");
+      // What the plan expected this task to touch, against what it did. A
+      // signal for the reviewer, never a verdict: the planner's list was
+      // written before anyone read the code, and QA is holding the criteria
+      // that decide which side of that is right.
+      const drift = pathDrift(task.touchedPaths, delta.files);
+      if (hasDrift(drift)) {
+        this.bus.publish({
+          type: "agent.log",
+          runId,
+          taskId,
+          sessionId: workerSession ?? taskId,
+          text:
+            `plan said ${task.touchedPaths.length} path${task.touchedPaths.length === 1 ? "" : "s"}, diff touched ${delta.files.length}` +
+            (drift.missing.length ? `; never changed: ${drift.missing.join(", ")}` : "") +
+            (drift.extra.length ? `; not in the plan: ${drift.extra.slice(0, 5).join(", ")}${drift.extra.length > 5 ? ", …" : ""}` : ""),
+          ts: Date.now(),
+        });
+      }
       let qa;
       try {
         qa = await this.pool.run({
@@ -2848,7 +3129,13 @@ export class RunController {
             workerSummary.slice(0, 4000),
             diffStat.slice(0, 2000),
             this.store.drainFeedback(runId, taskId) || undefined,
-            inherited.map((i) => i.command)
+            inherited.map((i) => i.command),
+            [
+              renderDrift(drift),
+              task.completionProbe ? `This task's completion probe passes: \`${task.completionProbe}\`. That settles the "everywhere" half of the job; it says nothing about whether the change is correct.` : "",
+            ]
+              .filter(Boolean)
+              .join("\n\n")
           ),
           cwd: wt.path,
           disallowedTools: ["WebSearch"],
@@ -2925,6 +3212,16 @@ export class RunController {
         this.store.transitionTask(runId, taskId, "ACCEPTED", verdict.notes);
         const merged = await this.integrate(runId, taskId);
         if (merged.ok) return;
+        // The branch emptied out between the pre-QA gate and here — a worker
+        // that reset or aborted its own work during a conflict fix is the way
+        // that happens. It is not a conflict and must not be described as one:
+        // there is no other side to reconcile with.
+        if ("empty" in merged) {
+          this.store.transitionTask(runId, taskId, "WORKING", "the accepted branch carries no changes; re-dispatched to commit its work");
+          qaFeedback = emptyBranchPrompt(this.wt.branchName(runId, taskId), 0);
+          lastRejection = "QA accepted the work, but the branch turned out to change nothing against the integration branch.";
+          continue;
+        }
         // The work passed; the base moved. Hand the conflict back to the worker
         // that wrote the code — it has the worktree, the context and the only
         // informed opinion about which side of each hunk belongs. Parking is
@@ -2965,10 +3262,25 @@ export class RunController {
    * openPrs. Reports a conflict rather than parking on it — the caller decides
    * whether the worker gets a go at it first.
    */
-  private async integrate(runId: string, taskId: string): Promise<{ ok: true } | { ok: false; conflicts: string[] }> {
+  private async integrate(runId: string, taskId: string): Promise<{ ok: true } | { ok: false; empty: true } | { ok: false; conflicts: string[] }> {
     const run = this.store.getRun(runId)!;
     const task = this.store.getTask(runId, taskId)!;
     const merge = await this.wt.mergeTaskBranch(runId, taskId);
+    // Nothing landed, so nothing is booked. The task stays un-merged and the
+    // caller sends it back — the one thing that must not happen is the state
+    // this replaces, where an unmoved integration branch was recorded as this
+    // task's delivery and its sha posted to the task's issue.
+    if (!merge.ok && "empty" in merge) {
+      this.bus.publish({
+        type: "agent.log",
+        runId,
+        taskId,
+        sessionId: taskId,
+        text: `merge produced nothing: ${task.branch ?? this.wt.branchName(runId, taskId)} left ${this.wt.integrationBranch(runId)} where it was`,
+        ts: Date.now(),
+      });
+      return merge;
+    }
     if (!merge.ok) {
       // Branch is set by ensureWorktree before the task can ever be merged;
     // the fallback is for the column type, not for a state that occurs.

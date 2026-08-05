@@ -55,7 +55,7 @@ const dagJson = (ids: string[]) =>
     epics: [{ id: "epic-e", title: "E", summary: "s" }],
     tasks: ids.map((id) => ({
       id, epicId: "epic-e", title: id.toUpperCase(), spec: "s", acceptanceCriteria: ["x"],
-      dependsOn: [], touchedPaths: [], estimatedSize: "S" as const,
+      dependsOn: [], touchedPaths: [], completionProbe: "", estimatedSize: "S" as const,
     })),
   }) +
   "\n```";

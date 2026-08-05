@@ -135,7 +135,7 @@ describe("skill routing", () => {
     "```json\n" +
     JSON.stringify({
       epics: [{ id: "epic-e", title: "E", summary: "s" }],
-      tasks: [{ id: "task-a", epicId: "epic-e", title, spec, acceptanceCriteria: ["x"], dependsOn: [], touchedPaths: [], estimatedSize: "S" }],
+      tasks: [{ id: "task-a", epicId: "epic-e", title, spec, acceptanceCriteria: ["x"], dependsOn: [], touchedPaths: [], completionProbe: "", estimatedSize: "S" }],
     }) +
     "\n```";
 

@@ -16,8 +16,8 @@ const DAG =
   JSON.stringify({
     epics: [{ id: "epic-e", title: "E", summary: "s" }],
     tasks: [
-      { id: "task-a", epicId: "epic-e", title: "A", spec: "s", acceptanceCriteria: ["x"], dependsOn: [], touchedPaths: [], estimatedSize: "S" },
-      { id: "task-b", epicId: "epic-e", title: "B", spec: "s", acceptanceCriteria: ["x"], dependsOn: ["task-a"], touchedPaths: [], estimatedSize: "S" },
+      { id: "task-a", epicId: "epic-e", title: "A", spec: "s", acceptanceCriteria: ["x"], dependsOn: [], touchedPaths: [], completionProbe: "", estimatedSize: "S" },
+      { id: "task-b", epicId: "epic-e", title: "B", spec: "s", acceptanceCriteria: ["x"], dependsOn: ["task-a"], touchedPaths: [], completionProbe: "", estimatedSize: "S" },
     ],
   }) +
   "\n```";
