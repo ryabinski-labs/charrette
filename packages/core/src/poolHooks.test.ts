@@ -9,10 +9,12 @@ const bash = (command: string, run_in_background?: boolean, timeout?: number) =>
     tool_input: { command, ...(run_in_background === undefined ? {} : { run_in_background }), ...(timeout === undefined ? {} : { timeout }) },
   }) as unknown as HookInput;
 
-const fire = async (index: number, input: HookInput) =>
-  (await bashHooks()!.PreToolUse![0]!.hooks[index]!(input, undefined, { signal: new AbortController().signal })) as {
+const fireIn = async (worktree: string, index: number, input: HookInput) =>
+  (await bashHooks(worktree)!.PreToolUse![0]!.hooks[index]!(input, undefined, { signal: new AbortController().signal })) as {
     hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string; updatedInput?: Record<string, unknown> };
   };
+
+const fire = (index: number, input: HookInput) => fireIn("", index, input);
 
 /**
  * Agents run with `permissionMode: "bypassPermissions"`, so there is no prompt
@@ -29,8 +31,34 @@ describe("the hooks every agent session runs with", () => {
   });
 
   it("ignores a tool that is not Bash, and an event that is not PreToolUse", async () => {
-    expect(await fire(1, { hook_event_name: "PreToolUse", tool_name: "Write", tool_input: {} } as unknown as HookInput)).toEqual({});
-    expect(await fire(1, { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: {} } as unknown as HookInput)).toEqual({});
+    expect(await fire(2, { hook_event_name: "PreToolUse", tool_name: "Write", tool_input: {} } as unknown as HookInput)).toEqual({});
+    expect(await fire(2, { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: {} } as unknown as HookInput)).toEqual({});
+  });
+
+  /**
+   * Run da8325bd: a worker committed its whole deliverable into the primary
+   * repository instead of its worktree. The branch the run merged and reported
+   * on stayed empty, and nothing in the pipeline could see the difference.
+   */
+  describe("the worktree guard", () => {
+    it("denies a git write aimed outside the session's worktree", async () => {
+      const denial = await fireIn("/repo-wt/run1/task-a", 1, bash("git -C /repo commit -am wip"));
+      expect(denial.hookSpecificOutput?.permissionDecision).toBe("deny");
+      expect(denial.hookSpecificOutput?.permissionDecisionReason).toContain("/repo");
+    });
+
+    it("leaves reads and in-worktree writes alone", async () => {
+      expect(await fireIn("/repo-wt/run1/task-a", 1, bash("git -C /repo log --oneline -20"))).toEqual({});
+      expect(await fireIn("/repo-wt/run1/task-a", 1, bash("git commit -am 'real work'"))).toEqual({});
+    });
+
+    /**
+     * Intake and planning run against the repository itself and commit nothing,
+     * so they are given no boundary rather than one that would be wrong.
+     */
+    it("enforces nothing for a session with no worktree of its own", async () => {
+      expect(await fire(1, bash("git -C /anywhere commit -am wip"))).toEqual({});
+    });
   });
 
   it("denies an apply through the registered hook, whether or not rtk is installed", async () => {
@@ -52,7 +80,7 @@ describe("the hooks every agent session runs with", () => {
    */
   describe("the background-shell guard", () => {
     it("denies run_in_background and names a form that is safe", async () => {
-      const denial = await fire(1, bash("npm test", true));
+      const denial = await fire(2, bash("npm test", true));
       expect(denial.hookSpecificOutput?.permissionDecision).toBe("deny");
       // The refusal has to be worth obeying: an agent told only "no" reaches for
       // the same tool again with a different command.
@@ -67,20 +95,20 @@ describe("the hooks every agent session runs with", () => {
      * the agent re-opens the door by asking for a two-minute limit.
      */
     it("raises a short explicit timeout instead of letting it background the command", async () => {
-      const raised = await fire(1, bash("npm test", undefined, 120_000));
+      const raised = await fire(2, bash("npm test", undefined, 120_000));
       expect(raised.hookSpecificOutput?.permissionDecision).toBe("allow");
       expect(raised.hookSpecificOutput?.updatedInput).toMatchObject({ command: "npm test", timeout: BASH_TIMEOUT_MS });
     });
 
     it("leaves a generous timeout as the agent wrote it", async () => {
-      expect(await fire(1, bash("npm test", undefined, BASH_TIMEOUT_MS))).toEqual({});
+      expect(await fire(2, bash("npm test", undefined, BASH_TIMEOUT_MS))).toEqual({});
     });
 
     it("leaves foreground commands alone, including a plain shell background job", async () => {
       // `&` inside one Bash call returns immediately, so it neither times out
       // nor registers a task — the recommended escape hatch, and untouched.
-      expect(await fire(1, bash("npm test"))).toEqual({});
-      expect(await fire(1, bash("npx tsx --test src/**/*.test.ts > /tmp/suite.log 2>&1 &"))).toEqual({});
+      expect(await fire(2, bash("npm test"))).toEqual({});
+      expect(await fire(2, bash("npx tsx --test src/**/*.test.ts > /tmp/suite.log 2>&1 &"))).toEqual({});
     });
   });
 });

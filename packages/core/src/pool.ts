@@ -9,6 +9,7 @@ import { harnessBuild } from "./build.js";
 import { infraGuardHook } from "./infraGuard.js";
 import { reapUnder } from "./reaper.js";
 import { rtkHooks } from "./rtk.js";
+import { worktreeGuardHook } from "./worktreeGuard.js";
 
 import { BASH_TIMEOUT_MS } from "./limits.js";
 
@@ -79,17 +80,22 @@ export function backgroundShellHook() {
 /**
  * The PreToolUse hooks every agent session runs with.
  *
- * Order matters: the infra guard runs first so a denial is decided on the
- * command the agent actually wrote, before rtk has a chance to rewrite it into
- * something the matcher no longer recognises. And it is unconditional — rtk is
- * optional and absent on most machines, so a guard assembled as "rtk's hooks
- * plus mine" would be missing exactly where nobody was looking.
+ * Order matters: the guards run first so a denial is decided on the command the
+ * agent actually wrote, before rtk has a chance to rewrite it into something the
+ * matchers no longer recognise. And they are unconditional — rtk is optional and
+ * absent on most machines, so a guard assembled as "rtk's hooks plus mine" would
+ * be missing exactly where nobody was looking.
  *
- * Exported for the test that pins both properties: this is the whole of what
+ * `worktree` is the session's own directory. Sessions that have one get the
+ * guard that keeps their git writes inside it; the few that do not — intake and
+ * planning, which run against the repository itself and commit nothing — are
+ * given no boundary to enforce rather than a wrong one.
+ *
+ * Exported for the test that pins these properties: this is the whole of what
  * stands between an agent under `bypassPermissions` and the operator's account.
  */
-export function bashHooks(): Options["hooks"] {
-  const guard = { matcher: "Bash", hooks: [infraGuardHook(), backgroundShellHook()] };
+export function bashHooks(worktree = ""): Options["hooks"] {
+  const guard = { matcher: "Bash", hooks: [infraGuardHook(), worktreeGuardHook(worktree), backgroundShellHook()] };
   const rtk = rtkHooks()?.PreToolUse ?? [];
   return { PreToolUse: [guard, ...rtk] };
 }
@@ -416,7 +422,7 @@ export class AgentPool {
       // alongside the guard that stops an agent applying real infrastructure,
       // which under bypassPermissions is the only thing standing between a
       // `terraform destroy` an agent writes and the operator's account.
-      hooks: bashHooks(),
+      hooks: bashHooks(spec.cwd),
       // `env` replaces the inherited environment wholesale, so spread rather than
       // set: workers reach gh/aws/podman through PATH (see toolbelt.ts).
       env: {
