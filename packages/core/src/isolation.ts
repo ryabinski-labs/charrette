@@ -85,6 +85,62 @@ export function isolationEnv(iso: TaskIsolation): Record<string, string> {
   };
 }
 
+/**
+ * Bring down the container stacks a set of tasks own.
+ *
+ * Agents are told to tear down what they start, and mostly they do not: a
+ * session that ends at its turn ceiling, dies mid-thought, or is killed by the
+ * budget gate never reaches its own cleanup, and the stack it started keeps its
+ * ports, its volumes and its share of the machine for the rest of the run. Over
+ * thirty tasks that is thirty databases nobody is using, and the run gets
+ * slower the longer it goes.
+ *
+ * Only this run's own projects are ever touched: the caller supplies the names,
+ * derived from this run's task ids, and anything the runtime reports that is
+ * not in that set is left exactly as it is. A stack belonging to the operator,
+ * to another run, or to a task still in flight is not reachable from here.
+ *
+ * `-v` goes with it deliberately. The volume is the database a finished task
+ * seeded; keeping it is how the next task inherits state it never created, and
+ * that is the failure isolation exists to prevent.
+ */
+export async function composeDown(
+  projects: string[],
+  exec: (bin: string, args: string[]) => Promise<string>,
+  clis: string[] = ["podman", "docker"]
+): Promise<string[]> {
+  const mine = new Set(projects);
+  if (!mine.size) return [];
+  const brought: string[] = [];
+  for (const cli of clis) {
+    // Ask what is running before tearing anything down. One cheap call decides
+    // the whole sweep: a machine with no runtime fails it and is done, and a
+    // run whose tasks never started a container issues no teardowns at all
+    // rather than one no-op per task. It is also the only way to report what
+    // actually came down — `compose down` on a project that was never up
+    // succeeds exactly like one that was.
+    const listed = await exec(cli, ["compose", "ls"]).catch(() => null);
+    if (listed === null) continue;
+    for (const project of composeProjectNames(listed)) {
+      if (!mine.has(project) || brought.some((b) => b.endsWith(`:${project}`))) continue;
+      const ok = await exec(cli, ["compose", "-p", project, "down", "-v", "--remove-orphans"]).then(
+        () => true,
+        () => false
+      );
+      if (ok) brought.push(`${cli}:${project}`);
+    }
+  }
+  return brought;
+}
+
+/** The project names in `compose ls` output — the first column, minus the header. */
+export function composeProjectNames(listing: string): string[] {
+  return listing
+    .split("\n")
+    .map((line) => line.trim().split(/\s+/)[0] ?? "")
+    .filter((name) => name && name !== "NAME");
+}
+
 /** What the agent is told about the block, in the prompt. Empty when there is no task. */
 export function isolationBlock(iso: TaskIsolation): string {
   return [
