@@ -20,6 +20,37 @@ export interface PrRef {
 /** Stamped on every comment the harness writes, so it never reads its own back. */
 const HARNESS_COMMENT_MARKER = "<!-- harness-comment -->";
 
+/** An issue or pull request as the operator would read it, thread included. */
+export interface IssueRead {
+  /** owner/repo it was actually fetched from, which may not be the run's. */
+  slug: string;
+  number: number;
+  url: string;
+  title: string;
+  state: string;
+  author: string;
+  labels: string[];
+  body: string;
+  comments: { author: string; body: string }[];
+  /** Comments left on GitHub because the thread ran past what is worth carrying. */
+  omittedComments: number;
+}
+
+/**
+ * How much of a thread comes back.
+ *
+ * Long enough for a specification and the discussion that settled it; short
+ * enough that reading an issue cannot swallow the conversation that asked for
+ * it. octocat/Hello-World#1 — the first widely-referenced public issue tried
+ * against this — has 2,500 comments, which is 275,000 characters, about 69,000
+ * tokens, and 7.8 seconds of paging. That is not an exotic case: threads that
+ * long are exactly what accumulates on the issues people ask for help with, and
+ * an intake agent gets 60 turns with everything it has read sitting in the
+ * cached prefix of every one of them.
+ */
+const THREAD_PAGE_CAP = 3;
+const THREAD_BUDGET_CHARS = 40_000;
+
 /**
  * GitHub adapter (PRD §11.1): the only module that talks to GitHub. Every write is
  * idempotent via a deterministic marker in the body, so crash-replays never duplicate.
@@ -126,6 +157,92 @@ export class GitHubAdapter {
       .filter((c) => !(c.body ?? "").includes(HARNESS_COMMENT_MARKER))
       .map((c) => ({ id: c.id, author: c.user?.login ?? "someone", body: (c.body ?? "").trim() }))
       .filter((c) => c.body.length > 0);
+  }
+
+  /**
+   * Read any issue or pull request — this repo's or another one the token can
+   * see — as title, body, labels and thread.
+   *
+   * The harness wrote to GitHub from the beginning and only ever read back the
+   * threads it started itself. But an operator's opening sentence is routinely
+   * "implement ryabinski-labs/agentdraft#480": the specification is already
+   * written, on GitHub, and this process is holding a token that can fetch it.
+   * With no tool for it the intake agent had one move left — ask the operator to
+   * paste the issue back at it — which is a strange thing for a harness that
+   * files issues to be doing.
+   *
+   * `null` when GitHub is not configured, or the issue does not exist, or the
+   * token cannot see it. The caller says which rather than inventing contents.
+   */
+  async readIssue(number: number, slug?: string): Promise<IssueRead | null> {
+    if (!this.octokit) return null;
+    const [owner, repo] = slug?.includes("/") ? (slug.split("/") as [string, string]) : [this.owner, this.repo];
+    const issue = await this.octokit.rest.issues
+      .get({ owner, repo, issue_number: number })
+      .then((r) => r.data)
+      .catch(() => null);
+    if (!issue) return null;
+    const { comments, omitted } = await this.thread(owner, repo, number, issue.comments ?? 0);
+    return {
+      slug: `${owner}/${repo}`,
+      number: issue.number,
+      url: issue.html_url,
+      title: issue.title,
+      state: issue.state,
+      author: issue.user?.login ?? "someone",
+      labels: issue.labels.map((l) => (typeof l === "string" ? l : (l.name ?? ""))).filter((l) => l.length > 0),
+      body: (issue.body ?? "").trim(),
+      comments,
+      omittedComments: omitted,
+    };
+  }
+
+  /**
+   * The readable part of an issue's thread, oldest first, and a count of what
+   * was left behind.
+   *
+   * Paged rather than aggregated so a thread with twenty-five pages costs three
+   * requests instead of twenty-five, and stopped on a character budget as well,
+   * because a hundred comments can be as long as a thousand. `total` is GitHub's
+   * own count of the thread, which is what makes "and 2,488 more" honest.
+   */
+  private async thread(
+    owner: string,
+    repo: string,
+    number: number,
+    total: number
+  ): Promise<{ comments: { author: string; body: string }[]; omitted: number }> {
+    const kept: { author: string; body: string }[] = [];
+    let seen = 0;
+    let chars = 0;
+    try {
+      const pages = this.octokit!.paginate.iterator(this.octokit!.rest.issues.listComments, {
+        owner,
+        repo,
+        issue_number: number,
+        per_page: 100,
+      });
+      let page = 0;
+      for await (const { data } of pages) {
+        for (const c of data) {
+          seen++;
+          // The harness's own status comments are not part of the specification.
+          if ((c.body ?? "").includes(HARNESS_COMMENT_MARKER)) continue;
+          const body = (c.body ?? "").trim();
+          if (!body) continue;
+          if (chars + body.length > THREAD_BUDGET_CHARS) {
+            return { comments: kept, omitted: Math.max(total, seen) - seen + 1 };
+          }
+          chars += body.length;
+          kept.push({ author: c.user?.login ?? "someone", body });
+        }
+        if (++page >= THREAD_PAGE_CAP) break;
+      }
+    } catch {
+      // A thread that cannot be read is not a reason to withhold the issue.
+      return { comments: kept, omitted: Math.max(total - seen, 0) };
+    }
+    return { comments: kept, omitted: Math.max(total - seen, 0) };
   }
 
   /**

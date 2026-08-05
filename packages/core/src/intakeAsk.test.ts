@@ -70,8 +70,11 @@ function request(over: Partial<IntakeRequest> = {}): IntakeRequest {
   };
 }
 
-/** The handler `runIntake` registered for `ask_user`. */
-const askHandler = (): AskHandler => (toolMock.mock.results.at(-1)!.value as { handler: AskHandler }).handler;
+/** The handler `runIntake` registered for `ask_user` — by name, since it is not the only tool. */
+const askHandler = (): AskHandler =>
+  toolMock.mock.results
+    .map((r) => r.value as { name: string; handler: AskHandler })
+    .find((t) => t.name === "ask_user")!.handler;
 
 beforeEach(() => {
   toolMock.mockClear();
