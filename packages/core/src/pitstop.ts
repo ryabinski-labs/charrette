@@ -1,5 +1,5 @@
 import type { PitStopEvery, TaskState } from "@harness/shared";
-import type { ArtifactClaim } from "./evidence.js";
+import type { ArtifactClaim, CommandClaim } from "./evidence.js";
 
 /**
  * Pit stops: the checkpoint between "approve this plan" and "here is the diff".
@@ -107,6 +107,14 @@ export interface DemoReport {
    * before this is rendered; see evidence.ts.
    */
   artifacts: ArtifactClaim[];
+  /**
+   * Commands the demo offered as proof, each with what passing it settles. The
+   * harness runs every repeatable one again before the operator sees it; the
+   * ones that fail, and the ones that cannot safely be repeated, are moved to
+   * `couldNotReach`. See evidence.ts — this is the same rule as `artifacts`,
+   * applied to the claims that are not files.
+   */
+  commands: CommandClaim[];
   summary: string;
 }
 
@@ -248,17 +256,18 @@ export function renderPitStop(stop: Omit<PitStop, "markdown">): string {
   }
   list("Not built yet, in this order", stop.upcoming, "nothing — this is the whole plan");
 
-  if (stop.demo.artifacts.length) {
+  if (stop.demo.artifacts.length || stop.demo.commands.length) {
     // Never a bare filename: the operator opens these to settle a question, and
     // a list of names does not say which question each one settles.
-    lines.push(
-      "## Evidence",
-      "",
-      ...stop.demo.artifacts.map((a) => `- \`${a.file}\` — ${a.shows}`),
-      "",
-      `All of it: ${stop.artifactsDir}`,
-      ""
-    );
+    lines.push("## Evidence", "");
+    if (stop.demo.artifacts.length) lines.push(...stop.demo.artifacts.map((a) => `- \`${a.file}\` — ${a.shows}`), "");
+    if (stop.demo.commands.length) {
+      // Everything printed here was run twice: once by the demo agent and once
+      // by the harness. A claim that survived only the first is not in this
+      // list — it is under what the pit stop could not check.
+      lines.push("Re-run by the harness and confirmed:", "", ...stop.demo.commands.map((c) => `- \`${c.command}\` — ${c.shows}`), "");
+    }
+    lines.push(`All of it: ${stop.artifactsDir}`, "");
   }
   return lines.join("\n").trimEnd();
 }
@@ -276,6 +285,7 @@ export function demoUnavailable(why: string): DemoReport {
     journeys: [],
     couldNotReach: ["everything — there is no demo for this pit stop, so nothing below was verified by running it"],
     artifacts: [],
+    commands: [],
     summary: "",
   };
 }

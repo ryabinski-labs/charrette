@@ -77,8 +77,8 @@ const twoEpicPlan =
       { id: "epic-two", title: "The map", summary: "s" },
     ],
     tasks: [
-      { id: "task-a", epicId: "epic-one", title: "Sign in", spec: "s", acceptanceCriteria: ["x"], dependsOn: [], touchedPaths: [], estimatedSize: "S" as const },
-      { id: "task-b", epicId: "epic-two", title: "The map", spec: "s", acceptanceCriteria: ["x"], dependsOn: ["task-a"], touchedPaths: [], estimatedSize: "S" as const },
+      { id: "task-a", epicId: "epic-one", title: "Sign in", spec: "s", acceptanceCriteria: ["x"], dependsOn: [], touchedPaths: [], completionProbe: "", estimatedSize: "S" as const },
+      { id: "task-b", epicId: "epic-two", title: "The map", spec: "s", acceptanceCriteria: ["x"], dependsOn: ["task-a"], touchedPaths: [], completionProbe: "", estimatedSize: "S" as const },
     ],
   }) +
   "\n```";

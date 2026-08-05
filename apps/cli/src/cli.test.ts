@@ -927,7 +927,7 @@ const STOP = {
   runId: "run-1",
   number: 1,
   reason: 'the "Sign-in" epic is finished',
-  demo: { started: true, howStarted: "pnpm dev", summary: "", journeys: [], couldNotReach: [], artifacts: [] },
+  demo: { started: true, howStarted: "pnpm dev", summary: "", journeys: [], couldNotReach: [], artifacts: [], commands: [] },
   reviews: [],
   merged: ["Sign in (task-a)"],
   upcoming: ["The map (task-b)"],

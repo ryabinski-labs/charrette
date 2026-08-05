@@ -54,7 +54,7 @@ const dag = (ids: string[]) =>
     epics: [{ id: "epic-one", title: "First", summary: "s" }],
     tasks: ids.map((id) => ({
       id, epicId: "epic-one", title: id, spec: "s", acceptanceCriteria: ["x"],
-      dependsOn: [], touchedPaths: [], estimatedSize: "S" as const,
+      dependsOn: [], touchedPaths: [], completionProbe: "", estimatedSize: "S" as const,
     })),
   }) +
   "\n```";

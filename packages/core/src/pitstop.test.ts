@@ -124,6 +124,7 @@ const DEMO: DemoReport = {
     { file: "signin.png", shows: "the signed-in home page with the session's own name in the header" },
     { file: "pack-404.png", shows: "the pack screen's error state — the 404 body, verbatim" },
   ],
+  commands: [{ command: "pnpm test", shows: "the suite is green on this branch" }],
 };
 
 const STOP: Omit<PitStop, "markdown"> = {
@@ -265,7 +266,20 @@ describe("the report the operator reads", () => {
   });
 
   it("leaves the evidence section out when the demo captured nothing", () => {
-    expect(renderPitStop({ ...STOP, demo: { ...DEMO, artifacts: [] } })).not.toContain("## Evidence");
+    expect(renderPitStop({ ...STOP, demo: { ...DEMO, artifacts: [], commands: [] } })).not.toContain("## Evidence");
+  });
+
+  /**
+   * Only commands the harness ran a second time and agreed with reach this
+   * list, so the heading can say so — and an operator who reads "the suite is
+   * green" here is reading a fact, not an agent's sentence about one.
+   */
+  it("says of a confirmed command that the harness re-ran it", () => {
+    const md = renderPitStop({ ...STOP, demo: { ...DEMO, artifacts: [] } });
+
+    expect(md).toContain("## Evidence");
+    expect(md).toContain("Re-run by the harness and confirmed:");
+    expect(md).toContain("- `pnpm test` — the suite is green on this branch");
   });
 
   it("leaves the reviewer section out when nobody reviewed", () => {

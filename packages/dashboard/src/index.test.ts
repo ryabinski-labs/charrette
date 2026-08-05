@@ -167,7 +167,7 @@ describe("saying why a task is parked", () => {
       integrationBranch: "harness/run1/main", config: RunConfig.parse({}),
     });
     store.insertTasks("run1", [{ id: "e1", title: "E" }], [
-      { id: "t1", epicId: "e1", title: "T", spec: "", acceptanceCriteria: [], dependsOn: [], state: "PENDING", branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [], estimatedSize: "M" as const },
+      { id: "t1", epicId: "e1", title: "T", spec: "", acceptanceCriteria: [], dependsOn: [], state: "PENDING", branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [], completionProbe: "", estimatedSize: "M" as const },
     ]);
     store.transitionTask("run1", "t1", "READY");
     store.transitionTask("run1", "t1", "WORKING");
@@ -190,7 +190,7 @@ describe("saying why a task is parked", () => {
     const task = (id: string, errorSummary: string | null) => ({
       id, epicId: "e1", title: id.toUpperCase(), spec: "", acceptanceCriteria: [], dependsOn: [], state: "PENDING" as TaskState,
       branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0,
-      assignedSkills: [], errorSummary, touchedPaths: [], estimatedSize: "M" as const,
+      assignedSkills: [], errorSummary, touchedPaths: [], completionProbe: "", estimatedSize: "M" as const,
     });
     store.insertTasks("run1", [{ id: "e1", title: "E" }], [task("working", null), task("parked", "the reason already on the row")]);
     store.transitionTask("run1", "working", "READY");
@@ -289,7 +289,7 @@ describe("the pit stop gate", () => {
     runId: "r1",
     number: 2,
     reason: 'the "Sign-in" epic is finished',
-    demo: { started: true, howStarted: "pnpm dev on :5173", summary: "", journeys: [], couldNotReach: ["payments"], artifacts: [] },
+    demo: { started: true, howStarted: "pnpm dev on :5173", summary: "", journeys: [], couldNotReach: ["payments"], artifacts: [], commands: [] },
     reviews: [],
     merged: ["Sign in (task-a)"],
     upcoming: ["The map (task-b)"],
