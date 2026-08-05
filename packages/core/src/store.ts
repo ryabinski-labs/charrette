@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   qaIterations INTEGER NOT NULL DEFAULT 0, respawns INTEGER NOT NULL DEFAULT 0,
   assignedSkills TEXT NOT NULL DEFAULT '[]', errorSummary TEXT,
   touchedPaths TEXT NOT NULL DEFAULT '[]', estimatedSize TEXT NOT NULL DEFAULT 'M',
+  completionProbe TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (runId, id)
 );
 CREATE TABLE IF NOT EXISTS sessions (
@@ -114,6 +115,13 @@ export interface TaskRow {
    * merge conflict that costs more than the parallelism saved.
    */
   touchedPaths: string[];
+  /**
+   * One shell command that exits zero exactly when this task is done, run in
+   * the worktree before QA is paid. Empty for the tasks — most of them — whose
+   * criteria are settled by reading the diff rather than by a search coming
+   * back empty. See `PlannedTask.completionProbe`.
+   */
+  completionProbe: string;
   /** The planner's size guess, and the only input a pre-run cost estimate has. */
   estimatedSize: "S" | "M" | "L";
 }
@@ -172,6 +180,9 @@ export class Store {
       tasks: {
         touchedPaths: "TEXT NOT NULL DEFAULT '[]'",
         estimatedSize: "TEXT NOT NULL DEFAULT 'M'",
+        // Empty is the honest default for a run planned before probes existed:
+        // no command, so nothing is checked and nothing is claimed to be.
+        completionProbe: "TEXT NOT NULL DEFAULT ''",
       },
       // Empty rather than 'unknown': the sessions of a run that predates this
       // column are not a build the postmortem should name, and the report says
@@ -519,7 +530,7 @@ export class Store {
   insertTasks(runId: string, epics: { id: string; title: string }[], tasks: Omit<TaskRow, "runId">[]): void {
     const insEpic = this.db.prepare("INSERT OR REPLACE INTO epics (id, runId, title, ord) VALUES (?,?,?,?)");
     const insTask = this.db.prepare(
-      "INSERT OR REPLACE INTO tasks (id, runId, epicId, title, spec, acceptanceCriteria, dependsOn, state, branch, worktreePath, githubIssueNumber, prNumber, qaIterations, respawns, assignedSkills, errorSummary, touchedPaths, estimatedSize) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+      "INSERT OR REPLACE INTO tasks (id, runId, epicId, title, spec, acceptanceCriteria, dependsOn, state, branch, worktreePath, githubIssueNumber, prNumber, qaIterations, respawns, assignedSkills, errorSummary, touchedPaths, estimatedSize, completionProbe) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
     );
     this.txn(() => {
       epics.forEach((e, i) => insEpic.run(e.id, runId, e.title, i));
@@ -529,7 +540,7 @@ export class Store {
           JSON.stringify(t.acceptanceCriteria), JSON.stringify(t.dependsOn), t.state,
           t.branch, t.worktreePath, t.githubIssueNumber, t.prNumber,
           t.qaIterations, t.respawns, JSON.stringify(t.assignedSkills), t.errorSummary,
-          JSON.stringify(t.touchedPaths), t.estimatedSize
+          JSON.stringify(t.touchedPaths), t.estimatedSize, t.completionProbe ?? ""
         );
       }
     });

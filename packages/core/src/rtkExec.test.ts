@@ -84,8 +84,9 @@ describe("driving the real rtk binary", () => {
     const pre = bashHooks()!.PreToolUse!;
 
     expect(pre).toHaveLength(2);
-    // The guard decides on the command the agent wrote, before rtk rewrites it.
-    expect(pre[0]!.hooks).toHaveLength(2);
+    // The guards decide on the command the agent wrote, before rtk rewrites it:
+    // infra, then worktree, then the background-shell rule.
+    expect(pre[0]!.hooks).toHaveLength(3);
     expect(pre[1]!.matcher).toBe("Bash");
   });
 

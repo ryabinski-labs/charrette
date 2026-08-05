@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { RunConfig } from "@harness/shared";
 import type { HarnessEvent } from "@harness/shared";
 import { Bus } from "./bus.js";
@@ -20,6 +20,7 @@ import { Store } from "./store.js";
 const made: string[] = [];
 afterEach(() => {
   for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true });
+  vi.restoreAllMocks();
 });
 
 function repo(): string {
@@ -47,7 +48,7 @@ const INTENT_PASS = '```json\n{"verdict":"PASS","gaps":[],"summary":"ok"}\n```';
 /** The artifact directory the demo agent's own system prompt tells it to use. */
 const artifactsDir = (spec: AgentSpec) => spec.systemPrompt.match(/into (.+?) \(it already exists\)/)![1]!;
 
-const demoJson = (artifacts: { file: string; shows: string }[]) =>
+const demoJson = (artifacts: { file: string; shows: string }[], commands: { command: string; shows: string }[] = []) =>
   "```json\n" +
   JSON.stringify({
     started: true,
@@ -56,6 +57,7 @@ const demoJson = (artifacts: { file: string; shows: string }[]) =>
     journeys: [{ name: "Sign in", result: "worked", evidence: "302 to /home" }],
     couldNotReach: ["payments — no test keys"],
     artifacts,
+    commands,
   }) +
   "\n```";
 
@@ -77,8 +79,8 @@ const twoEpicPlan =
       { id: "epic-two", title: "The map", summary: "s" },
     ],
     tasks: [
-      { id: "task-a", epicId: "epic-one", title: "Sign in", spec: "s", acceptanceCriteria: ["x"], dependsOn: [], touchedPaths: [], estimatedSize: "S" as const },
-      { id: "task-b", epicId: "epic-two", title: "The map", spec: "s", acceptanceCriteria: ["x"], dependsOn: ["task-a"], touchedPaths: [], estimatedSize: "S" as const },
+      { id: "task-a", epicId: "epic-one", title: "Sign in", spec: "s", acceptanceCriteria: ["x"], dependsOn: [], touchedPaths: [], completionProbe: "", estimatedSize: "S" as const },
+      { id: "task-b", epicId: "epic-two", title: "The map", spec: "s", acceptanceCriteria: ["x"], dependsOn: ["task-a"], touchedPaths: [], completionProbe: "", estimatedSize: "S" as const },
     ],
   }) +
   "\n```";
@@ -216,6 +218,69 @@ describe("stopping at an epic boundary", () => {
 
     expect(stops[0]!.demo.artifacts).toEqual([SIGNIN_EVIDENCE]);
     expect(stops[0]!.markdown).toContain(`- \`${SIGNIN_EVIDENCE.file}\` — ${SIGNIN_EVIDENCE.shows}`);
+  });
+
+  /**
+   * "I ran the suite and it is green" reached the operator as a fact on the
+   * strength of an agent having typed it. What survives here is what a second
+   * run agreed with; everything else moves to what the pit stop could not check,
+   * with the command printed beside it so the operator can settle it themselves.
+   */
+  it("re-runs the commands a demo offers as proof, and files the rest under what it could not check", async () => {
+    const dir = repo();
+    const { pool } = rolePool({
+      ...ROLES,
+      demo: (spec: AgentSpec) => {
+        writeFileSync(path.join(artifactsDir(spec), SIGNIN_EVIDENCE.file), '{"log":{"entries":[{"request":{}}]}}');
+        return demoJson(
+          [SIGNIN_EVIDENCE],
+          [
+            { command: "test -f README.md", shows: "the demo ran against the merged tree" },
+            { command: "false", shows: "the suite is green" },
+            // A second POST is a second booking, so this one is reported rather
+            // than repeated.
+            { command: "curl -X POST localhost:9/v1/bookings", shows: "a booking is created" },
+          ]
+        );
+      },
+    });
+    const { controller, stops } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a thing", RunConfig.parse(BASE));
+
+    const stop = stops[0]!;
+    expect(stop.demo.commands).toEqual([{ command: "test -f README.md", shows: "the demo ran against the merged tree" }]);
+    expect(stop.markdown).toContain("Re-run by the harness and confirmed:");
+    expect(stop.markdown).toContain("- `test -f README.md` — the demo ran against the merged tree");
+    const unchecked = stop.demo.couldNotReach.join("\n");
+    expect(unchecked).toContain("the suite is green — not verified: `false` re-run by the harness and it failed");
+    expect(unchecked).toContain("repeat the write");
+    // The demo's own answer is not deleted, only moved: the operator still sees
+    // every claim, under the heading that is true of it.
+    expect(unchecked).toContain("payments — no test keys");
+  });
+
+  it("re-runs at most six of them, and says plainly that the rest were not checked", async () => {
+    const dir = repo();
+    const claims = Array.from({ length: 7 }, (_, i) => ({ command: `echo proof-${i + 1}`, shows: `claim ${i + 1}` }));
+    const { pool } = rolePool({
+      ...ROLES,
+      demo: (spec: AgentSpec) => {
+        writeFileSync(path.join(artifactsDir(spec), SIGNIN_EVIDENCE.file), '{"log":{"entries":[{"request":{}}]}}');
+        return demoJson([SIGNIN_EVIDENCE], claims);
+      },
+    });
+    const { controller, stops, events } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a thing", RunConfig.parse(BASE));
+
+    // Six confirmed and the seventh named as unverified — a truncated list that
+    // reads as a complete one is the failure this whole gate exists to stop.
+    expect(stops[0]!.demo.commands.map((c) => c.command)).toEqual(claims.slice(0, 6).map((c) => c.command));
+    expect(stops[0]!.demo.couldNotReach.join("\n")).toContain("claim 7 — not verified: `echo proof-7` the harness re-runs at most 6 commands per pit stop");
+    expect(
+      events.some((e) => e.type === "agent.log" && e.text === "the demo claimed 7 commands; the harness re-ran the first 6 and reported the rest as unverified")
+    ).toBe(true);
   });
 
   it("records the stop so a resumed run does not demo the same epic twice", async () => {
@@ -512,5 +577,61 @@ describe("what the operator decides", () => {
 
     expect(events.some((e) => e.type === "task.feedback")).toBe(false);
     expect(events.find((e) => e.type === "run.pitstop_resolved")).toMatchObject({ tasks: [] });
+  });
+});
+
+/**
+ * A pit stop is the run's natural quiet moment, so it is where the machine gets
+ * back what finished tasks stopped needing. Run 40da9337 ended with 37 orphaned
+ * processes across five already-merged worktrees, two of them thirteen hours
+ * old, all still writing to a database the live tasks were reading — and the
+ * containers are worse, because they hold ports and volumes as well as memory.
+ */
+describe("giving the machine back at a pit stop", () => {
+  /** What the sweep found, without needing a container runtime to find it. */
+  const swept = async (stacks: string[], processes: { pid: number; command: string; signal: "SIGKILL" | "SIGTERM" }[]) => {
+    const isolation = await import("./isolation.js");
+    const reaper = await import("./reaper.js");
+    vi.spyOn(isolation, "composeDown").mockResolvedValue(stacks);
+    vi.spyOn(reaper, "reapUnder").mockResolvedValue(processes);
+    const dir = repo();
+    const { pool } = rolePool(ROLES);
+    const { controller, events } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a thing", RunConfig.parse(BASE));
+
+    return events.filter((e): e is HarnessEvent & { text: string } => e.type === "agent.log" && e.text.startsWith("swept after"));
+  };
+
+  it("says what it took back, in the singular when there was one of each", async () => {
+    const lines = await swept(["podman:harness-sign-in-0001"], [{ pid: 4131, command: "node server.js", signal: "SIGKILL" }]);
+
+    expect(lines[0]!.text).toBe(
+      "swept after pit stop 1: 1 container stack still up and brought down (podman:harness-sign-in-0001); 1 orphaned process killed"
+    );
+  });
+
+  it("names the first few stacks and stops, rather than printing thirty", async () => {
+    const lines = await swept(
+      Array.from({ length: 7 }, (_, i) => `podman:harness-task-${i + 1}`),
+      []
+    );
+
+    expect(lines[0]!.text).toBe(
+      "swept after pit stop 1: 7 container stacks still up and brought down (podman:harness-task-1, podman:harness-task-2, podman:harness-task-3, podman:harness-task-4, podman:harness-task-5, …)"
+    );
+  });
+
+  it("reports processes alone when no container was ever started", async () => {
+    const lines = await swept([], [
+      { pid: 1, command: "pnpm dev", signal: "SIGKILL" },
+      { pid: 2, command: "postgres", signal: "SIGKILL" },
+    ]);
+
+    expect(lines[0]!.text).toBe("swept after pit stop 1: 2 orphaned processes killed");
+  });
+
+  it("says nothing at all when there was nothing to take back", async () => {
+    expect(await swept([], [])).toEqual([]);
   });
 });

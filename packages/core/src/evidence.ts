@@ -1,4 +1,5 @@
 import { inflateSync } from "node:zlib";
+import { hasDryRun, infraMutation } from "./infraGuard.js";
 
 /**
  * The gate on what a pit stop is allowed to call evidence.
@@ -234,6 +235,153 @@ export function checkEvidence(artifacts: ArtifactClaim[], read: (file: string) =
     if (!shows) return bad("listed with no statement of what it shows, so nobody can tell what it proves");
     return { file, shows, ok: true, fault: "", retryable: false };
   });
+}
+
+/**
+ * The other half of the same rule, for the claims that are not files.
+ *
+ * A file listed as evidence is now opened before it is believed. A command is
+ * not: "I ran the full suite and it is green" reaches the operator as a fact
+ * because an agent typed it. In run da8325bd a release-verification task
+ * reported a green end-to-end pass over criteria that the demo then
+ * contradicted on the first surface it rendered — and the only thing standing
+ * behind that report was the sentence itself.
+ *
+ * So a claim about a command has to carry the command, and the harness runs it
+ * again. What comes back decides which heading the claim is printed under, the
+ * same three-way outcome the artifacts get: confirmed, struck, or — for a
+ * command that cannot be safely repeated — reported as the unverified thing it
+ * is rather than as evidence.
+ */
+export interface CommandClaim {
+  command: string;
+  /** What passing it proves. Empty is a fault, as it is for a file. */
+  shows: string;
+}
+
+export interface CommandCheck extends CommandClaim {
+  ok: boolean;
+  /** Whether the harness actually ran it. False means the claim is unverified, not disproved. */
+  verified: boolean;
+  /** Why it is not evidence, in the operator's language. Empty when ok. */
+  fault: string;
+}
+
+/**
+ * Commands whose second run is not the same as their first.
+ *
+ * Re-running a check is free; re-running a POST creates a second booking, and
+ * re-running an install or a migration changes the tree the operator is about
+ * to review. The harness would rather report a claim as unverified than cause
+ * the thing it was trying to confirm.
+ */
+const NOT_REPEATABLE: { re: RegExp; why: string; unless?: (command: string) => boolean }[] = [
+  // Scoped to the HTTP clients, and anchored on whitespace rather than `\b`:
+  // there is no word boundary between a space and a `-`, so `\b-X` matches
+  // nothing an agent would ever write.
+  {
+    re: /\b(curl|wget|http|https|xh|httpie)\b[\s\S]*?(?:(?:^|\s)-X\s*(?:POST|PUT|PATCH|DELETE)\b|--request[=\s]+(?:POST|PUT|PATCH|DELETE)\b|(?:^|\s)(?:-d|--data(?:-raw|-binary|-urlencode|-ascii)?)[=\s]|--post-data\b|(?:^|\s)(?:POST|PUT|PATCH|DELETE)\s)/i,
+    why: "it sends a write request, and running it again would repeat the write",
+  },
+  { re: /\b(npm|pnpm|yarn|pip|pip3|poetry|bundle|gem|cargo|go|apt|apt-get|brew)\s+(i|install|add|get|update|upgrade)\b/, why: "it installs or updates dependencies, which changes the tree being reviewed" },
+  {
+    // Both halves matter: the word, for `manage.py migrate` and `db:seed`, and
+    // the tool, for `alembic upgrade head`, which says neither.
+    re: /\b(migrate|migrations?|seed|createdb|dropdb|flushdb|truncate)\b|\b(alembic|flyway|liquibase|goose|dbmate|sqitch|prisma|knex)\b/i,
+    why: "it changes stored data, so a second run does not start from the same state",
+  },
+  {
+    // The tools above are how a repository migrates; this is how a person does
+    // the same thing by hand, and the harness has to recognise both. Scoped to
+    // a database client and a statement that writes, so `psql -c "SELECT
+    // count(*) FROM bookings"` — the shape a probe actually wants — still runs.
+    re: /\b(psql|mysql|mariadb|sqlite3|mongosh|mongo|redis-cli|clickhouse-client|cqlsh)\b[\s\S]*?\b(drop|delete|truncate|insert|update|alter|create|flushall)\b/i,
+    why: "it runs a statement that changes the database, so a second run does not start from the same state",
+  },
+  { re: /\bgit\s+(commit|push|merge|rebase|reset|checkout|switch|restore|clean|stash)\b/, why: "it writes to a git repository" },
+  { re: />>?\s*\S|\btee\b|\b(rm|mv|cp|mkdir|touch|chmod|chown|ln)\s/, why: "it writes to the filesystem" },
+  {
+    re: /\b(docker|podman|compose|kubectl|helm)\b.*\b(up|run|start|restart|exec|apply|delete)\b/,
+    why: "it starts or changes containers, which is not the same twice",
+    // `kubectl --dry-run=server apply` is the same every time it runs, and is
+    // the form these tools are supposed to be demonstrated with. Asking the
+    // infra guard rather than matching a flag here keeps one answer to it.
+    unless: hasDryRun,
+  },
+];
+
+/** Can this command be run a second time without changing anything? */
+export function repeatable(command: string): { ok: true } | { ok: false; why: string } {
+  const trimmed = command.trim();
+  if (!trimmed) return { ok: false, why: "there is no command to run" };
+  const mutation = infraMutation(trimmed);
+  if (mutation) return { ok: false, why: `${mutation.what} changes real infrastructure and the harness will not run it` };
+  for (const { re, why, unless } of NOT_REPEATABLE) if (re.test(trimmed) && !unless?.(trimmed)) return { ok: false, why };
+  return { ok: true };
+}
+
+/** How a re-run went: whether it passed, and what it printed. */
+export interface Rerun {
+  ok: boolean;
+  output: string;
+}
+
+/**
+ * Grade every command the agent offered as proof.
+ *
+ * `rerun` runs one command and says how it went, or returns null when the
+ * harness had nowhere to run it — which keeps this pure, and means "there was
+ * no worktree to check in" is reported as unverified rather than as failed.
+ */
+export function checkCommands(
+  claims: CommandClaim[],
+  rerun: (command: string) => Rerun | null,
+  /** Why a command the harness was willing to repeat was not repeated after all. */
+  notRunReason = "the harness did not run it again"
+): CommandCheck[] {
+  const seen = new Set<string>();
+  return claims.map((c) => {
+    const command = c.command.trim();
+    const shows = c.shows.trim();
+    const unverified = (fault: string): CommandCheck => ({ command, shows, ok: false, verified: false, fault });
+
+    if (!command) return unverified("a claim with no command, so there is nothing to check");
+    if (seen.has(command)) return { command, shows, ok: true, verified: false, fault: "" };
+    seen.add(command);
+    if (!shows) return unverified("run with no statement of what it proves, so nobody can tell what it settles");
+
+    const repeat = repeatable(command);
+    if (!repeat.ok) return unverified(`not re-run by the harness because ${repeat.why}`);
+
+    const result = rerun(command);
+    if (!result) return unverified(notRunReason);
+    if (!result.ok) {
+      return { command, shows, ok: false, verified: true, fault: `re-run by the harness and it failed:\n${result.output.slice(-1200)}` };
+    }
+    return { command, shows, ok: true, verified: true, fault: "" };
+  });
+}
+
+/**
+ * File every command claim under the heading that is true of it.
+ *
+ * A confirmed claim keeps its place. Everything else moves to what the pit stop
+ * could not check — including the ones that were merely not re-run, because an
+ * unverified claim printed beside a verified one reads as verified, and that is
+ * the whole failure this exists to stop.
+ */
+export function strikeCommands<T extends { commands: CommandClaim[]; couldNotReach: string[] }>(report: T, checks: CommandCheck[]): T {
+  const kept = checks.filter((c) => c.ok && c.verified);
+  const struck = checks.filter((c) => !(c.ok && c.verified));
+  if (!struck.length) return { ...report, commands: kept.map((c) => ({ command: c.command, shows: c.shows })) };
+  return {
+    ...report,
+    commands: kept.map((c) => ({ command: c.command, shows: c.shows })),
+    couldNotReach: [
+      ...report.couldNotReach,
+      ...struck.map((c) => `${c.shows || c.command || "a command"} — not verified: ${c.command ? `\`${c.command}\` ` : ""}${c.fault}`),
+    ],
+  };
 }
 
 /** The agent-facing list of what has to be fixed. Empty when nothing does. */

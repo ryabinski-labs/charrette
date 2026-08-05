@@ -206,7 +206,7 @@ describe("guards that should never fire", () => {
       {
         id: "t1", epicId: "e1", title: "T", spec: "", acceptanceCriteria: [], dependsOn: [], state: "PENDING",
         branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0,
-        assignedSkills: [], errorSummary: null, touchedPaths: [], estimatedSize: "M" as const,
+        assignedSkills: [], errorSummary: null, touchedPaths: [], completionProbe: "", estimatedSize: "M" as const,
       },
     ]);
     store.transitionTask("r1", "t1", "READY");

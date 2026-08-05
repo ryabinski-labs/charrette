@@ -4,6 +4,7 @@ import {
   advisorPrompt,
   demoEvidenceReaskPrompt,
   demoSystemPrompt,
+  emptyBranchPrompt,
   extractJson,
   plannerBreakdownSystemPrompt,
   qaSystemPrompt,
@@ -301,7 +302,7 @@ describe("what the advisor is told about the repository", () => {
     id: "task-a", runId: "r", epicId: "e", title: "A", spec: "s", acceptanceCriteria: ["x"],
     dependsOn: [], state: "WORKING" as const, branch: null, worktreePath: null,
     githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0,
-    assignedSkills: [], errorSummary: null, touchedPaths: [], estimatedSize: "M" as const,
+    assignedSkills: [], errorSummary: null, touchedPaths: [], completionProbe: "", estimatedSize: "M" as const,
   };
 
   it("names the commands the repository actually checks a task with", () => {
@@ -320,5 +321,25 @@ describe("what the advisor is told about the repository", () => {
 
     expect(p).not.toMatch(/How this repository checks a task/);
     expect(p).toContain("Investigate the worktree you are in");
+  });
+});
+
+/**
+ * The worker has to be told which of the two mistakes it made. "No commits" is
+ * work that went somewhere else; "commits that change nothing" is an empty
+ * commit or a change and its own revert, and looking for missing files is the
+ * wrong thing to do about it.
+ */
+describe("telling a worker its branch delivers nothing", () => {
+  it("says a branch with no commits has none", () => {
+    const p = emptyBranchPrompt("harness/r/task-a", 0);
+
+    expect(p).toContain("`harness/r/task-a` delivers nothing: it has no commits on it at all.");
+    expect(p).toContain("git stash list");
+  });
+
+  it("counts the commits that changed nothing, in the singular and the plural", () => {
+    expect(emptyBranchPrompt("b", 1)).toContain("it has 1 commit, and together they change no files.");
+    expect(emptyBranchPrompt("b", 3)).toContain("it has 3 commits, and together they change no files.");
   });
 });

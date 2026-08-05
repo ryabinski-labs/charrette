@@ -153,6 +153,99 @@ describe("worktrees", () => {
   });
 });
 
+describe("what a task branch actually carries", () => {
+  it("reports nothing for a branch that was created and never committed to", async () => {
+    const dir = repo();
+    const wt = new WorktreeManager(dir);
+    await wt.ensureIntegrationBranch("run1");
+    await wt.ensureWorktree("run1", "task1");
+
+    expect(await wt.taskBranchDelta("run1", "task1")).toEqual({ commits: 0, files: [] });
+  });
+
+  it("reports the files a real branch would land", async () => {
+    const dir = repo();
+    const wt = new WorktreeManager(dir);
+    await wt.ensureIntegrationBranch("run1");
+    const info = await wt.ensureWorktree("run1", "task1");
+    commit(info.path, "work.txt", "done\n", "task work");
+
+    expect(await wt.taskBranchDelta("run1", "task1")).toEqual({ commits: 1, files: ["work.txt"] });
+  });
+
+  /**
+   * A branch can hold commits and still deliver nothing — a change and its own
+   * revert, or an empty commit. The commit count says one thing and the diff
+   * says the truth, so the diff is what the gate reads.
+   */
+  it("reports no files for commits that cancel each other out", async () => {
+    const dir = repo();
+    const wt = new WorktreeManager(dir);
+    await wt.ensureIntegrationBranch("run1");
+    const info = await wt.ensureWorktree("run1", "task1");
+    commit(info.path, "work.txt", "done\n", "task work");
+    execFileSync("git", ["revert", "--no-edit", "HEAD"], { cwd: info.path, stdio: "ignore" });
+
+    const delta = await wt.taskBranchDelta("run1", "task1");
+    expect(delta.commits).toBe(2);
+    expect(delta.files).toEqual([]);
+  });
+
+  /**
+   * The bug this exists for: git reports success. `merge --no-ff` on a branch
+   * with nothing on it prints "Already up to date", exits 0, and leaves the
+   * integration branch exactly where it was — which the caller used to record
+   * as the task's own delivery.
+   */
+  it("refuses to call an empty merge a merge", async () => {
+    const dir = repo();
+    const wt = new WorktreeManager(dir);
+    await wt.ensureIntegrationBranch("run1");
+    await wt.ensureWorktree("run1", "task1");
+    const before = sha(dir, "harness/run1/main");
+
+    const merge = await wt.mergeTaskBranch("run1", "task1");
+
+    expect(merge).toEqual({ ok: false, empty: true });
+    expect(sha(dir, "harness/run1/main")).toBe(before);
+  });
+
+  it("still merges a branch that has something on it", async () => {
+    const dir = repo();
+    const wt = new WorktreeManager(dir);
+    await wt.ensureIntegrationBranch("run1");
+    const info = await wt.ensureWorktree("run1", "task1");
+    commit(info.path, "work.txt", "done\n", "task work");
+
+    const merge = await wt.mergeTaskBranch("run1", "task1");
+
+    expect(merge.ok).toBe(true);
+    expect(sha(dir, "harness/run1/main")).toBe((merge as { sha: string }).sha);
+  });
+});
+
+/**
+ * Sampled around every worker session so that a commit written into the
+ * operator's own checkout is at least recorded. It is asked before the run
+ * knows anything about the repository, so it has to answer for a path that is
+ * not one — an empty answer means "nothing to compare", and two of those never
+ * look like a repository that moved.
+ */
+describe("watching the operator's own checkout", () => {
+  it("names the branch and the commit it is sitting on", async () => {
+    const dir = repo();
+
+    expect(await new WorktreeManager(dir).primaryHead()).toBe(`main@${sha(dir)}`);
+  });
+
+  it("says nothing at all when the path is not a repository", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "harness-notrepo-"));
+    made.push(dir);
+
+    expect(await new WorktreeManager(dir).primaryHead()).toBe("");
+  });
+});
+
 describe("measuring the base a task is judged against", () => {
   it("checks out the baseline commit, and moves it on a second call", async () => {
     const dir = repo();

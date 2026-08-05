@@ -13,7 +13,7 @@ export interface Dispatchable {
 }
 
 /** Trim the spellings of one path that mean the same file: `./a/b/`, `a/b`. */
-function normalizePath(p: string): string {
+export function normalizePath(p: string): string {
   return p.trim().replace(/^\.\//, "").replace(/\/+$/, "");
 }
 

@@ -144,6 +144,16 @@ export interface WorktreeInfo {
   created: boolean;
 }
 
+/**
+ * What happened when a task branch was offered to the integration branch.
+ *
+ * `empty` is its own outcome rather than a flavour of failure: a conflict means
+ * two pieces of real work disagree and a worker can resolve it, while an empty
+ * branch means there is no work at all, and telling a worker to "resolve the
+ * conflict" in that state sends it looking for something that does not exist.
+ */
+export type MergeOutcome = { ok: true; sha: string } | { ok: false; empty: true } | { ok: false; conflicts: string[] };
+
 export class WorktreeManager {
   /**
    * The integration worktree, memoized per run. The exists-check and the
@@ -207,9 +217,51 @@ export class WorktreeManager {
     await git(this.repoPath, ["worktree", "prune"], { serialize: true }).catch(() => undefined);
   }
 
+  /**
+   * The primary repository's own checked-out branch and commit.
+   *
+   * The one place in the whole run that nothing should ever write. Every task
+   * has a worktree; the operator's checkout is not one of them, and work that
+   * lands there lands on a branch no part of the run will look at. Sampled
+   * around each worker session so that when the guard is evaded — by a shell
+   * script, a Makefile, anything indirect enough to read as ordinary — the run
+   * still records that it happened, and which task was live at the time.
+   */
+  async primaryHead(): Promise<string> {
+    const branch = await git(this.repoPath, ["rev-parse", "--abbrev-ref", "HEAD"], { serialize: true }).catch(() => "");
+    const sha = await git(this.repoPath, ["rev-parse", "HEAD"], { serialize: true }).catch(() => "");
+    return branch && sha ? `${branch}@${sha}` : "";
+  }
+
   /** The commit the integration branch currently points at — the base every task is judged against. */
   async integrationHead(runId: string): Promise<string> {
     return git(this.repoPath, ["rev-parse", this.integrationBranch(runId)], { serialize: true }).catch(() => "");
+  }
+
+  /**
+   * What a task's branch actually carries over the base it will merge into.
+   *
+   * Nothing else in the harness ever asks. `git merge --no-ff` on a branch with
+   * no commits prints `Already up to date.` and exits 0, so `mergeTaskBranch`
+   * reports success, `integrate` books MERGED, and `mergedShas` records the
+   * integration branch's own pre-existing commit as the task's delivery — which
+   * is then the sha posted to the task's GitHub issue. In run da8325bd three
+   * branches were in exactly that state, and the ledger called all three
+   * merged; the operator did not find out until a demo agent rendered the page
+   * the work was supposed to have changed.
+   *
+   * The file list is the signal, not the commit count: a task branch also picks
+   * up catch-up merges from the integration branch, and those are commits that
+   * deliver nothing of the task's own. A three-dot diff is measured from the
+   * merge base, so it answers the question that matters — what would landing
+   * this branch change? — whatever the topology above it looks like.
+   */
+  async taskBranchDelta(runId: string, taskId: string): Promise<{ commits: number; files: string[] }> {
+    const branch = this.branchName(runId, taskId);
+    const base = this.integrationBranch(runId);
+    const count = await git(this.repoPath, ["rev-list", "--count", `${base}..${branch}`], { serialize: true }).catch(() => "0");
+    const files = await git(this.repoPath, ["diff", "--name-only", `${base}...${branch}`], { serialize: true }).catch(() => "");
+    return { commits: Number(count) || 0, files: files.split("\n").filter(Boolean) };
   }
 
   /**
@@ -302,13 +354,20 @@ export class WorktreeManager {
    * integration branch. Returns conflict file list on failure instead of throwing.
    * One merge sequence at a time (see mergeLock).
    */
-  async mergeTaskBranch(runId: string, taskId: string): Promise<{ ok: true; sha: string } | { ok: false; conflicts: string[] }> {
-    const run = async (): Promise<{ ok: true; sha: string } | { ok: false; conflicts: string[] }> => {
+  async mergeTaskBranch(runId: string, taskId: string): Promise<MergeOutcome> {
+    const run = async (): Promise<MergeOutcome> => {
       const branch = this.branchName(runId, taskId);
       const wtPath = await this.ensureIntegrationWorktree(runId);
       try {
+        const before = await git(wtPath, ["rev-parse", "HEAD"], { serialize: true });
         await git(wtPath, ["merge", "--no-ff", "--no-edit", branch], { serialize: true });
         const sha = await git(wtPath, ["rev-parse", "HEAD"], { serialize: true });
+        // `--no-ff` commits for any merge that has something to merge, so a HEAD
+        // that did not move is git's "Already up to date" — an exit code of 0
+        // reporting that the branch carried nothing. The pre-QA gate normally
+        // catches this long before here; this is the backstop that makes it
+        // impossible to book a MERGED task against a commit it did not write.
+        if (sha === before) return { ok: false, empty: true };
         return { ok: true, sha };
       } catch {
         const status = await git(wtPath, ["diff", "--name-only", "--diff-filter=U"], { serialize: true }).catch(() => "");

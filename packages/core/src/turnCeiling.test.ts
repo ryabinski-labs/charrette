@@ -116,7 +116,7 @@ describe("a ceiling one task proved too low", () => {
       epics: [{ id: "epic-e", title: "E", summary: "s" }],
       tasks: ["task-a", "task-b"].map((id, i) => ({
         id, epicId: "epic-e", title: id, spec: "s", acceptanceCriteria: ["x"],
-        dependsOn: chained && i === 1 ? ["task-a"] : [], touchedPaths: [], estimatedSize: "S" as const,
+        dependsOn: chained && i === 1 ? ["task-a"] : [], touchedPaths: [], completionProbe: "", estimatedSize: "S" as const,
       })),
     }) +
     "\n```";
@@ -157,18 +157,24 @@ describe("a ceiling one task proved too low", () => {
         const nth = (counts[spec.role] = (counts[spec.role] ?? 0) + 1);
         const base = { sessionId: `s${specs.length}`, costUsd: 0, turns: 1 };
         if (spec.role === "planner") return { ...base, resultText: planning++ === 0 ? DOCS : dag(!together), outcome: "done" as const };
+        if (spec.role === "worker") {
+          // A distinct commit per dispatch: an empty one fails, and the failure
+          // would read as the worker crashing rather than as the test's own bug.
+          //
+          // Committed before the ceiling check, not after, because a worker that
+          // runs out of turns has usually written something on the way there —
+          // and a branch that carries nothing no longer reaches QA at all, so a
+          // truncated session that committed nothing would be re-dispatched and
+          // this fixture would be measuring that instead of the ceiling.
+          writeFileSync(path.join(spec.cwd, `w-${specs.length}.txt`), "work\n");
+          gitIn(spec.cwd, "add", "-A");
+          gitIn(spec.cwd, "commit", "-m", "wip");
+        }
         if (truncate(spec, nth)) {
           if (spec.role === "qa") throw new Error("error_max_turns");
           return { ...base, resultText: "", outcome: "error" as const, errorDetail: "error_max_turns (hit the turn ceiling of 120)" };
         }
-        if (spec.role === "worker") {
-          // A distinct commit per dispatch: an empty one fails, and the failure
-          // would read as the worker crashing rather than as the test's own bug.
-          writeFileSync(path.join(spec.cwd, `w-${specs.length}.txt`), "work\n");
-          gitIn(spec.cwd, "add", "-A");
-          gitIn(spec.cwd, "commit", "-m", "wip");
-          return { ...base, resultText: "worker done", outcome: "done" as const };
-        }
+        if (spec.role === "worker") return { ...base, resultText: "worker done", outcome: "done" as const };
         return { ...base, resultText: '{"verdict":"PASS","notes":"ok"}', outcome: "done" as const };
       },
     } as unknown as AgentPool;

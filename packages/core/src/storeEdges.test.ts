@@ -35,7 +35,7 @@ function withRun(id = "run1"): { store: Store; bus: Bus } {
 const TASK = {
   id: "t1", epicId: "e1", title: "T", spec: "", acceptanceCriteria: [], dependsOn: [], state: "PENDING" as const,
   branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0,
-  assignedSkills: [], errorSummary: null, touchedPaths: [], estimatedSize: "M" as const,
+  assignedSkills: [], errorSummary: null, touchedPaths: [], completionProbe: "", estimatedSize: "M" as const,
 };
 
 describe("opening the database a run actually uses", () => {

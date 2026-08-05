@@ -1,6 +1,6 @@
 import { deflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
-import { checkEvidence, evidenceFaults, inspectPng, retryableFaults, strikeEvidence } from "./evidence.js";
+import { checkCommands, checkEvidence, evidenceFaults, inspectPng, repeatable, retryableFaults, strikeCommands, strikeEvidence } from "./evidence.js";
 
 /**
  * Real PNGs, built here rather than checked in as fixtures: the thing under
@@ -380,5 +380,169 @@ describe("striking what did not survive the look", () => {
     const clean = { artifacts: [{ file: "desktop.png", shows: "the home page" }], couldNotReach: [] as string[] };
     const struck = strikeEvidence(clean, checkEvidence(clean.artifacts, () => page()));
     expect(struck).toEqual(clean);
+  });
+});
+
+/**
+ * The same rule as artifacts, applied to the claims that are not files.
+ *
+ * Run da8325bd: a release-verification task reported a green end-to-end pass
+ * over criteria the demo then contradicted on the first surface it rendered.
+ * Nothing stood behind that report but the sentence itself.
+ */
+describe("a claim about a command", () => {
+  const green = () => ({ ok: true, output: "" });
+  const red = (output: string) => () => ({ ok: false, output });
+
+  it("survives when the harness runs it again and agrees", () => {
+    const checks = checkCommands([{ command: "pnpm test", shows: "the suite is green" }], green);
+
+    expect(checks[0]).toMatchObject({ ok: true, verified: true, fault: "" });
+  });
+
+  it("is struck, with the output, when the re-run disagrees", () => {
+    const checks = checkCommands([{ command: "pnpm test", shows: "the suite is green" }], red("2 failed | 40 passed"));
+
+    expect(checks[0]!.ok).toBe(false);
+    expect(checks[0]!.verified).toBe(true);
+    expect(checks[0]!.fault).toContain("2 failed | 40 passed");
+  });
+
+  it("is not evidence without a statement of what passing it proves", () => {
+    expect(checkCommands([{ command: "pnpm test", shows: "" }], green)[0]).toMatchObject({ ok: false, verified: false });
+    expect(checkCommands([{ command: "", shows: "it works" }], green)[0]!.fault).toContain("no command");
+  });
+
+  /**
+   * The harness would rather report a claim as unverified than cause the thing
+   * it was trying to confirm — a second POST is a second booking.
+   */
+  it("refuses to repeat anything whose second run is not the same as its first", () => {
+    expect(repeatable("curl -X POST localhost:8000/v1/bookings").ok).toBe(false);
+    expect(repeatable("curl -s -d '{}' localhost:8000/v1/bookings").ok).toBe(false);
+    expect(repeatable("pnpm install").ok).toBe(false);
+    expect(repeatable("alembic upgrade head").ok).toBe(false);
+    expect(repeatable("git commit -am wip").ok).toBe(false);
+    expect(repeatable("echo hi > out.txt").ok).toBe(false);
+    expect(repeatable("docker compose up -d").ok).toBe(false);
+    expect(repeatable("terraform apply -auto-approve").ok).toBe(false);
+  });
+
+  /**
+   * The migration tools are how a repository changes its data; a SQL client is
+   * how a person does the same thing by hand, and it says none of their names.
+   * It matters more since the completion probe started asking this function
+   * whether the harness may run a planner's command — a probe is not re-run
+   * once, it is re-run on every QA iteration until the task passes.
+   */
+  it("refuses a statement that writes to the database, however it was spelled", () => {
+    expect(repeatable("psql -c 'DROP TABLE users'").ok).toBe(false);
+    expect(repeatable("psql $DATABASE_URL -c \"DELETE FROM bookings\"").ok).toBe(false);
+    expect(repeatable("mysql -e 'INSERT INTO orgs VALUES (1)'").ok).toBe(false);
+    expect(repeatable("redis-cli flushall").ok).toBe(false);
+  });
+
+  it("does repeat the reads a demo actually offers as proof", () => {
+    expect(repeatable("pnpm test").ok).toBe(true);
+    expect(repeatable("npx tsc --noEmit").ok).toBe(true);
+    expect(repeatable("pytest -q").ok).toBe(true);
+    expect(repeatable("curl -s -o /dev/null -w '%{http_code}' localhost:8000/health").ok).toBe(true);
+    // A query is the shape a completion probe actually wants, and it reads.
+    expect(repeatable('psql -c "SELECT count(*) FROM bookings"').ok).toBe(true);
+    // A dry run is the same every time it runs, and is how these tools are
+    // meant to be demonstrated.
+    expect(repeatable("kubectl --dry-run=server apply -f k8s/").ok).toBe(true);
+  });
+
+  /**
+   * A planner writing a completion probe is the one caller that can hand this
+   * an empty string: `completionProbe` defaults to "" for the tasks that have
+   * none, and every task in a plan carries the field whether or not it is set.
+   */
+  it("has nothing to say yes to when there is no command", () => {
+    expect(repeatable("")).toEqual({ ok: false, why: "there is no command to run" });
+    expect(repeatable("   \n ").ok).toBe(false);
+  });
+
+  it("reports an unrepeatable claim as unverified rather than as proof or as a lie", () => {
+    const checks = checkCommands([{ command: "curl -X POST /v1/bookings", shows: "a booking is created" }], green);
+
+    expect(checks[0]).toMatchObject({ ok: false, verified: false });
+    expect(checks[0]!.fault).toContain("repeat the write");
+  });
+
+  it("says why a claim it was willing to run was not run", () => {
+    const checks = checkCommands([{ command: "pnpm test", shows: "green" }], () => null, "past the per-pit-stop cap");
+
+    expect(checks[0]!.fault).toBe("past the per-pit-stop cap");
+  });
+
+  it("does not run the same command twice for two claims", () => {
+    let runs = 0;
+    const checks = checkCommands(
+      [
+        { command: "pnpm test", shows: "the suite is green" },
+        { command: "pnpm test", shows: "the regression is fixed" },
+      ],
+      () => (runs++, { ok: true, output: "" })
+    );
+
+    expect(runs).toBe(1);
+    expect(checks.every((c) => c.ok)).toBe(true);
+  });
+});
+
+describe("filing command claims under the heading that is true of them", () => {
+  const report = () => ({
+    commands: [
+      { command: "pnpm test", shows: "the suite is green" },
+      { command: "curl -X POST /v1/bookings", shows: "a booking is created" },
+      { command: "npx tsc --noEmit", shows: "the types check" },
+    ],
+    couldNotReach: ["payments — no Stripe test keys"],
+  });
+
+  it("keeps only what a second run confirmed, and moves the rest to what was not checked", () => {
+    const r = report();
+    const struck = strikeCommands(
+      r,
+      checkCommands(r.commands, (c) => (c === "pnpm test" ? { ok: true, output: "" } : { ok: false, output: "TS2339" }))
+    );
+
+    expect(struck.commands).toEqual([{ command: "pnpm test", shows: "the suite is green" }]);
+    // The claim it could not repeat and the claim that failed both land here,
+    // each with the command, so the operator can settle it themselves.
+    expect(struck.couldNotReach).toHaveLength(3);
+    expect(struck.couldNotReach.join("\n")).toContain("curl -X POST /v1/bookings");
+    expect(struck.couldNotReach.join("\n")).toContain("npx tsc --noEmit");
+    expect(struck.couldNotReach[0]).toBe("payments — no Stripe test keys");
+  });
+
+  /**
+   * The heading has to name something even when the claim named nothing. A demo
+   * that lists a command with no statement of what it proves, or a statement
+   * with no command, still has to appear in what the pit stop could not check —
+   * a claim that quietly disappears reads to the operator as one that passed.
+   */
+  it("still names the claim when the demo left the command or the statement blank", () => {
+    const r = {
+      commands: [
+        { command: "pnpm test", shows: "" },
+        { command: "", shows: "" },
+      ],
+      couldNotReach: [] as string[],
+    };
+    const struck = strikeCommands(r, checkCommands(r.commands, () => ({ ok: true, output: "" })));
+
+    expect(struck.commands).toEqual([]);
+    expect(struck.couldNotReach[0]).toContain("pnpm test — not verified: `pnpm test` ");
+    expect(struck.couldNotReach[0]).toContain("no statement of what it proves");
+    // Nothing left to name it by, so it is filed under what it was.
+    expect(struck.couldNotReach[1]).toBe("a command — not verified: a claim with no command, so there is nothing to check");
+  });
+
+  it("leaves a report whose every claim was confirmed exactly as it was", () => {
+    const clean = { commands: [{ command: "pnpm test", shows: "green" }], couldNotReach: [] as string[] };
+    expect(strikeCommands(clean, checkCommands(clean.commands, () => ({ ok: true, output: "" })))).toEqual(clean);
   });
 });

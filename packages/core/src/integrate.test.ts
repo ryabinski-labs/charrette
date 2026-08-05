@@ -15,7 +15,7 @@ const DAG =
   "```json\n" +
   JSON.stringify({
     epics: [{ id: "epic-e", title: "E", summary: "s" }],
-    tasks: [{ id: "task-a", epicId: "epic-e", title: "A", spec: "s", acceptanceCriteria: ["x"], dependsOn: [], touchedPaths: [], estimatedSize: "S" }],
+    tasks: [{ id: "task-a", epicId: "epic-e", title: "A", spec: "s", acceptanceCriteria: ["x"], dependsOn: [], touchedPaths: [], completionProbe: "", estimatedSize: "S" }],
   }) +
   "\n```";
 
@@ -152,6 +152,63 @@ async function build(
   return { store, runId, logs, repo, controller };
 }
 
+describe("a task branch that carries nothing", () => {
+  it("is never merged, however cleanly git says the merge went", async () => {
+    // Run da8325bd: three task branches held zero commits, `git merge --no-ff`
+    // answered "Already up to date" and exited 0 for each of them, and all
+    // three were booked MERGED against the integration branch's own commit —
+    // one of them for the work whose absence the operator found at the demo.
+    const { adapter, prs } = fakeGitHub(() => ({ number: 7, url: "u" }));
+    const { store, runId, logs } = await build(adapter, false);
+
+    expect(store.getTask(runId, "task-a")!.state).toBe("NEEDS_HUMAN");
+    expect(store.getTask(runId, "task-a")!.state).not.toBe("MERGED");
+    // Nothing was merged, so there is no diff and no PR to open.
+    expect(prs).toEqual([]);
+    expect(logs.join("\n")).toMatch(/nothing to review: harness\/.*\/task-a changes no file against harness\/.*\/main \(0 commits\)/);
+  });
+
+  it("goes back to the worker with the question only the worker can answer", async () => {
+    // Not "your code is wrong" — the code is usually written and simply not on
+    // this branch, so the prompt sends it looking for where the work went.
+    const prompts: string[] = [];
+    const { adapter } = fakeGitHub(() => ({ number: 7, url: "u" }));
+    const base = buildingPool(false);
+    const pool = {
+      async run(spec: AgentSpec): Promise<AgentResult> {
+        if (spec.role === "worker") prompts.push(spec.prompt as string);
+        return base.run(spec);
+      },
+    } as unknown as AgentPool;
+    const { store, runId } = await build(adapter, false, undefined, "single", pool);
+
+    // The first dispatch is the ordinary task briefing; every one after it is a
+    // re-dispatch caused by the empty branch, and each costs a QA iteration.
+    expect(prompts.length).toBeGreaterThan(1);
+    expect(prompts.slice(1).join("\n")).toContain("delivers nothing");
+    expect(prompts.slice(1).join("\n")).toContain("it has no commits on it at all");
+    expect(prompts.slice(1).join("\n")).toContain("do not commit anything outside it");
+    expect(store.getTask(runId, "task-a")!.qaIterations).toBeGreaterThan(0);
+  });
+
+  it("does not spend a QA agent on an empty diff", async () => {
+    // The gate sits before the deterministic checks and before QA precisely so
+    // that reviewing nothing is never paid for.
+    const roles: string[] = [];
+    const { adapter } = fakeGitHub(() => ({ number: 7, url: "u" }));
+    const base = buildingPool(false);
+    const pool = {
+      async run(spec: AgentSpec): Promise<AgentResult> {
+        roles.push(spec.role);
+        return base.run(spec);
+      },
+    } as unknown as AgentPool;
+    await build(adapter, false, undefined, "single", pool);
+
+    expect(roles).not.toContain("qa");
+  });
+});
+
 describe("opening the component PR", () => {
   it("bases the per-task PR on the branch the run started from, not the integration branch", async () => {
     // The integration branch already contains the task by the time the PR is
@@ -196,9 +253,11 @@ describe("opening the component PR", () => {
     expect(logs.join("\n")).toMatch(/merged locally, but the pull request could not be opened/);
   });
 
-  it("says so plainly when the task produced no commits at all", async () => {
+  it("says so plainly when the integration branch adds nothing to the base", async () => {
+    // GitHub refusing the PR is the signal, not an empty task branch: a task
+    // whose work is already in the base merges fine and still has no PR to open.
     const { adapter } = fakeGitHub(() => null);
-    const { store, runId, logs } = await build(adapter, false);
+    const { store, runId, logs } = await build(adapter);
 
     expect(store.getTask(runId, "task-a")!.prNumber).toBeNull();
     expect(logs.join("\n")).toMatch(/no commits that release does not already have/);
@@ -225,7 +284,7 @@ describe("what the run says it produced", () => {
     // everything downstream, then announced "PRs opened; human review on GitHub"
     // and sent the operator to GitHub to look at work that was never pushed.
     const { adapter } = fakeGitHub(() => null);
-    const { store, runId } = await build(adapter, false);
+    const { store, runId } = await build(adapter);
     expect(reason(store, runId)).toBe("no pull requests opened; intent check passed");
     expect(reason(store, runId)).not.toMatch(/PRs opened/);
   });
@@ -269,13 +328,13 @@ describe("what the run says it produced", () => {
 
   it("reports what is parked and what was abandoned", async () => {
     const { adapter } = fakeGitHub(() => null);
-    const { store, runId, controller } = await build(adapter, false);
+    const { store, runId, controller } = await build(adapter);
     // One task the operator has to deal with, and two that never became reachable —
     // the second only transitively, through the first.
     store.insertTasks(runId, [], [
-      { id: "b", epicId: "epic-e", title: "B", spec: "", acceptanceCriteria: [], dependsOn: [], state: "NEEDS_HUMAN", branch: "harness/x/b", worktreePath: null, githubIssueNumber: 12, prNumber: null, qaIterations: 3, respawns: 0, assignedSkills: [], errorSummary: "QA rejected it 3 times (the cap): still no tests", touchedPaths: [], estimatedSize: "M" },
-      { id: "c", epicId: "epic-e", title: "C", spec: "", acceptanceCriteria: [], dependsOn: ["b"], state: "CANCELLED", branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [], estimatedSize: "M" },
-      { id: "d", epicId: "epic-e", title: "D", spec: "", acceptanceCriteria: [], dependsOn: ["c"], state: "CANCELLED", branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [], estimatedSize: "M" },
+      { id: "b", epicId: "epic-e", title: "B", spec: "", acceptanceCriteria: [], dependsOn: [], state: "NEEDS_HUMAN", branch: "harness/x/b", worktreePath: null, githubIssueNumber: 12, prNumber: null, qaIterations: 3, respawns: 0, assignedSkills: [], errorSummary: "QA rejected it 3 times (the cap): still no tests", touchedPaths: [], completionProbe: "", estimatedSize: "M" },
+      { id: "c", epicId: "epic-e", title: "C", spec: "", acceptanceCriteria: [], dependsOn: ["b"], state: "CANCELLED", branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [], completionProbe: "", estimatedSize: "M" },
+      { id: "d", epicId: "epic-e", title: "D", spec: "", acceptanceCriteria: [], dependsOn: ["c"], state: "CANCELLED", branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [], completionProbe: "", estimatedSize: "M" },
     ]);
     const out = controller.outcome(runId);
     expect(out.line).toBe("no pull requests opened; 1 task needs you; 2 never started, blocked behind them; intent check passed");
@@ -289,9 +348,9 @@ describe("what the run says it produced", () => {
     // Runs written before the reason was stored on the task still have it in the
     // transition event, which is the only record the operator's finished run has.
     const { adapter } = fakeGitHub(() => null);
-    const { store, runId, controller } = await build(adapter, false);
+    const { store, runId, controller } = await build(adapter);
     store.insertTasks(runId, [], [
-      { id: "e", epicId: "epic-e", title: "E", spec: "", acceptanceCriteria: [], dependsOn: [], state: "PENDING", branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [], estimatedSize: "M" },
+      { id: "e", epicId: "epic-e", title: "E", spec: "", acceptanceCriteria: [], dependsOn: [], state: "PENDING", branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [], completionProbe: "", estimatedSize: "M" },
     ]);
     store.transitionTask(runId, "e", "READY");
     store.transitionTask(runId, "e", "WORKING");
