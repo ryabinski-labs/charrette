@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { advisorPrompt, extractJson, plannerBreakdownSystemPrompt, qaSystemPrompt } from "./prompts.js";
+import {
+  INTERFACE_STANDARD,
+  advisorPrompt,
+  demoSystemPrompt,
+  extractJson,
+  plannerBreakdownSystemPrompt,
+  qaSystemPrompt,
+  workerSystemPrompt,
+} from "./prompts.js";
 
 const fence = "```";
 
@@ -120,6 +128,122 @@ describe("infrastructure work", () => {
     expect(p).toMatch(/checkable WITHOUT provisioning anything/);
     // The trap this closes: "the bucket exists in staging" is unjudgeable here.
     expect(p).toMatch(/cannot be judged and will park the task/);
+  });
+});
+
+/**
+ * Skill routing decides whether an agent gets the *playbooks*; this decides
+ * whether it gets the *rules*. The distinction is the whole design: routing is
+ * a regex over task text, and the operator asked for interfaces that are always
+ * good — not interfaces that are good whenever a planner happened to write the
+ * word "component" into a spec.
+ */
+describe("the interface standard", () => {
+  const worker = workerSystemPrompt("use vitest", "", "");
+  const qa = qaSystemPrompt();
+
+  it("reaches every worker, whatever the task text says", () => {
+    // No skill, no toolbelt, conventions that mention nothing visual — the
+    // conditions under which routing injects precisely nothing.
+    expect(worker).toContain(INTERFACE_STANDARD);
+    // And it scopes itself, so a database migration is not held to it.
+    expect(worker).toMatch(/whenever what you build renders anything a human being looks at/);
+    expect(worker).toMatch(/Ignore it only when this task produces nothing anyone sees/);
+  });
+
+  it("is the same text on both sides of the gate", () => {
+    // Two copies would drift, and drift here has a specific victim: a worker
+    // failed for a rule it was never given, three times, then parked.
+    expect(qa).toContain(INTERFACE_STANDARD);
+    expect(qa).toMatch(/The worker was handed this same list verbatim/);
+  });
+
+  it("is fenced off from the instructions that quote it", () => {
+    // Both call sites embed it inside their own bulleted list. Unfenced, QA's
+    // "judge it against the standard below" ran straight into six bullets that
+    // read as QA's own rules, and the "FAIL on the standard above" that follows
+    // them had no visible antecedent.
+    for (const prompt of [worker, qa]) {
+      expect(prompt).toContain(`<interface-standard>\n${INTERFACE_STANDARD}\n</interface-standard>`);
+    }
+  });
+
+  it("says what a native control is, because that is the loudest tell", () => {
+    // The operator's words: app-native selectors, not browser defaults.
+    expect(INTERFACE_STANDARD).toMatch(/Use the application's own components/);
+    expect(INTERFACE_STANDARD).toContain("<select>");
+    expect(INTERFACE_STANDARD).toContain("window.confirm");
+    expect(INTERFACE_STANDARD).toMatch(/build the primitive once/);
+  });
+
+  it("gives the list thresholds as numbers a reviewer can count", () => {
+    // "Add filters if the list is long" is not checkable and so cannot gate.
+    expect(INTERFACE_STANDARD).toMatch(/More than 7 options in a selector: make it searchable/);
+    expect(INTERFACE_STANDARD).toMatch(/More than 20 rows or cards in a list: give it filter and sort/);
+    expect(INTERFACE_STANDARD).toMatch(/More than 100: paginate or virtualize/);
+    // The state that is forgotten every single time a filter is added.
+    expect(INTERFACE_STANDARD).toMatch(/empty state that says how to clear the filter/);
+  });
+
+  it("requires the three states nobody builds, and forbids the error nobody can act on", () => {
+    expect(INTERFACE_STANDARD).toMatch(/loading, empty, error, and full/);
+    expect(INTERFACE_STANDARD).toMatch(/never "Something went wrong"/);
+  });
+
+  it("wants the interface self-explanatory before it is documented", () => {
+    expect(INTERFACE_STANDARD).toMatch(/self-explanatory first and documented second/);
+    expect(INTERFACE_STANDARD).toMatch(/a tooltip explaining a confusing label is the second-best fix/);
+    expect(INTERFACE_STANDARD).toMatch(/not in a doc they will never open/);
+  });
+});
+
+describe("QA's authority over how something looks", () => {
+  const qa = qaSystemPrompt();
+
+  it("makes QA open the app and look, rather than read the markup", () => {
+    expect(qa).toMatch(/screenshot the surface this task touched/);
+    expect(qa).toMatch(/Desktop width and mobile width/);
+    expect(qa).toMatch(/Reading the JSX is not looking at the screen/);
+  });
+
+  /**
+   * The bounded half of the mandate, and the one that keeps it usable. A task
+   * gets three QA iterations in its life; a reviewer who may fail on taste can
+   * spend all three on a disagreement the worker cannot resolve, and the task
+   * parks having been correct the whole time.
+   */
+  it("fails only on the countable rules and demotes taste to a note", () => {
+    expect(qa).toMatch(/FAIL on the standard above and only on it/);
+    expect(qa).toMatch(/Everything else you notice about how it looks is a NOTE, not a FAIL/);
+    expect(qa).toMatch(/a palette you would have chosen differently/);
+    expect(qa).toMatch(/three QA iterations in its whole life/);
+    // And a failure has to be actionable, or the worker cannot clear it either.
+    expect(qa).toMatch(/Name the file and the component in mustFix/);
+  });
+
+  it("keeps an unrenderable surface an honest gap rather than a pass", () => {
+    expect(qa).toMatch(/say which parts of the standard went unchecked/);
+    expect(qa).toMatch(/how an unusable screen ships/);
+  });
+
+  it("still lets infrastructure work be infrastructure work", () => {
+    // The visual block sits directly above the infra block and neither may
+    // swallow the other: declarative config renders nothing and has no states.
+    expect(qa).toMatch(/Do not fail an infra task for an empty tests directory/);
+    expect(qa.indexOf("FAIL on the standard above and only on it")).toBeLessThan(
+      qa.indexOf("When the artifact is infrastructure")
+    );
+  });
+});
+
+describe("what the demo agent photographs", () => {
+  it("captures both widths and the states, because a lens reads it afterwards", () => {
+    // The pit stop's design reviewer never runs the product. Everything it can
+    // say about the interface comes out of this directory.
+    const p = demoSystemPrompt("/tmp/artifacts");
+    expect(p).toMatch(/at desktop width and again at mobile width/);
+    expect(p).toMatch(/capture the empty and error states/);
+    expect(p).toMatch(/A surface you described but did not capture is a surface nobody reviewed/);
   });
 });
 

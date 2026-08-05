@@ -281,6 +281,46 @@ describe("skill routing", () => {
     expect(system).toContain('<skill name="branding-manager"');
     expect(system).toContain('<skill name="marketing-director"');
   }, 30_000);
+
+  /**
+   * The vocabulary named the container and not the contents: `component` and
+   * `screen` routed, `button`, `form`, `dropdown`, `modal` and `page` did not.
+   * So "Add a pricing page with a plan selector" — a task that is nothing but
+   * interface — reached its worker with no design playbook at all.
+   */
+  it("routes a task that names the controls rather than the container", async () => {
+    const system = await inject("Pricing page", "Add the pricing page with a plan dropdown, a comparison data table and a call-to-action button");
+    expect(system).toContain('<skill name="frontend-design"');
+    expect(system).toContain('<skill name="ui-ux-cx-engineer"');
+  }, 30_000);
+
+  it("routes the states and the polish, not just the structure", async () => {
+    const system = await inject("Invoices list", "Add a loading state, an empty state and a tooltip on the icon, and check it in dark mode");
+    expect(system).toContain('<skill name="frontend-design"');
+    expect(system).toContain('<skill name="ui-ux-cx-engineer"');
+  }, 30_000);
+
+  /**
+   * Precision matters more than recall here, which inverts the usual instinct
+   * about a keyword gate. Since the craft rules ship in every worker's prompt,
+   * a miss costs depth — the task still gets the standard. A false positive
+   * costs one of four skill slots on a task with no interface, and the slot it
+   * takes is the one the relevant skill needed. So the ambiguous words are
+   * qualified: a database table is not a data table, a dependency graph is not
+   * a chart, a feature toggle is not a toggle switch, and `page size` is
+   * pagination.
+   */
+  it("does not mistake backend vocabulary for interface vocabulary", async () => {
+    const db = await inject("Ledger schema", "Create the postings table and backfill it, keyed off the accounts table");
+    expect(db).not.toContain('<skill name="frontend-design"');
+    expect(db).not.toContain('<skill name="ui-ux-cx-engineer"');
+
+    const paging = await inject("Cursor the exports API", "Return results in batches with a page size and a page token, no offsets");
+    expect(paging).not.toContain('<skill name="frontend-design"');
+
+    const flags = await inject("Feature toggles", "Read the toggle from config so a half-built path can ship dark");
+    expect(flags).not.toContain('<skill name="frontend-design"');
+  }, 90_000);
 });
 
 /**
