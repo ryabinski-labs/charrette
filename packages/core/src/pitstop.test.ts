@@ -120,7 +120,10 @@ const DEMO: DemoReport = {
     { name: "The map", result: "not-reachable", evidence: "no route renders it" },
   ],
   couldNotReach: ["payments — no Stripe test keys on this machine"],
-  artifacts: ["signin.png", "pack-404.png"],
+  artifacts: [
+    { file: "signin.png", shows: "the signed-in home page with the session's own name in the header" },
+    { file: "pack-404.png", shows: "the pack screen's error state — the 404 body, verbatim" },
+  ],
 };
 
 const STOP: Omit<PitStop, "markdown"> = {
@@ -249,6 +252,16 @@ describe("the report the operator reads", () => {
 
   it("points at the evidence directory when there is evidence", () => {
     expect(renderPitStop(STOP)).toContain("All of it: /repo/.harness/run1/pitstops/2");
+  });
+
+  it("says what each file is for, because a filename settles nothing", () => {
+    // An operator opened a pit stop's `01-marketing-home-desktop.png`, saw a
+    // homepage, and could not say what it was supposed to tell them. A list of
+    // names is not evidence; a name plus the claim it backs is.
+    const md = renderPitStop(STOP);
+
+    expect(md).toContain("- `signin.png` — the signed-in home page with the session's own name in the header");
+    expect(md).toContain("- `pack-404.png` — the pack screen's error state — the 404 body, verbatim");
   });
 
   it("leaves the evidence section out when the demo captured nothing", () => {
