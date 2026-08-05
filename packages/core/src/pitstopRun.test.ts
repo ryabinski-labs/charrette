@@ -159,9 +159,19 @@ describe("stopping at an epic boundary", () => {
     const demoSpec = specs.find((s) => s.role === "demo")!;
     expect(demoSpec.cwd).not.toBe(dir);
     expect(demoSpec.cwd).toContain(runId);
-    // One session per configured lens, at each stop, all of them named.
-    expect(specs.filter((s) => s.role === "reviewer").length).toBe(6);
-    expect(first.reviews.map((r) => r.lens)).toEqual(["product-manager", "critical-challenger", "qa-agent"]);
+    // One session per configured lens, at each stop, all of them named. The
+    // design lens is the fourth and last: the pit stop is the only place the
+    // whole product is looked at once, and six screens that each passed their
+    // own task's QA can still disagree with each other about every visual
+    // decision. It became worth paying for when the demo agent got a browser —
+    // before that it would have been reviewing a prose description of a screen.
+    expect(specs.filter((s) => s.role === "reviewer").length).toBe(8);
+    expect(first.reviews.map((r) => r.lens)).toEqual([
+      "product-manager",
+      "critical-challenger",
+      "qa-agent",
+      "ui-ux-cx-engineer",
+    ]);
     expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
   });
 
@@ -268,7 +278,7 @@ describe("a demo that goes wrong", () => {
     expect(readFileSync(path.join(wt, "README.md"), "utf8")).toBe("start\n");
   });
 
-  it("names a reviewer that did not finish instead of quietly showing two of three", async () => {
+  it("names a reviewer that did not finish instead of quietly showing three of four", async () => {
     const dir = repo();
     const { pool } = rolePool({
       ...ROLES,
@@ -279,7 +289,7 @@ describe("a demo that goes wrong", () => {
     await controller.startRun("build a thing", RunConfig.parse(BASE));
 
     const reviews = stops[0]!.reviews;
-    expect(reviews.length).toBe(3);
+    expect(reviews.length).toBe(RunConfig.parse(BASE).pitStop.reviewers.length);
     expect(reviews.filter((r) => r.findings.some((f) => f.includes("this reviewer did not finish"))).length).toBe(1);
   });
 

@@ -59,15 +59,22 @@ export const PitStopConfig = z.object({
   every: PitStopEvery.default("epic"),
   /**
    * The lenses the built product is reviewed through, by skill name. Each one is
-   * a separate short session, so this is also the pit stop's price: three lenses
-   * is three reviews. Skills absent from `skillsDirs` still get their lens — the
+   * a separate short session, so this is also the pit stop's price: four lenses
+   * is four reviews. Skills absent from `skillsDirs` still get their lens — the
    * name alone tells the reviewer which hat to wear — but they read far better
    * with the operator's own playbook in front of them.
+   *
+   * `ui-ux-cx-engineer` is here because the pit stop is the only place anyone
+   * looks at the whole product at once. Task-level QA judges one screen against
+   * one task's criteria and cannot see that six of them disagree about spacing,
+   * button weight and where the primary action lives. It is also newly worth
+   * paying for: the demo agent could not photograph anything until it was given
+   * a browser, so this lens would have been reviewing prose.
    */
   reviewers: z
     .array(z.string())
     .max(4)
-    .default(["product-manager", "critical-challenger", "qa-agent"]),
+    .default(["product-manager", "critical-challenger", "qa-agent", "ui-ux-cx-engineer"]),
   /**
    * The demo agent's turn ceiling. It has to start a product it has never seen
    * and drive it, which is the expensive half of a pit stop; a ceiling that is
@@ -91,8 +98,45 @@ export const Budget = z.object({
 // marketing rule's words, that rule sits below this one, and a branding task
 // that tripped both would spend its four slots on frontend skills and drop
 // `branding-manager` at the cap. Design-system vocabulary is named instead.
+//
+// Tuned for precision rather than recall, which is the opposite of how a
+// keyword gate is usually written — because since `INTERFACE_STANDARD` the
+// craft rules reach every worker unconditionally, from the prompt. This regex
+// no longer decides whether a task gets design guidance at all; it decides
+// whether it also gets two 200-line playbooks, against a four-skill cap. A miss
+// now costs depth. A false positive costs a slot on a task with no surface, and
+// that slot is the one the genuinely relevant skill needed.
+//
+// So the ambiguous words are qualified rather than dropped: bare `table` is a
+// database table far more often than a data grid, bare `graph` is a dependency
+// graph, bare `toggle` is a feature flag, and `page` is pagination whenever it
+// is followed by size/token/cursor/number. `form` is excluded before "of" for
+// the same reason — "in the form of" appears in ordinary prose.
+// Every countable noun here carries `s?`, which the original vocabulary did
+// not: `\bicon\b` does not match "icons", so "Replace the emoji with proper
+// icons" routed nowhere, and neither did "responsive components". A gate that
+// depends on a planner writing the singular is not a gate.
 const UI_WHEN =
-  "\\b(ui|ux|frontend|front-end|dashboard|console|web page|landing|component|css|styling|layout|responsive|accessib\\w+|design system|design token|design language|style guide|screen|theme|palette|typograph\\w+|wordmark)\\b";
+  "\\b(" +
+  // Surfaces and the design system itself.
+  "ui|ux|frontend|front-end|dashboards?|console|web pages?|landing|components?|css|styling|layouts?|responsive|" +
+  "accessib\\w+|design systems?|design tokens?|design language|style guides?|screens?|themes?|palettes?|" +
+  "typograph\\w+|wordmarks?|pages?(?! ?(size|token|cursor|number))|" +
+  // Controls a person points at. The rule about using the app's own components,
+  // and the one about scaling a control to its data, are only checkable when a
+  // task that names the control rather than the container still routes.
+  "buttons?|forms?(?! of)|input fields?|text fields?|dropdowns?|drop-?downs?|combo ?box(es)?|autocomplete|" +
+  "typeahead|date ?pickers?|checkbox(es)?|radio groups?|toggle switch(es)?|sliders?|modals?|dialogs?|" +
+  "tooltips?|popovers?|toasts?|snackbars?|banners?|hero|breadcrumbs?|nav|navbars?|navigation|sidebars?|" +
+  "menus?|tab bars?|steppers?|wizards?|data ?tables?|table views?|list views?|grid views?|charts?|" +
+  "visuali[sz]ations?|icons?|iconograph\\w+|avatars?|" +
+  // The states everyone forgets, and the polish that separates a screen that
+  // works from one that is pleasant to use.
+  "empty states?|loading states?|error states?|spinners?|placeholders?|helper text|microcopy|onboarding|" +
+  "dark mode|light mode|contrast ratios?|focus states?|hover states?|animations?|micro-?interactions?|" +
+  // Where it is looked at.
+  "mobile|ios|android|tablet|touch targets?|safe areas?" +
+  ")\\b";
 
 export const RunConfig = z.object({
   // PRD §11.5: default 3. Independent DAG tasks run concurrently, each in its

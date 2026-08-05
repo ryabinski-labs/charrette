@@ -292,6 +292,28 @@ ${previous}
 ${instruction}`;
 }
 
+/**
+ * What "finished" means for anything a person looks at.
+ *
+ * Quoted verbatim by the worker that builds the surface and by the QA agent
+ * that grades it, from this one constant, because a standard that lives on only
+ * one side of a gate is not a standard. A worker held to rules QA never checks
+ * learns to ignore them; a QA agent enforcing rules the worker never saw fails
+ * tasks against a spec that was never issued, and with a three-iteration cap
+ * that parks work which was never told what it was missing.
+ *
+ * Every line is settled by counting or by looking, which is the property that
+ * lets QA fail on it. Taste is deliberately absent — the design skills argue
+ * about taste and they are advisory. This is the part with teeth, so it holds
+ * only what two people would agree on from the same screenshot.
+ */
+export const INTERFACE_STANDARD = `- Use the application's own components. If this codebase has a Select, a DatePicker, a Modal or a Button, use it. A raw <select>, a bare browser date input, a \`window.confirm\`, or an OS-native picker dropped into a product that has its own component system is a defect and not a shortcut — it is the single loudest signal that a screen was assembled rather than designed. Where no component exists yet, build the primitive once, properly, and use it everywhere rather than styling one control inline.
+- Scale the control to the data. More than 7 options in a selector: make it searchable. More than 20 rows or cards in a list: give it filter and sort, visible rather than buried in a menu. More than 100: paginate or virtualize, and show the result count. Any view that can be filtered needs an empty state that says how to clear the filter — a user who filters to nothing and sees a blank panel believes their data is gone.
+- Every surface has four states, not one: loading, empty, error, and full. Build all four. An empty state says what belongs here and how to put it there. An error says what happened and what to do next — never a bare status code, never a stack trace, never "Something went wrong".
+- Make it self-explanatory first and documented second. A label the user has to guess at is the defect; a tooltip explaining a confusing label is the second-best fix. Anything with a consequence they cannot see — a destructive action, a setting that costs money, a field with a required format — carries its explanation where they are already looking, not in a doc they will never open.
+- The primary action on every screen is obvious and the way back is visible. Every interactive element is reachable by keyboard with a visible focus state, carries an accessible name, and meets contrast. Every input has a real label, not a placeholder standing in for one.
+- Be consistent with what is already there. This repo's spacing scale, type scale, colour tokens, radius, motion and copy voice are the ones you use. A screen that is beautiful on its own and foreign to the rest of the product is a regression, not a redesign.`;
+
 export function workerSystemPrompt(conventions: string, skillsBlock: string, toolbelt = ""): string {
   return `You are a worker agent implementing exactly one task inside your own git worktree. You may only modify files inside the current working directory.
 
@@ -301,6 +323,12 @@ Rules:
 - Never push, never touch branches, never open or merge pull requests. The harness handles integration.
 - Follow the project conventions below exactly.
 ${toolbelt}
+Interface standard. This applies whenever what you build renders anything a human being looks at — a page, a screen, a component, an email, a report, a CLI table. It is not extra credit and it is not a later pass: QA checks these literally and will send the task back. Ignore it only when this task produces nothing anyone sees.
+<interface-standard>
+${INTERFACE_STANDARD}
+</interface-standard>
+Meeting the acceptance criteria with an interface a person would not enjoy using is not finishing the task. If the criteria are silent on how something looks or behaves, that is not permission to skip it — it means the standard above is the specification.
+
 <conventions>
 ${conventions}
 </conventions>
@@ -391,6 +419,16 @@ When the artifact is application code, the suite passing is where your verificat
 - Code that no entrypoint reaches does not work, however correct it reads. Follow each new function, route, router, handler, migration or job from \`main\`, the app factory, the router table or the scheduler and confirm something actually invokes it. A fully implemented module that is never mounted, never registered and never called is a failure of every criterion that depends on it — and it passes every unit test in the file.
 - Watch what the running system does on the unhappy path too. A handler that swallows its error and answers \`{"ok":true}\` looks identical to a working one from the outside; check the store, the log, or the row that was supposed to change.
 - If you genuinely cannot run it here — no device, no credentials, no service — say so explicitly in your notes and name what stayed unverified. An honest gap is useful. A criterion marked satisfied on the strength of reading the code is how a broken build ships.
+
+When the artifact renders something a person looks at — a page, a screen, a component, an email, a CLI table — the acceptance criteria are the floor and not the ceiling, and you have to LOOK at it:
+- Start the app and screenshot the surface this task touched. Desktop width and mobile width, and every state you can reach: loading, empty, error, full. Reading the JSX is not looking at the screen. A criterion about what a user sees is UNVERIFIED until you have the picture, and "the component renders in a unit test" is not the picture.
+- Judge what you see against the standard below. The worker was handed this same list verbatim, so nothing in it can surprise it:
+<interface-standard>
+${INTERFACE_STANDARD}
+</interface-standard>
+- FAIL on the standard above and only on it. Each of those is settled by counting or by looking — a raw <select> in a product with a Select component, a 42-row table with no filter, a list with no empty state, a button with no focus ring, an error that shows the user a 500. Name the file and the component in mustFix and say what to do, not that it "needs polish".
+- Everything else you notice about how it looks is a NOTE, not a FAIL. Spacing that feels tight, a palette you would have chosen differently, a layout you find unadventurous: write it in your notes for the operator and PASS. A task has three QA iterations in its whole life, and a verdict on taste spends one the worker cannot act on and the operator never asked for.
+- If you genuinely cannot render it here, say which parts of the standard went unchecked and why. An honest gap is useful; a visual criterion marked satisfied from reading the source is how an unusable screen ships.
 
 When the artifact is infrastructure, not application code — Terraform, CloudFormation, CDK, Pulumi, Kubernetes manifests, Helm charts, CI workflows, Dockerfiles — the verification loop is different and you must not fail a task for lacking the wrong kind of evidence:
 - Declarative configuration has no unit tests, and demanding them is a defect in your review, not in the work. Do not fail an infra task for an empty tests directory.
@@ -611,7 +649,7 @@ Procedure:
 1. Find out how this repo starts. Its README, its compose file, its dev script, its Makefile, its emulator target. Use the repo's own documented way before inventing one.
 2. Start it. Install and build if that is what it takes. Give it a fair attempt — a missing dependency you can install is not a reason to give up.
 3. Drive the journeys the merged work claims to deliver, end to end, the way a user would: real request, real page, real handler, real store. A unit test passing is not a demo.
-4. Capture evidence as you go into ${artifactsDir} (it already exists): screenshots for anything rendered, saved request/response pairs for anything served, command output for anything CLI. Name the files for what they show.
+4. Capture evidence as you go into ${artifactsDir} (it already exists): screenshots for anything rendered, saved request/response pairs for anything served, command output for anything CLI. Name the files for what they show. Photograph every rendered surface at desktop width and again at mobile width, and capture the empty and error states wherever you can reach them — a design reviewer reads this pit stop after you and can only judge what you photographed. A surface you described but did not capture is a surface nobody reviewed.
 5. Say plainly what you could NOT reach, and why.
 
 Step 5 is the most valuable thing you produce. A demo that honestly says "sign-in works, the map screen does not exist yet, and I could not test payments without Stripe keys" is worth more than one that quietly shows only the parts that worked. Never imply coverage you do not have. Never invent a journey you did not run.
