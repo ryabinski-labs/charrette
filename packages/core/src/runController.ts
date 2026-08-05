@@ -2227,7 +2227,7 @@ export class RunController {
       ...Array.from({ length: this.store.pitStopHistory(runId, 0).count + 1 }, (_, i) => taskIsolation(runId, `pitstop-${i + 1}`).composeProject),
     ];
     const [stacks, processes] = await Promise.all([
-      composeDown(projects, async (bin, args) => (await execFileP(bin, args, { timeout: 120_000 })).stdout).catch(() => [] as string[]),
+      composeDown(projects, async (bin, args, timeoutMs) => (await execFileP(bin, args, { timeout: timeoutMs })).stdout).catch(() => [] as string[]),
       reapUnder(path.join(this.wt.worktreeRoot(), runId)).catch(() => [] as unknown[]),
     ]);
     await this.wt.pruneAndReconcile().catch(() => undefined);

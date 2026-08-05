@@ -104,9 +104,24 @@ export function isolationEnv(iso: TaskIsolation): Record<string, string> {
  * seeded; keeping it is how the next task inherits state it never created, and
  * that is the failure isolation exists to prevent.
  */
+/**
+ * How long the "what is running?" question is worth waiting for.
+ *
+ * A runtime that is installed but cannot be reached does not fail fast: a
+ * podman machine whose socket is unreachable retries an ssh handshake for two
+ * minutes and fourteen seconds before giving up, and this sweep runs at every
+ * pit stop against two CLIs — nearly five minutes of a run spent finding out
+ * there was nothing to sweep. A listing either answers in a moment or the
+ * runtime is not there to answer it.
+ */
+export const LIST_TIMEOUT_MS = 10_000;
+
+/** Bringing a stack down stops containers and deletes volumes, which takes as long as it takes. */
+export const DOWN_TIMEOUT_MS = 120_000;
+
 export async function composeDown(
   projects: string[],
-  exec: (bin: string, args: string[]) => Promise<string>,
+  exec: (bin: string, args: string[], timeoutMs: number) => Promise<string>,
   clis: string[] = ["podman", "docker"]
 ): Promise<string[]> {
   const mine = new Set(projects);
@@ -119,11 +134,11 @@ export async function composeDown(
     // rather than one no-op per task. It is also the only way to report what
     // actually came down — `compose down` on a project that was never up
     // succeeds exactly like one that was.
-    const listed = await exec(cli, ["compose", "ls"]).catch(() => null);
+    const listed = await exec(cli, ["compose", "ls"], LIST_TIMEOUT_MS).catch(() => null);
     if (listed === null) continue;
     for (const project of composeProjectNames(listed)) {
       if (!mine.has(project) || brought.some((b) => b.endsWith(`:${project}`))) continue;
-      const ok = await exec(cli, ["compose", "-p", project, "down", "-v", "--remove-orphans"]).then(
+      const ok = await exec(cli, ["compose", "-p", project, "down", "-v", "--remove-orphans"], DOWN_TIMEOUT_MS).then(
         () => true,
         () => false
       );
@@ -137,7 +152,7 @@ export async function composeDown(
 export function composeProjectNames(listing: string): string[] {
   return listing
     .split("\n")
-    .map((line) => line.trim().split(/\s+/)[0] ?? "")
+    .map((line) => /^\s*(\S+)/.exec(line)?.[1] ?? "")
     .filter((name) => name && name !== "NAME");
 }
 

@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { PORTS_PER_TASK, PORT_RANGE_START, PORT_SLOTS, composeDown, composeProjectNames, isolationBlock, isolationEnv, taskIsolation } from "./isolation.js";
+import {
+  DOWN_TIMEOUT_MS,
+  LIST_TIMEOUT_MS,
+  PORTS_PER_TASK,
+  PORT_RANGE_START,
+  PORT_SLOTS,
+  composeDown,
+  composeProjectNames,
+  isolationBlock,
+  isolationEnv,
+  taskIsolation,
+} from "./isolation.js";
 
 /**
  * Measured while this was being written: `podman compose ls` on the machine
@@ -13,15 +24,17 @@ describe("giving the machine back", () => {
   /** A fake runtime: `installed` says which CLIs exist, `up` what each reports running. */
   const runtime = (installed: string[], up: string[] = []) => {
     const calls: string[][] = [];
-    const exec = async (bin: string, args: string[]) => {
+    const waits: number[] = [];
+    const exec = async (bin: string, args: string[], timeoutMs: number) => {
       calls.push([bin, ...args]);
+      waits.push(timeoutMs);
       if (!installed.includes(bin)) throw new Error(`${bin}: command not found`);
       if (args[1] === "ls") {
         return ["NAME                STATUS       CONFIG FILES", ...up.map((p) => `${p}   running(2)   /somewhere/compose.yml`)].join("\n");
       }
       return "";
     };
-    return { calls, exec };
+    return { calls, waits, exec };
   };
 
   it("brings down the stacks that are up, with their volumes, so nothing is inherited", async () => {
@@ -76,6 +89,29 @@ describe("giving the machine back", () => {
     expect(calls.every((c) => c[2] === "ls")).toBe(true);
   });
 
+  /**
+   * Found by running this: a podman machine that is installed but whose socket
+   * is unreachable does not fail fast — it retried an ssh handshake for two
+   * minutes and fourteen seconds before answering. The sweep runs at every pit
+   * stop and asks two runtimes, so a laptop with a wedged VM was spending five
+   * minutes of a run discovering there was nothing to sweep.
+   */
+  it("waits a moment on the question and a long time on the teardown", async () => {
+    const { calls, waits, exec } = runtime(["podman"], ["harness-a-0001"]);
+
+    await composeDown(["harness-a-0001"], exec);
+
+    const byCall = calls.map((c, i) => [c[0], c[2], waits[i]]);
+    expect(byCall).toEqual([
+      ["podman", "ls", LIST_TIMEOUT_MS],
+      ["podman", "-p", DOWN_TIMEOUT_MS],
+      // The second runtime is asked the same question, and is the reason the
+      // wait is paid twice on a machine where neither can answer.
+      ["docker", "ls", LIST_TIMEOUT_MS],
+    ]);
+    expect(LIST_TIMEOUT_MS).toBeLessThan(DOWN_TIMEOUT_MS);
+  });
+
   it("asks nothing when there are no projects to sweep", async () => {
     const { calls, exec } = runtime(["podman"], ["harness-a-0001"]);
 
@@ -88,6 +124,9 @@ describe("giving the machine back", () => {
       "NAME                                    STATUS       CONFIG FILES",
       "harness-pitstop-9-117d                  running(3)   /a/docker-compose.yml,/b/compose.override.yml",
       "harness-seed-and-demo-script-f735       running(3)   /c/docker-compose.yml",
+      // Blank and whitespace-only lines are what the runtime actually prints
+      // around the table, and neither of them names a project.
+      "   ",
       "",
     ].join("\n");
 
