@@ -353,9 +353,11 @@ describe("evidence that does not survive being looked at", () => {
 
     const demos = specs.filter((s) => s.role === "demo");
     expect(demos.length).toBe(2);
-    // Resumed, not restarted: the expensive half of a demo is standing the
-    // product up, and the second turn is only about the evidence.
-    expect(demos[1]!.resume).toBeTruthy();
+    // Resumed, and resumed onto *its own* first session: the expensive half of
+    // a demo is standing the product up, and the second turn is only about the
+    // evidence. The fake pool hands back `sdk<n>` for the nth session it runs.
+    expect(demos[1]!.resume).toBe(`sdk${specs.indexOf(demos[0]!) + 1}`);
+    expect(demos[1]!.cwd).toBe(demos[0]!.cwd);
     expect(demos[1]!.prompt).toContain("signin.png");
     expect(demos[1]!.prompt).toContain("not written to the artifact directory");
     expect(demos[1]!.maxTurns).toBeLessThan(RunConfig.parse(BASE).pitStop.demoMaxTurns);
@@ -398,6 +400,22 @@ describe("evidence that does not survive being looked at", () => {
     expect(stops[0]!.demo.started).toBe(true);
     expect(stops[0]!.demo.artifacts).toEqual([]);
     expect(stops[0]!.markdown).toContain("no statement of what it shows");
+  });
+
+  it("does not accept a file the demo agent did not produce", async () => {
+    const dir = repo();
+    // Anything outside the pit stop's own directory is not evidence this demo
+    // captured, whatever it says about it.
+    const { pool } = rolePool({
+      ...ROLES,
+      demo: () => demoJson([{ file: "../../../../etc/hosts", shows: "the host is resolving the API" }]),
+    });
+    const { controller, stops } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a thing", RunConfig.parse({ ...BASE, pitStop: { every: { tasks: 2 } } }));
+
+    expect(stops[0]!.demo.artifacts).toEqual([]);
+    expect(stops[0]!.markdown).toContain("not written to the artifact directory");
   });
 
   it("does not spend a second demo session on a report that has no evidence at all", async () => {

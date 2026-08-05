@@ -42,13 +42,16 @@ const MIN_IMAGE_BYTES = 256;
 /**
  * The fraction of one colour at which an image stops carrying information.
  *
- * A blank capture is exactly 1.0. The threshold sits just below because a page
- * that painted its background and nothing else is the same failure with a
- * stray scrollbar in it, and because a real screenshot of a sparse page still
- * comes in well under: the desktop capture that prompted this module is 71%
- * background.
+ * A blank capture is exactly 1.0 — the failure this exists to catch is a page
+ * that never painted, not a page with little on it. The threshold sits just
+ * below 1.0 so that "background painted, nothing else did" is caught too, and
+ * no lower: at 0.995 a mobile viewport whose only content is an 8px-tall line
+ * of text was struck, and a false strike hides real evidence from the operator.
+ * Measured margin — the real capture that prompted this module carries 2676
+ * distinct colours, and one 16px line of text on a 390x844 page comes in at
+ * 0.990, so nothing that rendered anything at all lands near here.
  */
-const FLAT_FRACTION = 0.995;
+const FLAT_FRACTION = 0.999;
 
 export type ImageVerdict =
   | { kind: "flat"; detail: string }
@@ -176,7 +179,8 @@ export function inspectPng(buf: Buffer): ImageVerdict {
     line = swap;
   }
 
-  if (!sampled) return { kind: "unreadable", detail: "no pixels sampled" };
+  // `sampled` is always at least one: parsePng rejects a zero width or height,
+  // and row 0 and column 0 are sampled whatever the steps work out to.
   let top = 0;
   for (const n of counts.values()) if (n > top) top = n;
   const fraction = top / sampled;
