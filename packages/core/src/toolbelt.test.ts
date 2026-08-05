@@ -87,6 +87,20 @@ describe("toolbelt prompt block", () => {
     expect(block).toMatch(/Local URLs only/);
   });
 
+  it("only advertises browser commands the installed engine can actually run", () => {
+    // Every Apple device descriptor pins webkit, and `-b chromium` does not
+    // override it. A machine that ran `playwright install chromium` — the one
+    // recovery this block recommends — therefore fails an `--device 'iPhone 15'`
+    // screenshot with "Executable doesn't exist at .../webkit-2336/pw_run.sh",
+    // an error that never names the flag that caused it. Mobile evidence has to
+    // come from a chromium-backed device or the advice sends the agent into a
+    // wall the toolbelt itself built.
+    const block = toolbeltBlock(detectToolbelt(undefined, env(fakeBin("playwright"))));
+    expect(block).toMatch(/--device 'Pixel 7'/);
+    expect(block).not.toMatch(/--device '(iPhone|iPad)/i);
+    expect(block).toMatch(/Apple descriptor pins webkit/);
+  });
+
   it("still lets a repo withhold the cloud CLIs entirely", () => {
     // An operator who does not want agents near their account narrows the
     // allowlist; detection must not smuggle the new tools in behind that.

@@ -82,7 +82,7 @@ const CANDIDATES: { name: string; use: string }[] = [
   },
   {
     name: "playwright",
-    use: "Headless browser — the only way to see a rendered page. `playwright screenshot --wait-for-timeout=2000 <url> <file.png>` captures what a user would actually see; a curl of the same URL is not a screenshot and must not be reported as one. `--full-page` for the whole scrollable page, `--device 'iPhone 15'` for mobile, `--save-har <file.har>` to record the requests behind it. If it reports a missing browser, `playwright install chromium`. Local URLs only — never drive a production site or sign into a real account.",
+    use: "Headless browser — the only way to see a rendered page. `playwright screenshot --wait-for-timeout=2000 <url> <file.png>` captures what a user would actually see; a curl of the same URL is not a screenshot and must not be reported as one. `--full-page` for the whole scrollable page, `--device 'Pixel 7'` for mobile, `--save-har <file.har>` to record the requests behind it. Stay on chromium devices: an Apple descriptor pins webkit, which is usually not installed. If it reports a missing browser, `playwright install chromium`. Local URLs only — never drive a production site or sign into a real account.",
   },
   {
     name: "adb",
