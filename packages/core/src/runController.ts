@@ -14,9 +14,9 @@ import { GitHubAdapter, type PrRef } from "./github.js";
 import { runIntake, type IntakeUi } from "./intake.js";
 import { isolationBlock, isolationEnv, taskIsolation } from "./isolation.js";
 import { observeChecks } from "./memory.js";
-import { ceilingNote, grantedTokens, sdkCeiling } from "./outputCeiling.js";
+import { ceilingNote, grantedTokens, requestTokens, sdkCeiling } from "./outputCeiling.js";
 import { reapUnder } from "./reaper.js";
-import { AgentPool, type AgentResult } from "./pool.js";
+import { AgentPool, type AgentResult, type AgentSpec } from "./pool.js";
 import {
   demoUnavailable,
   pitStopDue,
@@ -166,11 +166,14 @@ const ProdVerdict = z.object({
   findings: z.array(z.string()).default([]),
 });
 /**
- * Ask for the model's full output ceiling. Note this is a request, not a promise:
- * the SDK clamps it to a per-model table keyed by substring, and a model the
- * installed SDK has never heard of falls through to 32k however high this is set.
- * That is why planning is split in two (see `plan`) instead of relying on a bigger
- * budget — the split works on any SDK version.
+ * What to ask for per planner message when the SDK will not say what the model
+ * allows. Note this is a request, not a promise: the SDK clamps it to its own
+ * per-model table, and a model it has never heard of falls through to 32k
+ * however high this is set. That is why planning is split in two (see `plan`)
+ * instead of relying on a bigger budget — the split works on any SDK version.
+ *
+ * When the table *can* be read, `plannerOutputTokens` asks for the model's real
+ * ceiling instead, which on current models is twice this.
  */
 const PLANNER_MAX_OUTPUT_TOKENS = 64_000;
 
@@ -1562,15 +1565,32 @@ export class RunController {
     if (text) this.bus.publish({ type: "agent.log", runId, sessionId: "planner", text, ts: Date.now() });
   }
 
+  /**
+   * How much output to ask each planner message for: everything the model
+   * allows, when the SDK will say what that is.
+   *
+   * Every planner message is one indivisible artifact — a PRD, a batch of the
+   * DAG — so the ceiling is not a spending limit but the size of the largest
+   * plan that can be written without being cut in half. `claude-opus-5` allows
+   * 128k and hands out 64k unasked, and the difference is a phase that either
+   * finishes in one message or spends three more attempts learning to be
+   * shorter.
+   */
+  private async plannerOutputTokens(runId: string): Promise<number> {
+    const model = this.store.getRun(runId)!.config.models.planner;
+    return requestTokens(await sdkCeiling(model), PLANNER_MAX_OUTPUT_TOKENS);
+  }
+
   /** Phase A: survey the repository and write the PRD and conventions documents. */
   private async planDocs(runId: string, feedback: string): Promise<Pick<Plan, "prdMarkdown" | "conventionsMarkdown">> {
     const run = this.store.getRun(runId)!;
     const attempts = 2;
     let lastReason = "the planner produced no output";
     let lastPath = "";
+    const maxOutputTokens = await this.plannerOutputTokens(runId);
 
     for (let attempt = 1; attempt <= attempts; attempt++) {
-      const result = await this.pool.run({
+      const result = await this.plannerMessage({
         runId,
         role: "planner",
         model: run.config.models.planner,
@@ -1584,9 +1604,13 @@ export class RunController {
         tools: ["Read", "Glob", "Grep"], // planning is read-only
         allowedTools: ["Read", "Glob", "Grep"],
         maxTurns: 40,
-        maxOutputTokens: PLANNER_MAX_OUTPUT_TOKENS,
+        maxOutputTokens,
         budgetCheck: () => this.checkBudget(runId),
       });
+      if ("died" in result) {
+        lastReason = this.failedAttempt(runId, attempt, result.died, lastPath, "error");
+        continue;
+      }
       lastPath = this.saveAttempt(path.join(this.repoPath, ".harness", runId), `docs-${attempt}`, result.resultText);
 
       const prdMarkdown = extractSection(result.resultText, "prd");
@@ -1626,8 +1650,10 @@ export class RunController {
     // told. Without this it names `touchedPaths` from the PRD's vocabulary and
     // invents paths for files that already exist a directory away.
     const files = await repoFileList(this.repoPath);
-    const ceiling = await sdkCeiling(run.config.models.planner);
-    const perMessage = tasksPerMessage(grantedTokens(ceiling, PLANNER_MAX_OUTPUT_TOKENS));
+    const maxOutputTokens = await this.plannerOutputTokens(runId);
+    // What the planner is told to fit in one message follows what it will
+    // actually be granted, so the two can never drift apart again.
+    const perMessage = tasksPerMessage(grantedTokens(await sdkCeiling(run.config.models.planner), maxOutputTokens));
 
     for (let attempt = 1; attempt <= attempts; attempt++) {
       // Only the first attempt restates the PRD. A rejected breakdown is a shape
@@ -1645,7 +1671,7 @@ export class RunController {
       // explicit break or the return: an attempt ends when the planner says the
       // plan is complete, when a message cannot be read, or at the cap.
       for (let batch = 1; ; batch++) {
-        const result = await this.pool.run({
+        const result = await this.plannerMessage({
           runId,
           role: "planner",
           model: run.config.models.planner,
@@ -1665,9 +1691,13 @@ export class RunController {
           tools: [],
           allowedTools: [],
           maxTurns: 4,
-          maxOutputTokens: PLANNER_MAX_OUTPUT_TOKENS,
+          maxOutputTokens,
           budgetCheck: () => this.checkBudget(runId),
         });
+        if ("died" in result) {
+          reason = result.died;
+          break;
+        }
         // The continuation resumes the same conversation when the transport
         // offers a handle; when it does not, `plannerContinuePrompt` carries
         // enough of the plan for the next message to stand on its own.
@@ -1715,6 +1745,28 @@ export class RunController {
       lastReason = this.failedAttempt(runId, attempt, reason, lastPath, outcome, errorDetail);
     }
     throw this.planFailed(runId, attempts, lastReason, lastPath);
+  }
+
+  /**
+   * One planner message, or the reason its session died trying.
+   *
+   * Both planning phases retry — a rejected plan is nearly always a shape
+   * problem the next attempt fixes — but that only ever covered output the
+   * planner *returned*. A session that died mid-message threw straight past the
+   * retry loop and out of `startRun`, ending the run with `harness: fatal` and
+   * discarding everything the intake and PRD phases had already paid for. A
+   * crash is a worse attempt than a bad plan, not a different kind of event.
+   *
+   * The budget is the one exception: it is the operator's cap, deliberately
+   * reached, and retrying it would spend three times over the number they set.
+   */
+  private async plannerMessage(spec: AgentSpec): Promise<AgentResult | { died: string }> {
+    try {
+      return await this.pool.run(spec);
+    } catch (e) {
+      if (e instanceof BudgetExceeded) throw e;
+      return { died: `the planner session died before it answered: ${(e instanceof Error ? e.message : String(e)).slice(0, 300)}` };
+    }
   }
 
   /** One message of the DAG, or the reason it was unusable. */
@@ -2260,7 +2312,7 @@ export class RunController {
         cwd: this.repoPath,
         tools: ["Read", "Glob", "Grep"],
         maxTurns: 40,
-        maxOutputTokens: PLANNER_MAX_OUTPUT_TOKENS,
+        maxOutputTokens: await this.plannerOutputTokens(runId),
         budgetCheck: () => this.checkBudget(runId),
       });
       const breakdown = PlanBreakdown.parse(extractJson(result.resultText));

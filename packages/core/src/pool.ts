@@ -190,6 +190,16 @@ const STALL_ABORT_MS = BASH_TIMEOUT_MS + STALL_GRACE_MS;
 const DEFAULT_MAX_TURNS = 100;
 
 /**
+ * Why the model stopped talking, when it says. Absent on the tool-loop
+ * transport and on any SDK message shape that does not carry one, which reads
+ * the same as a turn that ended normally — the caller only acts on `max_tokens`.
+ */
+function stopReasonOf(message: Record<string, unknown>): string | undefined {
+  const inner = message.message as { stop_reason?: string | null } | undefined;
+  return inner?.stop_reason ?? undefined;
+}
+
+/**
  * How far into its turn budget a session is asked to wrap up. Low enough that
  * the agent has room to write the answer, high enough that sessions which were
  * going to finish on their own never see the message at all.
@@ -207,6 +217,7 @@ export class PromptStream {
   private queue: SDKUserMessage[] = [];
   private wake: (() => void) | undefined;
   private closed = false;
+  private sealed = false;
   /** The first prompt is delivered once, by whichever reader asks first. */
   private firstSent = false;
 
@@ -222,12 +233,31 @@ export class PromptStream {
     return m.message.content as string;
   }
 
-  /** Queue a message for the live session. False once the stream has closed. */
+  /** Queue a message for the live session. False once the stream has closed or sealed. */
   push(text: string): boolean {
-    if (this.closed) return false;
+    if (this.closed || this.sealed) return false;
     this.queue.push(this.message(text));
     this.wake?.();
     return true;
+  }
+
+  /**
+   * Nothing more may be said to this session, though it is still finishing.
+   *
+   * Set when a turn comes back cut off at the output ceiling. The API requires
+   * the thinking blocks of the latest assistant message to be handed back
+   * exactly as they were, and a truncated turn's never are — so appending a
+   * message to one is a 400 that kills the session, and with it the run. See
+   * the `max_tokens` branch in `run()`.
+   *
+   * Returns whatever was already queued and now cannot be delivered, so the
+   * caller can say so rather than let it disappear. `push()` refuses from here,
+   * which is what makes `inject()` report operator feedback as undelivered and
+   * queue it for the next session instead of losing it.
+   */
+  seal(): string[] {
+    this.sealed = true;
+    return this.queue.splice(0).map(PromptStream.textOf);
   }
 
   /**
@@ -418,6 +448,10 @@ export class AgentPool {
     let sdkSessionId: string | undefined;
     let turns = 0;
     let cost = 0;
+    /** A turn came back cut off at the output ceiling; see the `max_tokens` branch. */
+    let truncated = false;
+    /** The session delivered its result, whatever it did afterwards. */
+    let settled = false;
     let killedByBudget = false;
     let abnormal = "";
     // Tokens seen on assistant messages since the last `result` booked the bill.
@@ -497,6 +531,52 @@ export class AgentPool {
             unbooked.cacheReadTokens += u.cache_read_input_tokens ?? 0;
             unbooked.cacheWriteTokens += u.cache_creation_input_tokens ?? 0;
           }
+          // A turn cut off at the per-message output ceiling ends the
+          // conversation whether or not the harness is finished with it.
+          //
+          // The API requires the thinking blocks of the latest assistant
+          // message to come back byte-identical, and a truncated turn's cannot
+          // be — so the next request carrying anything appended to it is
+          // rejected outright:
+          //
+          //   400 messages.1.content.1: `thinking` … blocks in the latest
+          //   assistant message cannot be modified
+          //
+          // which exits the CLI, throws here, and killed a whole planning phase
+          // ($2.18 of intake and PRD) over a plan the caller already knew how to
+          // repair. Sealing costs the wrap-up nudge and any operator feedback
+          // racing it — both of which are exactly what would trigger the 400 —
+          // and lets the session settle so the truncated answer comes back to a
+          // caller that can retry it.
+          //
+          // This is the 0.1.x shape, which is where that run died. Probed on
+          // 0.3.222, the same overflow never reaches here: the CLI turns it into
+          // an error result and throws, so there is no truncated turn left
+          // standing for anything to be appended to. The guard stays because a
+          // pinned older SDK still reaches this branch, and because a stop
+          // reason is the only signal that arrives in time to prevent the push
+          // rather than explain it afterwards.
+          if (stopReasonOf(message) === "max_tokens" && !truncated) {
+            truncated = true;
+            for (const undelivered of stream.seal()) {
+              this.bus.publish({
+                type: "agent.log",
+                runId: spec.runId,
+                taskId: spec.taskId,
+                sessionId,
+                text: `undelivered — this session ended at the output ceiling before it could be told: ${undelivered.slice(0, 500)}`,
+                ts: Date.now(),
+              });
+            }
+            this.bus.publish({
+              type: "agent.log",
+              runId: spec.runId,
+              taskId: spec.taskId,
+              sessionId,
+              text: `the answer hit the ${spec.maxOutputTokens ?? "default"}-token per-message output ceiling and was cut off — nothing more can be said to this session`,
+              ts: Date.now(),
+            });
+          }
           // Ask for the answer before the ceiling takes it away.
           //
           // Sessions that die at maxTurns are the expensive ones — they die
@@ -509,7 +589,7 @@ export class AgentPool {
           // the stream when nothing is waiting, so the agent gets one more
           // exchange to say what it found. A session that finishes early never
           // reaches this and is untouched.
-          if (turns === wrapUpAt) {
+          if (turns === wrapUpAt && !truncated) {
             stream.push(
               `[HARNESS] You are near this session's turn limit and will be cut off shortly. Stop investigating now and give your final answer immediately, in exactly the output format you were asked for. Report what you have actually established so far and say plainly what you did not get to — a partial answer in the right format is usable, and being cut off mid-investigation is not. If you have already given your final answer, ignore this message.`
             );
@@ -536,12 +616,14 @@ export class AgentPool {
         } else if (message.type === "result") {
           const m = message as {
             subtype?: string;
+            is_error?: boolean;
             errors?: string[];
             result?: string;
             total_cost_usd?: number;
             usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
           };
           resultText = m.result ?? "";
+          settled = true;
           // `error_max_turns` and friends still yield a result message; without this
           // a truncated session is indistinguishable from a clean one.
           if (m.subtype && m.subtype !== "success") {
@@ -553,6 +635,25 @@ export class AgentPool {
             const named = m.subtype === "error_max_turns" ? `error_max_turns (hit the turn ceiling of ${turnCap})` : m.subtype;
             abnormal = named + (m.errors?.length ? `: ${m.errors.join("; ")}` : "");
           }
+          // A truncated answer is not a clean finish, and the SDK reports the
+          // session itself as successful — the ceiling was the model's, not the
+          // CLI's. Unsaid, the caller cannot tell "the plan is malformed" from
+          // "the plan is unfinished", which need opposite retries: one asks for
+          // better JSON, the other for a shorter message. `outputTruncated` in
+          // runController reads this string.
+          if (truncated && !abnormal) {
+            abnormal = `max_tokens (the answer hit the per-message output ceiling of ${spec.maxOutputTokens ?? "the SDK default"} tokens and was cut off mid-message)`;
+          }
+          // A failed session that calls itself a success.
+          //
+          // From SDK 0.3 an API-level failure comes back as `subtype: "success"`
+          // with `is_error` set and the error text sitting where the answer
+          // should be — so the subtype check above waves it through, and the
+          // caller is handed "API Error: Claude's response exceeded the 1024
+          // output token maximum" as though the agent had written it. Measured
+          // on 0.3.222 against a deliberately small ceiling; that exact string
+          // is what a planner attempt would otherwise have been graded on.
+          if (m.is_error && !abnormal) abnormal = `the session ended in an error: ${resultText.slice(0, 300)}`;
           const usage = {
             inputTokens: m.usage?.input_tokens ?? 0,
             outputTokens: m.usage?.output_tokens ?? 0,
@@ -575,13 +676,39 @@ export class AgentPool {
     } catch (e) {
       // No result message is coming for the turns since the last one.
       bookUnbooked();
-      if (!killedByBudget) {
+      // A throw that only restates a result already in hand is not a crash.
+      //
+      // Through 0.1.x a session that hit its turn ceiling ended the iteration
+      // normally and the caller got its partial answer back. From 0.3 the SDK
+      // delivers the same `result` message and then throws it again as an
+      // exception — measured on 0.3.222: `result{subtype: "error_max_turns",
+      // is_error: true}` followed by `Error: Claude Code returned an error
+      // result: Reached maximum number of turns (1)`.
+      //
+      // Propagating that costs the answer. `parseBrief` falls back to a brief
+      // built from the answers the operator already gave rather than asking
+      // them everything twice, and a throw skips it — so an intake that ran out
+      // of turns would discard the whole conversation, which is the failure the
+      // wrap-up message exists to prevent. The result is already recorded,
+      // `abnormal` already says which wall it hit, so return it and let the
+      // caller decide.
+      if (settled && !killedByBudget) {
+        this.bus.publish({
+          type: "agent.log",
+          runId: spec.runId,
+          taskId: spec.taskId,
+          sessionId,
+          text: `the session ended abnormally but had already answered — keeping what it produced (${String(e).slice(0, 200)})`,
+          ts: Date.now(),
+        });
+      } else if (killedByBudget) {
+        throw e;
+      } else {
         const stallNote = stalledMinutes ? `session watchdog: no output for ${stalledMinutes} minutes, aborted as hung. ` : "";
         const detail = stallNote + (stderrTail ? `${String(e)}\nstderr: ${stderrTail.trim().slice(-800)}` : String(e));
         this.endSession(spec, sessionId, turns, cost, "interrupted", detail);
         throw new Error(detail, { cause: e });
       }
-      throw e;
     } finally {
       clearInterval(stallTimer);
       stream.close();

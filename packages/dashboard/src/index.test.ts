@@ -54,20 +54,37 @@ describe("port selection", () => {
   }
 
   it("takes the next free port so a second repo can run at the same time", async () => {
-    // A free base port, then squat on it exactly as a running harness would.
-    const base = await freeAdjacentBase();
-    held.push(await occupy(base));
+    // Retried, because the port space is shared and the probe cannot hold what
+    // it is proving free: `freeAdjacentBase` has to release base+1 before the
+    // dashboard can bind it, and anything on the machine — including another
+    // test file's dashboard, running in a parallel worker — can take it in that
+    // window. The behaviour under test is deterministic; the machine is not,
+    // and a suite that fails one run in ten teaches people to re-run CI rather
+    // than read it.
+    for (let attempt = 1; ; attempt++) {
+      // A free base port, then squat on it exactly as a running harness would.
+      const base = await freeAdjacentBase();
+      held.push(await occupy(base));
 
-    const second = dashboard();
-    started.push(second);
-    const url = await second.start();
+      const second = dashboard();
+      started.push(second);
+      const url = await second.start();
+      const port = Number(new URL(url).port);
 
-    expect(Number(new URL(url).port)).toBe(base + 1);
-    // and it is actually serving there, not merely bound
-    const res = await fetch(new URL("/api/state", url), {
-      headers: { authorization: `Bearer ${second.token}`, connection: "close" },
-    });
-    expect(res.status).toBe(200);
+      if (port !== base + 1 && attempt < 5) {
+        // Somebody else took base+1 first. Give the ports back and try again.
+        await started.pop()!.stop();
+        await close(held.pop()!);
+        continue;
+      }
+      expect(port).toBe(base + 1);
+      // and it is actually serving there, not merely bound
+      const res = await fetch(new URL("/api/state", url), {
+        headers: { authorization: `Bearer ${second.token}`, connection: "close" },
+      });
+      expect(res.status).toBe(200);
+      return;
+    }
   });
 
   it("fails loudly instead of moving when the operator named the port", async () => {
