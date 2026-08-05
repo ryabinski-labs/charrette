@@ -92,7 +92,11 @@ function canonical(target: string): string {
       return path.join(realpathSync.native(head), ...tail.reverse());
     } catch {
       const parent = path.dirname(head);
-      // Reached the filesystem root without resolving anything: nothing to fix.
+      // Reached the filesystem root without resolving anything, which takes a
+      // machine whose own root cannot be read. Every path this is called with
+      // is already absolute, so the walk always terminates at a directory that
+      // exists long before here.
+      /* v8 ignore next */
       if (parent === head) return target;
       tail.push(path.basename(head));
       head = parent;

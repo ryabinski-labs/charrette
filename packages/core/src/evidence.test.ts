@@ -454,6 +454,16 @@ describe("a claim about a command", () => {
     expect(repeatable("kubectl --dry-run=server apply -f k8s/").ok).toBe(true);
   });
 
+  /**
+   * A planner writing a completion probe is the one caller that can hand this
+   * an empty string: `completionProbe` defaults to "" for the tasks that have
+   * none, and every task in a plan carries the field whether or not it is set.
+   */
+  it("has nothing to say yes to when there is no command", () => {
+    expect(repeatable("")).toEqual({ ok: false, why: "there is no command to run" });
+    expect(repeatable("   \n ").ok).toBe(false);
+  });
+
   it("reports an unrepeatable claim as unverified rather than as proof or as a lie", () => {
     const checks = checkCommands([{ command: "curl -X POST /v1/bookings", shows: "a booking is created" }], green);
 
@@ -506,6 +516,29 @@ describe("filing command claims under the heading that is true of them", () => {
     expect(struck.couldNotReach.join("\n")).toContain("curl -X POST /v1/bookings");
     expect(struck.couldNotReach.join("\n")).toContain("npx tsc --noEmit");
     expect(struck.couldNotReach[0]).toBe("payments — no Stripe test keys");
+  });
+
+  /**
+   * The heading has to name something even when the claim named nothing. A demo
+   * that lists a command with no statement of what it proves, or a statement
+   * with no command, still has to appear in what the pit stop could not check —
+   * a claim that quietly disappears reads to the operator as one that passed.
+   */
+  it("still names the claim when the demo left the command or the statement blank", () => {
+    const r = {
+      commands: [
+        { command: "pnpm test", shows: "" },
+        { command: "", shows: "" },
+      ],
+      couldNotReach: [] as string[],
+    };
+    const struck = strikeCommands(r, checkCommands(r.commands, () => ({ ok: true, output: "" })));
+
+    expect(struck.commands).toEqual([]);
+    expect(struck.couldNotReach[0]).toContain("pnpm test — not verified: `pnpm test` ");
+    expect(struck.couldNotReach[0]).toContain("no statement of what it proves");
+    // Nothing left to name it by, so it is filed under what it was.
+    expect(struck.couldNotReach[1]).toBe("a command — not verified: a claim with no command, so there is nothing to check");
   });
 
   it("leaves a report whose every claim was confirmed exactly as it was", () => {

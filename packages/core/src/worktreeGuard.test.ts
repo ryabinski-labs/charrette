@@ -117,6 +117,58 @@ describe("what the guard deliberately allows", () => {
     rmSync(real, { recursive: true, force: true });
   });
 
+  it("reads `git remote` as a listing until a sub-verb makes it a change", () => {
+    expect(blocked("git -C /tmp/repo remote")).toBeNull();
+    expect(blocked("git -C /tmp/repo remote show origin")).toBeNull();
+    expect(blocked("git -C /tmp/repo remote get-url origin")).toBeNull();
+
+    expect(blocked("git -C /tmp/repo remote set-url origin u")).toBe("git remote -> /tmp/repo");
+  });
+
+  /**
+   * Global flags sit before the verb, and an agent that has been told to avoid
+   * a pager writes one without thinking about it. Skipping them is what lets
+   * the verb after them still be read.
+   */
+  it("steps over git's own flags to reach the verb", () => {
+    expect(blocked("git --no-pager -C /tmp/repo log")).toBeNull();
+    expect(blocked("git --no-pager -C /tmp/repo commit -am x")).toBe("git commit -> /tmp/repo");
+  });
+
+  /**
+   * A truncated command is not a write. Convicting on one would deny work over
+   * something git itself would refuse to run.
+   */
+  it("does not convict on a git invocation with no verb at all", () => {
+    expect(blocked("git")).toBeNull();
+    expect(blocked("git --version")).toBeNull();
+    expect(blocked("git -C")).toBeNull();
+    expect(blocked("git --git-dir=$HOME/.git commit -am x")).toBeNull();
+  });
+
+  it("keeps reading past a nested shell that did nothing wrong", () => {
+    expect(blocked(`bash -c "git status" && git commit -am x`)).toBeNull();
+    // …and the segment after a clean one is still judged.
+    expect(blocked(`bash -c "git log" && git -C /tmp/repo commit -am x`)).toBe("git commit -> /tmp/repo");
+  });
+
+  /**
+   * A shell inside a shell inside a shell is a wrapper, not a plan; past a
+   * handful of levels the guard stops unwrapping rather than recurse without a
+   * floor. Allowing is the conservative direction here — the same direction
+   * every other unknown takes.
+   */
+  it("gives up at the recursion floor", () => {
+    expect(outsideWorktreeWrite("git -C /tmp/repo commit -am x", WT, 4)).toBeNull();
+  });
+
+  it("reads past a segment that invokes nothing", () => {
+    expect(blocked("&& ||")).toBeNull();
+    // An exported variable is a segment with no command in it, and the segment
+    // after it still has to be judged.
+    expect(blocked("cd /tmp/repo && CI=1 && git commit -am x")).toBe("git commit -> /tmp/repo");
+  });
+
   it("is not fooled by a command that only mentions git", () => {
     expect(blocked(`echo "cd /tmp/repo && git commit -am x" >> notes.md`)).toBeNull();
     expect(blocked("grep -rn 'git commit' docs/")).toBeNull();
@@ -166,6 +218,14 @@ describe("the hook around it", () => {
     expect(await fire({ hook_event_name: "PreToolUse", tool_name: "Write", tool_input: {} } as unknown as HookInput)).toEqual({});
     expect(await fire({ hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: {} } as unknown as HookInput)).toEqual({});
     expect(await fire(bash("   "))).toEqual({});
+  });
+
+  it("lets the task's own commit through untouched", async () => {
+    // The common case by a wide margin: every Bash command in every session
+    // passes through here, and all but the aimed-elsewhere ones must be a
+    // no-op — a hook that returns anything at all is a hook that can be wrong.
+    expect(await fire(bash("git commit -am 'real work'"))).toEqual({});
+    expect(await fire(bash("pnpm test"))).toEqual({});
   });
 
   it("enforces nothing without a worktree, and nothing when explicitly allowed", async () => {

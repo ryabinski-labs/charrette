@@ -247,6 +247,34 @@ describe("a task whose definition of done is a command", () => {
     expect(gates.at(-1)!.why).toContain("not finished everywhere it was scoped to reach");
   });
 
+  it("carries the operator's answer into the next attempt, above the probe's own instructions", async () => {
+    const dir = repo();
+    const { pool, specs } = rolePool({
+      worker: (spec, nth) => {
+        commitInWorktree(spec.cwd, "claims.txt", nth < 3 ? `unenforced claim ${nth}\n` : "enforced claim\n");
+        return "did the work";
+      },
+      qa: () => QA_PASS,
+    });
+    const { controller, store, runId } = executing({
+      repoPath: dir,
+      pool,
+      guidance: "the other twenty are in pricing/*.md — sweep those too",
+      config: { qaIterationCap: 1 },
+      tasks: [{ id: "task-a", completionProbe: SWEEP }],
+    });
+
+    await controller.resume(runId);
+
+    // The operator's sentence is what unblocked it, so it goes first and the
+    // probe's own text stays underneath.
+    const after = workerPrompts(specs)[1] as string;
+    expect(after).toContain("The operator looked at the failing probe and says");
+    expect(after).toContain("sweep those too");
+    expect(after.indexOf("sweep those too")).toBeLessThan(after.indexOf("Do not change or delete the probe"));
+    expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
+  });
+
   it("tells QA the probe passed, so it reviews correctness rather than coverage", async () => {
     const dir = repo();
     const { pool, specs } = rolePool({
@@ -299,6 +327,40 @@ describe("what the plan said a task would touch", () => {
     expect(logs(events).some((t) => t.includes("never changed: b.txt, c.txt"))).toBe(true);
   });
 
+  it("names the files nobody planned for, and stops naming them past a handful", async () => {
+    const dir = repo();
+    const { pool } = rolePool({
+      worker: (spec) => {
+        for (const f of ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt", "g.txt"]) commitInWorktree(spec.cwd, f, "done\n");
+        return "did the work";
+      },
+      qa: () => QA_PASS,
+    });
+    const { controller, events, runId } = executing({ repoPath: dir, pool, tasks: [{ id: "task-a", touchedPaths: ["a.txt"] }] });
+
+    await controller.resume(runId);
+
+    const drift = logs(events).find((t) => t.startsWith("plan said"))!;
+    // One path, so it is not "1 paths"; and nothing was missed, so the reader is
+    // not shown an empty list of what was.
+    expect(drift).toContain("plan said 1 path, diff touched 7");
+    expect(drift).not.toContain("never changed");
+    expect(drift).toContain("not in the plan: b.txt, c.txt, d.txt, e.txt, f.txt, …");
+  });
+
+  it("prints a short list of unplanned files in full", async () => {
+    const dir = repo();
+    const { pool } = rolePool({
+      worker: (spec) => (commitInWorktree(spec.cwd, "a.txt", "done\n"), commitInWorktree(spec.cwd, "b.txt", "done\n"), "did the work"),
+      qa: () => QA_PASS,
+    });
+    const { controller, events, runId } = executing({ repoPath: dir, pool, tasks: [{ id: "task-a", touchedPaths: ["a.txt"] }] });
+
+    await controller.resume(runId);
+
+    expect(logs(events).find((t) => t.startsWith("plan said"))).toBe("plan said 1 path, diff touched 2; not in the plan: b.txt");
+  });
+
   it("says nothing when the diff matches the plan", async () => {
     const dir = repo();
     const { pool, specs } = rolePool({
@@ -310,6 +372,120 @@ describe("what the plan said a task would touch", () => {
     await controller.resume(runId);
 
     expect(specs.find((s) => s.role === "qa")!.prompt as string).not.toContain("Declared in the plan");
+  });
+});
+
+/**
+ * The pre-QA gate sends an empty branch back to the worker, which is right the
+ * first few times — the work is usually written and simply not committed here.
+ * What it must not do is send it back forever: run da8325bd's empty branches
+ * were empty because the commits went to another repository, and no number of
+ * re-dispatches was going to move them.
+ */
+describe("a branch that arrives empty over and over", () => {
+  it("parks the task once re-dispatching it has stopped being an answer", async () => {
+    const dir = repo();
+    const { pool, counts, specs } = rolePool({ worker: () => "did the work", qa: () => QA_PASS });
+    const { controller, store, gates, runId } = executing({
+      repoPath: dir,
+      pool,
+      // The operator answers every time, so nothing but the attempt count can
+      // end this loop.
+      guidance: "check the primary repository's own branch",
+      config: { qaIterationCap: 1 },
+    });
+
+    await controller.resume(runId);
+
+    const task = store.getTask(runId, "task-a")!;
+    expect(task.state).toBe("NEEDS_HUMAN");
+    expect(task.errorSummary).toContain("still empty after 5 attempts");
+    // No reviewer was ever paid to read nothing.
+    expect(counts.qa ?? 0).toBe(0);
+    // The operator was asked, and the answer was carried to the worker rather
+    // than logged and dropped.
+    expect(gates.some((g) => g.why.includes("still empty"))).toBe(true);
+    expect(workerPrompts(specs).at(-1)).toContain("check the primary repository's own branch");
+  });
+
+  it("counts one commit that changed nothing as one commit", async () => {
+    const dir = repo();
+    const { pool } = rolePool({
+      worker: (spec, nth) => {
+        // A commit that delivers nothing: the branch is not empty, the diff is.
+        if (nth === 1) execFileSync("git", ["-c", "user.email=w@e.invalid", "-c", "user.name=W", "commit", "--allow-empty", "-m", "wip"], { cwd: spec.cwd, stdio: "ignore" });
+        else commitInWorktree(spec.cwd, "work.txt", "done\n");
+        return "did the work";
+      },
+      qa: () => QA_PASS,
+    });
+    const { controller, store, events, runId } = executing({ repoPath: dir, pool });
+
+    await controller.resume(runId);
+
+    expect(logs(events).some((t) => /changes no file against harness\/run1\/main \(1 commit\)$/.test(t))).toBe(true);
+    expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
+  });
+});
+
+/**
+ * Run da8325bd again, from the other side: a worker wrote its entire deliverable
+ * into the operator's own checkout instead of its worktree. The guard denies the
+ * direct spelling, but indirection through a script or a Makefile is not
+ * something any guard reads — so the run also watches, and says so when the one
+ * repository nothing should write to has moved.
+ */
+/**
+ * The pre-QA gate reads the branch before the review, and the merge happens
+ * after it — so a branch can pass the gate and still arrive at the merge with
+ * nothing on it. A worker resetting its own worktree while fixing a conflict is
+ * how that happens, and `git merge --no-ff` reports it as success. It is not a
+ * conflict and must not be described as one: there is no other side.
+ */
+describe("a branch that empties out after QA passed it", () => {
+  it("is sent back to be committed rather than booked as merged", async () => {
+    const dir = repo();
+    const { pool, counts, specs } = rolePool({
+      worker: (spec) => (commitInWorktree(spec.cwd, "work.txt", "done\n"), "did the work"),
+      qa: (spec, nth) => {
+        if (nth === 1) execFileSync("git", ["reset", "--hard", "harness/run1/main"], { cwd: spec.cwd, stdio: "ignore" });
+        return QA_PASS;
+      },
+    });
+    const { controller, store, events, runId } = executing({ repoPath: dir, pool });
+
+    await controller.resume(runId);
+
+    expect(logs(events).some((t) => /merge produced nothing: harness\/run1\/task-a left harness\/run1\/main where it was/.test(t))).toBe(true);
+    // Re-dispatched with the question the worker can answer, not with a merge
+    // it has no way to resolve.
+    expect(workerPrompts(specs)[1]).toContain("delivers nothing");
+    expect(counts.worker).toBe(2);
+    expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
+  });
+});
+
+describe("the operator's own checkout moving under a task", () => {
+  it("records that it moved, and which task was live at the time", async () => {
+    const dir = repo();
+    const { pool } = rolePool({
+      worker: (spec) => {
+        commitInWorktree(spec.cwd, "work.txt", "done\n");
+        commitInWorktree(dir, "stray.txt", "committed in the wrong repository\n");
+        return "did the work";
+      },
+      qa: () => QA_PASS,
+    });
+    const { controller, store, events, runId } = executing({ repoPath: dir, pool });
+
+    await controller.resume(runId);
+
+    const moved = logs(events).find((t) => t.startsWith("the primary repository moved"));
+    expect(moved).toMatch(/main@[0-9a-f]{40} -> main@[0-9a-f]{40}/);
+    expect(moved).toContain("a branch this run will never merge or report");
+    expect(events.some((e) => e.type === "agent.log" && e.taskId === "task-a" && e.text.startsWith("the primary repository moved"))).toBe(true);
+    // Watching is not blocking: the task's own committed work still lands.
+    expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
   });
 });
 

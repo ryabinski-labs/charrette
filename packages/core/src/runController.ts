@@ -2399,8 +2399,8 @@ export class RunController {
    * can run it themselves.
    */
   private async verifyDemoCommands(runId: string, wtPath: string, report: DemoReport): Promise<CommandCheck[]> {
-    const claims = report.commands ?? [];
-    if (!claims.length || !wtPath) return [];
+    const claims = report.commands;
+    if (!claims.length) return [];
     const runnable = [...new Set(claims.map((c) => c.command.trim()).filter((c) => c && repeatable(c).ok))];
     const willRun = runnable.slice(0, RunController.MAX_VERIFIED_COMMANDS);
     const results = new Map<string, Rerun>();
@@ -3068,6 +3068,9 @@ export class RunController {
       if (task.completionProbe) {
         const probe = await runDeterministicChecks(wt.path, [task.completionProbe]);
         if (!probe.ok) {
+          // One command in, so a run that is not ok has exactly one failure in
+          // it; the fallback is for the type, not for a state that occurs.
+          /* v8 ignore next */
           const output = probe.failures[0]?.output ?? "";
           qaFeedback =
             `This task's completion probe still fails. The probe is the task's own definition of done, and it does not depend on ` +
@@ -3276,16 +3279,18 @@ export class RunController {
         runId,
         taskId,
         sessionId: taskId,
+        // Branch is set by ensureWorktree before the task can ever be merged;
+        // the fallback is for the column type, not for a state that occurs.
+        /* v8 ignore next */
         text: `merge produced nothing: ${task.branch ?? this.wt.branchName(runId, taskId)} left ${this.wt.integrationBranch(runId)} where it was`,
         ts: Date.now(),
       });
       return merge;
     }
     if (!merge.ok) {
-      // Branch is set by ensureWorktree before the task can ever be merged;
-    // the fallback is for the column type, not for a state that occurs.
-    /* v8 ignore next */
-    this.bus.publish({ type: "git.merge_conflict", runId, taskId, branch: task.branch ?? "", files: merge.conflicts, ts: Date.now() });
+      // Same fallback, and the same reason it never fires.
+      /* v8 ignore next */
+      this.bus.publish({ type: "git.merge_conflict", runId, taskId, branch: task.branch ?? "", files: merge.conflicts, ts: Date.now() });
       return merge;
     }
     this.store.transitionTask(runId, taskId, "MERGED");

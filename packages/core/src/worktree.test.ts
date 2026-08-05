@@ -224,6 +224,28 @@ describe("what a task branch actually carries", () => {
   });
 });
 
+/**
+ * Sampled around every worker session so that a commit written into the
+ * operator's own checkout is at least recorded. It is asked before the run
+ * knows anything about the repository, so it has to answer for a path that is
+ * not one — an empty answer means "nothing to compare", and two of those never
+ * look like a repository that moved.
+ */
+describe("watching the operator's own checkout", () => {
+  it("names the branch and the commit it is sitting on", async () => {
+    const dir = repo();
+
+    expect(await new WorktreeManager(dir).primaryHead()).toBe(`main@${sha(dir)}`);
+  });
+
+  it("says nothing at all when the path is not a repository", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "harness-notrepo-"));
+    made.push(dir);
+
+    expect(await new WorktreeManager(dir).primaryHead()).toBe("");
+  });
+});
+
 describe("measuring the base a task is judged against", () => {
   it("checks out the baseline commit, and moves it on a second call", async () => {
     const dir = repo();
