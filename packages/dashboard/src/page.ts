@@ -372,6 +372,24 @@ const el = (tag, cls, text) => {
   return n;
 };
 
+/**
+ * Puts nodes in order as the children of parent that follow its first "keep"
+ * children, touching only what is actually out of place.
+ *
+ * The naive version — wipe the parent and append everything — is what used to
+ * destroy a selection on the task board every 5 seconds. Re-appending a node
+ * that is already in the right place is not a no-op either: to the browser it
+ * is a remove followed by an insert, and it takes the selection, the focus and
+ * the scroll position with it. So compare first, move only on a mismatch.
+ */
+const syncChildren = (parent, nodes, keep) => {
+  for (let i = 0; i < nodes.length; i++) {
+    const have = parent.childNodes[keep + i];
+    if (have !== nodes[i]) parent.insertBefore(nodes[i], have || null);
+  }
+  while (parent.childNodes.length > keep + nodes.length) parent.removeChild(parent.lastChild);
+};
+
 const streaming = new Set();
 const sessionRole = {};   // sessionId -> role
 const lastAction = {};    // sessionId -> newest formatted tool line
@@ -585,6 +603,9 @@ function renderHeader() {
     : "priced at API list rates";
 }
 
+/** When the last running session stopped being reported; 0 while one is. */
+let idleSince = 0;
+
 function renderNow() {
   const box = $("now");
   box.textContent = "";
@@ -596,11 +617,33 @@ function renderNow() {
   }
   const live = [];
   for (const run of runs) for (const s of run.sessions) if (s.state === "running") live.push(s);
-  $("nowcount").textContent = live.length ? "" : "idle";
   if (!live.length) {
-    box.append(el("div", "empty", "No agent is running \\u2014 the harness is waiting on you, on git, or between tasks."));
+    /*
+     * No session is running, which is not the same thing as nothing happening.
+     * A session row is written when the agent starts and closed when it ends,
+     * so every handover — worker to QA, QA back to worker, one task to the
+     * next — has a gap with a task plainly in progress and nobody reported on
+     * it. Saying "the harness is waiting on you" there sends the operator
+     * hunting for a gate that does not exist, while the feed scrolls past.
+     *
+     * So name the gap, and time it: a handover is a second or two, and one
+     * that has lasted minutes is the thing actually worth looking at.
+     */
+    if (!idleSince) idleSince = Date.now();
+    const busy = [];
+    for (const run of runs) for (const t of run.tasks) if (groupOf[t.state] === "live") busy.push(t.id);
+    const waited = Date.now() - idleSince;
+    $("nowcount").textContent = busy.length ? "between agents" : "idle";
+    box.append(el("div", "empty", !busy.length
+      ? "No agent is running \\u2014 the harness is waiting on you, on git, or between tasks."
+      : waited > 90_000
+      ? "Nothing has been running on " + busy.join(", ") + " for " + dur(waited) +
+        ", which is longer than a handover takes \\u2014 worth a look at the feed."
+      : "Between agents on " + busy.join(", ") + " \\u2014 one finished and the next has not started. Nothing is waiting on you."));
     return;
   }
+  idleSince = 0;
+  $("nowcount").textContent = "";
   for (const s of live) {
     const row = el("div", "agent");
     row.append(el("span", "dot r-" + s.role));
@@ -731,14 +774,60 @@ const GROUPS = [
 const groupOf = {};
 for (const g of GROUPS) for (const s of g.states) groupOf[s] = g.key;
 
-/** Groups the operator closed, and task details they opened. The board is rebuilt from
- *  scratch on every event, so without this their disclosure snaps shut under them. */
+/** Groups the operator closed, and task details they opened. A card is rebuilt whenever
+ *  its facts change, so without this their disclosure snaps shut under them. */
 const closedGroups = new Set();
 const openTasks = new Set();
 
+/**
+ * The cards on screen, keyed run/task, each with the facts it was built from.
+ *
+ * The board is re-rendered on every poll and every agent event — several times
+ * a minute — but the great majority of cards are identical between two of
+ * those. Handing back the same node instead of an equal one is what lets a
+ * selection, a focus ring or an open "what it did" survive the next tick; only
+ * the card that actually changed flickers.
+ */
+let cards = new Map();
+/** Group sections, kept across renders for the same reason the cards are. */
+const groups = new Map();
+
+function cardSig(t, run, isDone) {
+  return JSON.stringify([
+    t.state, t.title, t.id, t.dependsOn, t.qaIterations, t.githubIssueNumber, t.prNumber,
+    t.assignedSkills, t.errorSummary, t.spec, t.acceptanceCriteria, run.githubRepo, isDone,
+  ]);
+}
+
+function cardFor(t, run, isDone, kept) {
+  const key = run.id + "/" + t.id;
+  const sig = cardSig(t, run, isDone);
+  const had = cards.get(key);
+  const entry = had && had.sig === sig ? had : { sig: sig, node: taskCard(t, run, isDone) };
+  kept.set(key, entry);
+  return entry.node;
+}
+
+function groupFor(g, count) {
+  let sec = groups.get(g.key);
+  if (!sec) {
+    sec = el("details", "grp g-" + g.key);
+    sec.open = !closedGroups.has(g.key);
+    sec.addEventListener("toggle", () => {
+      if (sec.open) closedGroups.delete(g.key);
+      else closedGroups.add(g.key);
+    });
+    const head = el("summary", null, g.label);
+    head.append(el("span", "n"));
+    sec.append(head);
+    groups.set(g.key, sec);
+  }
+  sec.querySelector("summary .n").textContent = " " + count;
+  return sec;
+}
+
 function renderBoard() {
   const box = $("board");
-  box.textContent = "";
 
   const buckets = {};
   for (const g of GROUPS) buckets[g.key] = [];
@@ -749,6 +838,8 @@ function renderBoard() {
   }
 
   if (!total) {
+    box.textContent = "";
+    cards = new Map();
     for (const run of runs) box.append(el("div", "empty", phaseHint(run.state)));
     if (!runs.length) box.append(el("div", "empty", "No tasks yet."));
     $("taskcount").textContent = "";
@@ -756,21 +847,20 @@ function renderBoard() {
     return;
   }
 
+  // Rebuilt from what is on the board now, so a task that goes away takes its
+  // cached node with it rather than waiting to be handed back to a later run.
+  const kept = new Map();
+  const sections = [];
   for (const g of GROUPS) {
     const items = buckets[g.key];
     if (!items.length) continue;
-    const sec = el("details", "grp g-" + g.key);
-    sec.open = !closedGroups.has(g.key);
-    sec.addEventListener("toggle", () => {
-      if (sec.open) closedGroups.delete(g.key);
-      else closedGroups.add(g.key);
-    });
-    const head = el("summary", null, g.label);
-    head.append(el("span", "n", " " + items.length));
-    sec.append(head);
-    for (const item of items) sec.append(taskCard(item.t, item.run, g.key === "done"));
-    box.append(sec);
+    const sec = groupFor(g, items.length);
+    // Past the summary, which groupFor owns.
+    syncChildren(sec, items.map((item) => cardFor(item.t, item.run, g.key === "done", kept)), 1);
+    sections.push(sec);
   }
+  syncChildren(box, sections, 0);
+  cards = kept;
 
   const done = buckets.done.length;
   $("taskcount").textContent = done + " of " + total + " done";
@@ -860,15 +950,25 @@ function taskCard(t, run, isDone) {
  * which of thirty cards to look at. The one question at the end of a run is "what do
  * I review?", and this is the whole answer to it — including when the answer is none.
  */
+let prsSig = "";
+
 function renderPrs() {
-  const box = $("prs");
-  box.textContent = "";
   const rows = [];
   let ended = false;
   for (const run of runs) {
     ended = ended || ["PR_REVIEW", "INTEGRATING", "VERIFYING", "DONE"].includes(run.state);
     for (const t of run.tasks) if (t.prNumber) rows.push({ t, run });
   }
+  // This list is the answer to "what do I review?", so it is read and copied
+  // out of. Nothing in it ticks, and PRs arrive a handful at a time at the end
+  // of a run — redrawing it on a poll that changed nothing here only costs the
+  // operator their selection.
+  const sig = JSON.stringify([ended, rows.map((r) => [r.t.prNumber, r.t.title, r.run.githubRepo])]);
+  if (sig === prsSig) return;
+  prsSig = sig;
+
+  const box = $("prs");
+  box.textContent = "";
   $("prcount").textContent = rows.length ? String(rows.length) : "";
   if (!rows.length) {
     box.append(el("div", "empty", ended
@@ -910,7 +1010,9 @@ function phaseHint(state) {
  * shut, the <pre> jumped back to the top, and a selection made it about two
  * words before being wiped mid-drag. So: rebuild on the facts, tick the clock.
  */
-let runInfoSig = "";
+/* null, not "": no run at all signs as the empty string, and starting there
+   would make the first paint of "No active runs." look like a no-op poll. */
+let runInfoSig = null;
 /** Elapsed-clock nodes from the last build, retargeted in place by the poll. */
 let runAges = [];
 /** Assignments the operator opened. Survives the rare rebuild, for the same
