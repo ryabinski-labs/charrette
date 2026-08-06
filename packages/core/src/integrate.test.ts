@@ -301,16 +301,21 @@ describe("what the run says it produced", () => {
     expect(logs.join("\n")).toMatch(/CI is red on #7: Deploy, CI \/ build/);
   });
 
-  it("says CI is green when it passes, and stays quiet when the repo has none", async () => {
+  it("says CI is green when it passes, and says NO CI when the repo has none", async () => {
     const green = fakeGitHub(() => ({ number: 7, url: "u" }), { state: "passing", failing: [], total: 4 });
     expect(reason(...(await build(green.adapter).then((b) => [b.store, b.runId] as const)))).toBe(
       "1 pull request open for review; CI green; intent check passed"
     );
-    // A repo with no CI at all must not gain a phantom "CI" clause. It still
-    // spends the grace polls first, in case CI simply had not been queued yet.
+    // A repo with no CI at all is a finding, not a quiet clause: nothing has
+    // built the merged tree, and "1 pull request open for review" alone reads
+    // as the same success a green branch reports. It still spends the grace
+    // polls first, in case CI simply had not been queued yet.
     const none = fakeGitHub(() => ({ number: 7, url: "u" }), { state: "none", failing: [], total: 0 });
     const b = await build(none.adapter, true, undefined, "single", undefined, 1);
-    expect(reason(b.store, b.runId)).toBe("1 pull request open for review; intent check passed");
+    expect(reason(b.store, b.runId)).toBe(
+      "1 pull request open for review; NO CI — nothing checked the merged branch; intent check passed"
+    );
+    expect(b.logs.join("\n")).toMatch(/#7 has no checks: this repository has no CI/);
   }, 20_000);
 
   it("says why no pull request exists when nothing was merged", async () => {
