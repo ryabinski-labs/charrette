@@ -44,9 +44,11 @@ export const AgentRole = z.enum([
   "prod",
   // Pit stops: `demo` starts the half-built product and drives it; `reviewer`
   // reads what the demo found through one named lens and says whether the run
-  // is still building the right thing.
+  // is still building the right thing; `pm` reads all of that and decides what
+  // the run does next.
   "demo",
   "reviewer",
+  "pm",
 ]);
 export type AgentRole = z.infer<typeof AgentRole>;
 

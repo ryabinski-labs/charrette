@@ -19,6 +19,13 @@ export const ModelRoutingShape = z.object({
    * buy, and it is judgment rather than tool work, so: Opus.
    */
   reviewer: z.string().default("claude-opus-5"),
+  /**
+   * Decides what the run does next at a pit stop, having read the demo and
+   * every reviewer. It is the only agent in the harness whose output redirects
+   * or re-plans the remaining work on its own, so it is the last place to save
+   * money: Opus.
+   */
+  pm: z.string().default("claude-opus-5"),
 });
 
 /**
@@ -81,6 +88,27 @@ export const PitStopConfig = z.object({
    * too low produces a report that says only "I could not start it".
    */
   demoMaxTurns: z.number().int().min(20).max(200).default(80),
+  /**
+   * Who decides what the run does next, by skill name — or `"operator"` to be
+   * asked, which is what this used to be unconditionally.
+   *
+   * A pit stop already buys four opinions from four named lenses. What it did
+   * with them was print them and block until a human typed a letter, which
+   * means the checkpoint only works while someone is watching: the run that
+   * stops at 2am for a decision its own reviewers had already made is a run
+   * that has stopped, and the operator wakes to a demo, four reviews and no
+   * progress. The named skill reads the same report and answers the same four
+   * ways, so the checkpoint keeps its judgment and loses its dependence on
+   * someone being awake for it.
+   *
+   * The operator is not cut out of anything they had: the report is still
+   * written, still published, and the decision and its reasoning are recorded
+   * next to it. What they lose is having to be there.
+   *
+   * A decider that fails, or answers with something that is not one of the four
+   * actions, falls back to asking — a pit stop is never resolved by a guess.
+   */
+  decidedBy: z.string().min(1).default("product-manager"),
 });
 export type PitStopConfig = z.infer<typeof PitStopConfig>;
 

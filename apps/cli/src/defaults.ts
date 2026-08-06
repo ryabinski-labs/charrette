@@ -135,6 +135,15 @@ export const FileConfig = z
         worker: z.string().optional(),
         qa: z.string().optional(),
         integrator: z.string().optional(),
+        // The rest of the roles, which this list simply never caught up with:
+        // `RunConfig` routes ten and the file accepted five, and because this
+        // schema is strict the other five were not ignored but rejected —
+        // `models.reviewer` in a harness.config.json failed the whole file.
+        advisor: z.string().optional(),
+        prod: z.string().optional(),
+        demo: z.string().optional(),
+        reviewer: z.string().optional(),
+        pm: z.string().optional(),
       })
       .optional(),
     budget: z

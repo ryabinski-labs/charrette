@@ -617,9 +617,11 @@ Run configuration is a zod-validated `RunConfig`
 | `models.prod` | `claude-opus-5` | — | ✅ | **Anthropic only** — the last word on whether the run delivered the assignment |
 | `models.demo` | `claude-sonnet-5` | — | ✅ | starts the half-built product at a pit stop and drives it — mostly tool work |
 | `models.reviewer` | `claude-opus-5` | — | ✅ | judges the demo through one named lens; this is the judgment a pit stop exists to buy. **Anthropic only** |
+| `models.pm` | `claude-opus-5` | — | ✅ | decides what the run does next at a pit stop, having read the demo and every reviewer. The only agent whose output redirects or re-plans the remaining work on its own, so it is the last place to save money. |
 | `pitStop.every` | `"epic"` | — | ✅ | when the run stops to show you what it built: `"epic"`, `"never"`, `{"tasks":5}`, `{"usd":100}`, `{"minutes":90}` — see [PITSTOP.md](./PITSTOP.md) |
 | `pitStop.reviewers` | `product-manager`, `critical-challenger`, `qa-agent` | — | ✅ | one short session per lens, by skill name; max 4, `[]` for none. This is the pit stop's price. |
 | `pitStop.demoMaxTurns` | `80` | — | ✅ | the demo agent has to start a product it has never seen; too low and its report says only "I could not start it" |
+| `pitStop.decidedBy` | `"product-manager"` | — | ✅ | who decides what the run does next, by skill name — or `"operator"` to be asked, which is what this used to be. The named skill reads the same report you would and answers the same four ways (continue / redirect / re-plan / stop). One that fails, or answers with something that is not one of the four, falls back to asking you. |
 | `budget.runCapUsd` | `30` | `--run-cap` | ✅ | checked **before every agent turn**; the plan gate prices the plan against it before you approve |
 | `budget.taskCapUsd` | `10` | `--task-cap` | ✅ | |
 | `intentFixRounds` | `1` | — | ✅ | how many times a FAIL from the intent validator may queue work to close its own gaps; `0` reports the verdict and stops there |

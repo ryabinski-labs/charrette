@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
@@ -54,6 +54,8 @@ import {
   extractJson,
   extractSection,
   operatorFeedbackMessage,
+  pitStopDeciderPrompt,
+  pitStopDeciderSystemPrompt,
   replanPrompt,
   reviewerPrompt,
   reviewerSystemPrompt,
@@ -364,6 +366,19 @@ const ReviewJson = z.object({
   verdict: z.enum(["on-track", "drifting", "off-track"]),
   findings: z.array(z.string()).default([]),
   question: z.string().default(""),
+});
+
+/**
+ * What the pit stop's decider said to do next.
+ *
+ * The same four actions the operator has always had, parsed strictly: an
+ * answer that is not one of them is not a decision, and the pit stop falls back
+ * to asking rather than rounding it to the nearest one.
+ */
+const PitStopDecisionJson = z.object({
+  action: z.enum(["continue", "redirect", "replan", "stop"]),
+  why: z.string().default(""),
+  feedback: z.string().default(""),
 });
 
 export class RunController {
@@ -2212,7 +2227,17 @@ export class RunController {
       ts: Date.now(),
     });
 
-    const decision = await this.gates.resolvePitStop!(stop);
+    const { decision, decidedBy, why } = await this.decidePitStop(runId, run, stop);
+    // The report is the artifact anyone reads afterwards, and until now it
+    // stopped at the evidence. What was decided on it, by whom, and what that
+    // cost belong in the same file — a decision recorded only as an event is
+    // one nobody finds when they open the pit stop that made it.
+    appendFileSync(
+      path.join(dir, "REPORT.md"),
+      `\n## Decision — ${decision.action}\n\nDecided by: ${decidedBy}` +
+        `${decidedBy === "operator" ? "" : ` ($${(this.store.spentUsd(runId) - afterUsd).toFixed(2)})`}\n` +
+        `${why ? `\n${why}\n` : ""}${decision.feedback.trim() ? `\nWhat the run was told:\n\n${decision.feedback.trim()}\n` : ""}`
+    );
     const touched = await this.applyPitStop(runId, decision);
     this.bus.publish({
       type: "run.pitstop_resolved",
@@ -2221,6 +2246,8 @@ export class RunController {
       action: decision.action,
       feedback: decision.feedback.slice(0, 2000),
       tasks: touched,
+      decidedBy,
+      why: why.slice(0, 500),
       ts: Date.now(),
     });
     await this.sweepRunResources(runId, `pit stop ${number}`);
@@ -2521,6 +2548,58 @@ export class RunController {
       })
     );
     return settled.filter((r): r is ReviewReport => r !== null);
+  }
+
+  /**
+   * Decide what the run does next — and say who decided.
+   *
+   * `pitStop.decidedBy` names a skill, and that skill reads the report the
+   * operator would have read and answers the way the operator would have
+   * answered. `"operator"` asks instead, which is what this always did.
+   *
+   * Falling back to asking is not a formality. A decider that crashed, ran out
+   * of turns or answered with prose has not decided anything, and the four
+   * actions are far too consequential to infer one from silence — `continue`
+   * would spend the rest of the plan on a judgment nobody made, and `stop`
+   * would park a healthy run because a session died. So the pit stop reverts to
+   * the thing it has always been able to do: ask.
+   */
+  private async decidePitStop(runId: string, run: RunRow, stop: PitStop): Promise<{ decision: PitStopDecision; decidedBy: string; why: string }> {
+    const ask = async () => ({ decision: await this.gates.resolvePitStop!(stop), decidedBy: "operator", why: "" });
+    const skill = run.config.pitStop.decidedBy;
+    if (skill === "operator") return await ask();
+
+    const say = (text: string) => this.bus.publish({ type: "agent.log", runId, sessionId: "pitstop", text, ts: Date.now() });
+    try {
+      // Looked up by name, like a reviewer's lens: "decide this as the product
+      // manager" and "decide this as whatever the matcher thinks this sounds
+      // like" are not the same instruction.
+      const skills = indexSkills(run.config.skillsDirs).filter((s) => s.name === skill && verifyHash(s));
+      const cap = run.config.budget.runCapUsd;
+      const result = await this.pool.run({
+        runId,
+        role: "pm",
+        model: run.config.models.pm,
+        systemPrompt: pitStopDeciderSystemPrompt(skill, toolbeltBlock(detectToolbelt(run.config.externalTools)), skillsBlock(skills)),
+        prompt: pitStopDeciderPrompt(
+          run.assignment,
+          this.planPrd(runId),
+          stop.markdown,
+          `The run has spent $${stop.spentUsd.toFixed(2)} of its $${cap.toFixed(2)} cap and the whole plan projects to about $${stop.projectedUsd.toFixed(2)}.\n\n`
+        ),
+        cwd: await this.wt.ensureIntegrationWorktree(runId).catch(() => this.repoPath),
+        disallowedTools: ["Write", "Edit", "NotebookEdit"],
+        maxTurns: 30,
+        budgetCheck: () => this.checkBudget(runId),
+      });
+      const parsed = PitStopDecisionJson.parse(extractJson(result.resultText));
+      say(`${skill} decided: ${parsed.action}${parsed.why ? ` — ${parsed.why}` : ""}`);
+      return { decision: { action: parsed.action, feedback: parsed.feedback }, decidedBy: skill, why: parsed.why };
+    } catch (e) {
+      if (e instanceof BudgetExceeded) throw e;
+      say(`${skill} did not return a decision (${String(e).slice(0, 200)}) — asking you instead`);
+      return await ask();
+    }
   }
 
   /**

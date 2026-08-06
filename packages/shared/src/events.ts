@@ -63,6 +63,14 @@ export const HarnessEvent = z.discriminatedUnion("type", [
     feedback: z.string().default(""),
     /** Tasks the operator's words were attached to. */
     tasks: z.array(z.string()).default([]),
+    /**
+     * The skill that decided, or `"operator"`. A run that redirected itself and
+     * a run the operator redirected are different histories, and the resolved
+     * event is the only record of which one this was.
+     */
+    decidedBy: z.string().default("operator"),
+    /** The decider's one-line reason. Empty when the operator decided. */
+    why: z.string().default(""),
   }),
   // What the deploy triggered by the human's merge did. The CI status judged the
   // pull request; this judges the merge commit on the base branch — the first

@@ -64,7 +64,12 @@ answer it at the start, from a plan, or at the end, from a diff.
 
 - Not a replacement for the plan gate or the task gate.
 - Not a per-task review. A pit stop is about the product, not the increment.
-- Not automatic redirection. The harness proposes; the operator decides.
+- Not automatic redirection *without a record*. The harness now decides for
+  itself by default — `pitStop.decidedBy` names the skill that answers, and
+  `"operator"` restores the original — but every decision is written into the
+  pit stop's own `REPORT.md` and carried on `run.pitstop_resolved` with who made
+  it and why. A run that redirected itself and a run the operator redirected are
+  different histories, and both are readable afterwards.
 - Not a deploy. A pit stop runs the product locally, the way QA already does.
 
 ## Trigger
@@ -231,9 +236,10 @@ is already in the target repo's `.gitignore`, so none of it reaches a commit.
 | Piece | Where |
 | --- | --- |
 | Trigger, report rendering | `packages/core/src/pitstop.ts` |
-| Demo + reviewers + the operator's decision | `RunController.pitStop` |
+| Demo + reviewers + the report | `RunController.pitStop` |
+| Who decides, and the fallback to asking | `RunController.decidePitStop` |
 | Re-planning the unstarted work (S3) | `RunController.replan` |
-| The prompts | `demoSystemPrompt`, `reviewerSystemPrompt`, `replanPrompt` |
+| The prompts | `demoSystemPrompt`, `reviewerSystemPrompt`, `pitStopDeciderSystemPrompt`, `replanPrompt` |
 | Terminal gate | `apps/cli/src/cli.ts` |
 | Dashboard gate | `POST /api/gates/pitstop`, the `#pitstop` panel |
 
@@ -243,6 +249,16 @@ Two decisions worth naming, because neither is in the stories above:
   contexts have nowhere to put the question, and spending a demo session plus
   three reviewers to print a report nobody will answer is worse than not
   stopping. `resolvePitStop` is optional on `GateHandler`; its absence is off.
+  This still holds with `decidedBy` set to a skill: the decider can answer the
+  question, but it cannot answer the one *it* fails to answer, and a pit stop
+  that has no way to fall back to a human is one that would resolve itself by
+  guessing.
+- **The decider is the decision, not a recommendation.** Showing the operator a
+  proposed action and asking them to confirm it is the same blocking gate with
+  an extra step, and it is worse: a confirmation prompt is answered "yes" by
+  everyone who is tired. Either the checkpoint runs unattended or it does not.
+  What the operator keeps is everything except being present — the report, the
+  reasoning, the record, and `"operator"` if they want the letter back.
 - **`"never"` means never, including for a FAIL verdict.** S6 says a recorded
   FAIL opens a pit stop regardless of the configured interval, and it does —
   regardless of the *cadence*. An operator who wrote `"never"` has said they do
