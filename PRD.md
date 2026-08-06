@@ -118,6 +118,7 @@ Cross-cutting: pause/resume/abort from the dashboard at any time; budget caps pa
 
 - **US-12** As an operator, accepted branches merge serially into the run branch with the full test suite after each merge. *AC: a merge that breaks the suite triggers the conflict/repair flow, never lands silently.*
 - **US-13** As an operator, each component ships as a PR linked to its issue. *AC: PR body references the issue and the run; re-running after a crash never duplicates issues or PRs (idempotency markers, ADR-7); the harness has no code path that merges PRs (SEC-17).*
+- **US-13a** As an operator, a run is not complete until something the repository owns has built and tested the merged branch, with a coverage floor the build fails under. Every other check in this system runs in a per-task worktree that the merged tree never was. *AC: the plan gate reports a plan with no CI task and a plan with no enforced coverage floor, on every plan and not only when the brief asked (`ciScan`); the planner is instructed to emit a pipeline task whose criteria name the floor as a number — 80% of the lines a change touches, 75% of the project — and to put one end-to-end test of the critical user path in it; a pull request whose checks come back `none` is reported as "NO CI — nothing checked the merged branch" in the run outcome and logged against the run, never omitted (a repo with no CI must not produce the same headline as a green one).*
 
 ### Epic F — Dashboard & monitoring
 

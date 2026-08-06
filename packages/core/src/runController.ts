@@ -82,6 +82,7 @@ import { hasDrift, pathDrift, renderDrift } from "./pathDrift.js";
 import { confirmFailures, runDeterministicChecks, splitInheritedFailures, type CheckResult } from "./qa.js";
 import { estimatePlan, renderEstimate } from "./estimate.js";
 import { renderIntegrations, scanIntegrations } from "./integrationScan.js";
+import { renderCi, scanCi } from "./ciScan.js";
 import { renderProduction, scanProduction } from "./productionScan.js";
 import { detectToolbelt, toolbeltBlock } from "./toolbelt.js";
 import { Store, TaskRow, type RunRow } from "./store.js";
@@ -1128,6 +1129,22 @@ export class RunController {
         ts: Date.now(),
       });
     }
+    // A repository with no workflow at all. This used to be the quietest
+    // outcome in the run: `settleChecks` spent its grace polls, wrote
+    // `total: 0`, and the outcome line skipped the clause entirely, so run
+    // 3ae58e02 reported "1 pull request open for review" over 543 files that
+    // nothing had ever built together. "None" is not a pass — it is the absence
+    // of the only check that judges the merge, and it reads as an achievement
+    // precisely because nothing is red.
+    if (checks.state === "none") {
+      this.bus.publish({
+        type: "agent.log",
+        runId,
+        sessionId: "integrator",
+        text: `#${prNumber} has no checks: this repository has no CI, so nothing has built or tested the merged branch. Every green result in this run came from a per-task worktree that was never this tree.`,
+        ts: Date.now(),
+      });
+    }
   }
 
   /**
@@ -1300,14 +1317,19 @@ export class RunController {
     // What the repo itself said about the branch. A red CI belongs next to the
     // pull request count, not three screens down the event feed: "1 pull request
     // open for review" over a branch that does not build is the wrong headline.
+    // "none" belongs here too, and used to be the one state this skipped. A
+    // repo with no CI produced the same headline as a repo whose CI was green,
+    // which is the reading an operator will take every time: nothing is red.
     const ci = this.store.ciStatus(runId);
-    if (ci && ci.state !== "none") {
+    if (ci) {
       parts.push(
         ci.state === "passing"
           ? "CI green"
           : ci.state === "failing"
             ? `CI red (${ci.failing.slice(0, 3).join(", ")}${ci.failing.length > 3 ? `, +${ci.failing.length - 3} more` : ""})`
-            : "CI still running"
+            : ci.state === "none"
+              ? "NO CI — nothing checked the merged branch"
+              : "CI still running"
       );
     }
     // The validator's answer to the only question the operator actually asked.
@@ -1994,7 +2016,11 @@ export class RunController {
     // PRD written from it, because the operator's own words are the only thing
     // that can say whether this product was ever meant to deploy or have a login.
     const production = renderProduction(scanProduction(`${run.assignment}\n${this.planPrd(runId)}`, tasks));
-    return [lines, renderEstimate(estimate, run.config.budget.runCapUsd), integrations, production].filter(Boolean).join("\n\n");
+    // And whether the plan builds the one check that will ever see the merged
+    // branch. This takes no brief: nothing has to ask for CI, so unlike the two
+    // above it reads only the plan.
+    const ci = renderCi(scanCi(tasks));
+    return [lines, renderEstimate(estimate, run.config.budget.runCapUsd), integrations, production, ci].filter(Boolean).join("\n\n");
   }
 
   private async fileIssues(runId: string): Promise<void> {

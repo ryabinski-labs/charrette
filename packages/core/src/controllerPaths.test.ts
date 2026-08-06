@@ -285,17 +285,27 @@ describe("the closing line", () => {
     }
   });
 
-  it("says nothing about a CI or a deploy the repo does not have", async () => {
+  it("says a repo has NO CI rather than omitting the clause", async () => {
+    // Run 3ae58e02 opened a 543-file pull request into a repo with no workflow
+    // and reported "1 pull request open for review" — the same headline a green
+    // branch gets, because the only difference was a clause this line skipped.
+    // Absence of CI is a finding; it merely has nothing red to point at.
     const { controller, runId } = await finished({
-      events: (s, id) => {
-        record(s, id, { type: "run.ci_status", prNumber: 1, state: "none", failing: [], total: 0 });
-        record(s, id, { type: "run.deploy_status", sha: "abc", state: "none", failing: [], total: 0 });
-      },
+      events: (s, id) => record(s, id, { type: "run.ci_status", prNumber: 1, state: "none", failing: [], total: 0 }),
     });
 
-    const line = controller.outcome(runId).line;
-    expect(line).not.toContain("CI");
-    expect(line).not.toContain("deploy");
+    expect(controller.outcome(runId).line).toContain("NO CI — nothing checked the merged branch");
+  });
+
+  it("still says nothing about a deploy the repo does not have", async () => {
+    // Not symmetric with CI, and deliberately: a run whose repo has no deploy
+    // workflow is a run the operator did not point at one, and `prodUrl` empty
+    // is the documented default. There is no default that excuses no CI.
+    const { controller, runId } = await finished({
+      events: (s, id) => record(s, id, { type: "run.deploy_status", sha: "abc", state: "none", failing: [], total: 0 }),
+    });
+
+    expect(controller.outcome(runId).line).not.toContain("deploy");
   });
 });
 
