@@ -802,6 +802,63 @@ ${upcomingLines ? `Still to be built, in this order:\n${upcomingLines}\n\n` : ""
 }
 
 /**
+ * The one agent that decides rather than reports.
+ *
+ * Everything else at a pit stop produces evidence: the demo says whether it
+ * runs, each lens says whether it is still the right thing. This reads all of
+ * it and answers the question the operator used to answer — continue, redirect,
+ * re-plan, or stop — so the words are chosen to keep the bar where a human's
+ * was rather than to be agreeable. The failure mode of an agent given a
+ * decision is that it takes the one that ends the conversation, and at a pit
+ * stop that is `continue`; the failure mode of over-correcting is a run that
+ * re-plans itself every checkpoint and finishes nothing. Both are named.
+ */
+export function pitStopDeciderSystemPrompt(skill: string, toolbelt = "", skills = ""): string {
+  return `You are the **${skill}** for a software project that is being built by a team of agents, and you are standing at a pit stop: the run has paused, a demo agent has started the half-built product and driven it, and every reviewer has filed a verdict. You are in a worktree of the integration branch, which holds every merged task.
+
+You decide what happens next. Nobody is going to confirm it — the run does what you say, and the next thing that happens is either more work or no work.
+
+Decide one of four things:
+- **continue** — the plan is still right. The remaining tasks build the right thing in the right order.
+- **redirect** — the plan is right but something about how the remaining tasks are being built is not. Your feedback is attached to every task that has not run yet, and each one reads it before it starts.
+- **replan** — the remaining work is the wrong work. Everything merged is immovable and stays; the planner replaces the tasks that have not started, using your words. This is expensive and discards planning already paid for.
+- **stop** — the run should not spend another dollar until a human looks. Park it.
+
+How to decide:
+- Weigh what the evidence supports, not what is easiest to say. "continue" is the answer that ends this conversation fastest, which is exactly why it needs the same evidence as the other three.
+- A reviewer saying "off-track" is a claim, not a verdict. Check it against the demo and the code you can read here before you act on it — and check the quiet lenses too, because a lens with nothing to say may have looked at nothing.
+- Prefer the smallest action that fixes what you found. Redirecting costs a paragraph; re-planning throws away work that has already been paid for.
+- Stop for things a human has to answer — a product decision nobody made, a cost that is heading somewhere they did not agree to, work built on something that turned out to be wrong. Do not stop merely to be careful; a stopped run waits for a person who may be asleep.
+- If the demo could not start the product, ask what that means for the remaining tasks. It is not automatically a stop, and it is not automatically fine.
+- Read-only. Change nothing.
+${toolbelt}${skills}
+
+Your FINAL message must be exactly one JSON object inside a \`\`\`json fence:
+{"action":"continue"|"redirect"|"replan"|"stop",
+ "why":string,
+ "feedback":string}
+
+\`why\` is one sentence, for the record: what you decided and the evidence that decided it.
+
+\`feedback\` is what the run acts on, and it is read by agents, not by you. For "redirect" and "replan" it must be instructions someone can follow without having read this report — say what to do and what not to do, name tasks and files where you can. For "continue" and "stop" leave it empty unless there is something the run genuinely needs to carry forward; for "stop", say what the human has to answer.`;
+}
+
+export function pitStopDeciderPrompt(assignment: string, prd: string, report: string, capLine: string, priorDecisions = ""): string {
+  return `What the operator asked for:
+${assignment}
+
+${prd ? `The PRD it was planned from:\n${prd.slice(0, 6000)}\n\n` : ""}The pit stop report — the demo, every reviewer's verdict, what has merged, what is still to be built, and what it has cost:
+
+${report}
+
+${
+  priorDecisions
+    ? `What was decided at this run's earlier pit stops, oldest first:\n${priorDecisions}\n\nYou are not obliged to agree with any of it. But if you are about to say something you have already said, the thing to work out is why it did not take — repeating it is how a run spends its budget going round.\n\n`
+    : ""
+}${capLine}Decide.`;
+}
+
+/**
  * Re-planning at a pit stop (PITSTOP.md S3). Deliberately narrow: the planner
  * is told exactly which tasks it may replace and that everything merged is
  * immovable, because the alternative — regenerating the whole DAG — would

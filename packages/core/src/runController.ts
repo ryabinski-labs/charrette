@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
@@ -54,6 +54,8 @@ import {
   extractJson,
   extractSection,
   operatorFeedbackMessage,
+  pitStopDeciderPrompt,
+  pitStopDeciderSystemPrompt,
   replanPrompt,
   reviewerPrompt,
   reviewerSystemPrompt,
@@ -366,6 +368,19 @@ const ReviewJson = z.object({
   question: z.string().default(""),
 });
 
+/**
+ * What the pit stop's decider said to do next.
+ *
+ * The same four actions the operator has always had, parsed strictly: an
+ * answer that is not one of them is not a decision, and the pit stop falls back
+ * to asking rather than rounding it to the nearest one.
+ */
+const PitStopDecisionJson = z.object({
+  action: z.enum(["continue", "redirect", "replan", "stop"]),
+  why: z.string().default(""),
+  feedback: z.string().default(""),
+});
+
 export class RunController {
   private wt: WorktreeManager;
 
@@ -663,10 +678,16 @@ export class RunController {
     // stop between the intent verdict and the first pull request can send the
     // run back to work: an operator reading a FAIL is being shown it at the last
     // moment where fixing it is still cheaper than a second run.
+    //
+    // The reasons written below name no one, because `pitStop.decidedBy` means
+    // the answer may not have come from the operator, and a run history that
+    // tells them they stopped their own run at 3am is worse than one that says
+    // only that it was stopped. Who decided is on `run.pitstop_resolved`, one
+    // event earlier.
     for (;;) {
       if (run.state === "EXECUTING") {
         if ((await this.execute(runId)) === "paused") {
-          this.store.transitionRun(runId, "PAUSED", "you stopped the run at a pit stop");
+          this.store.transitionRun(runId, "PAUSED", "the run was stopped at a pit stop");
           return;
         }
         this.store.transitionRun(runId, "INTEGRATING", "all tasks terminal");
@@ -684,14 +705,14 @@ export class RunController {
         const fixes = await this.queueIntentFixes(runId);
         const after = await this.closingPitStop(runId);
         if (after === "stop") {
-          this.store.transitionRun(runId, "PAUSED", "you stopped the run at a pit stop");
+          this.store.transitionRun(runId, "PAUSED", "the run was stopped at a pit stop");
           return;
         }
         if (after === "back-to-work" || fixes.length) {
           this.store.transitionRun(
             runId,
             "EXECUTING",
-            after === "back-to-work" ? "you sent the run back to work at a pit stop" : `closing ${fixes.length} gap(s) the intent check found`
+            after === "back-to-work" ? "the pit stop sent the run back to work" : `closing ${fixes.length} gap(s) the intent check found`
           );
           run = this.store.getRun(runId)!;
           continue;
@@ -2149,7 +2170,7 @@ export class RunController {
    * read the demo. A reviewer that has only read the diff is producing the same
    * artifact the plan gate already produced — an opinion about a description.
    */
-  private async pitStop(runId: string, due: PitStopDue): Promise<PitStopDecision["action"]> {
+  private async pitStop(runId: string, due: PitStopDue, askOperator = false): Promise<PitStopDecision["action"]> {
     const run = this.store.getRun(runId)!;
     const tasks = this.store.listTasks(runId);
     const history = this.store.pitStopHistory(runId, run.createdAt);
@@ -2212,7 +2233,17 @@ export class RunController {
       ts: Date.now(),
     });
 
-    const decision = await this.gates.resolvePitStop!(stop);
+    const { decision, decidedBy, why } = await this.decidePitStop(runId, run, stop, askOperator);
+    // The report is the artifact anyone reads afterwards, and until now it
+    // stopped at the evidence. What was decided on it, by whom, and what that
+    // cost belong in the same file — a decision recorded only as an event is
+    // one nobody finds when they open the pit stop that made it.
+    appendFileSync(
+      path.join(dir, "REPORT.md"),
+      `\n## Decision — ${decision.action}\n\nDecided by: ${decidedBy}` +
+        `${decidedBy === "operator" ? "" : ` ($${(this.store.spentUsd(runId) - afterUsd).toFixed(2)})`}\n` +
+        `${why ? `\n${why}\n` : ""}${decision.feedback.trim() ? `\nWhat the run was told:\n\n${decision.feedback.trim()}\n` : ""}`
+    );
     const touched = await this.applyPitStop(runId, decision);
     this.bus.publish({
       type: "run.pitstop_resolved",
@@ -2221,6 +2252,8 @@ export class RunController {
       action: decision.action,
       feedback: decision.feedback.slice(0, 2000),
       tasks: touched,
+      decidedBy,
+      why: why.slice(0, 500),
       ts: Date.now(),
     });
     await this.sweepRunResources(runId, `pit stop ${number}`);
@@ -2296,7 +2329,26 @@ export class RunController {
     // Only for a verdict nobody has been shown: a resumed run re-entering
     // integration must not re-open the same pit stop it already answered.
     if (this.store.lastEventSeq(runId, "run.pitstop_opened") > this.store.lastEventSeq(runId, "run.intent_verdict")) return "proceed";
-    const action = await this.pitStop(runId, { reason: "the intent check came back FAIL", epicIds: [] });
+    // This is the pit stop that repeats: "back to work" returns the run to the
+    // same verdict on a tree it has already judged, and one verdict per pass
+    // means the count of them is the count of goes it has had. A person
+    // answering this loop ends it by losing patience; nothing else does, so
+    // past the bound the decision goes to a person whether or not `decidedBy`
+    // names one.
+    const rounds = this.store.eventCount(runId, "run.intent_verdict");
+    const spent = rounds > run.config.pitStop.backToWorkRounds;
+    if (spent) {
+      this.bus.publish({
+        type: "agent.log",
+        runId,
+        sessionId: "pitstop",
+        text:
+          `the intent check has come back FAIL ${rounds} times and the run has been sent back to work ${rounds - 1} of them — ` +
+          `past ${run.config.pitStop.backToWorkRounds}, so this one is yours to answer`,
+        ts: Date.now(),
+      });
+    }
+    const action = await this.pitStop(runId, { reason: "the intent check came back FAIL", epicIds: [] }, spent);
     if (action === "stop") return "stop";
     // Redirect and replan both put work back in the queue; continuing from here
     // with tasks pending would open a pull request over an unfinished tree.
@@ -2521,6 +2573,67 @@ export class RunController {
       })
     );
     return settled.filter((r): r is ReviewReport => r !== null);
+  }
+
+  /**
+   * Decide what the run does next — and say who decided.
+   *
+   * `pitStop.decidedBy` names a skill, and that skill reads the report the
+   * operator would have read and answers the way the operator would have
+   * answered. `"operator"` asks instead, which is what this always did.
+   *
+   * Falling back to asking is not a formality. A decider that crashed, ran out
+   * of turns or answered with prose has not decided anything, and the four
+   * actions are far too consequential to infer one from silence — `continue`
+   * would spend the rest of the plan on a judgment nobody made, and `stop`
+   * would park a healthy run because a session died. So the pit stop reverts to
+   * the thing it has always been able to do: ask.
+   */
+  private async decidePitStop(
+    runId: string,
+    run: RunRow,
+    stop: PitStop,
+    askOperator = false
+  ): Promise<{ decision: PitStopDecision; decidedBy: string; why: string }> {
+    const ask = async () => ({ decision: await this.gates.resolvePitStop!(stop), decidedBy: "operator", why: "" });
+    const skill = run.config.pitStop.decidedBy;
+    if (skill === "operator" || askOperator) return await ask();
+
+    const say = (text: string) => this.bus.publish({ type: "agent.log", runId, sessionId: "pitstop", text, ts: Date.now() });
+    try {
+      // Looked up by name, like a reviewer's lens: "decide this as the product
+      // manager" and "decide this as whatever the matcher thinks this sounds
+      // like" are not the same instruction.
+      const skills = indexSkills(run.config.skillsDirs).filter((s) => s.name === skill && verifyHash(s));
+      const cap = run.config.budget.runCapUsd;
+      const result = await this.pool.run({
+        runId,
+        role: "pm",
+        model: run.config.models.pm,
+        systemPrompt: pitStopDeciderSystemPrompt(skill, toolbeltBlock(detectToolbelt(run.config.externalTools)), skillsBlock(skills)),
+        prompt: pitStopDeciderPrompt(
+          run.assignment,
+          this.planPrd(runId),
+          stop.markdown,
+          `The run has spent $${stop.spentUsd.toFixed(2)} of its $${cap.toFixed(2)} cap and the whole plan projects to about $${stop.projectedUsd.toFixed(2)}.\n\n`,
+          this.store
+            .pitStopDecisions(runId)
+            .map((d, i) => `${i + 1}. **${d.action}** (${d.decidedBy})${d.why ? ` — ${d.why}` : ""}${d.feedback ? `\n   What the run was told: ${d.feedback.slice(0, 500)}` : ""}`)
+            .join("\n")
+        ),
+        cwd: await this.wt.ensureIntegrationWorktree(runId).catch(() => this.repoPath),
+        disallowedTools: ["Write", "Edit", "NotebookEdit"],
+        maxTurns: 30,
+        budgetCheck: () => this.checkBudget(runId),
+      });
+      const parsed = PitStopDecisionJson.parse(extractJson(result.resultText));
+      say(`${skill} decided: ${parsed.action}${parsed.why ? ` — ${parsed.why}` : ""}`);
+      return { decision: { action: parsed.action, feedback: parsed.feedback }, decidedBy: skill, why: parsed.why };
+    } catch (e) {
+      if (e instanceof BudgetExceeded) throw e;
+      say(`${skill} did not return a decision (${String(e).slice(0, 200)}) — asking you instead`);
+      return await ask();
+    }
   }
 
   /**

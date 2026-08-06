@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { demoPrompt, demoSystemPrompt, intakeSystemPrompt, replanPrompt, reviewerPrompt, reviewerSystemPrompt } from "./prompts.js";
+import {
+  demoPrompt,
+  demoSystemPrompt,
+  intakeSystemPrompt,
+  pitStopDeciderPrompt,
+  pitStopDeciderSystemPrompt,
+  replanPrompt,
+  reviewerPrompt,
+  reviewerSystemPrompt,
+} from "./prompts.js";
 
 /**
  * What the pit stop's agents are actually told. These prompts carry the whole
@@ -102,6 +111,55 @@ describe("re-planning at a pit stop", () => {
 
   it("works without a PRD to show", () => {
     expect(replanPrompt("a", "", "b", "c", "d", "e")).not.toContain("The PRD it was planned from");
+  });
+});
+
+describe("the agent that decides what the run does next", () => {
+  const system = pitStopDeciderSystemPrompt("product-manager");
+
+  it("wears the hat it was named as, and knows nobody is behind it", () => {
+    expect(system).toContain("**product-manager**");
+    expect(system).toContain("Nobody is going to confirm it");
+  });
+
+  it("names the cheap answer as the one that needs the most evidence", () => {
+    // An agent handed a decision reaches for the one that ends the
+    // conversation, and at a pit stop that is "continue".
+    expect(system).toContain('"continue" is the answer that ends this conversation fastest');
+  });
+
+  it("names the opposite failure too, so it does not re-plan every checkpoint", () => {
+    expect(system).toContain("Prefer the smallest action that fixes what you found");
+    expect(system).toContain("a stopped run waits for a person who may be asleep");
+  });
+
+  it("separates the sentence for the record from the words the run acts on", () => {
+    expect(system).toContain("`feedback` is what the run acts on, and it is read by agents, not by you");
+    expect(system).toContain("instructions someone can follow without having read this report");
+  });
+
+  it("puts the whole report in front of it, and what the run has left to spend", () => {
+    const prompt = pitStopDeciderPrompt("build a map app", "# PRD", "# Pit stop 1 — first epic merged", "It has spent $12 of $30.\n\n");
+    expect(prompt).toContain("# Pit stop 1 — first epic merged");
+    expect(prompt).toContain("The PRD it was planned from");
+    expect(prompt).toContain("It has spent $12 of $30.");
+  });
+
+  it("works without a PRD to show", () => {
+    expect(pitStopDeciderPrompt("a", "", "b", "c")).not.toContain("The PRD it was planned from");
+  });
+
+  it("shows it what it has already decided, and why repeating it is the failure", () => {
+    // A fresh session each time, so without this it is free to give the same
+    // redirect a third time and call it a new idea.
+    const prompt = pitStopDeciderPrompt("a", "", "b", "c", "1. **redirect** (product-manager) — the empty states are missing");
+    expect(prompt).toContain("What was decided at this run's earlier pit stops");
+    expect(prompt).toContain("the empty states are missing");
+    expect(prompt).toContain("repeating it is how a run spends its budget going round");
+  });
+
+  it("says nothing about earlier decisions at the first pit stop", () => {
+    expect(pitStopDeciderPrompt("a", "", "b", "c")).not.toContain("earlier pit stops");
   });
 });
 

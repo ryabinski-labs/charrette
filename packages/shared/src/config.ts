@@ -19,6 +19,13 @@ export const ModelRoutingShape = z.object({
    * buy, and it is judgment rather than tool work, so: Opus.
    */
   reviewer: z.string().default("claude-opus-5"),
+  /**
+   * Decides what the run does next at a pit stop, having read the demo and
+   * every reviewer. It is the only agent in the harness whose output redirects
+   * or re-plans the remaining work on its own, so it is the last place to save
+   * money: Opus.
+   */
+  pm: z.string().default("claude-opus-5"),
 });
 
 /**
@@ -81,6 +88,41 @@ export const PitStopConfig = z.object({
    * too low produces a report that says only "I could not start it".
    */
   demoMaxTurns: z.number().int().min(20).max(200).default(80),
+  /**
+   * Who decides what the run does next, by skill name — or `"operator"` to be
+   * asked, which is what this used to be unconditionally.
+   *
+   * A pit stop already buys four opinions from four named lenses. What it did
+   * with them was print them and block until a human typed a letter, which
+   * means the checkpoint only works while someone is watching: the run that
+   * stops at 2am for a decision its own reviewers had already made is a run
+   * that has stopped, and the operator wakes to a demo, four reviews and no
+   * progress. The named skill reads the same report and answers the same four
+   * ways, so the checkpoint keeps its judgment and loses its dependence on
+   * someone being awake for it.
+   *
+   * The operator is not cut out of anything they had: the report is still
+   * written, still published, and the decision and its reasoning are recorded
+   * next to it. What they lose is having to be there.
+   *
+   * A decider that fails, or answers with something that is not one of the four
+   * actions, falls back to asking — a pit stop is never resolved by a guess.
+   */
+  decidedBy: z.string().min(1).default("product-manager"),
+  /**
+   * How many times the closing pit stop may send the run back to work before
+   * the next one goes to the operator whatever `decidedBy` says.
+   *
+   * The closing pit stop is the one that repeats. Every other pit stop happens
+   * at a new point in the plan — a decider that redirects at three consecutive
+   * epics is doing its job — but this one fires on a FAIL from the intent
+   * check, and "back to work" returns the run to the same verdict on a tree it
+   * has already judged. Answered by a human that loop ends when they lose
+   * patience; answered by an agent it ends when the run hits its cap, having
+   * paid for a demo, four reviewers, a decider and a round of workers each time
+   * round. Two goes, and then the question is one only a person can settle.
+   */
+  backToWorkRounds: z.number().int().min(0).max(10).default(2),
 });
 export type PitStopConfig = z.infer<typeof PitStopConfig>;
 
