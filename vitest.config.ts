@@ -37,7 +37,15 @@ export default defineConfig({
     // Several suites drive real git — worktrees, merges, pushes to a bare
     // remote — and a whole run can be a few dozen of those. The 5s default is
     // comfortable on a developer's laptop and a coin flip on a CI runner.
-    testTimeout: 30_000,
+    //
+    // 30s was itself a coin flip. The whole-run cases spend their wall clock
+    // waiting on process spawns rather than on work — the pit-stop suite's
+    // longest case measures 30s wall against 5.7s of CPU — so their duration
+    // tracks how fast the machine can fork git, and four of that file's seven
+    // cases already sit between 10s and 30s. It failed there on an unmodified
+    // tree while passing in the same suite an hour earlier; a bound that a
+    // green test lands inside by a second is not measuring anything.
+    testTimeout: 60_000,
     coverage: {
       provider: "v8",
       reporter: ["text", "html", "lcov", "json-summary"],
