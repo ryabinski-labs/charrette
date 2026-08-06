@@ -1,0 +1,107 @@
+import { createServer, type Server } from "node:http";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { clearDashboard, liveDashboardUrl, recordDashboard } from "./dashboardLink.js";
+
+const made: string[] = [];
+const servers: Server[] = [];
+
+afterEach(async () => {
+  for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true });
+  for (const s of servers.splice(0)) await new Promise((resolve) => s.close(resolve));
+});
+
+/** A repo with the `.harness/` directory the run would have made. */
+function repo(): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "harness-link-"));
+  made.push(dir);
+  mkdirSync(path.join(dir, ".harness"));
+  return dir;
+}
+
+/**
+ * A stand-in dashboard. Answers /api/state the way the real one does — 200 for
+ * the right bearer token, 401 for anything else — and nothing else.
+ */
+async function fakeDashboard(): Promise<{ url: string; asked: string[] }> {
+  const token = "deadbeef";
+  const asked: string[] = [];
+  const server = createServer((req, res) => {
+    asked.push(req.url ?? "");
+    if (req.headers.authorization !== `Bearer ${token}`) return res.writeHead(401).end();
+    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ runs: [] }));
+  });
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as { port: number };
+  return { url: `http://127.0.0.1:${port}/#${token}`, asked };
+}
+
+describe("recording where the dashboard is", () => {
+  it("writes the url down, readable only by its owner", async () => {
+    const dir = repo();
+    const { url } = await fakeDashboard();
+    recordDashboard(dir, url);
+    expect(JSON.parse(readFileSync(path.join(dir, ".harness", "dashboard.json"), "utf8")).url).toBe(url);
+  });
+
+  it("says nothing when .harness/ cannot be written to", () => {
+    // A read-only checkout, a full disk. The link is a convenience; refusing to
+    // start a run over it would be the wrong trade.
+    const dir = mkdtempSync(path.join(tmpdir(), "harness-nolink-"));
+    made.push(dir);
+    expect(() => recordDashboard(dir, "http://127.0.0.1:4777/#x")).not.toThrow();
+  });
+
+  it("removes the record on the way out, and does not mind if it is already gone", () => {
+    const dir = repo();
+    recordDashboard(dir, "http://127.0.0.1:4777/#x");
+    clearDashboard(dir);
+    expect(existsSync(path.join(dir, ".harness", "dashboard.json"))).toBe(false);
+    expect(() => clearDashboard(dir)).not.toThrow();
+  });
+});
+
+describe("finding a dashboard that is actually up", () => {
+  it("returns the url when the server answers", async () => {
+    const dir = repo();
+    const { url, asked } = await fakeDashboard();
+    recordDashboard(dir, url);
+    expect(await liveDashboardUrl(dir)).toBe(url);
+    // It asked, rather than trusting the file.
+    expect(asked).toEqual(["/api/state"]);
+  });
+
+  it("returns nothing when no run ever started one here", async () => {
+    expect(await liveDashboardUrl(repo())).toBeNull();
+  });
+
+  it("returns nothing for a record with no url in it", async () => {
+    const dir = repo();
+    writeFileSync(path.join(dir, ".harness", "dashboard.json"), "{}\n");
+    expect(await liveDashboardUrl(dir)).toBeNull();
+  });
+
+  it("returns nothing, and forgets the record, when the process is gone", async () => {
+    // Killed, crashed, or the machine rebooted — the file outlives the server.
+    // A link that goes nowhere costs the operator a browser tab to discover.
+    const dir = repo();
+    const { url } = await fakeDashboard();
+    recordDashboard(dir, url);
+    for (const s of servers.splice(0)) await new Promise((resolve) => s.close(resolve));
+
+    expect(await liveDashboardUrl(dir)).toBeNull();
+    expect(existsSync(path.join(dir, ".harness", "dashboard.json"))).toBe(false);
+  });
+
+  it("returns nothing when the server is up but rejects the recorded token", async () => {
+    // A second dashboard took the port after the first died. Its token is not
+    // the one on file, so the link would land on a page that cannot load.
+    const dir = repo();
+    const { url } = await fakeDashboard();
+    recordDashboard(dir, url.replace(/#.*$/, "#staleandwrong"));
+    expect(await liveDashboardUrl(dir)).toBeNull();
+  });
+});

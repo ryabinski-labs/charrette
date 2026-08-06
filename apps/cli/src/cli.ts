@@ -17,13 +17,14 @@ import {
 } from "./defaults.js";
 import { TerminalChat } from "./chat.js";
 import { armCrashLog } from "./crashlog.js";
+import { clearDashboard, liveDashboardUrl, recordDashboard } from "./dashboardLink.js";
 import { notifyDone } from "./notify.js";
 
 /**
  * Start the dashboard for a run, or nothing when it is turned off. Kept in one
  * place so `run` and `resume` cannot drift apart on port handling.
  */
-function makeDashboardFactory(want: boolean, port: number | undefined): {
+function makeDashboardFactory(want: boolean, port: number | undefined, repoPath: string): {
   gateOverride?: (bus: Bus, store: Store) => GateHandler;
   connect: (controller: RunController) => void;
   start: () => Promise<string | null>;
@@ -39,9 +40,20 @@ function makeDashboardFactory(want: boolean, port: number | undefined): {
     // The dashboard is born inside makeController, before the controller exists;
     // feedback flows the other way (browser → controller), so it is wired after.
     connect: (controller) => dash?.attach(controller),
-    start: () => dash!.start(),
+    // Written down as well as printed: the banner scrolls away, and `harness
+    // status` in another terminal is where an operator looks for the run.
+    start: async () => {
+      const url = await dash!.start();
+      recordDashboard(repoPath, url);
+      return url;
+    },
+    // Guarded the same way `connect` is: a caller is free not to wire
+    // `gateOverride` into anything, and then there is no server to stop.
     stop: async () => {
-      if (dash) await dash.stop();
+      if (dash) {
+        await dash.stop();
+        clearDashboard(repoPath);
+      }
     },
   };
 }
@@ -493,7 +505,7 @@ export function buildProgram(): Command {
     .action(async (assignment: string | undefined, opts: RunOpts, cmd: Command) => {
       if (await repoBlocked(resolveRepoRoot(opts.repo))) return;
       const { repo, config, dashboard: wantDashboard, dashboardPort, chat: wantChat, banner } = resolveRun(cmd, opts, assignment);
-      const dash = makeDashboardFactory(wantDashboard, dashboardPort);
+      const dash = makeDashboardFactory(wantDashboard, dashboardPort, repo);
       const { controller, store } = makeController(repo, dash.gateOverride);
       // A new run forks from the base branch as it is right now. Another run whose
       // work is merged locally but not yet in that base is invisible to it — so the
@@ -553,7 +565,7 @@ export function buildProgram(): Command {
       const file = loadFileConfig(repo).config;
       const fromCli = (name: string) => cmd.getOptionValueSource(name) === "cli";
       const wantDashboard = fromCli("dashboard") ? opts.dashboard === true : file.dashboard ?? true;
-      const dash = makeDashboardFactory(wantDashboard, fromCli("port") ? port(opts.port!) : file.dashboardPort);
+      const dash = makeDashboardFactory(wantDashboard, fromCli("port") ? port(opts.port!) : file.dashboardPort, repo);
       const { controller, store } = makeController(repo, dash.gateOverride);
       dash.connect(controller);
       // Resumable = interrupted mid-run, or finished with parked tasks, cancelled
@@ -774,6 +786,49 @@ export function buildProgram(): Command {
           process.stdout.write("  pull requests: none — no task got far enough to open one.\n");
         }
       }
+      // Last, under everything it refers to. A live server is linked; otherwise
+      // the command that starts one, because "there is no dashboard" is not
+      // what the operator wants to know — they want the dashboard.
+      const live = await liveDashboardUrl(repo);
+      process.stdout.write(
+        live
+          ? `\ndashboard  ${live}   (the fragment is your auth token)\n`
+          : `\ndashboard  none running — \`harness dashboard\` serves this repo's runs\n`
+      );
+    });
+
+  program
+    .command("dashboard")
+    .description("browse this repo's runs in the dashboard, without starting or resuming anything")
+    .option("-r, --repo <path>", "target repo (default: the git repo containing the cwd)", process.cwd())
+    .option("--port <n>", "pin the port (default: the first free port from 4777)")
+    .action(async (opts: { repo: string; port?: string }) => {
+      // The dashboard was only ever reachable for the length of the run that
+      // served it, so the record of a $939 run became unbrowsable the moment it
+      // finished — every question about it answered by `harness status` and a
+      // SQLite file. Nothing about the page needs a run in flight: it reads the
+      // same store, and the event log outlives the process that wrote it.
+      const repo = resolveRepoRoot(opts.repo);
+      const { store, bus } = makeController(repo);
+      const dash = new Dashboard(store, bus, { port: opts.port === undefined ? undefined : port(opts.port), includeFinished: true });
+      const url = await dash.start();
+      recordDashboard(repo, url);
+      process.stdout.write(`\ndashboard  ${url}   (the fragment is your auth token)\n\nRead-only: no run is executing, so gates and feedback have nothing to reach.\nCtrl-C to stop.\n`);
+      // Nothing else to do — the server is the command. Hold the process until
+      // the operator ends it, and take the link record with us. Both handlers
+      // come off together: whichever signal arrives, the other must not be left
+      // behind holding a reference to a resolved promise.
+      await new Promise<void>((resolve) => {
+        const signals = ["SIGINT", "SIGTERM"] as const;
+        const done = () => {
+          for (const s of signals) process.off(s, done);
+          resolve();
+        };
+        for (const s of signals) process.on(s, done);
+      });
+      await dash.stop();
+      clearDashboard(repo);
+      process.stdout.write("dashboard stopped.\n");
     });
 
   program

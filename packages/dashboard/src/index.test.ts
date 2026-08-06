@@ -99,6 +99,50 @@ describe("port selection", () => {
   });
 });
 
+describe("which runs the page shows", () => {
+  const started: Dashboard[] = [];
+  afterEach(async () => {
+    for (const d of started.splice(0)) await d.stop();
+  });
+
+  /** One finished run and nothing else, which is what a repo looks like afterwards. */
+  function finishedRun(): Store {
+    const store = new Store(":memory:");
+    store.createRun({
+      id: "run1",
+      repoPath: tmpdir(),
+      assignment: "build a thing",
+      state: "CREATED",
+      prdPath: null,
+      planHash: null,
+      integrationBranch: "harness/run1/main",
+      config: RunConfig.parse({}),
+    });
+    for (const to of ["PLANNING", "PLAN_REVIEW", "EXECUTING", "INTEGRATING", "PR_REVIEW"] as RunState[]) {
+      store.transitionRun("run1", to);
+    }
+    return store;
+  }
+
+  async function runIds(store: Store, opts?: { includeFinished?: boolean }): Promise<string[]> {
+    const dash = new Dashboard(store, new Bus(store), opts);
+    started.push(dash);
+    const url = await dash.start();
+    const res = await fetch(new URL("/api/state", url), { headers: { authorization: `Bearer ${dash.token}`, connection: "close" } });
+    return ((await res.json()) as { runs: { id: string }[] }).runs.map((r) => r.id);
+  }
+
+  it("drops a run that has finished, because it is a view of work in flight", async () => {
+    expect(await runIds(finishedRun())).toEqual([]);
+  });
+
+  it("keeps it for `harness dashboard`, where the finished run is the whole subject", async () => {
+    // Nothing is executing when that command runs, so the open-runs view serves
+    // an empty page for the one thing the operator opened it to read.
+    expect(await runIds(finishedRun(), { includeFinished: true })).toEqual(["run1"]);
+  });
+});
+
 describe("linking issues and PRs", () => {
   const started: Dashboard[] = [];
   afterEach(async () => {
