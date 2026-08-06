@@ -442,6 +442,29 @@ export class RunController {
     await this.drive(runId, intake);
   }
 
+  /**
+   * Did this run fail before it ever produced a task?
+   *
+   * Such a run is not finished with, it is stuck: planning is the one phase
+   * whose failure leaves nothing built, nothing merged and nothing in flight, so
+   * there is no state a second attempt could talk over. What there is, is
+   * everything the operator already paid for — the intake conversation, the
+   * brief it became, the run's identity and config — and the only way to spend
+   * it was, until now, to not fail. Run f338b5c8 hit its account's usage limit
+   * three planner attempts in a row, ended `harness: fatal`, and `harness
+   * resume` answered "No run to resume", leaving the operator to start over and
+   * answer every intake question again.
+   *
+   * The pool now waits usage limits out, so the common cause of this is gone;
+   * the door stays because a planning phase can fail for reasons that are worth
+   * simply trying again — and a run that cannot be resumed is a run whose
+   * history is lost.
+   */
+  replannable(runId: string): boolean {
+    const run = this.store.getRun(runId);
+    return Boolean(run && run.state === "FAILED" && this.store.listTasks(runId).length === 0);
+  }
+
   /** Does a finished run still have work `resume` can pick up? */
   hasRecoverableWork(runId: string): boolean {
     const run = this.store.getRun(runId);
@@ -515,6 +538,13 @@ export class RunController {
    */
   private async reopen(runId: string): Promise<void> {
     const run = this.store.getRun(runId);
+    // A planning failure re-enters planning. The assignment it plans from is the
+    // brief intake already wrote, so the conversation is not repeated; what is
+    // repeated is the phase that failed.
+    if (run && this.replannable(runId)) {
+      this.store.transitionRun(runId, "PLANNING", "the operator resumed a run whose planning phase failed");
+      return;
+    }
     if (!run || run.state !== "PR_REVIEW") return;
     if (!run.config.baseBranch) {
       const branch = await this.currentBranch();
@@ -2853,6 +2883,16 @@ export class RunController {
       startedAt = Date.now();
       return guidance;
     };
+    /**
+     * Time the account spent out of quota is not time this task spent going
+     * nowhere. The pool waits limits out and continues the same session; the
+     * clock this loop judges progress on has to skip that wait, or a limit
+     * reached early in a task turns into a wall-clock escalation about slowness
+     * — asked of an operator who is not there, which parks the task.
+     */
+    const creditLimitWait = (ms: number) => {
+      startedAt += ms;
+    };
     for (;;) {
       task = this.store.getTask(runId, taskId)!;
       // Wall clock (taskWallClockMinutes): a task looping past its bound is a
@@ -2904,6 +2944,7 @@ export class RunController {
           env: isolationEnv(iso),
           reapOnEnd: true,
           budgetCheck: () => this.checkBudget(runId, taskId),
+          onLimitWait: creditLimitWait,
         });
         workerSummary = worker.resultText;
         workerSession = worker.sdkSessionId ?? workerSession;
@@ -3146,6 +3187,7 @@ export class RunController {
           env: isolationEnv(iso),
           reapOnEnd: true,
           budgetCheck: () => this.checkBudget(runId, taskId),
+          onLimitWait: creditLimitWait,
         });
         // A session cut off at its turn ceiling still returns a result message —
         // just not the JSON verdict. Parsing that books a FAIL against the

@@ -383,6 +383,7 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
     workerMaxTurns: file.workerMaxTurns,
     workerRespawnCap: file.workerRespawnCap,
     taskWallClockMinutes: file.taskWallClockMinutes,
+    usageLimitWaitMinutes: file.usageLimitWaitMinutes,
     // The flag wins over the file: it is the thing you reach for when the run
     // in front of you needs to get cheaper right now.
     models: { ...file.models, ...modelOverrides(opts.model) },
@@ -557,18 +558,24 @@ export function buildProgram(): Command {
       dash.connect(controller);
       // Resumable = interrupted mid-run, or finished with parked tasks, cancelled
       // tasks whose blockers have since merged, or merged work whose PRs never
-      // opened. FAILED and ABORTED runs stay closed.
+      // opened. ABORTED runs stay closed, and so does a FAILED run that got as
+      // far as producing tasks.
       // A run whose pull request is merged is resumable even with no task work
       // left: the deploy and the production check are what remain, and re-entering
       // verification is exactly how a fixed deploy gets noticed.
+      // A run that failed *in planning* has built nothing to talk over and holds
+      // an intake conversation worth more than the phase that failed, so it
+      // resumes by planning again rather than being started from scratch.
       const resumable = (id: string, state: string) =>
-        !["FAILED", "ABORTED", "DONE"].includes(state) &&
-        (state !== "PR_REVIEW" || controller.hasRecoverableWork(id) || controller.awaitingVerification(id));
+        state === "FAILED"
+          ? controller.replannable(id)
+          : !["ABORTED", "DONE"].includes(state) &&
+            (state !== "PR_REVIEW" || controller.hasRecoverableWork(id) || controller.awaitingVerification(id));
       let runId = runIdArg;
       if (!runId) {
         const pick = store.listRuns().find((r) => resumable(r.id, r.state));
         if (!pick) {
-          process.stdout.write("No run to resume: every run in this repo either finished cleanly or failed before producing work.\n");
+          process.stdout.write("No run to resume: every run in this repo either finished cleanly, was aborted, or failed with work already in flight.\n");
           return;
         }
         runId = pick.id;

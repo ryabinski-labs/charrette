@@ -712,6 +712,41 @@ describe("a task that keeps going and going", () => {
     expect(workerPrompts(specs).at(-1)).toMatch(/reviewed why this task is taking so long[\s\S]*docker compose ps/);
     expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
   });
+
+  it("does not count time the account was out of quota against that clock", async () => {
+    const dir = repo();
+    const realNow = Date.now.bind(Date);
+    let offset = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+    const { pool } = rolePool({
+      worker: (spec, nth) => {
+        if (nth === 1) {
+          // The quota window closed mid-session. The pool waited two hours and
+          // continued the same session — which is two hours of the account
+          // being unavailable, not two hours of this task going nowhere.
+          offset = 2 * 60 * 60 * 1000;
+          spec.onLimitWait!(offset);
+        }
+        commitInWorktree(spec.cwd, "work.txt", `attempt ${nth}\n`);
+        return "did the work";
+      },
+      advisor: () => "",
+      qa: (_spec, nth) => (nth === 1 ? QA_FAIL : QA_PASS),
+    });
+    const { controller, store, gates, runId } = executing({
+      repoPath: dir,
+      pool,
+      config: { taskWallClockMinutes: 30, qaIterationCap: 3 },
+      guidance: "carry on",
+    });
+
+    await controller.resume(runId);
+
+    // Nobody was interrupted about a task that had been asleep, and the work
+    // the wait preserved went on to merge.
+    expect(gates).toEqual([]);
+    expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
+  });
 });
 
 describe("a branch that passed QA but no longer merges", () => {

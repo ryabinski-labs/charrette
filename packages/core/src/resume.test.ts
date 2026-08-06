@@ -238,3 +238,66 @@ describe("resuming a finished run", () => {
     expect(controller.hasRecoverableWork(runId)).toBe(false);
   });
 });
+
+describe("resuming a run whose planning phase failed", () => {
+  /** A run that never got past planning: every planner attempt came back unusable. */
+  async function failedPlanning() {
+    const repoPath = repo();
+    const store = new Store(":memory:");
+    const bus = new Bus(store);
+    const pool = {
+      async run(): Promise<AgentResult> {
+        return { sessionId: `s${Math.random()}`, resultText: "not a plan", costUsd: 0, turns: 1, outcome: "done" };
+      },
+    } as unknown as AgentPool;
+    const controller = new RunController(store, bus, pool, noGithub, gates(), repoPath);
+    await expect(controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [] }))).rejects.toThrow(/planner attempts rejected/);
+    const runId = store.listRuns()[0]!.id;
+    expect(store.getRun(runId)!.state).toBe("FAILED");
+    return { repoPath, store, bus, runId };
+  }
+
+  it("plans again instead of making the operator start over", async () => {
+    // Run f338b5c8: three planner attempts died on the account's usage limit,
+    // the run ended `harness: fatal`, and `harness resume` said there was
+    // nothing to resume — so the only way on was a new run and the whole intake
+    // conversation a second time.
+    const { repoPath, store, bus, runId } = await failedPlanning();
+    expect(store.listTasks(runId)).toHaveLength(0);
+
+    let planning = 0;
+    const pool = {
+      async run(spec: AgentSpec): Promise<AgentResult> {
+        let resultText = "";
+        if (spec.role === "planner") resultText = planning++ === 0 ? DOCS : DAG;
+        else if (spec.role === "worker") {
+          writeFileSync(path.join(spec.cwd, "feature.txt"), "work\n");
+          gitIn(spec.cwd, "add", "-A");
+          gitIn(spec.cwd, "commit", "-m", "wip");
+          resultText = "worker done";
+        } else if (spec.role === "qa") resultText = '{"verdict":"PASS"}';
+        else resultText = '{"verdict":"PASS","summary":"all delivered"}';
+        return { sessionId: `s${Math.random()}`, resultText, costUsd: 0, turns: 1, outcome: "done" };
+      },
+    } as unknown as AgentPool;
+    const controller = new RunController(store, bus, pool, noGithub, gates(), repoPath);
+    expect(controller.replannable(runId)).toBe(true);
+
+    await controller.resume(runId);
+
+    // The same run, carried to the end — same id, same assignment, no second
+    // intake — with the phase that failed simply done again.
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
+    expect(controller.replannable(runId)).toBe(false);
+  });
+
+  it("leaves a run that failed with work already in flight closed", async () => {
+    const { repoPath, store, bus, runId } = await parkedRun();
+    // A run with tasks has state a re-plan would talk over; `resume` reaches it
+    // through the escalation gate instead, and this door stays shut.
+    store.db.prepare("UPDATE runs SET state = 'FAILED' WHERE id = ?").run(runId);
+    const controller = new RunController(store, bus, healedPool().pool, noGithub, gates(), repoPath);
+    expect(controller.replannable(runId)).toBe(false);
+  });
+});

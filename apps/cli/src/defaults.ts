@@ -123,6 +123,11 @@ export const FileConfig = z
     workerMaxTurns: z.number().int().min(20).max(400).optional(),
     workerRespawnCap: z.number().int().min(1).max(3).optional(),
     taskWallClockMinutes: z.number().int().min(5).optional(),
+    /**
+     * How long a run waits out the account's usage limit before giving up
+     * (default six hours). `0` fails the moment the quota window closes.
+     */
+    usageLimitWaitMinutes: z.number().int().min(0).max(7 * 24 * 60).optional(),
     models: z
       .object({
         intake: z.string().optional(),

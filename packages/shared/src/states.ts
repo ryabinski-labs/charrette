@@ -83,7 +83,13 @@ export const RUN_TRANSITIONS: Record<RunState, RunState[]> = {
   DONE: [],
   PAUSED: ["INTAKE", "PLANNING", "EXECUTING", "INTEGRATING", "ABORTED"],
   BUDGET_HOLD: ["EXECUTING", "INTEGRATING", "ABORTED"],
-  FAILED: [],
+  // FAILED -> PLANNING: a run that died before it produced a single task can be
+  // planned again. Everything it has is still worth something — the intake
+  // conversation the operator sat through, the brief it became — and the
+  // alternative is a new run that asks them all of it a second time. Only from a
+  // planning failure: a run that failed with work in flight has state a re-plan
+  // would talk over, and `resume` has other doors for that.
+  FAILED: ["PLANNING"],
   ABORTED: [],
 };
 

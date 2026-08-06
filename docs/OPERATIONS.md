@@ -607,6 +607,7 @@ Run configuration is a zod-validated `RunConfig`
 | `workerMaxTurns` | `120` | — | ✅ | turns before the SDK cuts a worker off. A session that hits it is the most expensive kind of failure — it dies having done the most work — so hitting it raises the ceiling **for the whole run**, not just that task: the repository is the same size for all of them. |
 | `qaMaxTurns` | `90` | — | ✅ | the same knob for QA, raised the same way. A QA session that runs out of turns never writes its verdict. |
 | `taskWallClockMinutes` | `45` | — | ✅ | a task looping this long without being accepted opens a gate. Answering **any** gate re-arms the clock, so the bound measures unattended time rather than time since dispatch. |
+| `usageLimitWaitMinutes` | `360` | — | ✅ | how long **one session** may sleep waiting for your account's usage limit to reset. A quota window closing kills every session in flight at once ("You've hit your session limit · resets 8:20pm") and is not a fault in the work, so the pool waits it out and continues the same session — same conversation, same bill, no attempt or respawn spent on it. Per session rather than per run, so an overnight run survives several outages of this length. Past the bound the failure is reported as it always was; `0` restores that immediately. |
 | `models.intake` | `claude-opus-5` | — | ✅ | this one talks to you; question quality is the whole value. **Anthropic only** — see [Using other providers](#using-other-providers) |
 | `models.planner` | `claude-opus-5` | — | ✅ | planning quality dominates run cost efficiency |
 | `models.worker` | `claude-sonnet-5` | — | ✅ | |
@@ -1422,10 +1423,31 @@ printed `PRs opened; human review on GitHub` unconditionally here — that messa
 was wrong, not a sign that the PRs went missing.
 
 **`harness resume` says there is nothing to resume**
-The run is already in a terminal state (`PR_REVIEW`, `FAILED`, `ABORTED`) and no
-state machine will move it again. Resume is for a run interrupted mid-flight. A
-parked task's work is committed on its own `harness/<runId>/<taskId>` branch —
-take it forward by hand, or start a fresh run now that you know what stalled.
+The run is already in a terminal state (`PR_REVIEW` with nothing recoverable,
+`ABORTED`, or `FAILED` with work already in flight) and no state machine will
+move it again. Resume is for a run interrupted mid-flight. A parked task's work
+is committed on its own `harness/<runId>/<taskId>` branch — take it forward by
+hand, or start a fresh run now that you know what stalled.
+
+A run that failed *in planning* is the exception: it built nothing to talk over
+and still holds the intake conversation you sat through, so `harness resume`
+plans it again under the same run id rather than making you answer everything a
+second time.
+
+**The run went quiet: "the account is out of quota — waiting …"**
+Your Claude plan's usage window closed. Every session in flight dies at the same
+moment with the same sentence, and the only remedy is time, so the harness sleeps
+until the reset the message quoted and then continues each session from where it
+stopped — the same conversation, the same bill, and no attempt, respawn or QA
+iteration spent on it. Nothing is required of you; leave it running. A session
+gives up and reports the failure once it has slept `usageLimitWaitMinutes`
+(default six hours), which is what a weekly limit will usually reach. That bound
+is per session, so a long run can sit out more than one outage. Set it to `0` to
+fail immediately instead.
+
+The one thing that does not survive the pause is whatever the agent had running
+in its worktree: the sweep that ends every session kills it, and the resumed
+session is told so and starts it again.
 
 **A task is `NEEDS_HUMAN` and the card does not say why**
 It should: the reason is written to the task when it parks, and the dashboard
