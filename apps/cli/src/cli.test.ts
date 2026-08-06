@@ -38,6 +38,7 @@ const h = vi.hoisted(() => {
     regroupPrs: vi.fn(async () => null as unknown),
     hasRecoverableWork: vi.fn(() => false),
     awaitingVerification: vi.fn(() => false),
+    replannable: vi.fn(() => false),
   };
   const dashboardMethods = {
     start: vi.fn(async () => "http://localhost:4777/#tok"),
@@ -221,6 +222,7 @@ beforeEach(() => {
   h.controllerMethods.regroupPrs.mockResolvedValue(null);
   h.controllerMethods.hasRecoverableWork.mockReturnValue(false);
   h.controllerMethods.awaitingVerification.mockReturnValue(false);
+  h.controllerMethods.replannable.mockReturnValue(false);
   h.dashboardMethods.start.mockResolvedValue("http://localhost:4777/#tok");
   h.dashboardMethods.stop.mockResolvedValue(undefined);
 
@@ -1027,6 +1029,28 @@ describe("harness resume", () => {
     await cli("resume", "--repo", "/repo", "--no-dashboard");
 
     expect(h.controllerMethods.resume).toHaveBeenCalledWith("run-pr", undefined);
+  });
+
+  it("treats a run that failed in planning as resumable", async () => {
+    // The state run f338b5c8 was stuck in: FAILED before it produced a task,
+    // holding an intake conversation the operator was otherwise going to have
+    // to sit through again. A FAILED run with work in flight still stays shut.
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-planless", state: "FAILED", assignment: "build the thing" }]);
+    h.controllerMethods.replannable.mockReturnValue(true);
+
+    await cli("resume", "--repo", "/repo", "--no-dashboard");
+
+    expect(printed()).toContain("Resuming run run-planless [FAILED]");
+    expect(h.controllerMethods.resume).toHaveBeenCalledWith("run-planless", undefined);
+  });
+
+  it("leaves a run that failed with work in flight closed", async () => {
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-failed", state: "FAILED", assignment: "build the thing" }]);
+
+    await cli("resume", "--repo", "/repo", "--no-dashboard");
+
+    expect(printed()).toContain("No run to resume");
+    expect(h.controllerMethods.resume).not.toHaveBeenCalled();
   });
 
   it("treats a PR_REVIEW run awaiting verification as resumable", async () => {

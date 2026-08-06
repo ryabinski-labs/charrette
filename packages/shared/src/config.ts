@@ -168,6 +168,27 @@ export const RunConfig = z.object({
   workerMaxTurns: z.number().int().min(20).max(400).default(120),
   workerRespawnCap: z.number().int().min(1).max(3).default(3),
   taskWallClockMinutes: z.number().int().min(5).default(45),
+  /**
+   * How long a single agent session may spend waiting for the account's usage
+   * limit to reset before it gives up and reports the failure.
+   *
+   * Per session, not per run: the limit is account-wide, so a run long enough to
+   * meet two quota windows would have its second one refused by a budget the
+   * first had spent. What this bounds is how long any one session is allowed to
+   * go quiet; a long run can survive several outages, each of them this long.
+   *
+   * A quota window closing is not a fault in the work: every session in flight
+   * dies at once with "You've hit your session limit · resets 8:20pm", and the
+   * only remedy is time. Read as an ordinary error it ends runs — three planner
+   * attempts inside one second, `harness: fatal`, and an intake conversation the
+   * operator sat through thrown away with it.
+   *
+   * Six hours covers a five-hour window reached at its very start, with slack
+   * for a message quoting a reset the account then honours a little late. Longer
+   * suits an operator who leaves runs going overnight and wants a weekly limit
+   * slept through too; `0` restores the old behaviour of failing immediately.
+   */
+  usageLimitWaitMinutes: z.number().int().min(0).max(7 * 24 * 60).default(360),
   models: ModelRouting.default({}),
   budget: Budget.default({}),
   /**

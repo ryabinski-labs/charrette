@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import { query, type HookInput, type HookJSONOutput, type Options, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { AgentRole, providerFor } from "@harness/shared";
 import { toolLoop, unsupportedSpec, type PromptSource } from "./toolLoop.js";
 import { Bus } from "./bus.js";
 import { Store } from "./store.js";
-import { costUsd } from "./budget.js";
+import { BudgetExceeded, costUsd } from "./budget.js";
+import { humanWait, limitWaitMs, usageLimitOf, type UsageLimit } from "./usageLimit.js";
 import { harnessBuild } from "./build.js";
 import { infraGuardHook } from "./infraGuard.js";
 import { reapUnder } from "./reaper.js";
@@ -161,6 +163,17 @@ export interface AgentSpec {
    * half-finished task. Throws BudgetExceeded to abort.
    */
   budgetCheck?: () => void | Promise<void>;
+  /**
+   * Called with the milliseconds this session spent waiting for the account's
+   * usage limit to reset, once per wait.
+   *
+   * Time the harness spends waiting for quota is not time the task spent going
+   * nowhere, and every wall clock the caller keeps has to be told so. Without
+   * it, a five-hour limit reached at minute 3 of a task comes back to a
+   * 45-minute wall-clock gate — an escalation about slowness, raised against a
+   * task that has been asleep, to an operator who walked away hours ago.
+   */
+  onLimitWait?: (ms: number) => void;
 }
 
 export interface AgentResult {
@@ -194,6 +207,25 @@ const STALL_ABORT_MS = BASH_TIMEOUT_MS + STALL_GRACE_MS;
 
 /** The SDK's own default, named so the wrap-up trigger and the option agree. */
 const DEFAULT_MAX_TURNS = 100;
+
+/**
+ * What a session is told when it comes back from a usage-limit wait.
+ *
+ * It is the same conversation — everything it had read, run and decided is
+ * still in its context — so the one thing worth saying is that time passed and
+ * the work it had already done is still there. Replaying the original prompt
+ * instead reads as a fresh assignment and is how a resumed worker starts the
+ * task over on top of its own committed changes.
+ *
+ * The one thing that does *not* survive is what was running: the interrupted
+ * attempt's sweep (`reapOnEnd`) kills everything left in the worktree, so an
+ * agent told only that its context still stands will keep addressing a stack it
+ * brought up hours ago and read the connection refusals as product bugs. Said
+ * plainly, because the transcript above it is full of evidence that it worked.
+ */
+const LIMIT_CONTINUE_PROMPT =
+  "[HARNESS] Your session was cut off part-way through because the account hit its usage limit. The limit has reset and this is the same conversation, continued — everything you had already established still stands. Before doing anything, check what you had already finished (git log and git status in your working directory, the files you were editing); the last thing you were doing may already be done. One thing did not survive the pause: anything you had left running in the background — dev server, watcher, database, containers — was stopped when the session was cut off, so start what you need again rather than assuming it is still up. Then carry on from exactly there and finish the task you were given, ending in the output format you were originally asked for.";
+
 
 /**
  * Why the model stopped talking, when it says. Absent on the tool-loop
@@ -331,7 +363,11 @@ export class PromptStream {
  * streams messages onto the bus, books usage into the ledger (PRD §11.1 Agent Pool).
  */
 export class AgentPool {
-  constructor(private store: Store, private bus: Bus) {}
+  /**
+   * `sleep` is injectable so the usage-limit wait can be tested without
+   * spending one. Nothing else in the pool measures time it was not handed.
+   */
+  constructor(private store: Store, private bus: Bus, private sleep: (ms: number) => Promise<unknown> = delay) {}
 
   /**
    * Live sessions accepting mid-flight operator feedback. Task agents key as
@@ -352,7 +388,111 @@ export class AgentPool {
     return { sessionId: hit.sessionId, role: hit.role };
   }
 
+  /**
+   * Run one agent session, waiting out the account's usage limits.
+   *
+   * A quota window closing is the one failure that is neither the agent's doing
+   * nor fixable by anything the caller could decide: retrying now fails
+   * identically, and reporting it upward spends an attempt, a respawn or a whole
+   * run on a wall that goes away by itself. So it is absorbed here, at the one
+   * place every role passes through, and the caller is handed a session that
+   * either answered or failed for a reason worth acting on.
+   *
+   * The wait continues the *same* session — same row, same ledger, same handle
+   * for live operator feedback — and, where the transport can, resumes the same
+   * conversation, so an agent that was halfway through a task picks up from what
+   * it already knows rather than paying to rediscover it. Bounded by
+   * `usageLimitWaitMinutes`: past that the error comes back as it always did.
+   */
   async run(spec: AgentSpec): Promise<AgentResult> {
+    const sessionId = spec.sessionId ?? randomUUID();
+    let budget = this.limitWaitBudgetMs(spec.runId);
+    let waits = 0;
+    /** The last attempt's result, when there is a conversation to resume. */
+    let carry: AgentResult | undefined;
+    for (let attempt = 0; ; attempt++) {
+      let result: AgentResult;
+      try {
+        result = await this.session(this.attemptSpec(spec, sessionId, carry), sessionId, attempt);
+      } catch (e) {
+        // A limit can also arrive as a throw — the session dies without ever
+        // producing a result. There is no handle to resume from that, so the
+        // retry starts the session over rather than continuing it.
+        if (e instanceof BudgetExceeded) throw e;
+        const limit = usageLimitOf(String(e));
+        if (!limit) throw e;
+        const slept = await this.waitOutLimit(spec, sessionId, limit, waits++, budget);
+        if (slept === null) throw e;
+        budget -= slept;
+        carry = undefined;
+        continue;
+      }
+      const limit = result.outcome === "error" ? usageLimitOf(result.errorDetail) : null;
+      if (!limit) return result;
+      const slept = await this.waitOutLimit(spec, sessionId, limit, waits++, budget);
+      // Out of patience: hand back the error the caller would have seen anyway.
+      if (slept === null) return result;
+      budget -= slept;
+      carry = result;
+      // Every way out of this loop is a return or a throw above: a wait that is
+      // refused ends it, and the budget only shrinks.
+      /* v8 ignore next */
+    }
+  }
+
+  /**
+   * The spec for one attempt. The first is the caller's, verbatim; a retry after
+   * a limit re-attaches to the conversation the limit interrupted where the
+   * transport keeps one — the OpenAI and Gemini loops are stateless, so those
+   * start the session over with the original prompt, as they do everywhere else.
+   */
+  private attemptSpec(spec: AgentSpec, sessionId: string, carry: AgentResult | undefined): AgentSpec {
+    const resumable = carry?.sdkSessionId && providerFor(spec.model) === "anthropic";
+    if (!resumable) return { ...spec, sessionId };
+    return { ...spec, sessionId, resume: carry!.sdkSessionId, prompt: LIMIT_CONTINUE_PROMPT };
+  }
+
+  /**
+   * Sleep until the quota is back, or refuse to. Returns the milliseconds
+   * waited, or null when the wait is longer than this run allows — the caller
+   * then reports the failure exactly as it did before any of this existed.
+   */
+  private async waitOutLimit(spec: AgentSpec, sessionId: string, limit: UsageLimit, priorWaits: number, budget: number): Promise<number | null> {
+    const ms = limitWaitMs(limit, priorWaits);
+    const say = (text: string) =>
+      this.bus.publish({ type: "agent.log", runId: spec.runId, taskId: spec.taskId, sessionId, text, ts: Date.now() });
+    if (ms > budget) {
+      say(
+        `the account is out of quota — ${limit.said} — and waiting ${humanWait(ms)} for it is more than this run allows ` +
+          `(${humanWait(Math.max(0, budget))} of usageLimitWaitMinutes left). Giving the failure to the caller.`
+      );
+      return null;
+    }
+    say(
+      `the account is out of quota — ${limit.said}. Waiting ${humanWait(ms)} and then continuing this ${spec.role} session ` +
+        `from where it stopped. Nothing is lost and nothing is retried against it: a limit is not a verdict on the work.`
+    );
+    // Credited before the sleep, not after: a wall clock the caller keeps is
+    // read by other tasks while this one is asleep.
+    spec.onLimitWait?.(ms);
+    await this.sleep(ms);
+    say(`the usage limit should have reset — continuing the ${spec.role} session`);
+    return ms;
+  }
+
+  /**
+   * How long *one* session may spend asleep on quota, however many limits it
+   * hits. Per session and not per run on purpose: a limit is account-wide, so a
+   * run long enough to meet two quota windows would otherwise have its second
+   * one refused by a budget the first spent — the run would die of the outage it
+   * had already survived once. The bound that matters is the one on a single
+   * session going quiet, and that is this one.
+   */
+  private limitWaitBudgetMs(runId: string): number {
+    return (this.store.getRun(runId)?.config.usageLimitWaitMinutes ?? 0) * 60_000;
+  }
+
+  private async session(spec: AgentSpec, sessionId: string, attempt: number): Promise<AgentResult> {
     // Refuse an impossible pairing before the session row exists, so it reads
     // as a configuration error at the top of the run rather than as an agent
     // that behaved oddly halfway through one.
@@ -364,15 +504,30 @@ export class AgentPool {
       );
     }
 
-    const sessionId = spec.sessionId ?? randomUUID();
     const abort = new AbortController();
     const now = Date.now();
-    this.store.db
-      // The build is stamped here rather than on the run, because a run outlives
-      // the process that started it: `resume` picks it up under whatever is
-      // installed then, and only the session knows which fixes it could have had.
-      .prepare("INSERT INTO sessions (id, runId, taskId, role, model, state, startedAt, build) VALUES (?,?,?,?,?,?,?,?)")
-      .run(sessionId, spec.runId, spec.taskId ?? null, spec.role, spec.model, "running", now, harnessBuild());
+    if (attempt === 0) {
+      this.store.db
+        // The build is stamped here rather than on the run, because a run outlives
+        // the process that started it: `resume` picks it up under whatever is
+        // installed then, and only the session knows which fixes it could have had.
+        .prepare("INSERT INTO sessions (id, runId, taskId, role, model, state, startedAt, build) VALUES (?,?,?,?,?,?,?,?)")
+        .run(sessionId, spec.runId, spec.taskId ?? null, spec.role, spec.model, "running", now, harnessBuild());
+    } else {
+      // Continuing after a usage-limit wait reopens the row it already has
+      // rather than opening a second one. The ledger is keyed by session id and
+      // `endSession` settles the row from it, so a new row would split one
+      // session's bill in two; the caller that pre-allocated the id (intake,
+      // which follows its agent's prose by filtering on it) would also stop
+      // hearing anything the moment the account ran out of quota.
+      this.store.db.prepare("UPDATE sessions SET state = 'running', endedAt = NULL WHERE id = ?").run(sessionId);
+    }
+    // Replies this session made before the wait. `turns` below counts this
+    // attempt only, and both writers of the column add the two: written flat, a
+    // worker forty turns into a task when the quota window closed comes back
+    // reading "3 replies" on the dashboard, which is the row the postmortem
+    // trusts to say which sessions did the most and returned the least.
+    const priorTurns = (this.store.db.prepare("SELECT turns FROM sessions WHERE id = ?").get(sessionId) as { turns: number }).turns;
     this.bus.publish({ type: "agent.spawned", runId: spec.runId, taskId: spec.taskId, sessionId, role: spec.role, model: spec.model, ts: now });
 
     // A re-dispatched worker normally re-attaches to its own conversation. The
@@ -514,7 +669,7 @@ export class AgentPool {
           abort.abort();
           killedByBudget = true;
           bookUnbooked();
-          this.endSession(spec, sessionId, turns, cost, "killed", String(e));
+          this.endSession(spec, sessionId, priorTurns + turns, cost, "killed", String(e));
           throw e;
         }
         if (message.type === "harness_note") {
@@ -618,7 +773,7 @@ export class AgentPool {
               }
             }
           }
-          this.store.db.prepare("UPDATE sessions SET turns = ?, lastHeartbeatAt = ? WHERE id = ?").run(turns, Date.now(), sessionId);
+          this.store.db.prepare("UPDATE sessions SET turns = ?, lastHeartbeatAt = ? WHERE id = ?").run(priorTurns + turns, Date.now(), sessionId);
         } else if (message.type === "result") {
           const m = message as {
             subtype?: string;
@@ -712,7 +867,7 @@ export class AgentPool {
       } else {
         const stallNote = stalledMinutes ? `session watchdog: no output for ${stalledMinutes} minutes, aborted as hung. ` : "";
         const detail = stallNote + (stderrTail ? `${String(e)}\nstderr: ${stderrTail.trim().slice(-800)}` : String(e));
-        this.endSession(spec, sessionId, turns, cost, "interrupted", detail);
+        this.endSession(spec, sessionId, priorTurns + turns, cost, "interrupted", detail);
         throw new Error(detail, { cause: e });
       }
     } finally {
@@ -721,7 +876,7 @@ export class AgentPool {
       if (liveKey && this.live.get(liveKey)?.stream === stream) this.live.delete(liveKey);
       await this.reap(spec, sessionId);
     }
-    this.endSession(spec, sessionId, turns, cost, abnormal ? "error" : "done", abnormal);
+    this.endSession(spec, sessionId, priorTurns + turns, cost, abnormal ? "error" : "done", abnormal);
     return {
       sessionId,
       sdkSessionId,
