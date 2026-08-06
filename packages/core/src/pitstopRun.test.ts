@@ -167,7 +167,7 @@ describe("stopping at an epic boundary", () => {
     expect(stops.length).toBe(2);
     const first = stops[0]!;
     expect(first.reason).toBe('the "Sign-in" epic is finished');
-    expect(first.demo.started).toBe(true);
+    expect(first.demo!.started).toBe(true);
     expect(first.markdown).toContain("**It runs.** pnpm dev on :5173");
     expect(first.markdown).toContain("payments — no test keys");
     // The point of the whole feature: at the first stop the map has not been
@@ -216,7 +216,7 @@ describe("stopping at an epic boundary", () => {
 
     await controller.startRun("build a thing", RunConfig.parse(BASE));
 
-    expect(stops[0]!.demo.artifacts).toEqual([SIGNIN_EVIDENCE]);
+    expect(stops[0]!.demo!.artifacts).toEqual([SIGNIN_EVIDENCE]);
     expect(stops[0]!.markdown).toContain(`- \`${SIGNIN_EVIDENCE.file}\` — ${SIGNIN_EVIDENCE.shows}`);
   });
 
@@ -249,10 +249,10 @@ describe("stopping at an epic boundary", () => {
     await controller.startRun("build a thing", RunConfig.parse(BASE));
 
     const stop = stops[0]!;
-    expect(stop.demo.commands).toEqual([{ command: "test -f README.md", shows: "the demo ran against the merged tree" }]);
+    expect(stop.demo!.commands).toEqual([{ command: "test -f README.md", shows: "the demo ran against the merged tree" }]);
     expect(stop.markdown).toContain("Re-run by the harness and confirmed:");
     expect(stop.markdown).toContain("- `test -f README.md` — the demo ran against the merged tree");
-    const unchecked = stop.demo.couldNotReach.join("\n");
+    const unchecked = stop.demo!.couldNotReach.join("\n");
     expect(unchecked).toContain("the suite is green — not verified: `false` re-run by the harness and it failed");
     expect(unchecked).toContain("repeat the write");
     // The demo's own answer is not deleted, only moved: the operator still sees
@@ -276,8 +276,8 @@ describe("stopping at an epic boundary", () => {
 
     // Six confirmed and the seventh named as unverified — a truncated list that
     // reads as a complete one is the failure this whole gate exists to stop.
-    expect(stops[0]!.demo.commands.map((c) => c.command)).toEqual(claims.slice(0, 6).map((c) => c.command));
-    expect(stops[0]!.demo.couldNotReach.join("\n")).toContain("claim 7 — not verified: `echo proof-7` the harness re-runs at most 6 commands per pit stop");
+    expect(stops[0]!.demo!.commands.map((c) => c.command)).toEqual(claims.slice(0, 6).map((c) => c.command));
+    expect(stops[0]!.demo!.couldNotReach.join("\n")).toContain("claim 7 — not verified: `echo proof-7` the harness re-runs at most 6 commands per pit stop");
     expect(
       events.some((e) => e.type === "agent.log" && e.text === "the demo claimed 7 commands; the harness re-ran the first 6 and reported the rest as unverified")
     ).toBe(true);
@@ -338,7 +338,7 @@ describe("a demo that goes wrong", () => {
 
     await controller.startRun("build a thing", RunConfig.parse(BASE));
 
-    expect(stops[0]!.demo.started).toBe(false);
+    expect(stops[0]!.demo!.started).toBe(false);
     expect(stops[0]!.markdown).toContain("session died at the turn ceiling");
     expect(stops[0]!.markdown).toContain("there is no demo for this pit stop");
   });
@@ -350,7 +350,7 @@ describe("a demo that goes wrong", () => {
 
     await controller.startRun("build a thing", RunConfig.parse(BASE));
 
-    expect(stops[0]!.demo.started).toBe(false);
+    expect(stops[0]!.demo!.started).toBe(false);
   });
 
   it("puts the worktree back however the demo left it", async () => {
@@ -427,7 +427,7 @@ describe("evidence that does not survive being looked at", () => {
     expect(demos[1]!.prompt).toContain("not written to the artifact directory");
     expect(demos[1]!.maxTurns).toBeLessThan(RunConfig.parse(BASE).pitStop.demoMaxTurns);
     // And what the operator finally sees is the file that exists.
-    expect(stops[0]!.demo.artifacts).toEqual([SIGNIN_EVIDENCE]);
+    expect(stops[0]!.demo!.artifacts).toEqual([SIGNIN_EVIDENCE]);
   });
 
   it("strikes what is still not evidence, and files it under what was not checked", async () => {
@@ -438,7 +438,7 @@ describe("evidence that does not survive being looked at", () => {
     await controller.startRun("build a thing", RunConfig.parse({ ...BASE, pitStop: { every: { tasks: 2 } } }));
 
     const stop = stops[0]!;
-    expect(stop.demo.artifacts).toEqual([]);
+    expect(stop.demo!.artifacts).toEqual([]);
     expect(stop.markdown).not.toContain("## Evidence");
     // Struck, not deleted: an operator shown neither the file nor the failure
     // assumes the surface was covered.
@@ -462,8 +462,8 @@ describe("evidence that does not survive being looked at", () => {
     await controller.startRun("build a thing", RunConfig.parse({ ...BASE, pitStop: { every: { tasks: 2 } } }));
 
     // Lenient at the parser — the rest of the report survives — strict at the gate.
-    expect(stops[0]!.demo.started).toBe(true);
-    expect(stops[0]!.demo.artifacts).toEqual([]);
+    expect(stops[0]!.demo!.started).toBe(true);
+    expect(stops[0]!.demo!.artifacts).toEqual([]);
     expect(stops[0]!.markdown).toContain("no statement of what it shows");
   });
 
@@ -479,7 +479,7 @@ describe("evidence that does not survive being looked at", () => {
 
     await controller.startRun("build a thing", RunConfig.parse({ ...BASE, pitStop: { every: { tasks: 2 } } }));
 
-    expect(stops[0]!.demo.artifacts).toEqual([]);
+    expect(stops[0]!.demo!.artifacts).toEqual([]);
     expect(stops[0]!.markdown).toContain("not written to the artifact directory");
   });
 
@@ -491,7 +491,7 @@ describe("evidence that does not survive being looked at", () => {
     await controller.startRun("build a thing", RunConfig.parse({ ...BASE, pitStop: { every: { tasks: 2 } } }));
 
     expect(specs.filter((s) => s.role === "demo").length).toBe(1);
-    expect(stops[0]!.demo.started).toBe(true);
+    expect(stops[0]!.demo!.started).toBe(true);
   });
 
   it("keeps the first report when the retake comes back as something else", async () => {
@@ -503,9 +503,9 @@ describe("evidence that does not survive being looked at", () => {
 
     // The journeys are real findings; losing them to a failed retake of one
     // screenshot would be a worse trade than the blank file was.
-    expect(stops[0]!.demo.started).toBe(true);
-    expect(stops[0]!.demo.journeys.map((j) => j.name)).toEqual(["Sign in"]);
-    expect(stops[0]!.demo.artifacts).toEqual([]);
+    expect(stops[0]!.demo!.started).toBe(true);
+    expect(stops[0]!.demo!.journeys.map((j) => j.name)).toEqual(["Sign in"]);
+    expect(stops[0]!.demo!.artifacts).toEqual([]);
   });
 });
 
@@ -527,6 +527,28 @@ describe("what the operator decides", () => {
     expect(mapWorker.prompt).toContain("drop the offline mode");
     const resolved = events.find((e) => e.type === "run.pitstop_resolved")!;
     expect(resolved).toMatchObject({ action: "redirect", tasks: ["task-b"] });
+  });
+
+  it("records what they said in full, however long they said it", async () => {
+    const dir = repo();
+    const { pool } = rolePool(ROLES);
+    // Comfortably past the 2000-character cap this used to be cut at, with the
+    // tail marked so a truncation shows up as a missing ending rather than as
+    // a length that happens to look plausible. A reviewer's decision really can
+    // run this long: the one that motivated this fix was three numbered
+    // questions, and the cap severed the third.
+    const long = `${"the third question matters. ".repeat(120)}AND HERE IS THE END OF IT`;
+    const { controller, events } = build({
+      repoPath: dir,
+      pool,
+      decide: (stop) => (stop.number === 1 ? { action: "redirect", feedback: long } : { action: "continue", feedback: "" }),
+    });
+
+    await controller.startRun("build a thing", RunConfig.parse(BASE));
+
+    const resolved = events.flatMap((e) => (e.type === "run.pitstop_resolved" && e.action === "redirect" ? [e] : []))[0]!;
+    expect(resolved.feedback).toBe(long);
+    expect(resolved.feedback).toContain("AND HERE IS THE END OF IT");
   });
 
   it("parks the run when they want to think, and resume picks it up where it was", async () => {
@@ -555,6 +577,169 @@ describe("what the operator decides", () => {
     // The epic demoed before the pause is not demoed again after it — the
     // trigger's memory is the event log, so it survives the process.
     expect(stops.filter((s) => s.reason.includes("Sign-in")).length).toBe(1);
+  });
+
+  /**
+   * The gap run 6fe4ba37 fell into. It parked at a pit stop with 3 tasks queued
+   * and 39 cancelled at an earlier re-plan. `resume` used to go straight back to
+   * dispatching, so the only thing it could do was build the 3 — the operator
+   * had no point at which to say "those 39 are the work I actually want", short
+   * of abandoning 167 commits of context and starting a new run.
+   */
+  describe("resuming a parked run", () => {
+    it("asks before it dispatches anything, and shows what left the plan", async () => {
+      const dir = repo();
+      const { pool, specs } = rolePool(ROLES);
+      let thinking = true;
+      const seen: PitStop[] = [];
+      let seenAt = () => {};
+      const { controller, store } = build({
+        repoPath: dir,
+        pool,
+        decide: (stop) => {
+          seen.push(stop);
+          seenAt();
+          seenAt = () => {};
+          return thinking ? { action: "stop", feedback: "" } : { action: "continue", feedback: "" };
+        },
+      });
+
+      const runId = await controller.startRun("build a thing", RunConfig.parse(BASE));
+      expect(store.getRun(runId)!.state).toBe("PAUSED");
+
+      thinking = false;
+      const before = specs.length;
+      // Everything the run spawned between `resume` and the question landing.
+      // Read inside the callback, because the run carries on afterwards and
+      // opens an ordinary demo-backed stop at the next epic boundary.
+      let spawnedBeforeAsking: string[] = [];
+      seen.length = 0;
+      seenAt = () => (spawnedBeforeAsking = specs.slice(before).map((s) => s.role));
+      await controller.resume(runId);
+
+      // The stop that resume opens is the first thing that happens, and it is
+      // the one with no demo behind it.
+      const resumeStop = seen[0]!;
+      expect(resumeStop.reason).toBe("you resumed a run that was parked at a pit stop");
+      expect(resumeStop.demo).toBeNull();
+      expect(resumeStop.reviews).toEqual([]);
+      expect(resumeStop.markdown).toContain("**Nothing was run for this stop.**");
+      // Free: no demo agent and no reviewer ran before the operator was asked,
+      // which is what makes it safe to put in front of a run at its cap. Nor
+      // did any worker — the queue is untouched at the moment they are asked.
+      expect(spawnedBeforeAsking).toEqual([]);
+      expect(resumeStop.stopCostUsd).toBe(0);
+      // And the queue it shows is the real one — task-b never ran.
+      expect(resumeStop.upcoming).toEqual(["The map (task-b)"]);
+      expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    });
+
+    it("re-plans the work back into the run when they ask it to", async () => {
+      const dir = repo();
+      // What the planner returns the second time it is asked: the queued task is
+      // gone and a different one takes its place.
+      const replanned =
+        "```json\n" +
+        JSON.stringify({
+          epics: [{ id: "epic-two", title: "The map", summary: "s" }],
+          tasks: [
+            { id: "task-c", epicId: "epic-two", title: "The engine", spec: "s", acceptanceCriteria: ["x"], dependsOn: [], touchedPaths: [], completionProbe: "", estimatedSize: "S" as const },
+          ],
+        }) +
+        "\n```";
+      // The re-planner is handed Read/Glob/Grep just as the PRD pass is, so the
+      // two are told apart by the operator's words being in the prompt.
+      let replans = 0;
+      const { pool } = rolePool({
+        ...ROLES,
+        planner: (s: AgentSpec) => {
+          if (s.prompt.includes("forget the map")) return (replans++, replanned);
+          return Array.isArray(s.tools) && s.tools.length > 0 ? DOCS : twoEpicPlan;
+        },
+      });
+      // stop at the first epic boundary; re-plan at the resume stop; continue
+      // through everything after it.
+      let answers: PitStopDecision[] = [{ action: "stop", feedback: "" }];
+      const { controller, store, events } = build({
+        repoPath: dir,
+        pool,
+        decide: () => answers.shift() ?? { action: "continue", feedback: "" },
+      });
+
+      const runId = await controller.startRun("build a thing", RunConfig.parse(BASE));
+      expect(store.getRun(runId)!.state).toBe("PAUSED");
+      expect(store.getTask(runId, "task-b")!.state).toBe("PENDING");
+
+      answers = [{ action: "replan", feedback: "forget the map — build the engine" }];
+      await controller.resume(runId);
+
+      // The words reached the planner, the new work was queued and built, and
+      // the task it replaced is recorded as replaced rather than silently gone.
+      expect(replans).toBe(1);
+      expect(store.getTask(runId, "task-c")!.state).toBe("MERGED");
+      expect(store.getTask(runId, "task-b")!.state).toBe("CANCELLED");
+      const resolved = events.filter((e) => e.type === "run.pitstop_resolved");
+      expect(resolved.some((e) => e.action === "replan")).toBe(true);
+    });
+
+    it("leaves the run exactly as it found it when they park it again", async () => {
+      const dir = repo();
+      const { pool } = rolePool(ROLES);
+      const { controller, store, events } = build({
+        repoPath: dir,
+        pool,
+        decide: () => ({ action: "stop", feedback: "" }),
+      });
+
+      const runId = await controller.startRun("build a thing", RunConfig.parse(BASE));
+      expect(store.getRun(runId)!.state).toBe("PAUSED");
+
+      const before = events.length;
+      await controller.resume(runId);
+
+      // Still parked, and task-b still unbuilt — a second "stop" must not have
+      // quietly dispatched anything on the way to asking.
+      expect(store.getRun(runId)!.state).toBe("PAUSED");
+      expect(store.getTask(runId, "task-b")!.state).toBe("PENDING");
+      expect(events.slice(before).some((e) => e.type === "task.state_changed")).toBe(false);
+    });
+
+    it("just runs what is queued when the resume has nowhere to put the question", async () => {
+      // A daemon, a cron, a CI job: something resumed the run without a
+      // terminal to ask at. The stop this feature adds is worth a lot to an
+      // operator sitting at a prompt and worth nothing to a process that would
+      // print the report into a log and answer it with a default. Falling back
+      // to what `resume` did before this existed — dispatch the queue — is the
+      // only behaviour that finishes the work either way.
+      const dir = repo();
+      const { pool } = rolePool(ROLES);
+      let thinking = true;
+      const { controller, store } = build({
+        repoPath: dir,
+        pool,
+        decide: () => (thinking ? { action: "stop", feedback: "" } : { action: "continue", feedback: "" }),
+      });
+
+      const runId = await controller.startRun("build a thing", RunConfig.parse(BASE));
+      expect(store.getRun(runId)!.state).toBe("PAUSED");
+
+      // Same run, same store, resumed by something that cannot ask anything.
+      thinking = false;
+      const headless = new RunController(
+        store,
+        new Bus(store),
+        pool,
+        new GitHubAdapter(undefined, undefined),
+        { async resolvePlanGate() { return { approved: true, feedback: "" }; }, async resolveBudgetGate() { return null; } },
+        dir
+      );
+      await headless.resume(runId);
+
+      // It got on with it rather than parking itself again waiting for an
+      // answer that was never going to come.
+      expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+      expect(store.getTask(runId, "task-b")!.state).toBe("MERGED");
+    });
   });
 
   it("continues when they say it looks right", async () => {

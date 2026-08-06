@@ -133,7 +133,14 @@ export interface PitStop {
   /** 1-based: the nth pit stop of this run. */
   number: number;
   reason: string;
-  demo: DemoReport;
+  /**
+   * Null when the stop was opened without running the product — the one that
+   * `harness resume` opens on a parked run. That stop exists to show the
+   * operator the queue and let them change it, and charging them for a demo
+   * and four reviewers before they have decided whether to spend anything at
+   * all is how a checkpoint becomes a thing people route around.
+   */
+  demo: DemoReport | null;
   reviews: ReviewReport[];
   /** One line per task merged since the last pit stop. */
   merged: string[];
@@ -141,6 +148,15 @@ export interface PitStop {
   upcoming: string[];
   /** Tasks parked for a human since the last pit stop. */
   parked: string[];
+  /**
+   * Tasks the run cancelled, each with the reason it was cancelled for.
+   *
+   * Here because run 6fe4ba37 dropped 39 tasks at a re-plan and then showed
+   * the operator a queue of 3, with nothing anywhere saying the other 39 had
+   * ever existed. Work that left the plan is exactly what someone deciding
+   * "is this run still going to build what I asked for?" has to be shown.
+   */
+  cancelled: string[];
   spentUsd: number;
   capUsd: number;
   /**
@@ -189,27 +205,37 @@ const VERDICT_MARK: Record<ReviewReport["verdict"], string> = {
 export function renderPitStop(stop: Omit<PitStop, "markdown">): string {
   const lines: string[] = [`# Pit stop ${stop.number} — ${stop.reason}`, ""];
 
-  lines.push(
-    stop.demo.started
-      ? `**It runs.** ${stop.demo.howStarted}`
-      : `**It does not run.** ${stop.demo.howStarted || "The demo agent could not start the product."}`,
-    ""
-  );
-  if (stop.demo.summary) lines.push(stop.demo.summary, "");
+  const demo = stop.demo;
+  if (demo) {
+    lines.push(
+      demo.started
+        ? `**It runs.** ${demo.howStarted}`
+        : `**It does not run.** ${demo.howStarted || "The demo agent could not start the product."}`,
+      ""
+    );
+    if (demo.summary) lines.push(demo.summary, "");
 
-  if (stop.demo.journeys.length) {
-    lines.push("## What it did", "");
-    for (const j of stop.demo.journeys) {
-      const mark = j.result === "worked" ? "✓" : j.result === "broken" ? "✗" : "–";
-      lines.push(`- ${mark} **${j.name}** — ${j.evidence}`);
+    if (demo.journeys.length) {
+      lines.push("## What it did", "");
+      for (const j of demo.journeys) {
+        const mark = j.result === "worked" ? "✓" : j.result === "broken" ? "✗" : "–";
+        lines.push(`- ${mark} **${j.name}** — ${j.evidence}`);
+      }
+      lines.push("");
     }
+    // Always rendered, even when empty: "nothing was left unchecked" and "nobody
+    // said what was left unchecked" have to look different.
+    lines.push("## What it could NOT check", "");
+    lines.push(...(demo.couldNotReach.length ? demo.couldNotReach.map((c) => `- ${c}`) : ["- (nothing — it reached everything it set out to)"]));
     lines.push("");
+  } else {
+    // Said plainly rather than left to inference. An operator who has read six
+    // pit stops backed by a demo must not read the seventh as "it still runs".
+    lines.push(
+      "**Nothing was run for this stop.** It opened because you resumed a parked run, so it costs nothing and shows only what the run's own records say.",
+      ""
+    );
   }
-  // Always rendered, even when empty: "nothing was left unchecked" and "nobody
-  // said what was left unchecked" have to look different.
-  lines.push("## What it could NOT check", "");
-  lines.push(...(stop.demo.couldNotReach.length ? stop.demo.couldNotReach.map((c) => `- ${c}`) : ["- (nothing — it reached everything it set out to)"]));
-  lines.push("");
 
   if (stop.reviews.length) {
     lines.push("## What the reviewers think", "");
@@ -255,17 +281,24 @@ export function renderPitStop(stop: Omit<PitStop, "markdown">): string {
     lines.push("These do not restart on their own: `harness resume` asks about each one, and anything you write here is waiting for them when it does.", "");
   }
   list("Not built yet, in this order", stop.upcoming, "nothing — this is the whole plan");
+  if (stop.cancelled.length) {
+    list("Cancelled — in the plan once, not any more", stop.cancelled, "nothing");
+    // The one sentence that would have saved run 6fe4ba37. `resume` alone puts
+    // none of this back; only re-planning does, and an operator who does not
+    // know that reads a short queue as "nearly done" rather than "gutted".
+    lines.push("`harness resume` does not bring these back. Re-planning at a pit stop is what queues this work again — say `replan` and describe what you still want.", "");
+  }
 
-  if (stop.demo.artifacts.length || stop.demo.commands.length) {
+  if (demo && (demo.artifacts.length || demo.commands.length)) {
     // Never a bare filename: the operator opens these to settle a question, and
     // a list of names does not say which question each one settles.
     lines.push("## Evidence", "");
-    if (stop.demo.artifacts.length) lines.push(...stop.demo.artifacts.map((a) => `- \`${a.file}\` — ${a.shows}`), "");
-    if (stop.demo.commands.length) {
+    if (demo.artifacts.length) lines.push(...demo.artifacts.map((a) => `- \`${a.file}\` — ${a.shows}`), "");
+    if (demo.commands.length) {
       // Everything printed here was run twice: once by the demo agent and once
       // by the harness. A claim that survived only the first is not in this
       // list — it is under what the pit stop could not check.
-      lines.push("Re-run by the harness and confirmed:", "", ...stop.demo.commands.map((c) => `- \`${c.command}\` — ${c.shows}`), "");
+      lines.push("Re-run by the harness and confirmed:", "", ...demo.commands.map((c) => `- \`${c.command}\` — ${c.shows}`), "");
     }
     lines.push(`All of it: ${stop.artifactsDir}`, "");
   }

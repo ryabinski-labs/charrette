@@ -934,6 +934,7 @@ const STOP = {
   merged: ["Sign in (task-a)"],
   upcoming: ["The map (task-b)"],
   parked: [],
+  cancelled: [],
   spentUsd: 12,
   capUsd: 100,
   stopCostUsd: 1.5,

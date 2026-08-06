@@ -643,7 +643,18 @@ export class RunController {
       // The only thing that parks a run rather than a task is an operator
       // choosing "stop, I want to think" at a pit stop. Resuming is them having
       // thought — the tasks and worktrees are exactly as they left them.
-      this.store.transitionRun(runId, "EXECUTING", "resumed after a pit stop");
+      //
+      // So resuming opens a pit stop before anything is dispatched, and it is
+      // the operator's to answer whatever `pitStop.decidedBy` says: they are
+      // demonstrably here, and the whole reason this run is parked is that a
+      // decision was taken about it. Without this, `resume` is a one-word
+      // command whose only power is "run whatever is still queued" — and run
+      // 6fe4ba37 is what that costs. It stopped with 3 tasks queued, 39
+      // cancelled at an earlier re-plan, and no way for the operator to say
+      // "those 39 are the work I actually want" short of starting a new run
+      // and re-planning 167 commits of context from scratch. `replan` here
+      // reaches exactly that, and `stop` leaves the run as it was found.
+      if (await this.resumePitStop(runId)) return;
       run = this.store.getRun(runId)!;
     } else if (run.state === "BUDGET_HOLD") {
       // The cap that parked it is still in force: execution re-opens the budget
@@ -2170,7 +2181,13 @@ export class RunController {
    * read the demo. A reviewer that has only read the diff is producing the same
    * artifact the plan gate already produced — an opinion about a description.
    */
-  private async pitStop(runId: string, due: PitStopDue, askOperator = false): Promise<PitStopDecision["action"]> {
+  private async pitStop(
+    runId: string,
+    due: PitStopDue,
+    askOperator = false,
+    opts: { demo?: boolean } = {}
+  ): Promise<PitStopDecision["action"]> {
+    const withDemo = opts.demo !== false;
     const run = this.store.getRun(runId)!;
     const tasks = this.store.listTasks(runId);
     const history = this.store.pitStopHistory(runId, run.createdAt);
@@ -2184,6 +2201,7 @@ export class RunController {
     const mergedSince = mergedIds.slice(history.mergedAt).map((id) => byId.get(id)).filter((t): t is TaskRow => Boolean(t)).map(line);
     const upcoming = tasks.filter((t) => t.state === "PENDING" || t.state === "READY").map(line);
     const parked = tasks.filter((t) => t.state === "NEEDS_HUMAN").map((t) => `${line(t)} — ${t.errorSummary ?? this.store.taskStateReason(runId, t.id)}`);
+    const cancelled = tasks.filter((t) => t.state === "CANCELLED").map((t) => `${line(t)} — ${this.store.taskStateReason(runId, t.id)}`);
     const allMerged = mergedIds.map((id) => byId.get(id)).filter((t): t is TaskRow => Boolean(t)).map(line);
 
     const spentUsd = this.store.spentUsd(runId);
@@ -2193,8 +2211,11 @@ export class RunController {
     const done = tasks.filter((t) => ["MERGED", "NEEDS_HUMAN", "CANCELLED"].includes(t.state)).length;
     const projectedUsd = done > 0 ? (spentUsd / done) * tasks.length : spentUsd;
 
-    const demo = await this.runDemo(runId, run, number, dir, allMerged.join("\n") || "(nothing yet)", upcoming.join("\n"));
-    const reviews = await this.runReviews(runId, run, demo, tasks, upcoming.join("\n"));
+    // A stop with no demo runs no agents at all, so it costs nothing and opens
+    // instantly — which is the only reason it is safe to put one in front of
+    // every `harness resume`, including the resume of a run already at its cap.
+    const demo = withDemo ? await this.runDemo(runId, run, number, dir, allMerged.join("\n") || "(nothing yet)", upcoming.join("\n")) : null;
+    const reviews = demo ? await this.runReviews(runId, run, demo, tasks, upcoming.join("\n")) : [];
     // Measured rather than estimated, and shown: a checkpoint whose price is
     // invisible is one the operator cannot decide they do not want.
     const afterUsd = this.store.spentUsd(runId);
@@ -2208,6 +2229,7 @@ export class RunController {
       merged: mergedSince,
       upcoming,
       parked,
+      cancelled,
       spentUsd: afterUsd,
       capUsd: run.config.budget.runCapUsd,
       stopCostUsd: afterUsd - spentUsd,
@@ -2229,7 +2251,10 @@ export class RunController {
       mergedCount: mergedIds.length,
       spentUsd: afterUsd,
       artifactsDir: dir,
-      demoStarted: demo.started,
+      // False for a stop that ran no demo, which is what "nothing was started"
+      // means — the event carries `reason` for anyone who needs to tell the two
+      // kinds of not-started apart.
+      demoStarted: demo?.started ?? false,
       ts: Date.now(),
     });
 
@@ -2250,7 +2275,16 @@ export class RunController {
       runId,
       stop: number,
       action: decision.action,
-      feedback: decision.feedback.slice(0, 2000),
+      // Not truncated. The 2000-character cap that used to be here cut the
+      // decision mid-sentence, and the event is the only copy anything reads
+      // programmatically — `harness diagnose`, the dashboard, and anyone
+      // querying the store go here, not to REPORT.md. On waf-adjacent run
+      // 6dfc504b it severed the third of three blocking questions a reviewer
+      // had written for the operator, and a decision that reads as two
+      // questions when it was three is worse than one that is obviously
+      // missing. Length is bounded by what a decider writes, and a stop is
+      // rare; there is nothing here worth protecting a few kilobytes from.
+      feedback: decision.feedback,
       tasks: touched,
       decidedBy,
       why: why.slice(0, 500),
@@ -2353,6 +2387,44 @@ export class RunController {
     // Redirect and replan both put work back in the queue; continuing from here
     // with tasks pending would open a pull request over an unfinished tree.
     return action === "continue" ? "proceed" : "back-to-work";
+  }
+
+  /**
+   * The pit stop `harness resume` opens on a parked run, before it dispatches
+   * anything. Returns true if the operator parked it again.
+   *
+   * No demo and no reviewers, so it is free and instant. That is the point: the
+   * run this exists for was parked *at* its budget cap, and a checkpoint that
+   * costs $9 to open is one an operator at their cap cannot afford to look at.
+   * What it shows is what the run already knows — merged, queued, parked,
+   * cancelled, spend — and what it offers is the full set of pit stop actions,
+   * which is the part `resume` never had.
+   *
+   * Always the operator's to answer, whatever `pitStop.decidedBy` names: a
+   * skill deciding is a bound on how long a run waits for an absent human, and
+   * a human who has just typed `harness resume` is not absent.
+   */
+  private async resumePitStop(runId: string): Promise<boolean> {
+    const run = this.store.getRun(runId)!;
+    // Before the stop opens, so the budget gate has a state to hold (it only
+    // holds EXECUTING and INTEGRATING) and the dashboard shows the run live
+    // while the operator is being asked.
+    this.store.transitionRun(runId, "EXECUTING", "resumed after a pit stop");
+    // Nobody to ask — a daemon or a test. Resuming then means what it has
+    // always meant: run what is queued.
+    //
+    // The other two stop triggers pair this with `pitStop.every === "never"`;
+    // here that half cannot be false. A run only reaches PAUSED by an operator
+    // answering "stop" at a pit stop, and a run with pit stops switched off
+    // never opens one to answer. Carrying the check anyway would read as a
+    // second way for this to return early when there is only one.
+    if (!this.gates.resolvePitStop) return false;
+    // `epicIds` stays empty: this stop demoes no epic, and marking one demoed
+    // here would silently cancel the real pit stop that epic is owed.
+    const action = await this.pitStop(runId, { reason: "you resumed a run that was parked at a pit stop", epicIds: [] }, true, { demo: false });
+    if (action !== "stop") return false;
+    this.store.transitionRun(runId, "PAUSED", "the run was stopped at a pit stop");
+    return true;
   }
 
   /**

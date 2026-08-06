@@ -99,6 +99,43 @@ and demo something that was never meant to stand alone.
 Whatever the trigger, a pit stop never fires while a task is mid-QA: it waits for
 the in-flight tasks to reach a terminal state, so the operator sees a settled tree.
 
+### The one that is not a trigger: `harness resume`
+
+A run parked at a pit stop opens one more when it is resumed, before it dispatches
+anything. It is not on the table above because nothing about the run causes it —
+the operator arriving does.
+
+Run `6fe4ba37` is why. It parked at pit stop 7 with three tasks queued and
+thirty-nine cancelled at a re-plan five stops earlier. `resume` at the time meant
+one thing: *dispatch whatever is still queued*. So the only run the operator could
+have was the three tasks they had just been advised not to build, and the
+thirty-nine — the actual product — were unreachable at any price, because
+`reopen()` revives cancelled tasks only for runs in `PR_REVIEW` and only when the
+cancellation reason begins `unreachable`. Their way back to the work was to
+abandon 167 merged commits of context and start a new run.
+
+The resume stop closes that. It offers the full set of actions, so `replan` can
+put work back into a run that dropped it, and `stop` leaves the run exactly as it
+was found.
+
+Two things make it different from every other stop:
+
+- **It runs no demo and no reviewers, so it costs nothing.** The run that needed
+  this was parked *at its budget cap*; a checkpoint costing $9 to open is one the
+  operator who most needs it cannot afford to look at. It shows what the run
+  already knows — merged, queued, parked, cancelled, spend — and says outright
+  that nothing was run, so it cannot be misread as "it still works".
+- **The operator always answers it**, whatever `pitStop.decidedBy` names. That
+  setting bounds how long a run waits on an absent human; someone who has just
+  typed `harness resume` is not absent.
+
+`{"pitStop": {"every": "never"}}` switches it off with all the others.
+
+Every pit stop report now also lists **cancelled** tasks with the reason each was
+cancelled for, and says plainly that `resume` alone does not bring them back.
+Work that silently left the plan is exactly what an operator deciding "is this
+still going to build what I asked for?" has to be shown.
+
 ## What the harness shows
 
 A pit stop dispatches a **demo agent** — a QA-role session with the toolbelt and
