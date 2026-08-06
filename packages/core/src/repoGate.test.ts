@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { repoFileList, repoUnusable } from "./git.js";
+import { pushRunBranch, repoFileList, repoUnusable } from "./git.js";
 
 function repo(): string {
   const dir = mkdtempSync(path.join(tmpdir(), "harness-gate-"));
@@ -123,5 +123,83 @@ describe("repoFileList", () => {
     expect(list).toContain("aaaa — 20 files");
     expect(list).toContain("… and 1 more directory");
     expect(list).not.toContain("more directories");
+  });
+});
+
+describe("pushRunBranch", () => {
+  /** A repo with a bare `origin` it can actually push to. */
+  function withOrigin(): { dir: string; remote: string } {
+    const dir = repo();
+    commit(dir, ["README.md"]);
+    const remote = mkdtempSync(path.join(tmpdir(), "harness-origin-"));
+    execFileSync("git", ["init", "--bare", "-b", "main", remote], { stdio: "ignore" });
+    execFileSync("git", ["remote", "add", "origin", remote], { cwd: dir, stdio: "ignore" });
+    return { dir, remote };
+  }
+
+  const branch = "harness/abc12345/main";
+
+  it("pushes a branch that fast-forwards, and says nothing", async () => {
+    const { dir } = withOrigin();
+    execFileSync("git", ["checkout", "-q", "-b", branch], { cwd: dir, stdio: "ignore" });
+    commit(dir, ["a.ts"]);
+    await expect(pushRunBranch(dir, branch)).resolves.toBeUndefined();
+  });
+
+  it("names the divergence when someone merged into the branch on GitHub", async () => {
+    // Run 3ae58e02: a pull request was opened against the run's integration
+    // branch and merged, so origin held commits the local branch had never
+    // seen. What the operator got was "Command failed: git push".
+    const { dir, remote } = withOrigin();
+    execFileSync("git", ["checkout", "-q", "-b", branch], { cwd: dir, stdio: "ignore" });
+    commit(dir, ["a.ts"]);
+    execFileSync("git", ["push", "-q", "origin", branch], { cwd: dir, stdio: "ignore" });
+
+    // Someone else's commit lands on origin's copy of the branch...
+    const theirs = mkdtempSync(path.join(tmpdir(), "harness-theirs-"));
+    execFileSync("git", ["clone", "-q", "--branch", branch, remote, theirs], { stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "t@example.com"], { cwd: theirs, stdio: "ignore" });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: theirs, stdio: "ignore" });
+    commit(theirs, ["browser-fix.ts"]);
+    execFileSync("git", ["push", "-q", "origin", branch], { cwd: theirs, stdio: "ignore" });
+
+    // ...while the run kept merging tasks locally.
+    commit(dir, ["b.ts"]);
+    commit(dir, ["c.ts"]);
+
+    await expect(pushRunBranch(dir, branch)).rejects.toThrow(
+      /has diverged from origin: 1 commit\(s\) on origin are not in the local branch, and 2 local commit\(s\)/
+    );
+  });
+
+  it("tells them to merge, and never offers a force push", async () => {
+    const { dir, remote } = withOrigin();
+    execFileSync("git", ["checkout", "-q", "-b", branch], { cwd: dir, stdio: "ignore" });
+    commit(dir, ["a.ts"]);
+    execFileSync("git", ["push", "-q", "origin", branch], { cwd: dir, stdio: "ignore" });
+    const theirs = mkdtempSync(path.join(tmpdir(), "harness-theirs2-"));
+    execFileSync("git", ["clone", "-q", "--branch", branch, remote, theirs], { stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "t@example.com"], { cwd: theirs, stdio: "ignore" });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: theirs, stdio: "ignore" });
+    commit(theirs, ["x.ts"]);
+    execFileSync("git", ["push", "-q", "origin", branch], { cwd: theirs, stdio: "ignore" });
+    commit(dir, ["b.ts"]);
+
+    const why = await pushRunBranch(dir, branch).then(
+      () => "",
+      (e: unknown) => String(e)
+    );
+    expect(why).toContain(`git merge origin/${branch}`);
+    expect(why).toContain("harness resume");
+    expect(why).not.toMatch(/--force|-f\b/);
+  });
+
+  it("re-raises git's own error when the rejection is not a divergence", async () => {
+    // No remote named origin at all: nothing to fetch, nothing behind, so
+    // dressing it up as a merge problem would send the operator somewhere
+    // there is no answer.
+    const dir = repo();
+    commit(dir, ["README.md"]);
+    await expect(pushRunBranch(dir, "main")).rejects.toThrow(/origin/);
   });
 });

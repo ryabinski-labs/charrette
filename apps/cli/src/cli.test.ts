@@ -52,6 +52,9 @@ const h = vi.hoisted(() => {
     subscribers: [] as ((e: { event: Record<string, unknown> }) => void)[],
     controllerArgs: [] as unknown[][],
     dashboardArgs: [] as unknown[][],
+    liveDashboardUrlMock: vi.fn(async () => null as string | null),
+    recordDashboardMock: vi.fn(),
+    clearDashboardMock: vi.fn(),
     StoreMock: vi.fn(() => storeMethods),
     BusMock: vi.fn(),
     AgentPoolMock: vi.fn(),
@@ -135,6 +138,11 @@ vi.mock("node:fs", async (importOriginal) => {
   return { ...actual, existsSync: h.existsSyncMock, mkdirSync: h.mkdirSyncMock, writeFileSync: h.writeFileSyncMock };
 });
 vi.mock("node:readline/promises", () => ({ createInterface: h.createInterfaceMock }));
+vi.mock("./dashboardLink.js", () => ({
+  liveDashboardUrl: h.liveDashboardUrlMock,
+  recordDashboard: h.recordDashboardMock,
+  clearDashboard: h.clearDashboardMock,
+}));
 
 import type { GateHandler } from "@harness/core";
 import { buildProgram, modelOverrides } from "./cli.js";
@@ -256,6 +264,9 @@ beforeEach(() => {
   h.writeFileSyncMock.mockReset();
   h.createInterfaceMock.mockReset();
   h.notifyDoneMock.mockReset();
+  h.liveDashboardUrlMock.mockReset().mockResolvedValue(null);
+  h.recordDashboardMock.mockReset();
+  h.clearDashboardMock.mockReset();
   h.armCrashLogMock.mockReset();
   h.promptSeedMock.mockReset().mockResolvedValue("seed from the conversation");
   h.chatCloseMock.mockReset();
@@ -1519,6 +1530,74 @@ describe("harness status", () => {
     await cli("status", "--repo", "/repo", "--all");
     expect(printed()).toContain("run run-2");
     expect(printed()).toContain("run run-1");
+  });
+
+  it("names the command that opens a dashboard when none is running", async () => {
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "PR_REVIEW", assignment: "a" }]);
+
+    await cli("status", "--repo", "/repo");
+
+    expect(printed()).toContain("dashboard  none running — `harness dashboard` serves this repo's runs");
+  });
+
+  it("links the dashboard a run is serving right now", async () => {
+    // The whole point: the url was printed once, in the banner of a run that
+    // has been going for hours, in a terminal the operator may not even still
+    // have open. `status` is where they look instead. Whether the server is
+    // really up is dashboardLink's question, and is tested there.
+    h.liveDashboardUrlMock.mockResolvedValue("http://127.0.0.1:4813/#livetoken");
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "EXECUTING", assignment: "a" }]);
+
+    await cli("status", "--repo", "/repo");
+
+    expect(printed()).toContain("dashboard  http://127.0.0.1:4813/#livetoken   (the fragment is your auth token)");
+  });
+
+  it("asks the repo it was pointed at, not the working directory", async () => {
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "DONE", assignment: "a" }]);
+
+    await cli("status", "--repo", "/somewhere/else");
+
+    expect(h.liveDashboardUrlMock).toHaveBeenCalledWith("/somewhere/else");
+  });
+});
+
+describe("harness dashboard", () => {
+  it("serves the repo's runs, finished ones included, until the operator stops it", async () => {
+    // A run that ends leaves `listOpenRuns`, which is right for a dashboard
+    // attached to a run and wrong for this one: the finished run is the whole
+    // reason the operator opened it.
+    const running = cli("dashboard", "--repo", "/repo");
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(h.dashboardArgs.at(-1)![2]).toMatchObject({ includeFinished: true });
+    expect(printed()).toContain("http://localhost:4777/#tok   (the fragment is your auth token)");
+    expect(printed()).toContain("Read-only");
+
+    process.emit("SIGINT");
+    await running;
+
+    expect(h.dashboardMethods.stop).toHaveBeenCalled();
+    expect(printed()).toContain("dashboard stopped.");
+  });
+
+  it("leaves no signal handler behind once it has stopped", async () => {
+    const before = process.listenerCount("SIGTERM");
+    const running = cli("dashboard", "--repo", "/repo");
+    await new Promise((resolve) => setImmediate(resolve));
+    process.emit("SIGINT");
+    await running;
+
+    expect(process.listenerCount("SIGTERM")).toBe(before);
+  });
+
+  it("binds the port the operator pinned", async () => {
+    const running = cli("dashboard", "--repo", "/repo", "--port", "5000");
+    await new Promise((resolve) => setImmediate(resolve));
+    process.emit("SIGINT");
+    await running;
+
+    expect(h.dashboardArgs.at(-1)![2]).toMatchObject({ port: 5000 });
   });
 });
 

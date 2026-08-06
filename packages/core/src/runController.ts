@@ -11,7 +11,7 @@ import { BudgetExceeded } from "./budget.js";
 import { seedWorktreeDeps } from "./deps.js";
 import { coChangeIndex, coChangeNote } from "./coChange.js";
 import { nextDispatch } from "./dispatchOrder.js";
-import { git, repoFileList, WorktreeManager } from "./git.js";
+import { git, pushRunBranch, repoFileList, WorktreeManager } from "./git.js";
 import { GitHubAdapter, type PrRef } from "./github.js";
 import { runIntake, type IntakeUi } from "./intake.js";
 import { composeDown, isolationBlock, isolationEnv, taskIsolation } from "./isolation.js";
@@ -1146,7 +1146,7 @@ export class RunController {
     if (!base) throw new Error("the run has no base branch (detached HEAD) — nothing to open a PR against");
 
     // SEC-5: only the harness/<runId>/* namespace is ever pushed.
-    await git(this.repoPath, ["push", "origin", this.wt.integrationBranch(runId)], { serialize: true });
+    await pushRunBranch(this.repoPath, this.wt.integrationBranch(runId));
 
     // Some of this run's work may have shipped already: an eager human can merge
     // the rollup while tasks are still executing. Those merged PRs are named in
@@ -3631,11 +3631,10 @@ export class RunController {
     if (!this.github.enabled || !task.branch) return;
     if (!base) throw new Error("the run has no base branch (detached HEAD) — nothing to open a PR against");
 
-    // SEC-5: push only harness/<runId>/* branches, never the base branch. Both are
-    // append-only, so a plain push is always a fast-forward — nothing is ever
-    // forced, and a rejection is a real problem worth surfacing.
-    await git(this.repoPath, ["push", "origin", task.branch], { serialize: true });
-    await git(this.repoPath, ["push", "origin", this.wt.integrationBranch(runId)], { serialize: true });
+    // SEC-5: push only harness/<runId>/* branches, never the base branch.
+    // Nothing is ever forced; `pushRunBranch` explains a rejection.
+    await pushRunBranch(this.repoPath, task.branch);
+    await pushRunBranch(this.repoPath, this.wt.integrationBranch(runId));
 
     // Base is the branch the run started from, not the integration branch: the
     // task is already merged into the integration branch by now, so a PR there has
@@ -3663,10 +3662,24 @@ export class RunController {
     this.bus.publish({ type: "github.pr_opened", runId, taskId, prNumber: pr.number, url: pr.url, ts: Date.now() });
   }
 
-  /** The branch HEAD is on, or "" when detached. */
+  /**
+   * The branch HEAD is on, or "" when detached.
+   *
+   * `branch --show-current` rather than `rev-parse --abbrev-ref HEAD`, because
+   * the two disagree on a repository with no commits yet: `rev-parse` cannot
+   * resolve an unborn HEAD and exits 128, which the catch below turns into ""
+   * — indistinguishable from a genuine detached HEAD. `branch --show-current`
+   * answers "main" there, which is the truth: the branch exists, it just has
+   * nothing on it yet.
+   *
+   * That distinction is worth a whole run. `harness run` in a freshly
+   * `git init`-ed repository recorded baseBranch "" and froze it into the
+   * config; three days and 60 merged tasks later every pull request failed to
+   * open with "no base branch (detached HEAD)" — about a repository that had
+   * been on `main` the entire time.
+   */
   private async currentBranch(): Promise<string> {
-    const name = await git(this.repoPath, ["rev-parse", "--abbrev-ref", "HEAD"]).catch(() => "");
-    return name === "HEAD" ? "" : name;
+    return await git(this.repoPath, ["branch", "--show-current"]).catch(() => "");
   }
 
   // ---- budget (PERF-7: checked before/while every agent turn) ----
