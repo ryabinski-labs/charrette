@@ -109,6 +109,20 @@ export const PitStopConfig = z.object({
    * actions, falls back to asking — a pit stop is never resolved by a guess.
    */
   decidedBy: z.string().min(1).default("product-manager"),
+  /**
+   * How many times the closing pit stop may send the run back to work before
+   * the next one goes to the operator whatever `decidedBy` says.
+   *
+   * The closing pit stop is the one that repeats. Every other pit stop happens
+   * at a new point in the plan — a decider that redirects at three consecutive
+   * epics is doing its job — but this one fires on a FAIL from the intent
+   * check, and "back to work" returns the run to the same verdict on a tree it
+   * has already judged. Answered by a human that loop ends when they lose
+   * patience; answered by an agent it ends when the run hits its cap, having
+   * paid for a demo, four reviewers, a decider and a round of workers each time
+   * round. Two goes, and then the question is one only a person can settle.
+   */
+  backToWorkRounds: z.number().int().min(0).max(10).default(2),
 });
 export type PitStopConfig = z.infer<typeof PitStopConfig>;
 

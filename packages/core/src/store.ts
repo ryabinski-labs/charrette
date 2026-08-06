@@ -446,6 +446,27 @@ export class Store {
     return { count: rows.length, demoedEpics, mergedAt, spentAt, atMs };
   }
 
+  /**
+   * What every earlier pit stop in this run decided, oldest first.
+   *
+   * The decider is a fresh session each time and would otherwise arrive with no
+   * memory of the run it is deciding about — free to give the same redirect a
+   * third time and call it a new idea. This is the only record of what it has
+   * already tried.
+   */
+  pitStopDecisions(runId: string): { action: string; decidedBy: string; why: string; feedback: string }[] {
+    return (this.db.prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.pitstop_resolved' ORDER BY seq").all(runId) as { payload: string }[]).map(
+      // Every field is present: the payload column holds the event exactly as
+      // the schema parsed it, and all four carry defaults.
+      (r) => JSON.parse(r.payload) as { action: string; decidedBy: string; why: string; feedback: string }
+    );
+  }
+
+  /** How many of this event a run has recorded — how many times round it has been. */
+  eventCount(runId: string, type: string): number {
+    return (this.db.prepare("SELECT COUNT(*) c FROM events WHERE runId = ? AND type = ?").get(runId, type) as { c: number }).c;
+  }
+
   lastEventSeq(runId: string, type: string): number {
     const row = this.db.prepare("SELECT MAX(seq) s FROM events WHERE runId = ? AND type = ?").get(runId, type) as { s: number | null };
     return row.s ?? 0;

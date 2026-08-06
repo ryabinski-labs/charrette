@@ -148,6 +148,19 @@ describe("the agent that decides what the run does next", () => {
   it("works without a PRD to show", () => {
     expect(pitStopDeciderPrompt("a", "", "b", "c")).not.toContain("The PRD it was planned from");
   });
+
+  it("shows it what it has already decided, and why repeating it is the failure", () => {
+    // A fresh session each time, so without this it is free to give the same
+    // redirect a third time and call it a new idea.
+    const prompt = pitStopDeciderPrompt("a", "", "b", "c", "1. **redirect** (product-manager) — the empty states are missing");
+    expect(prompt).toContain("What was decided at this run's earlier pit stops");
+    expect(prompt).toContain("the empty states are missing");
+    expect(prompt).toContain("repeating it is how a run spends its budget going round");
+  });
+
+  it("says nothing about earlier decisions at the first pit stop", () => {
+    expect(pitStopDeciderPrompt("a", "", "b", "c")).not.toContain("earlier pit stops");
+  });
 });
 
 describe("the intake agent's disambiguation sweep", () => {

@@ -53,6 +53,7 @@ const commit = (cwd: string, file: string) => {
 const DOCS = "<prd>\n# PRD — Build the thing\n</prd>\n<conventions>\nuse vitest\n</conventions>";
 const QA_PASS = '```json\n{"verdict":"PASS","notes":"ok"}\n```';
 const INTENT_PASS = '```json\n{"verdict":"PASS","gaps":[],"summary":"ok"}\n```';
+const INTENT_FAIL = '```json\n{"verdict":"FAIL","gaps":["the seam is broken"],"summary":"no"}\n```';
 const DEMO_OK = '```json\n{"started":true,"howStarted":"pnpm dev","summary":"","journeys":[],"couldNotReach":[],"artifacts":[]}\n```';
 const REVIEW_OK = '```json\n{"verdict":"on-track","findings":[],"question":""}\n```';
 
@@ -303,6 +304,85 @@ describe("a decider that cannot decide", () => {
     await expect(controller.startRun("build a thing", config())).rejects.toThrow(BudgetExceeded);
     expect(asked).toEqual([]);
     expect(resolved(events)).toEqual([]);
+  });
+});
+
+describe("the closing pit stop, which is the one that repeats", () => {
+  it("stops sending itself back to work and hands the loop to the operator", async () => {
+    const dir = repo();
+    let replans = 0;
+    const { pool, specs } = rolePool({
+      // The first plan, then a fresh single task for every re-plan.
+      planner: (_s, nth) => (nth === 1 ? DOCS : nth === 2 ? dag(["task-a"]) : dag([`task-fix-${++replans}`])),
+      worker,
+      qa: () => QA_PASS,
+      // A verdict that never comes good: every integration pass returns to the
+      // same closing pit stop over a tree it has already judged.
+      validator: () => INTENT_FAIL,
+      demo: () => DEMO_OK,
+      reviewer: () => REVIEW_OK,
+      pm: () => decision({ action: "replan", why: "the gaps the intent check found are real", feedback: "Close the gaps." }),
+    });
+    const { controller, store, events, asked } = build({
+      repoPath: dir,
+      pool,
+      // The operator, once they are finally asked, ends it.
+      decide: () => ({ action: "continue", feedback: "" }),
+    });
+
+    const runId = await controller.startRun(
+      "build a thing",
+      RunConfig.parse({
+        ...BASE,
+        // Only the closing pit stop fires: nothing else should be in this.
+        pitStop: { every: { usd: 1000 }, backToWorkRounds: 2 },
+        intentFixRounds: 0,
+        budget: { runCapUsd: 1000, taskCapUsd: 1000 },
+      })
+    );
+
+    // Two goes at deciding for itself, and then the third is the operator's —
+    // a loop a person ends by losing patience needs another way to end when
+    // the thing answering it cannot get tired.
+    expect(specs.filter((s) => s.role === "pm")).toHaveLength(2);
+    expect(asked).toHaveLength(1);
+    expect(resolved(events).map((e) => (e as { decidedBy: string }).decidedBy)).toEqual(["product-manager", "product-manager", "operator"]);
+    expect(logs(events)).toContainEqual(expect.stringMatching(/come back FAIL 3 times[\s\S]*this one is yours to answer/));
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    // The second decider was shown what the first one already tried — a fresh
+    // session with no memory is free to give the same answer forever.
+    const second = specs.filter((s) => s.role === "pm")[1]!;
+    expect(second.prompt).toContain("What was decided at this run's earlier pit stops");
+    expect(second.prompt).toContain("the gaps the intent check found are real");
+  });
+
+  it("says the pit stop sent the run back, rather than telling the operator they did", async () => {
+    const dir = repo();
+    const { pool } = rolePool({
+      planner: (_s, nth) => (nth === 1 ? DOCS : nth === 2 ? dag(["task-a"]) : dag(["task-fix"])),
+      worker,
+      qa: () => QA_PASS,
+      // The first call is the plan-intent check; the second is the first
+      // closing check, and it is the one that opens the pit stop.
+      validator: (_s, nth) => (nth <= 2 ? INTENT_FAIL : INTENT_PASS),
+      demo: () => DEMO_OK,
+      reviewer: () => REVIEW_OK,
+      pm: (_s, nth) => decision(nth === 1 ? { action: "replan", feedback: "Close the gaps." } : {}),
+    });
+    const { controller, store, events } = build({ repoPath: dir, pool });
+
+    const runId = await controller.startRun(
+      "build a thing",
+      RunConfig.parse({ ...BASE, pitStop: { every: { usd: 1000 } }, intentFixRounds: 0, budget: { runCapUsd: 1000, taskCapUsd: 1000 } })
+    );
+
+    // A run history that tells the operator they stopped their own run at 3am
+    // is worse than one that says only that it was stopped. Who decided is on
+    // the resolved event, one event earlier.
+    const reasons = events.filter((e) => e.type === "run.state_changed").map((e) => (e as { reason: string }).reason);
+    expect(reasons).toContain("the pit stop sent the run back to work");
+    expect(reasons.join(" ")).not.toMatch(/you sent the run back/);
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
   });
 });
 

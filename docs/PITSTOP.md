@@ -253,6 +253,13 @@ Two decisions worth naming, because neither is in the stories above:
   question, but it cannot answer the one *it* fails to answer, and a pit stop
   that has no way to fall back to a human is one that would resolve itself by
   guessing.
+- **The closing pit stop is capped; the others are not.** Every other pit stop
+  happens at a new point in the plan, so a decider that redirects at three
+  consecutive epics is doing its job. The closing one fires on a FAIL from the
+  intent check, and "back to work" returns the run to the same verdict over a
+  tree it has already judged — a loop whose only brake used to be a human losing
+  patience. `pitStop.backToWorkRounds` (2) is that brake. The decider also sees
+  what earlier pit stops decided, so repeating itself is at least visible to it.
 - **The decider is the decision, not a recommendation.** Showing the operator a
   proposed action and asking them to confirm it is the same blocking gate with
   an extra step, and it is worse: a confirmation prompt is answered "yes" by

@@ -843,7 +843,7 @@ Your FINAL message must be exactly one JSON object inside a \`\`\`json fence:
 \`feedback\` is what the run acts on, and it is read by agents, not by you. For "redirect" and "replan" it must be instructions someone can follow without having read this report — say what to do and what not to do, name tasks and files where you can. For "continue" and "stop" leave it empty unless there is something the run genuinely needs to carry forward; for "stop", say what the human has to answer.`;
 }
 
-export function pitStopDeciderPrompt(assignment: string, prd: string, report: string, capLine: string): string {
+export function pitStopDeciderPrompt(assignment: string, prd: string, report: string, capLine: string, priorDecisions = ""): string {
   return `What the operator asked for:
 ${assignment}
 
@@ -851,7 +851,11 @@ ${prd ? `The PRD it was planned from:\n${prd.slice(0, 6000)}\n\n` : ""}The pit s
 
 ${report}
 
-${capLine}Decide.`;
+${
+  priorDecisions
+    ? `What was decided at this run's earlier pit stops, oldest first:\n${priorDecisions}\n\nYou are not obliged to agree with any of it. But if you are about to say something you have already said, the thing to work out is why it did not take — repeating it is how a run spends its budget going round.\n\n`
+    : ""
+}${capLine}Decide.`;
 }
 
 /**
