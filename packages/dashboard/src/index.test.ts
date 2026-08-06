@@ -294,6 +294,7 @@ describe("the pit stop gate", () => {
     merged: ["Sign in (task-a)"],
     upcoming: ["The map (task-b)"],
     parked: [],
+    cancelled: [],
     spentUsd: 41.5,
     capUsd: 120,
     stopCostUsd: 3.75,

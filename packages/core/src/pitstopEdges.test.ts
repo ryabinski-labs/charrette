@@ -188,7 +188,7 @@ describe("a demo with nowhere to run", () => {
     // The pit stop still happens, and says why there is nothing to look at. A
     // checkpoint that quietly does not happen is the failure being fixed here.
     expect(stops.length).toBeGreaterThan(0);
-    expect(stops[0]!.demo.started).toBe(false);
+    expect(stops[0]!.demo!.started).toBe(false);
     expect(stops[0]!.markdown).toContain("there is no demo for this pit stop");
   });
 });

@@ -139,6 +139,7 @@ const STOP: Omit<PitStop, "markdown"> = {
   merged: ["Sign-in (task-a)"],
   upcoming: ["The map (task-c)"],
   parked: ["Entitlements (task-b) — the check needs DynamoDB running"],
+  cancelled: [],
   spentUsd: 41.5,
   capUsd: 120,
   stopCostUsd: 3.75,
@@ -253,6 +254,48 @@ describe("the report the operator reads", () => {
 
   it("points at the evidence directory when there is evidence", () => {
     expect(renderPitStop(STOP)).toContain("All of it: /repo/.harness/run1/pitstops/2");
+  });
+
+  /**
+   * Run 6fe4ba37 dropped 39 tasks at a re-plan and then showed its operator a
+   * queue of 3, with nothing on the report saying the other 39 had ever been
+   * planned. They read the short queue as "nearly finished" and only found out
+   * by reading the event log by hand, days later.
+   */
+  it("names the work that left the plan, and says what brings it back", () => {
+    const md = renderPitStop({
+      ...STOP,
+      cancelled: ["The engine (task-d) — replaced when you re-planned at a pit stop"],
+    });
+
+    expect(md).toContain("### Cancelled — in the plan once, not any more");
+    expect(md).toContain("- The engine (task-d) — replaced when you re-planned at a pit stop");
+    // The sentence is the point: `resume` alone puts none of it back.
+    expect(md).toContain("`harness resume` does not bring these back");
+  });
+
+  it("says nothing about cancelled work when none was cancelled", () => {
+    expect(renderPitStop(STOP)).not.toContain("Cancelled — in the plan once");
+  });
+
+  /**
+   * The stop `harness resume` opens runs no demo, because a checkpoint that
+   * costs a demo and four reviewers to open is one an operator at their budget
+   * cap cannot afford to look at — and that operator is exactly who needs it.
+   */
+  it("says outright that nothing was run, rather than letting it read as still working", () => {
+    const md = renderPitStop({ ...STOP, demo: null, reviews: [] });
+
+    expect(md).toContain("**Nothing was run for this stop.**");
+    expect(md).not.toContain("**It runs.**");
+    expect(md).not.toContain("**It does not run.**");
+    // The sections that only a demo can fill are absent, not empty-and-alarming.
+    expect(md).not.toContain("## What it could NOT check");
+    expect(md).not.toContain("## Evidence");
+    // What the run knows without running anything is still all there.
+    expect(md).toContain("### Not built yet, in this order");
+    expect(md).toContain("- The map (task-c)");
+    expect(md).toContain("Spent **$41.50** of $120.00");
   });
 
   it("says what each file is for, because a filename settles nothing", () => {
