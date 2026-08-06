@@ -58,6 +58,48 @@ export async function git(cwd: string, args: string[], opts: { serialize?: boole
 }
 
 /**
+ * Push one of the run's own branches, and explain a rejection instead of
+ * relaying git's.
+ *
+ * The harness only ever pushes `harness/<runId>/*` (SEC-5), and it treats those
+ * as append-only, so a plain push is expected to fast-forward and nothing is
+ * ever forced. That held until a human opened a pull request *into* a run's
+ * integration branch and merged it: origin moved ahead of the local branch, and
+ * every subsequent push was rejected as non-fast-forward. Run 3ae58e02 reported
+ * `merged locally, but the pull request could not be opened: Command failed:
+ * git push origin harness/3ae58e02/main` — 60 merged tasks, and nothing in that
+ * sentence says the remote has commits the operator wants to keep.
+ *
+ * A force push is not the answer and is not offered here: the commits on the
+ * remote are the ones a person deliberately merged. Reconciling them is a merge
+ * with conflicts to resolve, which is the operator's call, so this says exactly
+ * that and stops.
+ */
+export async function pushRunBranch(repoPath: string, branch: string): Promise<void> {
+  try {
+    await git(repoPath, ["push", "origin", branch], { serialize: true });
+    return;
+  } catch (e) {
+    // The tracking ref may be absent or stale — a rejection is precisely the
+    // case where what we last saw of origin is out of date. Ask origin.
+    const fetched = await git(repoPath, ["fetch", "origin", branch], { serialize: true }).then(
+      () => true,
+      () => false
+    );
+    const behind = fetched ? await git(repoPath, ["rev-list", "--count", `${branch}..FETCH_HEAD`]).catch(() => "0") : "0";
+    if (behind === "0") throw e; // a rejection for some other reason: no credentials, protected branch, a hook
+    const ahead = await git(repoPath, ["rev-list", "--count", `FETCH_HEAD..${branch}`]).catch(() => "?");
+    throw new Error(
+      `${branch} has diverged from origin: ${behind} commit(s) on origin are not in the local branch, and ${ahead} local commit(s) are not on origin.\n\n` +
+        `Something merged into this branch on GitHub — a pull request opened against it, most likely. Those commits are not the harness's to discard, and it never force-pushes, so publishing has to wait for the two to be reconciled:\n\n` +
+        `  git fetch origin ${branch}\n` +
+        `  git merge origin/${branch}      # in the run's integration worktree\n\n` +
+        `then \`harness resume\` opens the pull request.`
+    );
+  }
+}
+
+/**
  * Whether this repository can host a run at all — asked before anything is spent.
  *
  * Every task the harness dispatches runs in a `git worktree`, and a worktree
