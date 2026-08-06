@@ -2275,7 +2275,16 @@ export class RunController {
       runId,
       stop: number,
       action: decision.action,
-      feedback: decision.feedback.slice(0, 2000),
+      // Not truncated. The 2000-character cap that used to be here cut the
+      // decision mid-sentence, and the event is the only copy anything reads
+      // programmatically — `harness diagnose`, the dashboard, and anyone
+      // querying the store go here, not to REPORT.md. On waf-adjacent run
+      // 6dfc504b it severed the third of three blocking questions a reviewer
+      // had written for the operator, and a decision that reads as two
+      // questions when it was three is worse than one that is obviously
+      // missing. Length is bounded by what a decider writes, and a stop is
+      // rare; there is nothing here worth protecting a few kilobytes from.
+      feedback: decision.feedback,
       tasks: touched,
       decidedBy,
       why: why.slice(0, 500),

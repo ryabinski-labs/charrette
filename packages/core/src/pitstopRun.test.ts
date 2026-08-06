@@ -529,6 +529,28 @@ describe("what the operator decides", () => {
     expect(resolved).toMatchObject({ action: "redirect", tasks: ["task-b"] });
   });
 
+  it("records what they said in full, however long they said it", async () => {
+    const dir = repo();
+    const { pool } = rolePool(ROLES);
+    // Comfortably past the 2000-character cap this used to be cut at, with the
+    // tail marked so a truncation shows up as a missing ending rather than as
+    // a length that happens to look plausible. A reviewer's decision really can
+    // run this long: the one that motivated this fix was three numbered
+    // questions, and the cap severed the third.
+    const long = `${"the third question matters. ".repeat(120)}AND HERE IS THE END OF IT`;
+    const { controller, events } = build({
+      repoPath: dir,
+      pool,
+      decide: (stop) => (stop.number === 1 ? { action: "redirect", feedback: long } : { action: "continue", feedback: "" }),
+    });
+
+    await controller.startRun("build a thing", RunConfig.parse(BASE));
+
+    const resolved = events.flatMap((e) => (e.type === "run.pitstop_resolved" && e.action === "redirect" ? [e] : []))[0]!;
+    expect(resolved.feedback).toBe(long);
+    expect(resolved.feedback).toContain("AND HERE IS THE END OF IT");
+  });
+
   it("parks the run when they want to think, and resume picks it up where it was", async () => {
     const dir = repo();
     const { pool } = rolePool(ROLES);
