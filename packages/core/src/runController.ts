@@ -2410,9 +2410,15 @@ export class RunController {
     // holds EXECUTING and INTEGRATING) and the dashboard shows the run live
     // while the operator is being asked.
     this.store.transitionRun(runId, "EXECUTING", "resumed after a pit stop");
-    // Nobody to ask — a daemon, a test, or an operator who switched pit stops
-    // off. Resuming then means what it has always meant: run what is queued.
-    if (!this.gates.resolvePitStop || run.config.pitStop.every === "never") return false;
+    // Nobody to ask — a daemon or a test. Resuming then means what it has
+    // always meant: run what is queued.
+    //
+    // The other two stop triggers pair this with `pitStop.every === "never"`;
+    // here that half cannot be false. A run only reaches PAUSED by an operator
+    // answering "stop" at a pit stop, and a run with pit stops switched off
+    // never opens one to answer. Carrying the check anyway would read as a
+    // second way for this to return early when there is only one.
+    if (!this.gates.resolvePitStop) return false;
     // `epicIds` stays empty: this stop demoes no epic, and marking one demoed
     // here would silently cancel the real pit stop that epic is owed.
     const action = await this.pitStop(runId, { reason: "you resumed a run that was parked at a pit stop", epicIds: [] }, true, { demo: false });

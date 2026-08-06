@@ -703,6 +703,43 @@ describe("what the operator decides", () => {
       expect(store.getTask(runId, "task-b")!.state).toBe("PENDING");
       expect(events.slice(before).some((e) => e.type === "task.state_changed")).toBe(false);
     });
+
+    it("just runs what is queued when the resume has nowhere to put the question", async () => {
+      // A daemon, a cron, a CI job: something resumed the run without a
+      // terminal to ask at. The stop this feature adds is worth a lot to an
+      // operator sitting at a prompt and worth nothing to a process that would
+      // print the report into a log and answer it with a default. Falling back
+      // to what `resume` did before this existed — dispatch the queue — is the
+      // only behaviour that finishes the work either way.
+      const dir = repo();
+      const { pool } = rolePool(ROLES);
+      let thinking = true;
+      const { controller, store } = build({
+        repoPath: dir,
+        pool,
+        decide: () => (thinking ? { action: "stop", feedback: "" } : { action: "continue", feedback: "" }),
+      });
+
+      const runId = await controller.startRun("build a thing", RunConfig.parse(BASE));
+      expect(store.getRun(runId)!.state).toBe("PAUSED");
+
+      // Same run, same store, resumed by something that cannot ask anything.
+      thinking = false;
+      const headless = new RunController(
+        store,
+        new Bus(store),
+        pool,
+        new GitHubAdapter(undefined, undefined),
+        { async resolvePlanGate() { return { approved: true, feedback: "" }; }, async resolveBudgetGate() { return null; } },
+        dir
+      );
+      await headless.resume(runId);
+
+      // It got on with it rather than parking itself again waiting for an
+      // answer that was never going to come.
+      expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+      expect(store.getTask(runId, "task-b")!.state).toBe("MERGED");
+    });
   });
 
   it("continues when they say it looks right", async () => {
