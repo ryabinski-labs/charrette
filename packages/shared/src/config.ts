@@ -163,6 +163,25 @@ export const TaskGateConfig = z.object({
    * is `decidedBy: "operator"` with extra steps.
    */
   autoAnswerRounds: z.number().int().min(0).max(10).default(2),
+  /**
+   * How many times the decider may rewrite the *probe* a task is escalating
+   * about, rather than answering around it.
+   *
+   * A completion probe is checked before QA and the worker is forbidden to edit
+   * it, so nothing an answer says can make a wrong one pass: run f338b5c8 spent
+   * nine rounds and about $80 on one task whose probe ended in
+   * `! rg -qi 'passkey|webauthn' frontend/src`, matching one enum value in a
+   * generated file that no login screen was ever going to remove. Every answer
+   * was correct — "the probe is a false positive, leave it alone" — and every
+   * answer led straight back to the same gate, because agreeing with the
+   * escalation was the one thing that could not end it.
+   *
+   * So the decider may narrow the probe once, on the record
+   * (`task.probe_amended`), and after that the task's definition of done is
+   * settled as far as any agent is concerned. `0` restores the probe as
+   * unamendable; the operator's own `harness probe` is never bounded.
+   */
+  probeAmendments: z.number().int().min(0).max(5).default(1),
 });
 export type TaskGateConfig = z.infer<typeof TaskGateConfig>;
 

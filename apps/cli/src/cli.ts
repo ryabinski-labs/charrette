@@ -729,6 +729,48 @@ export function buildProgram(): Command {
     });
 
   program
+    .command("probe")
+    .description("rewrite the completion probe a task is stuck on — the operator's half of the escalation gate")
+    .argument("<taskId>", "the task whose definition of done is wrong")
+    .argument("[command]", "the probe to hold it to instead; omit with --clear to drop it")
+    .option("-r, --repo <path>", "target repo (default: the git repo containing the cwd)", process.cwd())
+    .option("--run <runId>", "which run (default: the newest one with this task)")
+    .option("--clear", "withdraw the probe instead of replacing it, leaving QA to judge the task", false)
+    .option("--why <words>", "one line for the record: what was wrong with the old one", "")
+    .action(async (taskId: string, command: string | undefined, opts: { repo: string; run?: string; clear: boolean; why: string }) => {
+      const repo = resolveRepoRoot(opts.repo);
+      const { store } = makeController(repo);
+      const runId = opts.run ?? store.listRuns().find((r) => store.getTask(r.id, taskId))?.id;
+      const task = runId ? store.getTask(runId, taskId) : undefined;
+      if (!task || !runId) {
+        process.stdout.write(opts.run ? `No task ${taskId} in run ${opts.run}.\n` : `No run in this repo has a task called ${taskId}.\n`);
+        process.exitCode = 1;
+        return;
+      }
+      // A probe is a shell command, so "no argument" and "the empty probe" are
+      // easy to confuse and expensive to confuse silently — withdrawing a task's
+      // definition of done has to be something you asked for.
+      if (!command && !opts.clear) {
+        process.stdout.write(`Give the new probe, or --clear to withdraw it. ${taskId} is currently held to:\n  ${task.completionProbe || "(no probe)"}\n`);
+        process.exitCode = 1;
+        return;
+      }
+      const next = opts.clear ? "" : command!.trim();
+      // The store treats this as a no-op, so saying "now: <the same thing>" would
+      // read as a change that did not happen.
+      if (next === task.completionProbe) {
+        process.stdout.write(`${runId}/${taskId} is already held to exactly that. Nothing changed.\n`);
+        return;
+      }
+      store.amendProbe(runId, taskId, next, "operator", opts.why);
+      process.stdout.write(`${runId}/${taskId} [${task.state}]\n  was  ${task.completionProbe || "(no probe)"}\n  now  ${next || "(no probe — QA alone decides this task)"}\n`);
+      // The loop re-reads the task at the top of every iteration, so this lands
+      // on a run in flight without stopping it — which is the whole point of it
+      // being a separate command rather than a config field.
+      process.stdout.write("A run in flight picks this up on the task's next iteration; you do not need to resume it.\n");
+    });
+
+  program
     .command("postmortem")
     .argument("[runId]", "the run to explain (default: the most recent)")
     .description("why a run produced what it produced — unanswered questions, verdicts, and where the money went")

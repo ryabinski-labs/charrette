@@ -530,7 +530,7 @@ Review the working tree you are in (it contains the worker's committed changes).
  * changes is that nothing waits for a click, and that an answer only a person
  * can give now has to be declared as one rather than merely phrased as one.
  */
-export function advisorSystemPrompt(toolbelt = "", decider = "", skills = ""): string {
+export function advisorSystemPrompt(toolbelt = "", decider = "", skills = "", probe = ""): string {
   return `You are ${decider ? `the **${decider}** for a software project, standing in for the human operator` : "an advisor agent"}. A task in an automated multi-agent run hit its retry cap ${decider ? "and cannot continue without an answer. You are the one who gives it." : "and is about to interrupt the human operator with a question. Your job is to draft the answer they will probably give, so they can approve it in one click instead of investigating from scratch."}
 
 You are in the task's worktree, read-only. ${decider ? "Nobody is going to review what you write: your recommendation is sent to the worker as-is and becomes its entire brief for the next attempt." : "The operator usually accepts your draft verbatim, which means your recommendation becomes the worker's entire brief for its next attempt."} Anything you leave out does not get fixed.
@@ -546,7 +546,7 @@ ${toolbelt}${skills}
 
 Your FINAL message must be exactly one JSON object inside a \`\`\`json fence:
 {"recommendation":string,
- "checked":[{"claim":string,"status":"confirmed"|"refuted"|"unverified","evidence":string}]${
+ "checked":[{"claim":string,"status":"confirmed"|"refuted"|"unverified","evidence":string}]${probe ? `,\n "probe":string|null` : ""}${
    decider
      ? `,
  "needsOperator":boolean,
@@ -557,6 +557,20 @@ Your FINAL message must be exactly one JSON object inside a \`\`\`json fence:
 \`checked\` carries one entry per distinct claim you found in step 1 — \`evidence\` cites the file and line you looked at, or says why you could not settle it. Prefer "unverified" over a guess.
 
 The recommendation is instructions addressed to the worker's next attempt. Carry every confirmed finding into it; say which to do first when one blocks another. Be as long as the findings require and no longer — no restating the task, no padding. If the operator must do something outside the repo first (start a service, provide credentials), open with that: "After you start X, tell the worker: ...". If you genuinely cannot tell what is wrong, say what to check rather than guessing.${
+    probe
+      ? `
+
+\`probe\` is this task's completion probe, rewritten — the one thing about the task itself you are allowed to change:
+
+    ${probe}
+
+It is checked before QA, it is the reason this escalation exists, and the worker is forbidden to edit it. That means no instruction you give can make a wrong probe pass: telling the worker "the probe is a false positive, leave it alone" is correct advice that ends with this exact gate opening again, and again, until the task's budget runs out. If the probe is the problem, this field is the only way to say so.
+
+Set it when the probe demands something the task was never scoped to do, or when a pattern in it matches something it did not mean to match — a generated file, a vendored directory, a word that means something else elsewhere in the tree. **Narrow it, do not delete it**: keep every clause that is doing real work and repair only the one that is not, and re-run your rewritten probe in the worktree before you answer — a replacement that still fails has bought nothing. An empty string drops the probe entirely and is for a probe with nothing worth keeping.
+
+\`null\` leaves it alone, and that is the right answer nearly every time. A probe that is merely hard to satisfy is the job. Rewriting one to pass is how a task declares itself finished without finishing, and it is on the permanent record with your name against it.`
+      : ""
+  }${
     decider
       ? `
 

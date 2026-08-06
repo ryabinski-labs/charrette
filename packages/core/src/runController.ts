@@ -257,6 +257,16 @@ function outputTruncated(resultText: string, errorDetail?: string): boolean {
   return /max_tokens|output token|response exceeded/i.test(`${errorDetail ?? ""}\n${resultText}`);
 }
 
+/**
+ * A shell argument the operator can paste without reading it first. Probes are
+ * full of quotes and pipes — `! rg -qi 'passkey|webauthn' src` is a real one —
+ * and a suggested command that needs hand-repair before it runs is a suggestion
+ * that does not get used.
+ */
+function shellQuote(s: string): string {
+  return `'${s.replaceAll("'", `'\\''`)}'`;
+}
+
 /** What the operator is told when a cap is reached. Never carries secrets. */
 export interface BudgetGate {
   /** Which cap tripped. A task cap stops one task; the run cap stops everything. */
@@ -1384,9 +1394,12 @@ export class RunController {
    * Returns the guidance to hand the worker, or null when the task parked —
    * either because the operator chose to, or because this gate handler has no
    * way to ask (headless / test contexts).
+   *
+   * `probe` marks the one escalation whose answer may also rewrite what the task
+   * is being held to, because it is the one an answer alone cannot end.
    */
-  private async askOrPark(runId: string, taskId: string, why: string): Promise<string | null> {
-    const guidance = await this.askOperator(runId, taskId, why);
+  private async askOrPark(runId: string, taskId: string, why: string, probe = false): Promise<string | null> {
+    const guidance = await this.askOperator(runId, taskId, why, probe);
     if (guidance === null) {
       this.park(runId, taskId, why);
       return null;
@@ -1404,7 +1417,7 @@ export class RunController {
    * NEEDS_HUMAN -> NEEDS_HUMAN transition. Null when the operator declined or
    * this gate handler has no way to ask (headless / test contexts).
    */
-  private async askOperator(runId: string, taskId: string, why: string): Promise<string | null> {
+  private async askOperator(runId: string, taskId: string, why: string, amendable = false): Promise<string | null> {
     const task = this.store.getTask(runId, taskId)!;
     const decider = this.taskGateDecider(runId, taskId);
     // Nobody to ask and nobody to decide: park, without paying for advice that
@@ -1414,8 +1427,12 @@ export class RunController {
     // whole run on a human, so a minute of agent time drafting their reply is
     // the cheapest latency win in the system. With a decider named, that same
     // session *is* the answer — see adviseOperator.
-    const advice = await this.adviseOperator(runId, taskId, why, decider);
-    const recommendation = advice.recommendation;
+    const probe = amendable ? (task.completionProbe ?? "") : "";
+    const advice = await this.adviseOperator(runId, taskId, why, decider, probe);
+    // Done before the gate is published, so the answer the operator reads
+    // already says what the task is now being held to.
+    const amended = probe && advice.probe !== null ? this.amendProbe(runId, taskId, probe, advice.probe, decider, advice.why) : "";
+    const recommendation = amended ? `${amended}\n\n${advice.recommendation}` : advice.recommendation;
     this.bus.publish({ type: "task.gate_opened", runId, taskId, why, recommendation, iterations: task.qaIterations, ts: Date.now() });
     const because = advice.why ? ` — ${advice.why}` : "";
     if (decider && recommendation && !advice.needsOperator) {
@@ -1485,6 +1502,42 @@ export class RunController {
   }
 
   /**
+   * Apply the advisor's rewritten probe, and return the line that tells the
+   * worker its definition of done moved. Empty when nothing was applied.
+   *
+   * Only a decider may rewrite a probe, and only `taskGate.probeAmendments`
+   * times: the advisor drafting for a human has no authority to change what the
+   * task is judged by, and a skill that keeps rewriting the bar until it clears
+   * it has stopped being a check on the work. When the amendment is not applied,
+   * the proposed probe is not thrown away — it is logged as the command the
+   * operator can run, which is the whole of what they were missing the nine
+   * times run f338b5c8 asked them about a probe they had no way to change.
+   */
+  private amendProbe(runId: string, taskId: string, from: string, to: string, decider: string, why: string): string {
+    const next = to.trim().slice(0, 1000);
+    if (next === from) return "";
+    const allowance = this.store.getRun(runId)!.config.taskGate.probeAmendments;
+    const spent = this.store.taskProbeAmendments(runId, taskId);
+    if (!decider || spent >= allowance) {
+      this.bus.publish({
+        type: "agent.log",
+        runId,
+        taskId,
+        sessionId: "advisor",
+        text:
+          `this task's completion probe looks wrong${why ? ` — ${why}` : ""}. It is checked before QA and no answer can make it pass. To change it:\n` +
+          `  harness probe ${taskId} ${next ? shellQuote(next) : "--clear"} --run ${runId} --why '...'`,
+        ts: Date.now(),
+      });
+      return "";
+    }
+    this.store.amendProbe(runId, taskId, next, decider, why);
+    return next
+      ? `Your completion probe has been changed by the ${decider}, which looked at why it was failing. It is now:\n\n    ${next}\n\nThat is the bar; the old one is not. Do not edit it.`
+      : `Your completion probe has been withdrawn by the ${decider}, which looked at why it was failing and found it was asking for the wrong thing. QA's judgment is now the whole of your definition of done.`;
+  }
+
+  /**
    * A short read-only advisor session in the stuck task's worktree, drafting
    * the answer the operator will probably give — or, when `decider` names a
    * skill, giving it. Never fatal — a crashed or unparseable advisor just means
@@ -1500,11 +1553,12 @@ export class RunController {
     runId: string,
     taskId: string,
     why: string,
-    decider = ""
-  ): Promise<{ recommendation: string; needsOperator: boolean; why: string }> {
+    decider = "",
+    probe = ""
+  ): Promise<{ recommendation: string; needsOperator: boolean; why: string; probe: string | null }> {
     const run = this.store.getRun(runId)!;
     const task = this.store.getTask(runId, taskId)!;
-    const none = { recommendation: "", needsOperator: true, why: "" };
+    const none = { recommendation: "", needsOperator: true, why: "", probe: null };
     try {
       // Looked up by name, as the pit stop's decider is: the skill was named to
       // be the one answering, and the lexical matcher's opinion of what this
@@ -1516,7 +1570,7 @@ export class RunController {
         taskId,
         role: "advisor",
         model: run.config.models.advisor,
-        systemPrompt: advisorSystemPrompt("", decider, skillsBlock(skills)),
+        systemPrompt: advisorSystemPrompt("", decider, skillsBlock(skills), probe),
         prompt: advisorPrompt(task, why, run.config.deterministicChecks),
         cwd: task.worktreePath ?? this.repoPath,
         disallowedTools: ["Write", "Edit", "NotebookEdit", "WebSearch"],
@@ -1527,7 +1581,7 @@ export class RunController {
         // to leave it in. Falling back to the repo means sweeping the repo.
         reapOnEnd: Boolean(task.worktreePath),
       });
-      const parsed = extractJson(result.resultText) as { recommendation?: unknown; checked?: unknown; needsOperator?: unknown; why?: unknown };
+      const parsed = extractJson(result.resultText) as { recommendation?: unknown; checked?: unknown; needsOperator?: unknown; why?: unknown; probe?: unknown };
       if (typeof parsed?.recommendation !== "string") return none;
       const checked = Array.isArray(parsed.checked) ? (parsed.checked as AdvisorCheck[]) : [];
       return {
@@ -1535,6 +1589,11 @@ export class RunController {
         recommendation: advisorAnswer(parsed.recommendation.trim(), checked),
         needsOperator: parsed.needsOperator === true,
         why: typeof parsed.why === "string" ? parsed.why.slice(0, 300) : "",
+        // Only a string is an amendment. Null is the documented "leave it
+        // alone", and a session that answered without the field at all — an
+        // advisor drafting for a human, an older prompt, a model that dropped
+        // it — is saying the same thing by saying nothing.
+        probe: probe && typeof parsed.probe === "string" ? parsed.probe : null,
       };
     } catch {
       // A session that crashed decided nothing, which is not the same as
@@ -3152,8 +3211,8 @@ export class RunController {
      * still reaches it again, one full interval later, and each of those
      * intervals is separated by an operator who chose to continue.
      */
-    const ask = async (why: string): Promise<string | null> => {
-      const guidance = await this.askOrPark(runId, taskId, why);
+    const ask = async (why: string, probe = false): Promise<string | null> => {
+      const guidance = await this.askOrPark(runId, taskId, why, probe);
       startedAt = Date.now();
       return guidance;
     };
@@ -3382,6 +3441,9 @@ export class RunController {
       // finished. Most tasks have none, and cost nothing here.
       if (task.completionProbe) {
         const probe = await runDeterministicChecks(wt.path, [task.completionProbe]);
+        // The probe has stopped standing between this task and QA — because it
+        // passed, or because the escalation it caused ended with it rewritten.
+        let settled = probe.ok;
         if (!probe.ok) {
           // One command in, so a run that is not ok has exactly one failure in
           // it; the fallback is for the type, not for a state that occurs.
@@ -3405,12 +3467,38 @@ export class RunController {
           });
           if (iterations >= run.config.qaIterationCap) {
             const guidance = await ask(
-              `the completion probe still fails after ${iterations} attempts — the task is not finished everywhere it was scoped to reach:\n\n$ ${task.completionProbe}\n${output.slice(-1500)}`
+              `the completion probe still fails after ${iterations} attempts — the task is not finished everywhere it was scoped to reach:\n\n$ ${task.completionProbe}\n${output.slice(-1500)}`,
+              // The one gate whose answer may also change the question. Every
+              // other escalation is about the attempt; this one is the only one
+              // where the thing doing the rejecting can itself be wrong, and
+              // where agreeing that it is wrong changes nothing on its own.
+              true
             );
             if (guidance === null) return;
             qaFeedback = `The operator looked at the failing probe and says — follow it over anything that contradicts it:\n${guidance}\n\n${qaFeedback}`;
+            // That answer may have rewritten the probe. Try the new one before
+            // spending a worker iteration: the amendment exists because the
+            // failure was the probe's rather than the work's, and re-dispatching
+            // a worker to satisfy a bar that has already moved is the same
+            // wasted round the gate was opened to stop.
+            const amended = this.store.getTask(runId, taskId)!.completionProbe ?? "";
+            if (amended !== task.completionProbe && (!amended || (await runDeterministicChecks(wt.path, [amended])).ok)) {
+              this.bus.publish({
+                type: "agent.log",
+                runId,
+                taskId,
+                sessionId: workerSession ?? taskId,
+                text: amended ? `completion probe passes as amended: ${amended}` : "completion probe withdrawn — QA decides this task alone",
+                ts: Date.now(),
+              });
+              // The probe's complaint died with the probe; anything the worker
+              // is told next comes from QA, not from a bar that no longer exists.
+              qaFeedback = "";
+              lastRejection = "";
+              settled = true;
+            }
           }
-          continue;
+          if (!settled) continue;
         }
       }
 

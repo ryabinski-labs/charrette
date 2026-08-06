@@ -343,6 +343,24 @@ describe("what the advisor is told about the repository", () => {
     // Both are still asked to investigate rather than summarise.
     for (const p of [draft, decides]) expect(p).toMatch(/Check the cheap ones against the code/);
   });
+
+  it("offers the probe field only at the gate the probe opened", () => {
+    // Every other escalation is about the attempt, and a knob for rewriting the
+    // task's definition of done has no business being on the table there.
+    expect(advisorSystemPrompt("", "product-manager")).not.toContain('"probe"');
+
+    const p = advisorSystemPrompt("", "product-manager", "", "! rg -qi 'passkey' src");
+    expect(p).toContain('"probe":string|null');
+    // The probe it is being asked about, quoted back verbatim.
+    expect(p).toContain("! rg -qi 'passkey' src");
+    // Why the field exists at all: agreeing with a failing probe reopens the
+    // same gate forever.
+    expect(p).toMatch(/no instruction you give can make a wrong probe pass/);
+    // And the two rails on it: narrow rather than delete, and leave it alone by
+    // default.
+    expect(p).toMatch(/Narrow it, do not delete it/);
+    expect(p).toMatch(/right answer nearly every time/);
+  });
 });
 
 /**

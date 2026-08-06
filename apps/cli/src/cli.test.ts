@@ -15,6 +15,8 @@ const h = vi.hoisted(() => {
     listRuns: vi.fn(() => [] as { id: string; state: string; assignment: string }[]),
     getRun: vi.fn(() => undefined as unknown),
     listTasks: vi.fn(() => [] as unknown[]),
+    getTask: vi.fn(() => undefined as unknown),
+    amendProbe: vi.fn(),
     patchRunConfig: vi.fn(),
     spentUsd: vi.fn(() => 0),
     deployStatus: vi.fn(() => null as unknown),
@@ -221,6 +223,7 @@ beforeEach(() => {
   h.storeMethods.listRuns.mockReturnValue([]);
   h.storeMethods.getRun.mockReturnValue(undefined);
   h.storeMethods.listTasks.mockReturnValue([]);
+  h.storeMethods.getTask.mockReturnValue(undefined);
   h.storeMethods.spentUsd.mockReturnValue(0);
   h.storeMethods.deployStatus.mockReturnValue(null);
   h.storeMethods.prodVerdict.mockReturnValue(null);
@@ -1345,6 +1348,59 @@ describe("harness resume — settings the operator changed since the run started
     await cli("resume", "run-x", "--repo", "/repo", "--no-dashboard");
 
     expect(h.storeMethods.patchRunConfig).not.toHaveBeenCalled();
+  });
+});
+
+describe("harness probe", () => {
+  const stuck = { id: "ui-login", state: "WORKING", completionProbe: "! rg -qi 'passkey' src" };
+
+  beforeEach(() => {
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "EXECUTING", assignment: "a" }]);
+    h.storeMethods.getTask.mockReturnValue(stuck);
+    process.exitCode = undefined;
+  });
+
+  it("rewrites the probe of the newest run holding that task, and says it lands without a restart", async () => {
+    await cli("probe", "ui-login", "! rg -qi 'passkey' src -g '!**/*.gen.ts'", "--repo", "/repo", "--why", "the only hit is a generated enum");
+
+    expect(h.storeMethods.amendProbe).toHaveBeenCalledWith("run-1", "ui-login", "! rg -qi 'passkey' src -g '!**/*.gen.ts'", "operator", "the only hit is a generated enum");
+    expect(printed()).toContain("was  ! rg -qi 'passkey' src");
+    expect(printed()).toContain("now  ! rg -qi 'passkey' src -g '!**/*.gen.ts'");
+    expect(printed()).toContain("you do not need to resume it");
+  });
+
+  it("withdraws the probe on --clear", async () => {
+    await cli("probe", "ui-login", "--clear", "--repo", "/repo");
+
+    expect(h.storeMethods.amendProbe).toHaveBeenCalledWith("run-1", "ui-login", "", "operator", "");
+    expect(printed()).toContain("QA alone decides this task");
+  });
+
+  it("shows the current probe rather than guessing when given neither", async () => {
+    // "No new probe" and "withdraw the probe" are one keystroke apart and one is
+    // irreversible, so the empty case asks rather than acts.
+    await cli("probe", "ui-login", "--repo", "/repo");
+
+    expect(h.storeMethods.amendProbe).not.toHaveBeenCalled();
+    expect(printed()).toContain("! rg -qi 'passkey' src");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("does not report a change when the probe is already what you typed", async () => {
+    await cli("probe", "ui-login", "! rg -qi 'passkey' src", "--repo", "/repo");
+
+    expect(h.storeMethods.amendProbe).not.toHaveBeenCalled();
+    expect(printed()).toContain("already held to exactly that");
+  });
+
+  it("says so when no run in the repo has that task", async () => {
+    h.storeMethods.getTask.mockReturnValue(undefined);
+
+    await cli("probe", "nope", "true", "--repo", "/repo");
+
+    expect(printed()).toContain("No run in this repo has a task called nope");
+    expect(h.storeMethods.amendProbe).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
   });
 });
 

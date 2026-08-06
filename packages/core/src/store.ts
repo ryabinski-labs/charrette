@@ -646,6 +646,45 @@ export class Store {
     );
   }
 
+  /**
+   * Rewrite the task's definition of done, and say on the record who did it and
+   * why. Deliberately not part of `updateTask`: every other field there is
+   * bookkeeping the harness owns, and this one is a judgment about the work that
+   * has to survive in the event log for a postmortem to explain why a probe the
+   * planner wrote is not the probe the task was held to.
+   *
+   * Safe against a live run: the task loop re-reads the task at the top of every
+   * iteration, so an amendment written from another process lands on the next
+   * pass rather than needing a restart.
+   */
+  amendProbe(runId: string, taskId: string, probe: string, by: string, why = ""): void {
+    const from = this.getTask(runId, taskId)?.completionProbe ?? "";
+    const to = probe.trim();
+    if (to === from) return;
+    this.appendEvent({ type: "task.probe_amended", runId, taskId, from, to, by, why: why.slice(0, 300), ts: Date.now() }, () => {
+      // Empty, not null: a withdrawn probe reads back as the same "this task has
+      // no probe" every task without one has always read back as.
+      this.db.prepare("UPDATE tasks SET completionProbe = ? WHERE runId = ? AND id = ?").run(to, runId, taskId);
+    });
+  }
+
+  /**
+   * How many times an agent has rewritten this task's probe. Read off the event
+   * log for the same reason the auto-answer count is: it is the only thing that
+   * survives the process, and the bound exists precisely for the run that keeps
+   * coming back to the same gate. The operator's own amendments do not count
+   * against a skill's allowance — they are not the thing being bounded.
+   */
+  taskProbeAmendments(runId: string, taskId: string): number {
+    const rows = this.db
+      .prepare("SELECT payload FROM events WHERE runId = ? AND taskId = ? AND type = 'task.probe_amended'")
+      .all(runId, taskId) as { payload: string }[];
+    return rows.filter((r) => {
+      const p = JSON.parse(r.payload) as { by?: string };
+      return Boolean(p.by) && p.by !== "operator";
+    }).length;
+  }
+
   updateTask(runId: string, taskId: string, patch: Partial<Pick<TaskRow, "branch" | "worktreePath" | "githubIssueNumber" | "prNumber" | "qaIterations" | "respawns" | "errorSummary" | "assignedSkills">>): void {
     const sets: string[] = [];
     const vals: (string | number | null)[] = [];

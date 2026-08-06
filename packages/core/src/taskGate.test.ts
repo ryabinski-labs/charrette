@@ -533,6 +533,129 @@ function decidingPool(advisorJson: () => string) {
   return { pool: pool as unknown as AgentPool, workerPrompts, advisorSystems };
 }
 
+/**
+ * A task whose definition of done cannot be met: `nope.txt` is not a file any
+ * worker in this fixture writes, so the probe fails on every iteration however
+ * good the work is. This is run f338b5c8's `! rg -qi 'passkey|webauthn' src`
+ * with the incidentals removed.
+ */
+const PROBE_DAG =
+  "```json\n" +
+  JSON.stringify({
+    epics: [{ id: "epic-e", title: "E", summary: "s" }],
+    tasks: [{ id: "task-a", epicId: "epic-e", title: "A", spec: "s", acceptanceCriteria: ["x"], dependsOn: [], touchedPaths: [], completionProbe: "test -f nope.txt", estimatedSize: "S" }],
+  }) +
+  "\n```";
+
+/** PROBE_DAG, a worker that writes `feature.txt`, and an advisor under test. */
+function probePool(advisorJson: (round: number) => string) {
+  const workerPrompts: string[] = [];
+  let planning = 0;
+  let advising = 0;
+  const pool = {
+    async run(spec: AgentSpec): Promise<AgentResult> {
+      let resultText = "";
+      if (spec.role === "planner") resultText = planning++ === 0 ? DOCS : PROBE_DAG;
+      else if (spec.role === "worker") {
+        workerPrompts.push(spec.prompt);
+        writeFileSync(path.join(spec.cwd, "feature.txt"), `attempt ${workerPrompts.length}\n`);
+        gitIn(spec.cwd, "add", "-A");
+        gitIn(spec.cwd, "commit", "-m", "wip");
+        resultText = "worker done";
+      } else if (spec.role === "qa") resultText = '{"verdict":"FAIL","reasons":["QA has its own opinion"],"mustFix":["something else entirely"]}';
+      else if (spec.role === "advisor") resultText = advisorJson(advising++);
+      else resultText = '{"verdict":"PASS","summary":"n/a"}';
+      return { sessionId: `s${Math.random()}`, resultText, costUsd: 0, turns: 1, outcome: "done" };
+    },
+  };
+  return { pool: pool as unknown as AgentPool, workerPrompts };
+}
+
+const logs = (store: Store, runId: string) =>
+  store
+    .eventsSince(runId, 0)
+    .map((e) => e.event)
+    .filter((e) => e.type === "agent.log")
+    .map((e) => (e as { text: string }).text);
+
+describe("a completion probe that cannot pass", () => {
+  it("is rewritten by the decider rather than agreed with forever", async () => {
+    // The reported experience, nine times over: the probe's last clause matched
+    // a generated file, every answer said so correctly, and every answer led
+    // back to the same gate — because the worker is forbidden to touch the probe
+    // and the probe is checked before QA, so agreeing with the escalation was
+    // the one thing that could not end it.
+    const { pool, workerPrompts } = probePool(
+      () =>
+        '```json\n{"recommendation":"the probe was looking for a file this task was never scoped to write","checked":[],"needsOperator":false,"why":"the probe named the wrong artifact","probe":"test -f feature.txt"}\n```'
+    );
+    const asked: string[] = [];
+    const { store, runId } = await run(gates(async (why) => { asked.push(why); return null; }), pool, { taskGate: { decidedBy: "product-manager" } });
+
+    // The bar moved, on the record, with a name against it.
+    expect(store.getTask(runId, "task-a")!.completionProbe).toBe("test -f feature.txt");
+    const amended = store.eventsSince(runId, 0).map((e) => e.event).filter((e) => e.type === "task.probe_amended") as { from: string; to: string; by: string; why: string }[];
+    expect(amended).toHaveLength(1);
+    expect(amended[0]).toMatchObject({ from: "test -f nope.txt", to: "test -f feature.txt", by: "product-manager" });
+    expect(amended[0]!.why).toContain("wrong artifact");
+
+    // And the task went on with its life: the amended probe was tried on the
+    // spot rather than costing a worker round, so what stopped it next was QA
+    // having an opinion — not the probe, again, for the second time.
+    expect(logs(store, runId).some((t) => t.includes("completion probe passes as amended"))).toBe(true);
+    expect(workerPrompts[1]).toContain("QA has its own opinion");
+    expect(workerPrompts[1]).not.toContain("completion probe");
+    expect(asked).toHaveLength(1);
+  });
+
+  it("is withdrawn when there is nothing in it worth keeping", async () => {
+    const { pool } = probePool(
+      () => '```json\n{"recommendation":"this probe belonged to a different task","checked":[],"needsOperator":false,"probe":""}\n```'
+    );
+    const { store, runId } = await run(gates(async () => null), pool, { taskGate: { decidedBy: "product-manager" } });
+
+    expect(store.getTask(runId, "task-a")!.completionProbe).toBe("");
+    expect(logs(store, runId).some((t) => t.includes("completion probe withdrawn"))).toBe(true);
+  });
+
+  it("is left alone for a human, who is handed the command instead", async () => {
+    // An advisor drafting for the operator has no authority over what the task
+    // is judged by. What it does have is the exact command they were missing —
+    // the reason a probe was unfixable was never that nobody knew what it should
+    // say, it was that saying it meant hand-editing SQLite.
+    const { pool } = probePool(
+      () => '```json\n{"recommendation":"the probe names a file nothing writes","checked":[],"probe":"test -f feature.txt"}\n```'
+    );
+    const { store, runId } = await run(gates(async () => null), pool);
+
+    expect(store.getTask(runId, "task-a")!.completionProbe).toBe("test -f nope.txt");
+    expect(store.eventsSince(runId, 0).map((e) => e.event).filter((e) => e.type === "task.probe_amended")).toHaveLength(0);
+    const hint = logs(store, runId).find((t) => t.includes("harness probe"));
+    expect(hint).toContain(`harness probe task-a 'test -f feature.txt' --run ${runId}`);
+  });
+
+  it("stops moving once the decider has moved it as often as it may", async () => {
+    // A skill that keeps rewriting the bar until the work clears it has stopped
+    // being a check on the work. One rewrite per task, then the probe is settled
+    // as far as any agent is concerned — even a rewrite that would have passed.
+    const { pool } = probePool((round) =>
+      round === 0
+        ? '```json\n{"recommendation":"try this one","checked":[],"needsOperator":false,"probe":"test -f still-nope.txt"}\n```'
+        : '```json\n{"recommendation":"no, this one","checked":[],"needsOperator":false,"probe":"test -f feature.txt"}\n```'
+    );
+    const asked: string[] = [];
+    const { store, runId } = await run(gates(async (why) => { asked.push(why); return null; }), pool, { taskGate: { decidedBy: "product-manager" } });
+
+    expect(store.taskProbeAmendments(runId, "task-a")).toBe(1);
+    expect(store.getTask(runId, "task-a")!.completionProbe).toBe("test -f still-nope.txt");
+    // The second rewrite is not silently swallowed: it becomes the operator's
+    // command, and the escalation becomes theirs to answer.
+    expect(logs(store, runId).some((t) => t.includes(`harness probe task-a 'test -f feature.txt'`))).toBe(true);
+    expect(asked).toHaveLength(1);
+    expect(store.getTask(runId, "task-a")!.state).toBe("NEEDS_HUMAN");
+  });
+});
+
 describe("the task-escalation gate, answered by a skill", () => {
   it("sends the skill's answer to the worker without waiting for the operator", async () => {
     // The reported experience: a task hit its cap at 3pm with a verified,

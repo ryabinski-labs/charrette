@@ -29,6 +29,20 @@ export const HarnessEvent = z.discriminatedUnion("type", [
     guidance: z.string().default(""),
     decidedBy: z.string().default("operator"),
   }),
+  // A task's definition of done, rewritten by whoever answered the escalation it
+  // caused — the only edit to a probe anything is allowed to make, and the only
+  // way out of a gate that reopens on a probe that cannot pass. `to` empty means
+  // the probe was dropped and QA's judgment is all that is left of it. `by` is
+  // the skill that decided, or "operator".
+  z.object({
+    ...base,
+    type: z.literal("task.probe_amended"),
+    taskId: z.string(),
+    from: z.string(),
+    to: z.string().default(""),
+    by: z.string().default("operator"),
+    why: z.string().default(""),
+  }),
   // Unprompted operator feedback on a task mid-run: "live" went straight into the
   // running session; "queued" waits for the next agent dispatched on the task.
   z.object({ ...base, type: z.literal("task.feedback"), taskId: z.string(), text: z.string(), delivery: z.enum(["live", "queued", "revived"]) }),
