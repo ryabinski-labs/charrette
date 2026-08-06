@@ -462,6 +462,25 @@ export class Store {
     );
   }
 
+  /**
+   * How many times a skill — rather than a person — has answered this task's
+   * escalation gate.
+   *
+   * The bound on `taskGate.autoAnswerRounds` reads this. It counts answers, not
+   * openings: an escalation the decider handed back to the operator is one the
+   * decider did not spend, and a task whose gate a person answered is not any
+   * closer to the round where the harness stops trusting an agent with it.
+   */
+  taskGateAutoAnswers(runId: string, taskId: string): number {
+    const rows = this.db
+      .prepare("SELECT payload FROM events WHERE runId = ? AND taskId = ? AND type = 'task.gate_resolved'")
+      .all(runId, taskId) as { payload: string }[];
+    return rows.filter((r) => {
+      const p = JSON.parse(r.payload) as { decidedBy?: string; parked?: boolean };
+      return !p.parked && Boolean(p.decidedBy) && p.decidedBy !== "operator";
+    }).length;
+  }
+
   /** How many of this event a run has recorded — how many times round it has been. */
   eventCount(runId: string, type: string): number {
     return (this.db.prepare("SELECT COUNT(*) c FROM events WHERE runId = ? AND type = ?").get(runId, type) as { c: number }).c;

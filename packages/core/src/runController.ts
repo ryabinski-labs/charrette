@@ -1405,13 +1405,42 @@ export class RunController {
    * this gate handler has no way to ask (headless / test contexts).
    */
   private async askOperator(runId: string, taskId: string, why: string): Promise<string | null> {
-    if (!this.gates.resolveTaskGate) return null;
     const task = this.store.getTask(runId, taskId)!;
+    const decider = this.taskGateDecider(runId, taskId);
+    // Nobody to ask and nobody to decide: park, without paying for advice that
+    // has no one to reach.
+    if (!decider && !this.gates.resolveTaskGate) return null;
     // The question arrives with a proposed answer attached: the gate blocks the
     // whole run on a human, so a minute of agent time drafting their reply is
-    // the cheapest latency win in the system.
-    const recommendation = await this.adviseOperator(runId, taskId, why);
+    // the cheapest latency win in the system. With a decider named, that same
+    // session *is* the answer — see adviseOperator.
+    const advice = await this.adviseOperator(runId, taskId, why, decider);
+    const recommendation = advice.recommendation;
     this.bus.publish({ type: "task.gate_opened", runId, taskId, why, recommendation, iterations: task.qaIterations, ts: Date.now() });
+    const because = advice.why ? ` — ${advice.why}` : "";
+    if (decider && recommendation && !advice.needsOperator) {
+      // Published as opened-then-resolved rather than never opened: the task
+      // did hit its cap, and a run whose log shows only the answer hides the
+      // fact that anything went wrong.
+      this.bus.publish({ type: "agent.log", runId, taskId, sessionId: "advisor", text: `${decider} answered this task's escalation${because}`, ts: Date.now() });
+      this.bus.publish({ type: "task.gate_resolved", runId, taskId, parked: false, guidance: recommendation, decidedBy: decider, ts: Date.now() });
+      return recommendation;
+    }
+    if (decider) {
+      this.bus.publish({
+        type: "agent.log",
+        runId,
+        taskId,
+        sessionId: "advisor",
+        text: recommendation
+          ? `${decider} sent this task's escalation back to you${because}`
+          : `${decider} did not return an answer for this task's escalation — asking you instead`,
+        ts: Date.now(),
+      });
+    }
+    // Whatever the decider said, an escalation it did not answer is one for the
+    // operator — and where there is no way to ask them, the task parks.
+    if (!this.gates.resolveTaskGate) return null;
     // From here until the answer arrives this task is running no agent, so its
     // worker slot goes back to the run. The advisor above is deliberately
     // outside this window: it *is* an agent, and it is this task's.
@@ -1435,14 +1464,31 @@ export class RunController {
       this.gatedTasks.delete(taskId);
       this.wakeScheduler();
     }
-    this.bus.publish({ type: "task.gate_resolved", runId, taskId, parked: guidance === null, guidance: guidance ?? "", ts: Date.now() });
+    this.bus.publish({ type: "task.gate_resolved", runId, taskId, parked: guidance === null, guidance: guidance ?? "", decidedBy: "operator", ts: Date.now() });
     return guidance;
   }
 
   /**
+   * The skill that answers this task's escalation, or "" when the operator does.
+   *
+   * Empty once the same task has been answered by a skill `autoAnswerRounds`
+   * times. The count is read off the event log rather than held in memory, so a
+   * resumed run does not hand a task that already burned its rounds a fresh set
+   * — the events are the only thing that survives the process, and this bound
+   * exists precisely for the case where an agent is answering its own
+   * escalation in a circle.
+   */
+  private taskGateDecider(runId: string, taskId: string): string {
+    const cfg = this.store.getRun(runId)!.config.taskGate;
+    if (cfg.decidedBy === "operator") return "";
+    return this.store.taskGateAutoAnswers(runId, taskId) < cfg.autoAnswerRounds ? cfg.decidedBy : "";
+  }
+
+  /**
    * A short read-only advisor session in the stuck task's worktree, drafting
-   * the answer the operator will probably give. Never fatal — a crashed or
-   * unparseable advisor just means the old, question-only gate.
+   * the answer the operator will probably give — or, when `decider` names a
+   * skill, giving it. Never fatal — a crashed or unparseable advisor just means
+   * the old, question-only gate.
    *
    * The turn budget buys verification, not just reading. An advisor that only
    * summarises the rejection is worse than none: on the run where this was
@@ -1450,16 +1496,27 @@ export class RunController {
    * compressed it away, the operator accepted the draft in one click and the
    * worker was re-dispatched never having heard about the defect.
    */
-  private async adviseOperator(runId: string, taskId: string, why: string): Promise<string> {
+  private async adviseOperator(
+    runId: string,
+    taskId: string,
+    why: string,
+    decider = ""
+  ): Promise<{ recommendation: string; needsOperator: boolean; why: string }> {
     const run = this.store.getRun(runId)!;
     const task = this.store.getTask(runId, taskId)!;
+    const none = { recommendation: "", needsOperator: true, why: "" };
     try {
+      // Looked up by name, as the pit stop's decider is: the skill was named to
+      // be the one answering, and the lexical matcher's opinion of what this
+      // task sounds like is a different question. A name that matches nothing
+      // still decides — it wears the hat without the playbook.
+      const skills = decider ? indexSkills(run.config.skillsDirs).filter((s) => s.name === decider && verifyHash(s)) : [];
       const result = await this.pool.run({
         runId,
         taskId,
         role: "advisor",
         model: run.config.models.advisor,
-        systemPrompt: advisorSystemPrompt(),
+        systemPrompt: advisorSystemPrompt("", decider, skillsBlock(skills)),
         prompt: advisorPrompt(task, why, run.config.deterministicChecks),
         cwd: task.worktreePath ?? this.repoPath,
         disallowedTools: ["Write", "Edit", "NotebookEdit", "WebSearch"],
@@ -1470,13 +1527,19 @@ export class RunController {
         // to leave it in. Falling back to the repo means sweeping the repo.
         reapOnEnd: Boolean(task.worktreePath),
       });
-      const parsed = extractJson(result.resultText) as { recommendation?: unknown; checked?: unknown };
-      if (typeof parsed?.recommendation !== "string") return "";
+      const parsed = extractJson(result.resultText) as { recommendation?: unknown; checked?: unknown; needsOperator?: unknown; why?: unknown };
+      if (typeof parsed?.recommendation !== "string") return none;
       const checked = Array.isArray(parsed.checked) ? (parsed.checked as AdvisorCheck[]) : [];
-      // advisorAnswer budgets the 4000 itself, spending it on the checks first.
-      return advisorAnswer(parsed.recommendation.trim(), checked);
+      return {
+        // advisorAnswer budgets the 4000 itself, spending it on the checks first.
+        recommendation: advisorAnswer(parsed.recommendation.trim(), checked),
+        needsOperator: parsed.needsOperator === true,
+        why: typeof parsed.why === "string" ? parsed.why.slice(0, 300) : "",
+      };
     } catch {
-      return "";
+      // A session that crashed decided nothing, which is not the same as
+      // deciding to continue: the escalation goes to the person it always did.
+      return none;
     }
   }
 

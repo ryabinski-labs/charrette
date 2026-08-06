@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import { SUBPROJECT_DIRS } from "@harness/core";
-import { PitStopConfig } from "@harness/shared";
+import { PitStopConfig, TaskGateConfig } from "@harness/shared";
 
 export const CONFIG_FILENAME = "harness.config.json";
 
@@ -158,6 +158,11 @@ export const FileConfig = z
      * `{"pitStop":{"every":"never"}}` turns it off.
      */
     pitStop: PitStopConfig.partial().optional(),
+    /**
+     * Who answers a task that hits its cap — a skill name, or `"operator"` to
+     * be asked yourself, which is what this always used to do.
+     */
+    taskGate: TaskGateConfig.partial().optional(),
     skillsDirs: z.array(z.string()).optional(),
     /**
      * Which skills a class of work gets, by name. Declaring this replaces the

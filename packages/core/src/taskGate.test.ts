@@ -97,11 +97,19 @@ function gates(onTaskGate?: (why: string) => Promise<string | null>): GateHandle
   };
 }
 
-async function run(handler: GateHandler, pool: AgentPool) {
+/**
+ * `decidedBy: "operator"` unless a test says otherwise: most of these are about
+ * the gate a person answers, and the default (`product-manager`) would answer
+ * it before they saw it. The tests that exercise the decider set it back.
+ */
+async function run(handler: GateHandler, pool: AgentPool, over: Record<string, unknown> = {}) {
   const store = new Store(":memory:");
   const bus = new Bus(store);
   const controller = new RunController(store, bus, pool, noGithub, handler, repo());
-  const runId = await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], qaIterationCap: 1 }));
+  const runId = await controller.startRun(
+    "do a thing",
+    RunConfig.parse({ deterministicChecks: [], qaIterationCap: 1, taskGate: { decidedBy: "operator" }, ...over })
+  );
   return { store, runId, controller };
 }
 
@@ -473,7 +481,10 @@ describe("the task-escalation gate", () => {
     );
     // Two iterations allowed, so the first rejection does not gate on the cap and
     // the clock is what stops the task.
-    const runId = await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], qaIterationCap: 2 }));
+    const runId = await controller.startRun(
+      "do a thing",
+      RunConfig.parse({ deterministicChecks: [], qaIterationCap: 2, taskGate: { decidedBy: "operator" } })
+    );
 
     const clockGate = asked.find((w) => /wall clock/.test(w));
     expect(clockGate).toBeDefined();
@@ -493,5 +504,132 @@ describe("the task-escalation gate", () => {
 
     expect(store.getTask(runId, "task-a")!.state).toBe("NEEDS_HUMAN");
     expect(workerPrompts).toHaveLength(1);
+  });
+});
+
+/** rejectingPool, plus an advisor that answers with whatever JSON is passed. */
+function decidingPool(advisorJson: () => string) {
+  const workerPrompts: string[] = [];
+  const advisorSystems: string[] = [];
+  let planning = 0;
+  const pool = {
+    async run(spec: AgentSpec): Promise<AgentResult> {
+      let resultText = "";
+      if (spec.role === "planner") resultText = planning++ === 0 ? DOCS : DAG;
+      else if (spec.role === "worker") {
+        workerPrompts.push(spec.prompt);
+        writeFileSync(path.join(spec.cwd, "feature.txt"), `attempt ${workerPrompts.length}\n`);
+        gitIn(spec.cwd, "add", "-A");
+        gitIn(spec.cwd, "commit", "-m", "wip");
+        resultText = "worker done";
+      } else if (spec.role === "qa") resultText = '{"verdict":"FAIL","reasons":["still wrong"],"mustFix":["fix it"]}';
+      else if (spec.role === "advisor") {
+        advisorSystems.push(spec.systemPrompt);
+        resultText = advisorJson();
+      } else resultText = '{"verdict":"PASS","summary":"n/a"}';
+      return { sessionId: `s${Math.random()}`, resultText, costUsd: 0, turns: 1, outcome: "done" };
+    },
+  };
+  return { pool: pool as unknown as AgentPool, workerPrompts, advisorSystems };
+}
+
+describe("the task-escalation gate, answered by a skill", () => {
+  it("sends the skill's answer to the worker without waiting for the operator", async () => {
+    // The reported experience: a task hit its cap at 3pm with a verified,
+    // correct answer already drafted on screen — and stopped there, holding a
+    // worker slot, until somebody clicked a button.
+    const { pool, workerPrompts, advisorSystems } = decidingPool(
+      () => '```json\n{"recommendation":"types.gen.ts is generated \\u2014 do not hand-edit it; the probe is a false positive","checked":[],"needsOperator":false,"why":"the probe greps a generated enum"}\n```'
+    );
+    const asked: string[] = [];
+    const { store, runId } = await run(gates(async (why) => { asked.push(why); return null; }), pool, { taskGate: { decidedBy: "product-manager", autoAnswerRounds: 1 } });
+
+    // Nobody was asked for the first escalation; the worker simply carried on.
+    expect(workerPrompts[1]).toContain("do not hand-edit it");
+    // It wears the named hat, and says so in its own system prompt.
+    expect(advisorSystems[0]).toContain("**product-manager**");
+    expect(advisorSystems[0]).toContain("needsOperator");
+
+    const events = store.eventsSince(runId, 0).map((e) => e.event);
+    const resolved = events.filter((e) => e.type === "task.gate_resolved") as { parked: boolean; guidance: string; decidedBy: string }[];
+    expect(resolved[0]).toMatchObject({ parked: false, decidedBy: "product-manager" });
+    expect(resolved[0]!.guidance).toContain("false positive");
+    // The escalation is still on the record: a run that answers its own
+    // questions must not look like a run that never had one.
+    expect(events.filter((e) => e.type === "task.gate_opened")).not.toHaveLength(0);
+    // One round only, so the second escalation is the operator's, and they
+    // parked it.
+    expect(asked).toHaveLength(1);
+    expect(store.getTask(runId, "task-a")!.state).toBe("NEEDS_HUMAN");
+  });
+
+  it("hands the question back when only a person can answer it", async () => {
+    // The skill's one power over the run is to stop it. A missing credential or
+    // an unmade product decision is not something a worker can be instructed
+    // around, and guessing at it costs a whole iteration to learn nothing.
+    const { pool, workerPrompts } = decidingPool(
+      () => '```json\n{"recommendation":"After you start DynamoDB locally, tell the worker to re-run the suite","checked":[],"needsOperator":true,"why":"the suite needs a service nobody started"}\n```'
+    );
+    const seen: string[] = [];
+    const { store, runId } = await run(
+      gates(async () => {
+        seen.push("asked");
+        return null;
+      }),
+      pool,
+      { taskGate: {} }
+    );
+
+    expect(seen).toHaveLength(1);
+    expect(workerPrompts).toHaveLength(1);
+    expect(store.getTask(runId, "task-a")!.state).toBe("NEEDS_HUMAN");
+    const resolved = store.eventsSince(runId, 0).map((e) => e.event).filter((e) => e.type === "task.gate_resolved") as { decidedBy: string }[];
+    expect(resolved[0]!.decidedBy).toBe("operator");
+    // Handing it back does not cost the operator the investigation: the draft
+    // they are shown is the one the skill wrote.
+    const opened = store.eventsSince(runId, 0).map((e) => e.event).filter((e) => e.type === "task.gate_opened") as { recommendation: string }[];
+    expect(opened[0]!.recommendation).toContain("start DynamoDB");
+  });
+
+  it("stops answering the same task once its rounds are spent", async () => {
+    // Every answer resets the task's iteration counters, so a skill answering
+    // its own escalations is a loop bounded only by the task's budget. Twice is
+    // the point at which the thing standing between this task and finishing is
+    // no longer something an agent has to say.
+    const { pool, workerPrompts } = decidingPool(() => '```json\n{"recommendation":"try it again but harder","checked":[],"needsOperator":false}\n```');
+    const asked: string[] = [];
+    const { store, runId } = await run(gates(async (why) => { asked.push(why); return null; }), pool, { taskGate: {} });
+
+    // Two answers, then the third escalation is a person's.
+    expect(store.taskGateAutoAnswers(runId, "task-a")).toBe(2);
+    expect(asked).toHaveLength(1);
+    expect(workerPrompts).toHaveLength(3);
+    expect(store.getTask(runId, "task-a")!.state).toBe("NEEDS_HUMAN");
+  });
+
+  it("answers a headless run, where there was never anyone to ask", async () => {
+    // `harness run` in CI has no gate handler at all: every escalation parked on
+    // the spot. The decider needs no terminal and no dashboard.
+    const { pool, workerPrompts } = decidingPool(() => '```json\n{"recommendation":"the fixture path moved to test/fixtures","checked":[],"needsOperator":false}\n```');
+    const { store, runId } = await run(gates(), pool, { taskGate: { decidedBy: "product-manager", autoAnswerRounds: 1 } });
+
+    expect(workerPrompts[1]).toContain("test/fixtures");
+    // And with its round spent and nobody to ask, it parks — as it always did.
+    expect(store.getTask(runId, "task-a")!.state).toBe("NEEDS_HUMAN");
+    expect(workerPrompts).toHaveLength(2);
+  });
+
+  it("asks rather than guesses when the decider's session returns nothing usable", async () => {
+    // A crashed or rambling decider has decided nothing. Reading silence as
+    // "carry on" would hand the worker an empty brief and buy it a fresh set of
+    // iterations to fail the same way.
+    const { pool, workerPrompts } = decidingPool(() => "I had a good look around and, honestly, it is hard to say.");
+    const asked: string[] = [];
+    const { store, runId } = await run(gates(async (why) => { asked.push(why); return null; }), pool, { taskGate: {} });
+
+    expect(asked).toHaveLength(1);
+    expect(workerPrompts).toHaveLength(1);
+    expect(store.getTask(runId, "task-a")!.state).toBe("NEEDS_HUMAN");
+    expect(store.taskGateAutoAnswers(runId, "task-a")).toBe(0);
   });
 });

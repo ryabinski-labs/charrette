@@ -132,6 +132,41 @@ export const Budget = z.object({
 });
 
 /**
+ * Who answers when a task hits its cap (Gate: task-escalation).
+ *
+ * The advisor has drafted that answer for a while now, and the operator's part
+ * in it had already shrunk to reading a verified recommendation and clicking
+ * accept. That click is still a person being awake: a run that escalates at 2am
+ * stops there, with a worker slot idle and an answer sitting on screen that
+ * nobody is there to send. Naming a skill hands the same draft to the same
+ * judgment the pit stop already trusts — the advisor answers *as* that skill,
+ * with its playbook in front of it, and the worker gets a fresh set of
+ * iterations without waiting for anyone.
+ *
+ * `"operator"` restores the old behaviour of always asking.
+ *
+ * Nothing is hidden by this: the escalation, the recommendation and who
+ * answered it are all still published, and the answer is the one the operator
+ * would have been shown.
+ */
+export const TaskGateConfig = z.object({
+  decidedBy: z.string().min(1).default("product-manager"),
+  /**
+   * How many times a skill may answer the *same* task's escalation before the
+   * next one goes to the operator whatever `decidedBy` says.
+   *
+   * Each answer resets the task's iteration and respawn counters — that is the
+   * point of answering — so an agent answering its own escalations is a loop
+   * with no natural end but the task's budget cap. A skill that has now twice
+   * told the same task how to get unstuck, and been wrong twice, is not the
+   * thing standing between this task and finishing. `0` asks every time, which
+   * is `decidedBy: "operator"` with extra steps.
+   */
+  autoAnswerRounds: z.number().int().min(0).max(10).default(2),
+});
+export type TaskGateConfig = z.infer<typeof TaskGateConfig>;
+
+/**
  * The vocabulary of user-interface work, written once because three rules match
  * on it. Splitting the UI rule by role is the point — see `skillRouting` — and
  * three copies of a regex this long is three chances for them to drift apart.
@@ -244,6 +279,11 @@ export const RunConfig = z.object({
    * diff". `{"pitStop":{"every":"never"}}` restores that.
    */
   pitStop: PitStopConfig.default({}),
+  /**
+   * Who answers a task that hit its cap, and how many times they may answer the
+   * same one. `{"taskGate":{"decidedBy":"operator"}}` always asks you.
+   */
+  taskGate: TaskGateConfig.default({}),
   /**
    * How many times a failing intent check may queue work to close its own gaps.
    *

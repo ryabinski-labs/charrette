@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   INTERFACE_STANDARD,
   advisorPrompt,
+  advisorSystemPrompt,
   demoEvidenceReaskPrompt,
   demoSystemPrompt,
   emptyBranchPrompt,
   extractJson,
   plannerBreakdownSystemPrompt,
   qaSystemPrompt,
+  skillsBlock,
   workerSystemPrompt,
 } from "./prompts.js";
 
@@ -321,6 +323,25 @@ describe("what the advisor is told about the repository", () => {
 
     expect(p).not.toMatch(/How this repository checks a task/);
     expect(p).toContain("Investigate the worktree you are in");
+  });
+
+  it("drafts for a human by default, and answers as the named skill when there is one", () => {
+    const draft = advisorSystemPrompt();
+    expect(draft).toContain("draft the answer they will probably give");
+    // Nothing about handing anything back: there is nobody to hand it to, the
+    // operator is already reading it.
+    expect(draft).not.toContain("needsOperator");
+
+    const decides = advisorSystemPrompt("", "product-manager", skillsBlock([{ name: "product-manager", content: "# PM playbook", path: "/s/pm" }]));
+    expect(decides).toContain("**product-manager**");
+    expect(decides).toContain("sent to the worker as-is");
+    expect(decides).toContain("# PM playbook");
+    // The one thing it can do that stops the run, and the four cases for it.
+    expect(decides).toContain('"needsOperator":boolean');
+    expect(decides).toMatch(/a credential issued/);
+    expect(decides).toMatch(/product decision nobody has made/);
+    // Both are still asked to investigate rather than summarise.
+    for (const p of [draft, decides]) expect(p).toMatch(/Check the cheap ones against the code/);
   });
 });
 

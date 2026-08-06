@@ -89,6 +89,10 @@ function makeController(repoPath: string, gateOverride?: (bus: Bus, store: Store
       process.stdout.write(`  QA[${event.taskId}] iteration ${event.iteration}: ${event.verdict}\n`);
     } else if (event.type === "task.feedback") {
       process.stdout.write(`  ✉ your feedback → ${event.taskId} (${event.delivery})\n`);
+    } else if (event.type === "task.gate_resolved" && event.decidedBy !== "operator") {
+      // The escalation you were not asked about. Printed because a run that
+      // answers its own questions still owes you the fact that it had one.
+      process.stdout.write(`  ⚑ ${event.decidedBy} answered ${event.taskId}'s escalation: ${event.guidance.split("\n")[0]!.slice(0, 120)}\n`);
     }
   });
   const pool = new AgentPool(store, bus);

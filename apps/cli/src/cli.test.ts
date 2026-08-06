@@ -814,6 +814,16 @@ describe("what the run narrates to the terminal", () => {
     expect(printed()).toBe("");
   });
 
+  it("says when a skill answered an escalation you were never asked about", () => {
+    // The whole point of `taskGate.decidedBy` is that nobody is interrupted —
+    // which must not become nobody being told. The gate you *were* asked is
+    // already on screen as a prompt, so printing it again would be noise.
+    publish({ type: "task.gate_resolved", taskId: "auth", parked: false, guidance: "the fixture moved\nto test/fixtures", decidedBy: "product-manager" });
+    publish({ type: "task.gate_resolved", taskId: "auth", parked: true, guidance: "", decidedBy: "operator" });
+
+    expect(printed()).toBe("  ⚑ product-manager answered auth's escalation: the fixture moved\n");
+  });
+
   it("stays silent for the intake agent, which owns the terminal while it talks", () => {
     publish({ type: "agent.spawned", role: "intake", sessionId: "sess-intake" });
     publish({ type: "agent.log", sessionId: "sess-intake", taskId: null, text: "asking a question" });
