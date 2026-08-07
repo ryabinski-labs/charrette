@@ -46,6 +46,8 @@ import {
   advisorAnswer,
   advisorPrompt,
   advisorSystemPrompt,
+  budgetDeciderPrompt,
+  budgetDeciderSystemPrompt,
   conflictPrompt,
   demoEvidenceReaskPrompt,
   demoPrompt,
@@ -56,6 +58,8 @@ import {
   operatorFeedbackMessage,
   pitStopDeciderPrompt,
   pitStopDeciderSystemPrompt,
+  planGateDeciderPrompt,
+  planGateDeciderSystemPrompt,
   replanPrompt,
   reviewerPrompt,
   reviewerSystemPrompt,
@@ -386,10 +390,49 @@ const ReviewJson = z.object({
  * answer that is not one of them is not a decision, and the pit stop falls back
  * to asking rather than rounding it to the nearest one.
  */
-const PitStopDecisionJson = z.object({
-  action: z.enum(["continue", "redirect", "replan", "stop"]),
+const PitStopDecisionJson = z
+  .object({
+    action: z.enum(["continue", "redirect", "replan", "stop"]),
+    blockedOn: z.enum(["money", "scope", "access", "direction"]).optional(),
+    why: z.string().default(""),
+    feedback: z.string().default(""),
+  })
+  // A stop must name which of the four things only an operator can settle it is
+  // stopping on. Not decoration: a decider that cannot fill this in is a
+  // decider stopping over something it had the authority to decide, and the
+  // requirement is there to be felt while choosing rather than checked
+  // afterwards. A stop that fails it falls through to `ask`, which parks the
+  // run at the operator anyway — the same place the stop was heading, minus
+  // the claim that an agent decided it.
+  .refine((d) => d.action !== "stop" || Boolean(d.blockedOn), {
+    message: 'a "stop" must say what it is blocked on: money, scope, access or direction',
+    path: ["blockedOn"],
+  });
+
+/**
+ * What the plan gate's adjudicator said about a failing intent check.
+ *
+ * There is deliberately no "approve" here. The gap list either goes back to the
+ * planner or reaches the operator with a reason attached, and the operator is
+ * the only thing that can turn a plan into a run.
+ */
+const PlanGateDecisionJson = z.object({
+  action: z.enum(["replan", "accept"]),
   why: z.string().default(""),
   feedback: z.string().default(""),
+});
+
+/**
+ * What the budget decider said about a cap that was reached.
+ *
+ * `capUsd` is checked against the spend and the bound by the caller rather than
+ * here: a figure that is too low or too high is a decision the harness declines
+ * to act on, and saying which is more useful in the log than a parse error.
+ */
+const BudgetDecisionJson = z.object({
+  action: z.enum(["raise", "park"]),
+  capUsd: z.number().default(0),
+  why: z.string().default(""),
 });
 
 export class RunController {
@@ -674,6 +717,9 @@ export class RunController {
       run = this.store.getRun(runId)!;
     }
     let planFeedback = "";
+    // What the adjudicator said last time it sent this plan back, so the next
+    // round can be told what it already asked for and did not get.
+    let planVeto = "";
     while (run.state === "PLANNING" || run.state === "PLAN_REVIEW") {
       if (run.state === "PLANNING") {
         const plan = await this.plan(runId, planFeedback);
@@ -683,7 +729,43 @@ export class RunController {
       // Asked here, where a gap is worth a re-plan, rather than only at
       // INTEGRATING, where the same answer costs a whole run.
       const shortfall = await this.checkPlanIntent(runId);
-      const gate = await this.gates.resolvePlanGate(this.planPrd(runId), `${this.planSummary(runId)}${shortfall}`);
+      // One gate, one id, however it ends: the adjudicator below may close it by
+      // sending the plan back, and if it does not, the operator closes it. Until
+      // now nothing recorded who approved a plan at all.
+      const gateId = randomUUID().slice(0, 8);
+      this.bus.publish({ type: "run.gate_opened", runId, gateId, kind: "plan", payload: { gaps: shortfall.gaps }, ts: Date.now() });
+      // Weighed before the operator sees it. A gap list with nobody's name
+      // against it is the thing that gets waved through — f338b5c8 approved four
+      // of them, one of which was the reason the run ended without a PR.
+      const adjudged = await this.decidePlanGate(runId, shortfall.gaps, planVeto);
+      if (adjudged.action === "replan") {
+        this.bus.publish({
+          type: "run.gate_resolved",
+          runId,
+          gateId,
+          kind: "plan",
+          resolution: "rejected",
+          feedback: adjudged.why,
+          decidedBy: adjudged.decidedBy,
+          ts: Date.now(),
+        });
+        planVeto = adjudged.feedback;
+        planFeedback = `${adjudged.feedback}${shortfall.block}`;
+        this.store.transitionRun(runId, "PLANNING", `${adjudged.decidedBy} sent the plan back over the intent check's gaps`);
+        run = this.store.getRun(runId)!;
+        continue;
+      }
+      const gate = await this.gates.resolvePlanGate(this.planPrd(runId), `${this.planSummary(runId)}${shortfall.block}${adjudged.note}`);
+      this.bus.publish({
+        type: "run.gate_resolved",
+        runId,
+        gateId,
+        kind: "plan",
+        resolution: gate.approved ? "approved" : "rejected",
+        feedback: gate.feedback,
+        decidedBy: "operator",
+        ts: Date.now(),
+      });
       if (gate.approved) {
         await this.fileIssues(runId);
         this.store.transitionRun(runId, "EXECUTING", "plan approved");
@@ -691,7 +773,7 @@ export class RunController {
         // The operator's words first — they saw the shortfall and are answering
         // it — with the finding appended so a re-plan closes it even when they
         // rejected for some other reason entirely.
-        planFeedback = `${gate.feedback}${shortfall}`;
+        planFeedback = `${gate.feedback}${shortfall.block}`;
         this.store.transitionRun(runId, "PLANNING", "plan rejected");
       }
       run = this.store.getRun(runId)!;
@@ -769,10 +851,14 @@ export class RunController {
    * feedback a rejected plan carries back to the planner. Empty on PASS, on a
    * check that could not complete, and when the operator has turned it off —
    * this informs the gate, it never blocks it. The decision stays theirs.
+   *
+   * The gaps come back alongside the rendered block because `planGate.decidedBy`
+   * adjudicates them item by item, and re-parsing them out of prose written for
+   * a human to read is how the two drift apart.
    */
-  private async checkPlanIntent(runId: string): Promise<string> {
+  private async checkPlanIntent(runId: string): Promise<{ block: string; gaps: string[] }> {
     const run = this.store.getRun(runId)!;
-    if (!run.config.planIntentCheck) return "";
+    if (!run.config.planIntentCheck) return { block: "", gaps: [] };
     const tasks = this.store.listTasks(runId);
     try {
       const result = await this.pool.run({
@@ -791,24 +877,107 @@ export class RunController {
       });
       const verdict = IntentVerdict.parse(extractJson(result.resultText));
       this.bus.publish({ type: "run.plan_intent_verdict", runId, verdict: verdict.verdict, gaps: verdict.gaps, summary: verdict.summary, ts: Date.now() });
-      if (verdict.verdict === "PASS" || !verdict.gaps.length) return "";
-      return [
-        "",
-        "",
-        "What this plan would not deliver, read against your assignment:",
-        ...verdict.gaps.map((g) => `  - ${g}`),
-        "",
-        "Every task here can pass its own acceptance criteria and still leave the",
-        "above missing, because those criteria are the whole contract a worker",
-        "builds to and QA checks. Rejecting sends this back to the planner with",
-        "the list attached; approving accepts it as the scope.",
-      ].join("\n");
+      if (verdict.verdict === "PASS" || !verdict.gaps.length) return { block: "", gaps: [] };
+      return {
+        gaps: verdict.gaps,
+        block: [
+          "",
+          "",
+          "What this plan would not deliver, read against your assignment:",
+          ...verdict.gaps.map((g) => `  - ${g}`),
+          "",
+          "Every task here can pass its own acceptance criteria and still leave the",
+          "above missing, because those criteria are the whole contract a worker",
+          "builds to and QA checks. Rejecting sends this back to the planner with",
+          "the list attached; approving accepts it as the scope.",
+        ].join("\n"),
+      };
     } catch (e) {
       if (e instanceof BudgetExceeded) throw e;
       // A plan that could not be checked is still a plan the operator may
       // approve. Say the check did not happen rather than implying it passed.
       this.bus.publish({ type: "agent.log", runId, sessionId: "validator", text: `the plan-intent check did not complete: ${String(e).slice(0, 300)}`, ts: Date.now() });
-      return "\n\nThe plan-intent check did not complete, so nothing has compared this plan to your assignment.";
+      return { block: "\n\nThe plan-intent check did not complete, so nothing has compared this plan to your assignment.", gaps: [] };
+    }
+  }
+
+  /**
+   * Weigh the intent check's gaps before the operator is asked to approve past
+   * them (`planGate.decidedBy`).
+   *
+   * The check has worked from the day it shipped. Run f338b5c8's fired before a
+   * worker was dispatched and named four things its plan would not deliver, one
+   * of them the missing mechanism that made M0's gates unmeasurable — the exact
+   * thing that ended the run 51 tasks and $475.07 later with no pull request.
+   * The gap list was approved two and a half minutes after it appeared.
+   *
+   * Nothing about that is unusual. At the plan gate the operator's alternative
+   * to `y` is composing re-planning feedback from a bulleted list of absences,
+   * and an advisory finding with nobody's name against it loses that trade every
+   * time. So a named skill takes the finding first and either sends the plan
+   * back on its own authority, or writes down why the run survives the gap —
+   * and the operator approves past a considered judgment rather than past a
+   * list.
+   *
+   * Returns `accept` unchanged when there are no gaps, when the operator has
+   * kept the gate for themselves, when the veto has been spent, and whenever
+   * the adjudicator itself fails: a plan that could not be weighed is still a
+   * plan they may approve, and it is never held hostage to an agent that died.
+   */
+  private async decidePlanGate(
+    runId: string,
+    gaps: string[],
+    priorVeto: string
+  ): Promise<{ action: "replan" | "accept"; feedback: string; why: string; note: string; decidedBy: string }> {
+    const accept = (note = "", why = "", decidedBy = "operator") => ({ action: "accept" as const, feedback: "", why, note, decidedBy });
+    const run = this.store.getRun(runId)!;
+    const skill = run.config.planGate.decidedBy;
+    if (!gaps.length || skill === "operator") return accept();
+
+    const spent = this.store.planGateAutoReplans(runId);
+    const rounds = run.config.planGate.replanRounds;
+    const say = (text: string) => this.bus.publish({ type: "agent.log", runId, sessionId: "plan-gate", text, ts: Date.now() });
+    // Out of vetoes. Saying so is worth more than the note a second adjudication
+    // would produce: the operator is looking at gaps that already survived one
+    // re-plan, and that is the fact that should decide how they read them.
+    if (spent >= rounds) {
+      return accept(
+        `\n\n${skill} already sent this plan back over these gaps, and they are still here. A gap the planner has now failed to close twice is usually a question about the assignment rather than about the plan.\n`
+      );
+    }
+
+    try {
+      const skills = indexSkills(run.config.skillsDirs).filter((s) => s.name === skill && verifyHash(s));
+      const bound =
+        rounds - spent === 1
+          ? "This is your last chance to send this plan back. After it, the gaps go to the operator however you answer, so a replan you are not sure about is one you do not get to correct."
+          : `You may send this plan back ${rounds - spent} more times before the gaps go to the operator however you answer.`;
+      const result = await this.pool.run({
+        runId,
+        role: "pm",
+        model: run.config.models.pm,
+        systemPrompt: planGateDeciderSystemPrompt(skill, bound, toolbeltBlock(detectToolbelt(run.config.externalTools)), skillsBlock(skills)),
+        prompt: planGateDeciderPrompt(run.assignment, this.planPrd(runId), this.planSummary(runId), gaps, priorVeto),
+        cwd: this.repoPath,
+        // The tree it would build in is the one it is standing in, and reading
+        // it is how "no task owns this" is told apart from "this already
+        // exists". Writing is not: nothing is built yet.
+        disallowedTools: ["Write", "Edit", "NotebookEdit"],
+        maxTurns: 20,
+        budgetCheck: () => this.checkBudget(runId),
+      });
+      const parsed = PlanGateDecisionJson.parse(extractJson(result.resultText));
+      say(`${skill} on the plan-intent gaps: ${parsed.action}${parsed.why ? ` — ${parsed.why}` : ""}`);
+      if (parsed.action === "replan") return { action: "replan", feedback: parsed.feedback, why: parsed.why, note: "", decidedBy: skill };
+      return accept(
+        `\n\n${skill} weighed these gaps and accepted them:\n${parsed.feedback || parsed.why}\n`,
+        parsed.why,
+        skill
+      );
+    } catch (e) {
+      if (e instanceof BudgetExceeded) throw e;
+      say(`${skill} did not weigh the plan-intent gaps (${String(e).slice(0, 200)}) — they go to you as they are`);
+      return accept("\n\nNothing weighed these gaps: the adjudicator did not return a decision.\n");
     }
   }
 
@@ -2413,7 +2582,7 @@ export class RunController {
     // one nobody finds when they open the pit stop that made it.
     appendFileSync(
       path.join(dir, "REPORT.md"),
-      `\n## Decision — ${decision.action}\n\nDecided by: ${decidedBy}` +
+      `\n## Decision — ${decision.action}${decision.blockedOn ? `, blocked on ${decision.blockedOn}` : ""}\n\nDecided by: ${decidedBy}` +
         `${decidedBy === "operator" ? "" : ` ($${(this.store.spentUsd(runId) - afterUsd).toFixed(2)})`}\n` +
         `${why ? `\n${why}\n` : ""}${decision.feedback.trim() ? `\nWhat the run was told:\n\n${decision.feedback.trim()}\n` : ""}`
     );
@@ -2436,6 +2605,7 @@ export class RunController {
       tasks: touched,
       decidedBy,
       why: why.slice(0, 500),
+      blockedOn: decision.blockedOn ?? "",
       ts: Date.now(),
     });
     await this.sweepRunResources(runId, `pit stop ${number}`);
@@ -2847,8 +3017,12 @@ export class RunController {
         budgetCheck: () => this.checkBudget(runId),
       });
       const parsed = PitStopDecisionJson.parse(extractJson(result.resultText));
-      say(`${skill} decided: ${parsed.action}${parsed.why ? ` — ${parsed.why}` : ""}`);
-      return { decision: { action: parsed.action, feedback: parsed.feedback }, decidedBy: skill, why: parsed.why };
+      say(`${skill} decided: ${parsed.action}${parsed.blockedOn ? ` (blocked on ${parsed.blockedOn})` : ""}${parsed.why ? ` — ${parsed.why}` : ""}`);
+      return {
+        decision: { action: parsed.action, feedback: parsed.feedback, blockedOn: parsed.blockedOn },
+        decidedBy: skill,
+        why: parsed.why,
+      };
     } catch (e) {
       if (e instanceof BudgetExceeded) throw e;
       say(`${skill} did not return a decision (${String(e).slice(0, 200)}) — asking you instead`);
@@ -3924,7 +4098,12 @@ export class RunController {
     const payload: BudgetGate = { scope, taskId, spentUsd: spent, capUsd: cap, runSpentUsd: this.store.spentUsd(runId) };
     this.bus.publish({ type: "run.gate_opened", runId, gateId, kind: "budget", payload, ts: Date.now() });
 
-    const raised = await this.gates.resolveBudgetGate(payload);
+    // Asked of the skill first, and of the operator only when it has no
+    // standing to answer — this is the gate that cost f338b5c8 six hours and
+    // forty-two minutes of an idle worker slot for an answer that turned out to
+    // be the suggested figure, accepted unchanged.
+    const decided = await this.decideBudgetGate(runId, payload);
+    const raised = decided.decidedBy === "operator" ? await this.gates.resolveBudgetGate(payload) : decided.capUsd;
     const ok = raised !== null && Number.isFinite(raised) && raised > spent;
     this.bus.publish({
       type: "run.gate_resolved",
@@ -3932,7 +4111,10 @@ export class RunController {
       gateId,
       kind: "budget",
       resolution: ok ? "approved" : "rejected",
-      feedback: ok ? `${scope} cap raised to $${raised!.toFixed(2)}` : "operator declined to raise the cap",
+      feedback:
+        (ok ? `${scope} cap raised to $${raised!.toFixed(2)}` : `${decided.decidedBy} declined to raise the cap`) +
+        (decided.why ? ` — ${decided.why}` : ""),
+      decidedBy: decided.decidedBy,
       ts: Date.now(),
     });
 
@@ -3942,6 +4124,133 @@ export class RunController {
     this.store.setRunBudget(runId, budget);
     this.bus.publish({ type: "run.budget_updated", runId, spentUsd: spent, capUsd: raised!, ts: Date.now() });
     if (held) this.store.transitionRun(runId, held, `${scope} cap raised to $${raised!.toFixed(2)}`);
+  }
+
+  /**
+   * Answer a cap that has been reached, or hand it to the operator
+   * (`budget.decidedBy`).
+   *
+   * A task cap is a planner's guess about the size of a piece of work, made
+   * before anyone read the code, and reaching one says the guess was wrong. The
+   * operator's half of that conversation had already collapsed into pressing
+   * enter on a suggested figure — run f338b5c8 did it twice, unchanged both
+   * times, once **six hours and forty-two minutes** after the gate opened, with
+   * a worker paused mid-task and three tasks queued behind it.
+   *
+   * Two bounds keep this honest, and they are deliberately asymmetric:
+   *
+   * - **The run cap is not the skill's to raise** unless the operator named a
+   *   `ceilingUsd` in advance. Task raises redistribute money already agreed to
+   *   — no sequence of them can spend a dollar past `runCapUsd`, because the
+   *   run gate fires on its own — but the run cap *is* the agreed number, and an
+   *   agent that can raise its own ceiling has none.
+   * - **`autoRaiseRounds` per cap.** A task at its third raise is not a slightly
+   *   wrong estimate; it is a task that does not know how to finish, and the
+   *   fourth raise buys another round of exactly what the first three bought.
+   *
+   * Everything outside those bounds, and every failure, goes to the operator —
+   * who has lost nothing, because asking them is all this ever did.
+   */
+  private async decideBudgetGate(runId: string, gate: BudgetGate): Promise<{ capUsd: number | null; decidedBy: string; why: string }> {
+    const ask = { capUsd: null, decidedBy: "operator", why: "" };
+    const run = this.store.getRun(runId)!;
+    const skill = run.config.budget.decidedBy;
+    if (skill === "operator") return ask;
+
+    const say = (text: string) => this.bus.publish({ type: "agent.log", runId, sessionId: "budget", text, ts: Date.now() });
+    // The most this decision may set the cap to. For a task that is the run's
+    // own cap — a task cap above it cannot buy anything the run gate will not
+    // stop — and for the run it is the figure the operator typed in advance,
+    // without which this is not theirs to answer at all.
+    const ceiling = gate.scope === "run" ? run.config.budget.ceilingUsd : run.config.budget.runCapUsd;
+    if (ceiling === undefined) return ask;
+    if (ceiling <= gate.spentUsd) {
+      say(`${skill} cannot answer this: the ${gate.scope} ceiling of $${ceiling.toFixed(2)} is already spent — asking you`);
+      return ask;
+    }
+    const spentRounds = this.store.budgetAutoRaises(runId, gate.scope, gate.taskId);
+    if (spentRounds >= run.config.budget.autoRaiseRounds) {
+      say(`${skill} has already raised this ${gate.scope} cap ${spentRounds} time(s) — this one is yours`);
+      return ask;
+    }
+
+    const tasks = this.store.listTasks(runId);
+    const task = gate.taskId ? tasks.find((t) => t.id === gate.taskId) : undefined;
+    const blocked = gate.taskId ? tasks.filter((t) => t.dependsOn.includes(gate.taskId!) && t.state !== "MERGED") : [];
+    const notStarted = tasks.filter((t) => t.state === "PENDING");
+    try {
+      const skills = indexSkills(run.config.skillsDirs).filter((s) => s.name === skill && verifyHash(s));
+      const result = await this.pool.run({
+        runId,
+        role: "pm",
+        model: run.config.models.pm,
+        systemPrompt: budgetDeciderSystemPrompt(
+          skill,
+          `You may set this cap as high as $${ceiling.toFixed(2)} and no higher; a figure above it will be treated as that figure. ` +
+            (run.config.budget.autoRaiseRounds - spentRounds === 1
+              ? "This is the last raise you get on this cap — the next one is the operator's however you answer."
+              : `You may raise this cap ${run.config.budget.autoRaiseRounds - spentRounds} more times before the operator is asked instead.`),
+          toolbeltBlock(detectToolbelt(run.config.externalTools)),
+          skillsBlock(skills)
+        ),
+        prompt: budgetDeciderPrompt(
+          run.assignment,
+          `The **${gate.scope}** cap has been reached${gate.taskId ? ` by task \`${gate.taskId}\`` : ""}.`,
+          task
+            ? [
+                `- **${task.title}** (\`${task.id}\`, ${task.estimatedSize}, state ${task.state})`,
+                `- QA has failed it ${task.qaIterations} time(s); its worker has been respawned ${task.respawns} time(s).`,
+                `- What it is meant to build: ${task.spec.slice(0, 1500)}`,
+                `- What would prove it done: ${task.acceptanceCriteria.map((c) => `\n    - ${c}`).join("")}`,
+                task.errorSummary ? `- Where it is stuck: ${task.errorSummary.slice(0, 800)}` : "",
+                blocked.length
+                  ? `- ${blocked.length} task(s) cannot start until it finishes: ${blocked.map((t) => t.id).join(", ")}`
+                  : "- Nothing is waiting on it.",
+              ]
+                .filter(Boolean)
+                .join("\n")
+            : "",
+          [
+            `This task has spent $${gate.spentUsd.toFixed(2)} against a cap of $${gate.capUsd.toFixed(2)}.`,
+            `The run has spent $${gate.runSpentUsd.toFixed(2)} of its $${run.config.budget.runCapUsd.toFixed(2)} cap.`,
+            spentRounds ? `This cap has already been raised ${spentRounds} time(s) without the operator being asked.` : "",
+          ]
+            .filter(Boolean)
+            .join("\n"),
+          `Still to build: ${notStarted.length} task(s) that have not started${notStarted.length ? ` — ${notStarted.map((t) => `${t.id} (${t.estimatedSize})`).join(", ")}` : ""}.\n`
+        ),
+        cwd: await this.wt.ensureIntegrationWorktree(runId).catch(() => this.repoPath),
+        disallowedTools: ["Write", "Edit", "NotebookEdit"],
+        maxTurns: 20,
+        // No `budgetCheck`: this session *is* the budget check. Enforcing the
+        // cap on the agent deciding what to do about the cap re-enters `enforce`
+        // behind a queue this call already holds, and the run deadlocks on
+        // itself. Its own spend is bounded by `maxTurns` and counted against
+        // everything measured after it.
+      });
+      const parsed = BudgetDecisionJson.parse(extractJson(result.resultText));
+      if (parsed.action === "park") {
+        say(`${skill} declined to raise the ${gate.scope} cap — ${parsed.why || "no reason given"}`);
+        return { capUsd: null, decidedBy: skill, why: parsed.why };
+      }
+      // A cap at or below the spend trips again on the very next check, which is
+      // a decline dressed as an approval — so it is read as what it does.
+      if (!Number.isFinite(parsed.capUsd) || parsed.capUsd <= gate.spentUsd) {
+        say(`${skill} answered with a cap of $${parsed.capUsd} that is not above the $${gate.spentUsd.toFixed(2)} already spent — asking you`);
+        return ask;
+      }
+      const capped = Math.min(parsed.capUsd, ceiling);
+      say(
+        `${skill} raised the ${gate.scope} cap to $${capped.toFixed(2)}` +
+          (capped < parsed.capUsd ? ` (asked for $${parsed.capUsd.toFixed(2)}, held at the ceiling)` : "") +
+          (parsed.why ? ` — ${parsed.why}` : "")
+      );
+      return { capUsd: capped, decidedBy: skill, why: parsed.why };
+    } catch (e) {
+      if (e instanceof BudgetExceeded) throw e;
+      say(`${skill} did not return a decision (${String(e).slice(0, 200)}) — asking you instead`);
+      return ask;
+    }
   }
 
   private readConventions(runId: string): string {

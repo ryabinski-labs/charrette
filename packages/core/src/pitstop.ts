@@ -186,6 +186,12 @@ export interface PitStop {
 export interface PitStopDecision {
   action: "continue" | "redirect" | "replan" | "stop";
   feedback: string;
+  /**
+   * For a `stop` a skill decided: which of the four things only an operator can
+   * settle it is waiting on. Absent when the operator stopped their own run —
+   * they owe nobody a category — and absent on every other action.
+   */
+  blockedOn?: "money" | "scope" | "access" | "direction";
 }
 
 const VERDICT_MARK: Record<ReviewReport["verdict"], string> = {

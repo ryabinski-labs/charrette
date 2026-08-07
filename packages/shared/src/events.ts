@@ -7,7 +7,19 @@ export const HarnessEvent = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("run.created"), assignment: z.string(), repoPath: z.string() }),
   z.object({ ...base, type: z.literal("run.state_changed"), from: RunState, to: RunState, reason: z.string().default("") }),
   z.object({ ...base, type: z.literal("run.gate_opened"), gateId: z.string(), kind: GateKind, payload: z.unknown() }),
-  z.object({ ...base, type: z.literal("run.gate_resolved"), gateId: z.string(), kind: GateKind, resolution: GateState, feedback: z.string().default("") }),
+  // `decidedBy` names the skill that answered, or "operator" when a person did —
+  // the same field, and the same default, that `task.gate_resolved` carries. The
+  // rows written before any skill could answer a run gate read back as the
+  // operator, which is who answered them.
+  z.object({
+    ...base,
+    type: z.literal("run.gate_resolved"),
+    gateId: z.string(),
+    kind: GateKind,
+    resolution: GateState,
+    feedback: z.string().default(""),
+    decidedBy: z.string().default("operator"),
+  }),
   z.object({ ...base, type: z.literal("run.budget_updated"), spentUsd: z.number(), capUsd: z.number() }),
   z.object({ ...base, type: z.literal("run.plan_attempt_failed"), attempt: z.number().int(), reason: z.string(), rawPath: z.string() }),
   z.object({ ...base, type: z.literal("intake.question"), sessionId: z.string(), question: z.string(), options: z.array(z.string()).default([]) }),
@@ -95,6 +107,17 @@ export const HarnessEvent = z.discriminatedUnion("type", [
     decidedBy: z.string().default("operator"),
     /** The decider's one-line reason. Empty when the operator decided. */
     why: z.string().default(""),
+    /**
+     * Which of the four things only an operator can settle a `stop` is waiting
+     * on. Empty for every other action, and for a stop the operator chose
+     * themselves — they do not have to justify parking their own run.
+     *
+     * It is on the record because it is the difference between a run that hit
+     * something real and a run that stopped to be careful. f338b5c8's last pit
+     * stop parked $127 of budget and eight buildable tasks over two questions,
+     * and nothing in the log distinguished that from a hard blocker.
+     */
+    blockedOn: z.enum(["money", "scope", "access", "direction", ""]).default(""),
   }),
   // What the deploy triggered by the human's merge did. The CI status judged the
   // pull request; this judges the merge commit on the base branch — the first

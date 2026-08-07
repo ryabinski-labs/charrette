@@ -93,6 +93,11 @@ function makeController(repoPath: string, gateOverride?: (bus: Bus, store: Store
       // The escalation you were not asked about. Printed because a run that
       // answers its own questions still owes you the fact that it had one.
       process.stdout.write(`  ⚑ ${event.decidedBy} answered ${event.taskId}'s escalation: ${event.guidance.split("\n")[0]!.slice(0, 120)}\n`);
+    } else if (event.type === "run.gate_resolved" && event.decidedBy !== "operator") {
+      // Same flag, for the two gates that now answer themselves. The budget one
+      // is money you were not asked about, which is the single most important
+      // thing on this stream — it is never worth losing in the agent chatter.
+      process.stdout.write(`  ⚑ ${event.decidedBy} resolved the ${event.kind} gate: ${event.feedback.split("\n")[0]!.slice(0, 140)}\n`);
     }
   });
   const pool = new AgentPool(store, bus);
