@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { RunConfig } from "@harness/shared";
 import type { HarnessEvent } from "@harness/shared";
 import { Bus } from "./bus.js";
+import { BudgetExceeded } from "./budget.js";
 import { GitHubAdapter } from "./github.js";
 import type { AgentPool, AgentResult, AgentSpec } from "./pool.js";
 import { budgetDeciderSystemPrompt } from "./prompts.js";
@@ -182,6 +183,32 @@ describe("a task cap answered by a skill", () => {
     if (runId) expect(store.getRun(runId)!.state).toBe("BUDGET_HOLD");
   });
 
+  it("is told where the task is stuck when it has already crashed once", async () => {
+    const dir = repo();
+    const { pool, specs, ref } = rolePool(
+      {
+        planner: (_s, nth) => (nth === 1 ? DOCS : dag(["task-a"])),
+        validator: () => INTENT_PASS,
+        // A cap reached after a crash is the case the decision actually turns
+        // on: money spent respawning is not money spent building, and the
+        // terminal prompt never carried the difference.
+        worker: (spec, nth) => (nth === 1 ? new Error("ENOENT: fixtures/runner.json") : worker(spec, nth)),
+        qa: () => QA_PASS,
+        pm: () => call({ action: "raise", capUsd: 50, why: "the fixture path is a one-line fix" }),
+      },
+      // $2 a call against a $3 cap: the crash lands first, the respawn trips it.
+      2
+    );
+    const { controller } = build({ repoPath: dir, pool, ref });
+
+    await controller.startRun("build a thing", config({ runCapUsd: 1000, taskCapUsd: 3 }));
+
+    const decider = specs.find((s) => s.role === "pm")!;
+    expect(decider.prompt).toContain("Where it is stuck: ");
+    expect(decider.prompt).toContain("ENOENT: fixtures/runner.json");
+    expect(decider.prompt).toContain("Nothing is waiting on it.");
+  });
+
   it("is told what the task is, what is waiting on it, and what is still unbuilt", async () => {
     const dir = repo();
     const { pool, specs, ref } = rolePool(
@@ -347,6 +374,51 @@ describe("a decider that cannot decide", () => {
     expect(asked).toHaveLength(1);
     expect(store.getRun(runId)!.config.budget.taskCapUsd).toBe(9);
     expect(budgetGates(events)[0]).toMatchObject({ decidedBy: "operator" });
+  });
+
+  it("says a park had no reason rather than logging a blank one", async () => {
+    const dir = repo();
+    const { pool, ref } = rolePool(
+      {
+        planner: (_s, nth) => (nth === 1 ? DOCS : dag(["task-a"])),
+        validator: () => INTENT_PASS,
+        worker,
+        qa: () => QA_PASS,
+        pm: () => call({ action: "park", why: "" }),
+      },
+      2
+    );
+    const { controller, events } = build({ repoPath: dir, pool, ref });
+
+    await controller.startRun("build a thing", config({ runCapUsd: 1000, taskCapUsd: 1 })).catch(() => undefined);
+
+    // Parking is the expensive answer. Whoever reads this log afterwards has to
+    // be able to tell "it gave a bad reason" from "it gave none".
+    expect(logs(events)).toContainEqual("product-manager declined to raise the task cap — no reason given");
+  });
+
+  it("lets a budget failure out rather than turning it into a cap nobody answered", async () => {
+    const dir = repo();
+    const { pool, ref } = rolePool(
+      {
+        planner: (_s, nth) => (nth === 1 ? DOCS : dag(["task-a"])),
+        validator: () => INTENT_PASS,
+        worker,
+        qa: () => QA_PASS,
+        // The decider is deliberately not metered against the cap it is
+        // deciding about, so this comes from the pool rather than from its own
+        // spend. Falling back to `ask` here would put the *task* cap in front of
+        // the operator on a run that has already stopped on a different one.
+        pm: () => new BudgetExceeded("run", 1200, 1000, "run-x"),
+      },
+      2
+    );
+    const { controller, events, asked } = build({ repoPath: dir, pool, ref, onBudget: () => 9 });
+
+    await expect(controller.startRun("build a thing", config({ runCapUsd: 1000, taskCapUsd: 1 }))).rejects.toThrow(BudgetExceeded);
+
+    expect(asked).toEqual([]);
+    expect(budgetGates(events)).toEqual([]);
   });
 });
 

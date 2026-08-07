@@ -6,9 +6,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { RunConfig } from "@harness/shared";
 import type { HarnessEvent } from "@harness/shared";
 import { Bus } from "./bus.js";
+import { BudgetExceeded } from "./budget.js";
 import { GitHubAdapter } from "./github.js";
 import type { AgentPool, AgentResult, AgentSpec } from "./pool.js";
-import { planGateDeciderSystemPrompt } from "./prompts.js";
+import { planGateDeciderPrompt, planGateDeciderSystemPrompt } from "./prompts.js";
 import { RunController, type GateHandler } from "./runController.js";
 import { Store } from "./store.js";
 
@@ -286,6 +287,65 @@ describe("a plan gate that weighs its own intent check", () => {
     expect(planGates(events)[0]).toMatchObject({ decidedBy: "operator" });
   });
 
+  it("shows the operator the reasoning when the accept came with nothing else", async () => {
+    const dir = repo();
+    const { pool } = rolePool({
+      planner: (_s, nth) => (nth % 2 === 1 ? DOCS : dag(["task-a"])),
+      validator: () => INTENT_FAIL,
+      // `feedback` is the field aimed at the operator and `why` at the log. An
+      // adjudicator that fills in only the second one has still weighed the
+      // gaps, and its reasoning is the whole reason the accept is worth more
+      // than the bare gap list — so it goes to them rather than being dropped.
+      pm: () => verdict({ action: "accept", why: "the ingest endpoint is M5 work", feedback: "" }),
+      worker,
+      qa: () => QA_PASS,
+    });
+    const { controller, shown } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a thing", config());
+
+    expect(shown[0]).toContain("product-manager weighed these gaps and accepted them:\nthe ingest endpoint is M5 work");
+  });
+
+  it("narrates an accept that gave no reason without trailing an empty dash", async () => {
+    const dir = repo();
+    const { pool } = rolePool({
+      planner: (_s, nth) => (nth % 2 === 1 ? DOCS : dag(["task-a"])),
+      validator: () => INTENT_FAIL,
+      pm: () => verdict({ action: "accept", why: "", feedback: "The ingest endpoint is out of scope for M0." }),
+      worker,
+      qa: () => QA_PASS,
+    });
+    const { controller, events, shown } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a thing", config());
+
+    expect(logs(events)).toContainEqual("product-manager on the plan-intent gaps: accept");
+    expect(shown[0]).toContain("The ingest endpoint is out of scope for M0.");
+  });
+
+  it("lets a budget failure stop the run rather than dressing it up as an unweighed gate", async () => {
+    const dir = repo();
+    const { pool } = rolePool({
+      planner: (_s, nth) => (nth % 2 === 1 ? DOCS : dag(["task-a"])),
+      validator: () => INTENT_FAIL,
+      // The adjudicator is metered like anything else, so it can be the call
+      // that runs the run out of money. That is not "the skill had nothing to
+      // say" — swallowing it would show the operator a gate to approve on a run
+      // that has already stopped paying for the work behind it.
+      pm: () => new BudgetExceeded("run", 10, 1, "run-x"),
+      worker,
+      qa: () => QA_PASS,
+    });
+    const { controller, events, shown } = build({ repoPath: dir, pool });
+
+    await expect(controller.startRun("build a thing", config())).rejects.toThrow(BudgetExceeded);
+
+    expect(shown).toEqual([]);
+    expect(logs(events)).not.toContainEqual(expect.stringContaining("did not weigh the plan-intent gaps"));
+    expect(planGates(events)).toEqual([]);
+  });
+
   it("records the operator's own rejection against them, not against the skill", async () => {
     const dir = repo();
     const { pool } = rolePool({
@@ -335,6 +395,22 @@ describe("what the adjudicator is told", () => {
 
   it("carries the bound it was given, so it knows what it is spending", () => {
     expect(system).toContain("You may send this plan back 1 more time.");
+  });
+
+  it("carries the PRD when there is one, and reads straight through when there is not", () => {
+    const withPrd = planGateDeciderPrompt("build a thing", "# PRD — Build the thing", "task-a: does a", [GAP]);
+    const without = planGateDeciderPrompt("build a thing", "", "task-a: does a", [GAP]);
+
+    expect(withPrd).toContain("The PRD the plan was written from:\n# PRD — Build the thing");
+    // A run started from a sentence has no PRD, and the heading must not appear
+    // over nothing — the assignment is then the only statement of intent there
+    // is, and the gaps have to be read against it.
+    expect(without).not.toContain("The PRD the plan was written from");
+    expect(without).toContain("What the operator asked for:\nbuild a thing");
+    for (const p of [withPrd, without]) {
+      expect(p).toContain(GAP);
+      expect(p).toContain("task-a: does a");
+    }
   });
 
   it("aims the two kinds of feedback at the two different readers", () => {
