@@ -3697,6 +3697,25 @@ export class RunController {
         });
       }
       let qa;
+      /**
+       * A QA session that dies delivers no verdict, so the minutes it spent
+       * dying are not minutes this task spent going nowhere — the same credit
+       * `creditLimitWait` gives a quota wait, for the same reason. Without it a
+       * long death converts straight into a wall-clock escalation: on run
+       * f338b5c8 QA lost its API connection 14 minutes in, the bound fired on
+       * the very next pass, and the question that reached a human was an
+       * infrastructure failure wearing a rejection's clothes. The advisor
+       * confirmed all six acceptance criteria, found nothing wrong, and still
+       * had to hand it back — "re-run QA" is not something a task gate can say,
+       * because the only thing it can return is guidance for the next worker.
+       *
+       * Only QA gets this. A worker that dies has usually committed something
+       * first — its worktree survives and the next dispatch continues from it —
+       * so the clock it burned may well have been spent building, and giving
+       * that back would hide a task that really is going nowhere.
+       */
+      const qaStartedAt = Date.now();
+      const clockBeforeQa = startedAt;
       try {
         qa = await this.pool.run({
           runId,
@@ -3740,6 +3759,16 @@ export class RunController {
         // worker crash. Bounded by the same cap: a QA agent that cannot finish
         // must not loop the task forever.
         if (e instanceof BudgetExceeded) throw e;
+        // Set rather than incremented: a limit wait inside this session has
+        // already moved the clock once, and that wait is part of the span being
+        // given back. Adding would credit it twice.
+        //
+        // Never backwards, though. The pool credits a quota wait *before* it
+        // sleeps (pool.ts) and its sleep is injectable, so the clock can already
+        // hold more credit than this session's measured wall time — a plain
+        // assignment would quietly take that back. Credit only ever moves the
+        // clock forward; whichever gave more, keep it.
+        startedAt = Math.max(startedAt, clockBeforeQa + (Date.now() - qaStartedAt));
         // The one failure whose remedy is known: it ran out of room, so give the
         // next attempt more of it rather than replaying the same wall.
         if (/max_turns/.test(String(e))) this.raiseCeiling(runId, "qaMaxTurns", (qaTurns = Math.min(300, Math.round(qaTurns * 1.5))));

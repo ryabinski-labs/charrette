@@ -747,6 +747,79 @@ describe("a task that keeps going and going", () => {
     expect(gates).toEqual([]);
     expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
   });
+
+  it("does not count the time a QA session spent dying against that clock either", async () => {
+    const dir = repo();
+    const realNow = Date.now.bind(Date);
+    let offset = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+    const { pool } = rolePool({
+      worker: (spec, nth) => (commitInWorktree(spec.cwd, "work.txt", `attempt ${nth}\n`), "did the work"),
+      advisor: () => "",
+      qa: (_spec, nth) => {
+        if (nth === 1) {
+          // Two hours of turns and then the connection drops, which is run
+          // f338b5c8's ci-workflow escalation exactly: no verdict was ever
+          // reached, so those two hours judged nothing.
+          offset = 2 * 60 * 60 * 1000;
+          return new Error("QA ended after 78 turns without a verdict: API Error: Connection closed mid-response");
+        }
+        return QA_PASS;
+      },
+    });
+    const { controller, store, gates, runId } = executing({
+      repoPath: dir,
+      pool,
+      config: { taskWallClockMinutes: 30, qaIterationCap: 3, workerRespawnCap: 3 },
+      guidance: "carry on",
+    });
+
+    await controller.resume(runId);
+
+    // The gate this used to open was unanswerable: its whole content was a
+    // dropped API connection, and the only thing a task gate can hand back is
+    // guidance for a worker that had nothing to fix.
+    expect(gates).toEqual([]);
+    expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
+  });
+
+  it("does not withdraw a quota credit from the session that then died", async () => {
+    const dir = repo();
+    const realNow = Date.now.bind(Date);
+    let offset = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+    const { pool } = rolePool({
+      // 45 real minutes of building after the death — more than the bound, so
+      // the pass that follows tells us whether the quota credit survived it.
+      worker: (spec, nth) => (nth === 2 && (offset += 45 * 60 * 1000), commitInWorktree(spec.cwd, "work.txt", `attempt ${nth}\n`), "did the work"),
+      advisor: () => "",
+      qa: (spec, nth) => {
+        if (nth === 1) {
+          // The pool credits a quota wait before it sleeps, so at this instant
+          // the clock holds two hours the session has not yet spent — and then
+          // the session dies without ever spending them.
+          spec.onLimitWait!(2 * 60 * 60 * 1000);
+          return new Error("QA ended after 78 turns without a verdict: API Error: Connection closed mid-response");
+        }
+        // A rejection rather than a pass: the wall clock is only read at the top
+        // of the loop, so the task has to go round once more to be judged on it.
+        return nth === 2 ? QA_FAIL : QA_PASS;
+      },
+    });
+    const { controller, store, gates, runId } = executing({
+      repoPath: dir,
+      pool,
+      config: { taskWallClockMinutes: 30, qaIterationCap: 3, workerRespawnCap: 3 },
+      guidance: "carry on",
+    });
+
+    await controller.resume(runId);
+
+    // Reducing the clock to the dead session's measured span would have handed
+    // those two hours back to the bound and gated on the next 45 minutes.
+    expect(gates).toEqual([]);
+    expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
+  });
 });
 
 describe("a branch that passed QA but no longer merges", () => {
