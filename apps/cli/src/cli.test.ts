@@ -1402,6 +1402,40 @@ describe("harness probe", () => {
     expect(h.storeMethods.amendProbe).not.toHaveBeenCalled();
     expect(process.exitCode).toBe(1);
   });
+
+  it("names the run you asked about when the task is not in that one", async () => {
+    // Different mistake, different fix: with --run the task may well exist, in
+    // the run next to the one you typed, and "no run has this task" would send
+    // you looking for a typo in the task id instead.
+    h.storeMethods.getTask.mockReturnValue(undefined);
+
+    await cli("probe", "ui-login", "true", "--run", "run-9", "--repo", "/repo");
+
+    expect(printed()).toContain("No task ui-login in run run-9");
+    expect(h.storeMethods.amendProbe).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("says a task has no probe rather than printing an empty line where one goes", async () => {
+    // Most tasks have no probe at all, so this is the common way to arrive here
+    // — and a blank line under "currently held to:" reads as a display bug.
+    h.storeMethods.getTask.mockReturnValue({ ...stuck, completionProbe: "" });
+
+    await cli("probe", "ui-login", "--repo", "/repo");
+
+    expect(printed()).toContain("currently held to:\n  (no probe)");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("gives a task that never had a probe one, and shows what it was before", async () => {
+    h.storeMethods.getTask.mockReturnValue({ ...stuck, completionProbe: "" });
+
+    await cli("probe", "ui-login", "test -f dist/main.js", "--repo", "/repo");
+
+    expect(h.storeMethods.amendProbe).toHaveBeenCalledWith("run-1", "ui-login", "test -f dist/main.js", "operator", "");
+    expect(printed()).toContain("was  (no probe)");
+    expect(printed()).toContain("now  test -f dist/main.js");
+  });
 });
 
 describe("harness regroup", () => {

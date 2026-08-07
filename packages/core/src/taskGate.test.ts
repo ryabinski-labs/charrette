@@ -634,6 +634,41 @@ describe("a completion probe that cannot pass", () => {
     expect(hint).toContain(`harness probe task-a 'test -f feature.txt' --run ${runId}`);
   });
 
+  it("hands them a withdrawal the same way, in the words that argued for it", async () => {
+    // Withdrawing a probe is the amendment an operator is least likely to think
+    // of and most likely to want: the probe is not wrong about the work, it is
+    // about work this task no longer owns. `--clear` because "" is not something
+    // you can type at a shell and mean on purpose.
+    const { pool } = probePool(
+      () =>
+        '```json\n{"recommendation":"nothing here is this task\'s to satisfy","checked":[],"probe":"","why":"the file it names went to the task this one was split off from"}\n```'
+    );
+    const { store, runId } = await run(gates(async () => null), pool);
+
+    expect(store.getTask(runId, "task-a")!.completionProbe).toBe("test -f nope.txt");
+    const hint = logs(store, runId).find((t) => t.includes("harness probe"));
+    expect(hint).toContain("looks wrong — the file it names went to the task this one was split off from.");
+    expect(hint).toContain(`harness probe task-a --clear --run ${runId}`);
+  });
+
+  it("is left exactly as it was when the advisor's best proposal is the probe itself", async () => {
+    // The advisor is offered the probe on every amendable gate, so "this one is
+    // right, the problem is elsewhere" is a normal answer and must cost nothing:
+    // no event a postmortem has to explain, and none of the one amendment this
+    // task gets, which the round that really needs it would then not have.
+    const { pool } = probePool(
+      () => '```json\n{"recommendation":"the probe is right — nothing writes the file because the work is not done","checked":[],"needsOperator":false,"probe":"test -f nope.txt"}\n```'
+    );
+    const { store, runId } = await run(gates(async () => null), pool, { taskGate: { decidedBy: "product-manager" } });
+
+    expect(store.getTask(runId, "task-a")!.completionProbe).toBe("test -f nope.txt");
+    expect(store.taskProbeAmendments(runId, "task-a")).toBe(0);
+    // Not refused, either — the operator is handed a command only when there was
+    // a change to make and the advisor lacked the authority to make it.
+    expect(logs(store, runId).some((t) => t.includes("harness probe"))).toBe(false);
+    expect(logs(store, runId).some((t) => t.includes("product-manager answered this task's escalation"))).toBe(true);
+  });
+
   it("stops moving once the decider has moved it as often as it may", async () => {
     // A skill that keeps rewriting the bar until the work clears it has stopped
     // being a check on the work. One rewrite per task, then the probe is settled

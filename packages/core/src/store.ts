@@ -658,7 +658,7 @@ export class Store {
    * pass rather than needing a restart.
    */
   amendProbe(runId: string, taskId: string, probe: string, by: string, why = ""): void {
-    const from = this.getTask(runId, taskId)?.completionProbe ?? "";
+    const from = this.getTask(runId, taskId)!.completionProbe;
     const to = probe.trim();
     if (to === from) return;
     this.appendEvent({ type: "task.probe_amended", runId, taskId, from, to, by, why: why.slice(0, 300), ts: Date.now() }, () => {

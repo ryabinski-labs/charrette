@@ -1427,7 +1427,7 @@ export class RunController {
     // whole run on a human, so a minute of agent time drafting their reply is
     // the cheapest latency win in the system. With a decider named, that same
     // session *is* the answer — see adviseOperator.
-    const probe = amendable ? (task.completionProbe ?? "") : "";
+    const probe = amendable ? task.completionProbe : "";
     const advice = await this.adviseOperator(runId, taskId, why, decider, probe);
     // Done before the gate is published, so the answer the operator reads
     // already says what the task is now being held to.
@@ -3481,7 +3481,7 @@ export class RunController {
             // failure was the probe's rather than the work's, and re-dispatching
             // a worker to satisfy a bar that has already moved is the same
             // wasted round the gate was opened to stop.
-            const amended = this.store.getTask(runId, taskId)!.completionProbe ?? "";
+            const amended = this.store.getTask(runId, taskId)!.completionProbe;
             if (amended !== task.completionProbe && (!amended || (await runDeterministicChecks(wt.path, [amended])).ok)) {
               this.bus.publish({
                 type: "agent.log",
