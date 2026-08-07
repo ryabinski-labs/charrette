@@ -202,6 +202,36 @@ describe("why a run produced what it produced", () => {
     expect(p.blockedHours).toBe(1);
   });
 
+  // Reading `decidedBy` put a JSON.parse where the old reckoning read only
+  // timestamps, and `JSON.parse("null")` is null rather than a throw — so the
+  // property read took out the whole report. A postmortem is what you run when
+  // the run has already gone wrong; it does not get to be the thing that fails.
+  it.each(["null", '"a string"', "123", "[]", "{}", "not json at all"])(
+    "still reports when a gate's payload reads back as %s",
+    (payload) => {
+      const { store, bus } = run();
+      bus.publish({ type: "run.gate_opened", runId: "run-1", gateId: "g1", kind: "budget", payload: {}, ts: 0 });
+      bus.publish({
+        type: "run.gate_resolved",
+        runId: "run-1",
+        gateId: "g1",
+        kind: "budget",
+        resolution: "approved",
+        feedback: "raised",
+        decidedBy: "product-manager",
+        ts: 3_600_000,
+      });
+      const seq = (store.db.prepare("SELECT MAX(seq) AS seq FROM events WHERE type = 'run.gate_resolved'").get() as { seq: number }).seq;
+      store.db.prepare("UPDATE events SET payload = ? WHERE seq = ?").run(payload, seq);
+
+      const p = postmortem(store, "run-1");
+      expect(p.gates).toBe(1);
+      // Unreadable means unattributable, and an unattributed gate is a person's.
+      expect(p.blockedHours).toBe(1);
+      expect(renderPostmortem(p)).toContain("1 gate(s), 1h waiting on you.");
+    }
+  );
+
   it("reports a clean run without inventing sections", () => {
     const { store } = run();
     const text = renderPostmortem(postmortem(store, "run-1"));

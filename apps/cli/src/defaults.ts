@@ -172,8 +172,12 @@ export const FileConfig = z
      */
     pitStop: PitStopConfig.partial().optional(),
     /**
-     * Who answers a task that hits its cap — a skill name, or `"operator"` to
-     * be asked yourself, which is what this always used to do.
+     * Who answers a task that has escalated — one that QA keeps rejecting, or
+     * that is stuck on a probe it is not allowed to edit. A skill name, or
+     * `"operator"` to be asked yourself, which is what this always used to do.
+     *
+     * Not the same thing as `budget.decidedBy`, which answers a task that has
+     * run out of *money*. A task can hit either without hitting the other.
      */
     taskGate: TaskGateConfig.partial().optional(),
     /**

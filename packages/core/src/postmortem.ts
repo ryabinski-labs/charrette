@@ -107,8 +107,7 @@ export function postmortem(store: Store, runId: string): Postmortem {
   // agent session, and reporting that back as "waiting on you" would credit the
   // operator with hours they were not part of — which is the exact number these
   // deciders exist to bring down, so it has to be measured honestly.
-  const waitedOnAPerson = (g: { by: string | null }) =>
-    !g.by || ((JSON.parse(g.by) as { decidedBy?: string }).decidedBy ?? "operator") === "operator";
+  const waitedOnAPerson = (g: { by: string | null }) => !g.by || decidedBy(g.by) === "operator";
   const blockedMs = gateRows.reduce((sum, g) => sum + (g.closed && waitedOnAPerson(g) ? g.closed - g.opened : 0), 0);
 
   return {
@@ -124,6 +123,26 @@ export function postmortem(store: Store, runId: string): Postmortem {
     gates: gateRows.length,
     builds,
   };
+}
+
+/**
+ * Who resolved a gate, from the resolution event's payload — a skill name, or
+ * `"operator"` for the gates a person answered and for every gate recorded
+ * before anything but a person could.
+ *
+ * Read defensively. This is the tool you reach for when a run has already gone
+ * wrong, so it has to survive a row it cannot make sense of. The old reckoning
+ * read only timestamps and could not fail; dying on one unparseable payload
+ * would be a worse answer than counting that gate as a person's. `null` is the
+ * case that bites — a perfectly good JSON document, and a property read on it
+ * throws.
+ */
+function decidedBy(payload: string): string {
+  try {
+    return (JSON.parse(payload) as { decidedBy?: string } | null)?.decidedBy ?? "operator";
+  } catch {
+    return "operator";
+  }
 }
 
 function readVerdict(store: Store, runId: string, type: string): { verdict: string; gaps: string[] } | null {
@@ -165,7 +184,7 @@ function lastPlanGateDecider(store: Store, runId: string): string {
     .get(runId) as { payload: string } | undefined;
   // Runs from before the plan gate was recorded at all have no such row, and
   // every rejection they carry was a person's.
-  return row ? ((JSON.parse(row.payload) as { decidedBy?: string }).decidedBy ?? "operator") : "";
+  return row ? decidedBy(row.payload) : "";
 }
 
 /** The report, for a terminal. Ordered by what most often explains the outcome. */
