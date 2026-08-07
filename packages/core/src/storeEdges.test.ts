@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { RunConfig } from "@harness/shared";
+import { Budget, RunConfig } from "@harness/shared";
 import { Bus } from "./bus.js";
 import { InvalidTransition, Store } from "./store.js";
 
@@ -61,7 +61,7 @@ describe("refusing what it cannot do", () => {
     const s = store();
 
     expect(() => s.transitionRun("nope", "PLANNING")).toThrow("unknown run nope");
-    expect(() => s.setRunBudget("nope", { runCapUsd: 10, taskCapUsd: 5 })).toThrow("unknown run nope");
+    expect(() => s.setRunBudget("nope", Budget.parse({ runCapUsd: 10, taskCapUsd: 5 }))).toThrow("unknown run nope");
     expect(() => s.patchRunConfig("nope", { prMode: "single" })).toThrow("unknown run nope");
     expect(s.getRun("nope")).toBeUndefined();
   });

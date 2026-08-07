@@ -57,7 +57,7 @@ const INTENT_FAIL = '```json\n{"verdict":"FAIL","gaps":["the seam is broken"],"s
 const DEMO_OK = '```json\n{"started":true,"howStarted":"pnpm dev","summary":"","journeys":[],"couldNotReach":[],"artifacts":[]}\n```';
 const REVIEW_OK = '```json\n{"verdict":"on-track","findings":[],"question":""}\n```';
 
-const decision = (over: Partial<{ action: string; why: string; feedback: string }> = {}) =>
+const decision = (over: Partial<{ action: string; why: string; feedback: string; blockedOn: string }> = {}) =>
   "```json\n" + JSON.stringify({ action: "continue", why: "", feedback: "", ...over }) + "\n```";
 
 const dag = (ids: string[]) =>
@@ -104,7 +104,12 @@ function rolePool(answers: Partial<Record<string, Answer>>, bill = 0, billOnly?:
 const worker = (spec: AgentSpec, nth: number) => (commit(spec.cwd, `w-${path.basename(spec.cwd)}-${nth}.txt`), "did the work");
 const plannerSaying = (...later: string[]) => (_s: AgentSpec, nth: number) => (nth === 1 ? DOCS : (later[nth - 2] ?? dag(["task-a", "task-b"])));
 
-const BASE = { deterministicChecks: [] as string[], waitForChecks: false, maxParallelWorkers: 1 };
+// `planGate.decidedBy` is off throughout this file on purpose. Several cases
+// here fail the plan-intent check deliberately — it is how they reach the
+// closing pit stop that repeats — and the plan-gate adjudicator would answer
+// that FAIL first, out of the same `pm` role, before any pit stop existed. Its
+// own behaviour is pinned in planGateDecider.test.ts.
+const BASE = { deterministicChecks: [] as string[], waitForChecks: false, maxParallelWorkers: 1, planGate: { decidedBy: "operator" } };
 
 function build(opts: { repoPath: string; pool: AgentPool; decide?: (stop: PitStop) => PitStopDecision }) {
   const store = new Store(":memory:");
@@ -237,7 +242,12 @@ describe("a pit stop that decides for itself", () => {
       validator: () => INTENT_PASS,
       demo: () => DEMO_OK,
       reviewer: () => REVIEW_OK,
-      pm: () => decision({ action: "stop", feedback: "Nobody has decided whether this stores card numbers. Answer that before it builds the billing screens." }),
+      pm: () =>
+        decision({
+          action: "stop",
+          blockedOn: "direction",
+          feedback: "Nobody has decided whether this stores card numbers. Answer that before it builds the billing screens.",
+        }),
     });
     const { controller, store, events, asked } = build({ repoPath: dir, pool });
 
@@ -245,7 +255,7 @@ describe("a pit stop that decides for itself", () => {
 
     expect(asked).toEqual([]);
     expect(store.getRun(runId)!.state).toBe("PAUSED");
-    expect(resolved(events)[0]).toMatchObject({ action: "stop", decidedBy: "product-manager" });
+    expect(resolved(events)[0]).toMatchObject({ action: "stop", decidedBy: "product-manager", blockedOn: "direction" });
     // Only the first task ran: the second never went out.
     expect(store.getTask(runId, "task-b")!.state).toBe("PENDING");
   });

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import { SUBPROJECT_DIRS } from "@harness/core";
-import { PitStopConfig, TaskGateConfig } from "@harness/shared";
+import { PitStopConfig, PlanGateConfig, TaskGateConfig } from "@harness/shared";
 
 export const CONFIG_FILENAME = "harness.config.json";
 
@@ -150,6 +150,19 @@ export const FileConfig = z
       .object({
         runCapUsd: z.number().positive().optional(),
         taskCapUsd: z.number().positive().optional(),
+        /**
+         * Who answers a cap that is reached — a skill name, or `"operator"` to
+         * be asked yourself, which is what this always used to do.
+         */
+        decidedBy: z.string().min(1).optional(),
+        /**
+         * How far a skill may raise the **run** cap. Leave it out and run-scope
+         * caps are always yours: task raises only redistribute money you have
+         * already agreed to, but the run cap is the agreement.
+         */
+        ceilingUsd: z.number().positive().optional(),
+        /** How many times a skill may raise the same cap before you are asked. */
+        autoRaiseRounds: z.number().int().min(0).max(10).optional(),
       })
       .optional(),
     /**
@@ -159,10 +172,20 @@ export const FileConfig = z
      */
     pitStop: PitStopConfig.partial().optional(),
     /**
-     * Who answers a task that hits its cap — a skill name, or `"operator"` to
-     * be asked yourself, which is what this always used to do.
+     * Who answers a task that has escalated — one that QA keeps rejecting, or
+     * that is stuck on a probe it is not allowed to edit. A skill name, or
+     * `"operator"` to be asked yourself, which is what this always used to do.
+     *
+     * Not the same thing as `budget.decidedBy`, which answers a task that has
+     * run out of *money*. A task can hit either without hitting the other.
      */
     taskGate: TaskGateConfig.partial().optional(),
+    /**
+     * Who weighs the plan-intent check's gaps before you approve past them — a
+     * skill name, or `"operator"` to be shown the list and asked, which is what
+     * this always used to do. It can send the plan back; it cannot approve one.
+     */
+    planGate: PlanGateConfig.partial().optional(),
     skillsDirs: z.array(z.string()).optional(),
     /**
      * Which skills a class of work gets, by name. Declaring this replaces the

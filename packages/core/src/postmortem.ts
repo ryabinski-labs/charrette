@@ -22,7 +22,7 @@ export interface Postmortem {
   /** Intake questions with no answer on record — the plan was made without them. */
   unanswered: string[];
   /** The plan-gate judgment, and whether the plan changed afterwards. */
-  planIntent: { verdict: string; gaps: string[]; heeded: boolean } | null;
+  planIntent: { verdict: string; gaps: string[]; heeded: boolean; sentBackBy: string } | null;
   /** The end-of-run judgment, and whether its gaps became tasks. */
   intent: { verdict: string; gaps: string[]; queued: number } | null;
   /** Tasks whose acceptance criteria never require anything to leave the process. */
@@ -53,9 +53,13 @@ export function postmortem(store: Store, runId: string): Postmortem {
   const planIntent = planVerdict && {
     verdict: planVerdict.verdict,
     gaps: planVerdict.gaps,
-    // A re-plan after the verdict is the operator having acted on it. Approving
+    // A re-plan after the verdict is somebody having acted on it. Approving
     // straight through is a legitimate choice, but it should be visible as one.
     heeded: store.lastEventSeq(runId, "run.plan_intent_verdict") < lastPlanRejection(store, runId),
+    // And by whom. `planGate.decidedBy` means the gaps may have been sent back
+    // by a skill before the operator ever saw them, and a run that corrected
+    // its own plan should not read as one a person had to catch.
+    sentBackBy: lastPlanGateDecider(store, runId),
   };
 
   const endVerdict = readVerdict(store, runId, "run.intent_verdict");
@@ -90,12 +94,21 @@ export function postmortem(store: Store, runId: string): Postmortem {
 
   const gateRows = store.db
     .prepare(
-      `SELECT o.ts AS opened, (SELECT MIN(r.ts) FROM events r WHERE r.runId = o.runId AND r.taskId IS o.taskId
-         AND r.type IN ('task.gate_resolved','run.gate_resolved') AND r.seq > o.seq) AS closed
+      `SELECT o.ts AS opened,
+         (SELECT r.ts FROM events r WHERE r.runId = o.runId AND r.taskId IS o.taskId
+            AND r.type IN ('task.gate_resolved','run.gate_resolved') AND r.seq > o.seq ORDER BY r.seq LIMIT 1) AS closed,
+         (SELECT r.payload FROM events r WHERE r.runId = o.runId AND r.taskId IS o.taskId
+            AND r.type IN ('task.gate_resolved','run.gate_resolved') AND r.seq > o.seq ORDER BY r.seq LIMIT 1) AS by
        FROM events o WHERE o.runId = ? AND o.type IN ('task.gate_opened','run.gate_opened')`
     )
-    .all(runId) as { opened: number; closed: number | null }[];
-  const blockedMs = gateRows.reduce((sum, g) => sum + (g.closed ? g.closed - g.opened : 0), 0);
+    .all(runId) as { opened: number; closed: number | null; by: string | null }[];
+  // Only what actually waited on a person. A gate `taskGate.decidedBy`,
+  // `planGate.decidedBy` or `budget.decidedBy` answered held the run for one
+  // agent session, and reporting that back as "waiting on you" would credit the
+  // operator with hours they were not part of — which is the exact number these
+  // deciders exist to bring down, so it has to be measured honestly.
+  const waitedOnAPerson = (g: { by: string | null }) => !g.by || decidedBy(g.by) === "operator";
+  const blockedMs = gateRows.reduce((sum, g) => sum + (g.closed && waitedOnAPerson(g) ? g.closed - g.opened : 0), 0);
 
   return {
     runId,
@@ -112,6 +125,26 @@ export function postmortem(store: Store, runId: string): Postmortem {
   };
 }
 
+/**
+ * Who resolved a gate, from the resolution event's payload — a skill name, or
+ * `"operator"` for the gates a person answered and for every gate recorded
+ * before anything but a person could.
+ *
+ * Read defensively. This is the tool you reach for when a run has already gone
+ * wrong, so it has to survive a row it cannot make sense of. The old reckoning
+ * read only timestamps and could not fail; dying on one unparseable payload
+ * would be a worse answer than counting that gate as a person's. `null` is the
+ * case that bites — a perfectly good JSON document, and a property read on it
+ * throws.
+ */
+function decidedBy(payload: string): string {
+  try {
+    return (JSON.parse(payload) as { decidedBy?: string } | null)?.decidedBy ?? "operator";
+  } catch {
+    return "operator";
+  }
+}
+
 function readVerdict(store: Store, runId: string, type: string): { verdict: string; gaps: string[] } | null {
   const row = store.db
     .prepare("SELECT payload FROM events WHERE runId = ? AND type = ? ORDER BY seq DESC LIMIT 1")
@@ -122,12 +155,36 @@ function readVerdict(store: Store, runId: string, type: string): { verdict: stri
   return { verdict: p.verdict, gaps: p.gaps };
 }
 
-/** Sequence of the last "plan rejected" transition, or 0 if the plan was never sent back. */
+/**
+ * Sequence of the last time the plan was sent back, or 0 if it never was.
+ *
+ * Two phrasings, because there are now two things that can send it back: the
+ * operator rejecting at the gate, and `planGate.decidedBy` vetoing the gaps
+ * before they ever reach the gate. Matching only the first would report a run
+ * whose adjudicator did exactly its job as one that approved the gaps anyway,
+ * which is the opposite of what happened.
+ */
 function lastPlanRejection(store: Store, runId: string): number {
   const row = store.db
-    .prepare("SELECT MAX(seq) AS seq FROM events WHERE runId = ? AND type = 'run.state_changed' AND payload LIKE '%plan rejected%'")
+    .prepare(
+      `SELECT MAX(seq) AS seq FROM events WHERE runId = ? AND type = 'run.state_changed'
+       AND (payload LIKE '%plan rejected%' OR payload LIKE '%sent the plan back over the intent check%')`
+    )
     .get(runId) as { seq: number | null };
   return row.seq ?? 0;
+}
+
+/** Who last sent the plan back at the gate — a skill name, "operator", or "". */
+function lastPlanGateDecider(store: Store, runId: string): string {
+  const row = store.db
+    .prepare(
+      `SELECT payload FROM events WHERE runId = ? AND type = 'run.gate_resolved'
+       AND payload LIKE '%"kind":"plan"%' AND payload LIKE '%"resolution":"rejected"%' ORDER BY seq DESC LIMIT 1`
+    )
+    .get(runId) as { payload: string } | undefined;
+  // Runs from before the plan gate was recorded at all have no such row, and
+  // every rejection they carry was a person's.
+  return row ? decidedBy(row.payload) : "";
 }
 
 /** The report, for a terminal. Ordered by what most often explains the outcome. */
@@ -145,7 +202,9 @@ export function renderPostmortem(p: Postmortem): string {
   if (p.planIntent && p.planIntent.gaps.length) {
     out.push(
       `The plan gate said this plan would not deliver ${p.planIntent.gaps.length} thing(s) the assignment asked for` +
-        (p.planIntent.heeded ? ", and it was sent back to the planner:" : ", and it was approved anyway:"),
+        (p.planIntent.heeded
+          ? `, and ${p.planIntent.sentBackBy && p.planIntent.sentBackBy !== "operator" ? `${p.planIntent.sentBackBy} sent it` : "it was sent"} back to the planner:`
+          : ", and it was approved anyway:"),
       ...p.planIntent.gaps.map((g) => `  - ${g.slice(0, 200)}`),
       ""
     );

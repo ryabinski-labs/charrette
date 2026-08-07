@@ -827,6 +827,21 @@ describe("what the run narrates to the terminal", () => {
     expect(printed()).toBe("  ⚑ product-manager answered auth's escalation: the fixture moved\n");
   });
 
+  it("says when a skill answered a plan or budget gate you were never asked about", () => {
+    // The budget one is the line that matters most on this stream: it is money
+    // moved without anyone being asked, so it must not be findable only by
+    // reading the database afterwards. The gate you *were* asked arrived as a
+    // terminal prompt, so it is already on screen and does not print twice.
+    publish({ type: "run.gate_resolved", kind: "budget", resolution: "approved", feedback: "task cap raised to $40.00\nthe migration is written", decidedBy: "product-manager" });
+    publish({ type: "run.gate_resolved", kind: "plan", resolution: "rejected", feedback: "the ingest seam has no owner", decidedBy: "product-manager" });
+    publish({ type: "run.gate_resolved", kind: "budget", resolution: "approved", feedback: "raised by hand", decidedBy: "operator" });
+
+    expect(printed()).toBe(
+      "  ⚑ product-manager resolved the budget gate: task cap raised to $40.00\n" +
+        "  ⚑ product-manager resolved the plan gate: the ingest seam has no owner\n"
+    );
+  });
+
   it("stays silent for the intake agent, which owns the terminal while it talks", () => {
     publish({ type: "agent.spawned", role: "intake", sessionId: "sess-intake" });
     publish({ type: "agent.log", sessionId: "sess-intake", taskId: null, text: "asking a question" });

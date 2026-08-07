@@ -680,17 +680,22 @@ Run configuration is a zod-validated `RunConfig`
 | `models.prod` | `claude-opus-5` | — | ✅ | **Anthropic only** — the last word on whether the run delivered the assignment |
 | `models.demo` | `claude-sonnet-5` | — | ✅ | starts the half-built product at a pit stop and drives it — mostly tool work |
 | `models.reviewer` | `claude-opus-5` | — | ✅ | judges the demo through one named lens; this is the judgment a pit stop exists to buy. **Anthropic only** |
-| `models.pm` | `claude-opus-5` | — | ✅ | decides what the run does next at a pit stop, having read the demo and every reviewer. The only agent whose output redirects or re-plans the remaining work on its own, so it is the last place to save money. |
+| `models.pm` | `claude-opus-5` | — | ✅ | every decision a skill makes instead of you: what the run does next at a pit stop, whether a failing plan goes back to the planner, and whether a cap that was reached is raised. The only agent whose output redirects the remaining work, re-plans it, or spends money on its own, so it is the last place to save money. |
 | `pitStop.every` | `"epic"` | — | ✅ | when the run stops to show you what it built: `"epic"`, `"never"`, `{"tasks":5}`, `{"usd":100}`, `{"minutes":90}` — see [PITSTOP.md](./PITSTOP.md) |
 | `pitStop.reviewers` | `product-manager`, `critical-challenger`, `qa-agent` | — | ✅ | one short session per lens, by skill name; max 4, `[]` for none. This is the pit stop's price. |
 | `pitStop.demoMaxTurns` | `80` | — | ✅ | the demo agent has to start a product it has never seen; too low and its report says only "I could not start it" |
 | `pitStop.decidedBy` | `"product-manager"` | — | ✅ | who decides what the run does next, by skill name — or `"operator"` to be asked, which is what this used to be. The named skill reads the same report you would, plus what earlier pit stops in the run already decided, and answers the same four ways (continue / redirect / re-plan / stop). One that fails, or answers with something that is not one of the four, falls back to asking you. |
 | `pitStop.backToWorkRounds` | `2` | — | ✅ | how many times the **closing** pit stop — the one a FAIL from the intent check opens — may send the run back to work before the next one comes to you whatever `decidedBy` says. It is the only pit stop that repeats over the same tree, and a loop a human ends by losing patience needs another way to end. |
-| `taskGate.decidedBy` | `"product-manager"` | — | ✅ | who answers a task that hits its cap, by skill name — or `"operator"` to be asked yourself, which is what this used to be. The advisor investigates exactly as before; naming a skill means it answers as that skill and the answer goes straight to the worker. It hands the question back to you when only a person can settle it (something to start or provide outside the repo, an unmade product decision, a plan that is wrong rather than an attempt that is) or when its session returned nothing usable. |
+| `taskGate.decidedBy` | `"product-manager"` | — | ✅ | who answers a task that has **escalated** — one QA keeps rejecting, or one stuck on a probe it may not edit — by skill name, or `"operator"` to be asked yourself, which is what this used to be. Not `budget.decidedBy`, four rows down, which answers a task that has run out of *money*; a task can hit either without hitting the other. The advisor investigates exactly as before; naming a skill means it answers as that skill and the answer goes straight to the worker. It hands the question back to you when only a person can settle it (something to start or provide outside the repo, an unmade product decision, a plan that is wrong rather than an attempt that is) or when its session returned nothing usable. |
 | `taskGate.autoAnswerRounds` | `2` | — | ✅ | how many times a skill may answer the **same** task's escalation before the next one comes to you whatever `decidedBy` says. Each answer resets that task's iteration and respawn counters, so this is the bound on an agent answering its own escalation in a circle. `0` asks every time. |
 | `taskGate.probeAmendments` | `1` | — | ✅ | how many times the decider may rewrite the **completion probe** it is escalating about, rather than answering around a probe no answer can satisfy. Recorded as `task.probe_amended`. `0` makes probes unamendable by any agent; your own `harness probe` is never bounded. |
 | `budget.runCapUsd` | `30` | `--run-cap` | ✅ | checked **before every agent turn**; the plan gate prices the plan against it before you approve |
 | `budget.taskCapUsd` | `10` | `--task-cap` | ✅ | |
+| `budget.decidedBy` | `"product-manager"` | — | ✅ | who answers a cap that is reached, by skill name — or `"operator"` to be asked, which is what this used to be. A task cap is a planner's guess at the size of the work, not a decision about money, and the skill is shown what the task is, what is queued behind it and what is still unbuilt before it names a figure. It may also decline, which parks the run exactly as your own `s` did. |
+| `budget.ceilingUsd` | *(unset)* | — | ✅ | how far a skill may raise the **run** cap. Unset means run-scope caps are always yours: task raises only redistribute money you already agreed to — no sequence of them spends a dollar past `runCapUsd`, because the run gate fires on its own — but the run cap *is* the agreement, and an agent that can raise its own ceiling has none. `{"budget":{"runCapUsd":100,"ceilingUsd":600}}` reads as "go to 600 without me if the work is worth it". A figure above the ceiling is held at it. |
+| `budget.autoRaiseRounds` | `3` | — | ✅ | how many times a skill may raise the **same** cap — per task for task scope, per run for run scope — before the next one comes to you whatever `decidedBy` says. A cap reached three times is not an estimate that was slightly off. `0` asks every time. |
+| `planGate.decidedBy` | `"product-manager"` | — | ✅ | who weighs the plan-intent check's gaps before you approve past them, by skill name — or `"operator"` to be shown the list and asked, which is what this used to be. It has two actions and **approve is not one of them**: it either sends the plan back to the planner on its own authority, or accepts the gaps in writing, with its reasoning printed underneath the gap list you then approve or reject. Runs only when the check FAILs; a decider that fails leaves you the gate you always had. |
+| `planGate.replanRounds` | `1` | — | ✅ | how many times the adjudicator may send a plan back over the intent check's gaps before the gate is yours however it answers. Each round is a planner session and another check, and a gap the planner cannot close twice is a question about the assignment rather than about the plan. `0` turns the veto off and leaves its reasoning as a note on the gate. |
 | `intentFixRounds` | `1` | — | ✅ | how many times a FAIL from the intent validator may queue work to close its own gaps; `0` reports the verdict and stops there |
 | `skillsDirs` | `~/.claude/skills`, `~/skills` | — | ✅ | |
 | `deterministicChecks` | auto-detected | `--check`, `--no-checks` | ✅ | shell strings, run via `sh -c` in the worktree |
@@ -1117,9 +1122,32 @@ What this plan would not deliver, read against your assignment:
     vendor categories, and no task requires a call to any vendor.
 ```
 
-It never blocks — approving accepts it as the scope. Rejecting sends the list
-back to the planner along with whatever you said. Turn it off with
-`planIntentCheck: false` if you would rather be the only thing reading the plan.
+**A FAIL is weighed before you see it.** The check works; what did not work was
+what an advisory finding is worth at nine in the evening, when the alternative
+to `y` is composing re-planning feedback out of a list of absences. Run f338b5c8
+was shown four gaps — one of them the missing mechanism that made its own M0
+gates unmeasurable — and approved them two and a half minutes later. Fifty-one
+tasks and $475 afterwards it stopped at a pit stop over exactly that gap, having
+opened no pull request.
+
+So `planGate.decidedBy` (`product-manager` out of the box) reads the assignment,
+the PRD, the plan and the gaps first, and does one of two things. It can **send
+the plan back to the planner on its own authority** — nothing is built yet, so
+this costs one planner session and nothing else — or it can **accept the gaps in
+writing**, in which case its reasoning is printed underneath them and you approve
+or reject as before.
+
+It cannot approve. That is yours, and you are at the keyboard: you started this
+run a few minutes ago, so there is nothing to win by taking it. What there is to
+win is that waving a FAIL through now costs something. It gets one veto by
+default (`planGate.replanRounds`) — a gap the planner cannot close twice is a
+question about the assignment, not about the plan — and any way it fails leaves
+you exactly the gate you had before, with the gaps unchanged.
+
+Rejecting yourself sends the list back to the planner along with whatever you
+said. Turn the check off with `planIntentCheck: false`, or the adjudicator alone
+with `{"planGate":{"decidedBy":"operator"}}`, if you would rather be the only
+thing reading the plan.
 
 **Which integrations are real is decided at the plan gate, not discovered at the
 end.** A task that talks to a third party has to say in its acceptance criteria
@@ -1227,9 +1255,34 @@ the suggested cap pre-filled.
 - A task cap trips the same way and names the task; the run total is shown too, so
   you can tell "this one task is expensive" from "the whole run is".
 
-Both gates are the operator's decision, and the run blocks until you answer. For
-an unattended run, set caps you are willing to have the run stop at, and check on
-it — there is no auto-raise.
+**A task cap is answered without waiting for you.** It is not really a question
+about money: the cap came from a planner guessing at the size of a piece of work
+before anyone read the code, and reaching it says the guess was wrong. Your half
+of that had already shrunk to pressing enter on the suggested figure — run
+f338b5c8 did it twice, unchanged both times, and one of them sat **six hours and
+forty-two minutes** with a worker paused mid-task and three tasks queued behind
+it.
+
+`budget.decidedBy` (`product-manager` out of the box) answers it instead, and is
+shown what the terminal prompt never showed anyone: what the task is meant to
+build, how many times QA has failed it, what cannot start until it finishes, and
+what is still unbuilt. It may decline, which parks the run exactly as `s` does.
+
+Two bounds, deliberately asymmetric:
+
+- **The run cap stays yours** unless you named a `budget.ceilingUsd` in advance.
+  Task raises only move money you already agreed to spend — no sequence of them
+  gets past `runCapUsd`, because the run gate fires on its own — but the run cap
+  *is* the agreement, and an agent that can raise its own ceiling has none. Set
+  `{"budget":{"runCapUsd":100,"ceilingUsd":600}}` to mean "go to 600 without me
+  if the work is worth it"; a decision above the ceiling is held at it.
+- **`budget.autoRaiseRounds` (default 3) per cap.** A task at its third raise is
+  not a slightly wrong estimate, it is a task that does not know how to finish.
+
+Everything outside those bounds, and every way the decider can fail, comes to
+you as it always did. `{"budget":{"decidedBy":"operator"}}` restores asking every
+time. For a genuinely unattended run, set `ceilingUsd` to the number you are
+actually willing to spend and let `runCapUsd` be the one the run works against.
 
 One caveat on "paused, not cancelled": the harness stops reading from the agent's
 stream while it waits for you, but it cannot promise the SDK session survives an

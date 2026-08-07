@@ -162,7 +162,7 @@ describe("live event delivery", () => {
     const store = makeStore();
     makeRun(store);
     const before = store.getRun("run1")!.config;
-    store.setRunBudget("run1", { runCapUsd: 99, taskCapUsd: before.budget.taskCapUsd });
+    store.setRunBudget("run1", { ...before.budget, runCapUsd: 99 });
     const after = store.getRun("run1")!.config;
     expect(after.budget.runCapUsd).toBe(99);
     expect({ ...after, budget: undefined }).toEqual({ ...before, budget: undefined });

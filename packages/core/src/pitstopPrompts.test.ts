@@ -130,7 +130,22 @@ describe("the agent that decides what the run does next", () => {
 
   it("names the opposite failure too, so it does not re-plan every checkpoint", () => {
     expect(system).toContain("Prefer the smallest action that fixes what you found");
-    expect(system).toContain("a stopped run waits for a person who may be asleep");
+    expect(system).toContain("A stopped run waits for a person who may be asleep");
+  });
+
+  it("makes stopping the expensive answer rather than the careful one", () => {
+    // f338b5c8 stopped at 2am over two good questions, with $127 of cap and
+    // eight buildable tasks that neither question blocked, and opened no PR.
+    expect(system).toContain("**Stopping is not the careful answer. It is the expensive one.**");
+    expect(system).toContain("could I have written this as a redirect?");
+  });
+
+  it("enumerates the four things only an operator can settle, and demands one", () => {
+    for (const only of ["**money**", "**scope**", "**access**", "**direction**"]) expect(system).toContain(only);
+    expect(system).toContain('`blockedOn` is required when — and only when — the action is "stop"');
+    // The two excuses that are not authority, named so they cannot be reached for.
+    expect(system).toContain('"I would like a human to confirm this" is not one of the four categories');
+    expect(system).toContain('Neither is "there are two reasonable options"');
   });
 
   it("separates the sentence for the record from the words the run acts on", () => {

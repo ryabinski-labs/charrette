@@ -209,6 +209,22 @@ resume it later.
 *Acceptance:* the run reaches a state `harness resume` picks up; no worktree or
 branch is discarded.
 
+**S4a — A skill stops only when it has to.** As an operator, when the decider
+parks my run overnight, it is because the question genuinely needed me — not
+because stopping felt careful.
+*Acceptance:* a decided `stop` names which of **money**, **scope**, **access** or
+**direction** it is waiting on, and that category is on `run.pitstop_resolved`
+and in the report's decision heading. A stop that names none is not a decision,
+and the pit stop falls back to asking the operator.
+
+The bar is authority, not confidence. Run f338b5c8's last pit stop stopped at 2am
+over two genuinely good questions, with $127 of cap and eight buildable tasks
+left that neither question blocked, and opened no pull request — everything it
+had found would have been just as true attached to a `redirect`. So the decider
+is asked outright, before it may choose `stop`, whether it could have written the
+same thing as a redirect: "I would like a human to confirm this" and "there are
+two reasonable options" are not categories.
+
 **S5 — Choose the cadence.** As an operator, I set the interval before the run and
 change it on resume.
 *Acceptance:* `pitStop.every` is read from `harness.config.json` at run start and

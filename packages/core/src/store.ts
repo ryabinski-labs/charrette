@@ -481,6 +481,60 @@ export class Store {
     }).length;
   }
 
+  /**
+   * How many times a skill — rather than a person — has raised this cap.
+   *
+   * The bound on `budget.autoRaiseRounds` reads this, and it is per cap rather
+   * than per run: a task on its third raise and the run on its first are not
+   * the same amount of trust spent. Scope and task id live on the *opened*
+   * event and the decider on the *resolved* one, so the two are paired by gate
+   * id here rather than duplicated into the schema.
+   *
+   * Declines are not counted. A decider that parked the run did not spend a
+   * round of anyone's patience — it used the gate exactly as intended.
+   */
+  budgetAutoRaises(runId: string, scope: "run" | "task", taskId?: string): number {
+    const rows = this.db
+      .prepare("SELECT type, payload FROM events WHERE runId = ? AND type IN ('run.gate_opened','run.gate_resolved') ORDER BY seq")
+      .all(runId) as { type: string; payload: string }[];
+    const mine = new Set<string>();
+    let raises = 0;
+    for (const row of rows) {
+      const e = JSON.parse(row.payload) as {
+        gateId: string;
+        kind: string;
+        payload?: { scope?: string; taskId?: string };
+        resolution?: string;
+        decidedBy?: string;
+      };
+      if (e.kind !== "budget") continue;
+      if (row.type === "run.gate_opened") {
+        if (e.payload?.scope === scope && (e.payload?.taskId ?? undefined) === taskId) mine.add(e.gateId);
+      } else if (mine.has(e.gateId) && e.resolution === "approved" && e.decidedBy && e.decidedBy !== "operator") {
+        raises++;
+      }
+    }
+    return raises;
+  }
+
+  /**
+   * How many times a skill — rather than a person — has sent this run's plan
+   * back over the intent check's gaps.
+   *
+   * The bound on `planGate.replanRounds` reads this. A plan the operator
+   * rejected themselves does not count against it: they are at the keyboard by
+   * definition at the plan gate, and their rejection is the system working.
+   */
+  planGateAutoReplans(runId: string): number {
+    const rows = this.db
+      .prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.gate_resolved'")
+      .all(runId) as { payload: string }[];
+    return rows.filter((r) => {
+      const p = JSON.parse(r.payload) as { kind?: string; resolution?: string; decidedBy?: string };
+      return p.kind === "plan" && p.resolution === "rejected" && Boolean(p.decidedBy) && p.decidedBy !== "operator";
+    }).length;
+  }
+
   /** How many of this event a run has recorded — how many times round it has been. */
   eventCount(runId: string, type: string): number {
     return (this.db.prepare("SELECT COUNT(*) c FROM events WHERE runId = ? AND type = ?").get(runId, type) as { c: number }).c;
