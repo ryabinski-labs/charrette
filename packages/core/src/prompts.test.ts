@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   INTERFACE_STANDARD,
   advisorPrompt,
+  advisorSystemPrompt,
   demoEvidenceReaskPrompt,
   demoSystemPrompt,
   emptyBranchPrompt,
   extractJson,
   plannerBreakdownSystemPrompt,
   qaSystemPrompt,
+  skillsBlock,
   workerSystemPrompt,
 } from "./prompts.js";
 
@@ -321,6 +323,43 @@ describe("what the advisor is told about the repository", () => {
 
     expect(p).not.toMatch(/How this repository checks a task/);
     expect(p).toContain("Investigate the worktree you are in");
+  });
+
+  it("drafts for a human by default, and answers as the named skill when there is one", () => {
+    const draft = advisorSystemPrompt();
+    expect(draft).toContain("draft the answer they will probably give");
+    // Nothing about handing anything back: there is nobody to hand it to, the
+    // operator is already reading it.
+    expect(draft).not.toContain("needsOperator");
+
+    const decides = advisorSystemPrompt("", "product-manager", skillsBlock([{ name: "product-manager", content: "# PM playbook", path: "/s/pm" }]));
+    expect(decides).toContain("**product-manager**");
+    expect(decides).toContain("sent to the worker as-is");
+    expect(decides).toContain("# PM playbook");
+    // The one thing it can do that stops the run, and the four cases for it.
+    expect(decides).toContain('"needsOperator":boolean');
+    expect(decides).toMatch(/a credential issued/);
+    expect(decides).toMatch(/product decision nobody has made/);
+    // Both are still asked to investigate rather than summarise.
+    for (const p of [draft, decides]) expect(p).toMatch(/Check the cheap ones against the code/);
+  });
+
+  it("offers the probe field only at the gate the probe opened", () => {
+    // Every other escalation is about the attempt, and a knob for rewriting the
+    // task's definition of done has no business being on the table there.
+    expect(advisorSystemPrompt("", "product-manager")).not.toContain('"probe"');
+
+    const p = advisorSystemPrompt("", "product-manager", "", "! rg -qi 'passkey' src");
+    expect(p).toContain('"probe":string|null');
+    // The probe it is being asked about, quoted back verbatim.
+    expect(p).toContain("! rg -qi 'passkey' src");
+    // Why the field exists at all: agreeing with a failing probe reopens the
+    // same gate forever.
+    expect(p).toMatch(/no instruction you give can make a wrong probe pass/);
+    // And the two rails on it: narrow rather than delete, and leave it alone by
+    // default.
+    expect(p).toMatch(/Narrow it, do not delete it/);
+    expect(p).toMatch(/right answer nearly every time/);
   });
 });
 

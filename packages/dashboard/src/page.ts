@@ -493,6 +493,14 @@ function describe(ev) {
       return ["you", "you", clip(ev.answer, 220)];
     case "task.feedback":
       return ["you", "you", "\\u2192 " + ev.taskId + " (" + ev.delivery + "): " + clip(ev.text, 220)];
+    // A task's definition of done changing mid-run is the loudest thing in this
+    // feed that is not a failure: everything judged after it was judged against
+    // something the plan did not say.
+    case "task.probe_amended":
+      return [ev.by === "operator" ? "you" : "state", ev.taskId,
+        (ev.by === "operator" ? "you" : ev.by) +
+        (ev.to ? " changed the completion probe to: " + clip(ev.to, 160) : " withdrew the completion probe \\u2014 QA alone judges this task") +
+        (ev.why ? "   (" + clip(ev.why, 120) + ")" : "")];
     case "intake.brief_ready":
       return ["state", "intake", "brief agreed (" + ev.decisions + " decisions): " + clip(ev.goal, 120)];
     case "git.worktree_created":

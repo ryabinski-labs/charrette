@@ -67,15 +67,53 @@ working, not a fault, but it means **`PR_REVIEW` is where the harness stops, not
 proof that it succeeded.** Read what it produced, which the closing line and
 `harness status` both spell out.
 
-Before a task parks, though, the harness asks you first. Hitting a cap opens a
-**task-escalation gate** — in the terminal, or as an amber panel (and a desktop
-notification) on the dashboard — showing what failed and why. One sentence from
-you ("the tests need DynamoDB running — `podman compose up -d` first", "skip
-that flaky check", "you misread the spec: do X") restarts the worker with your
-words and a fresh iteration budget. Leaving it blank, or clicking *Park it*,
-parks the task exactly as before. Most cap hits are an environment or intent
-problem only you can resolve; the gate is how you resolve it without losing the
-run.
+Before a task parks, though, somebody is asked first. Hitting a cap opens a
+**task-escalation gate**: an advisor agent reads the failure in the task's own
+worktree, checks QA's claims against the code, and writes the answer — one
+sentence like "the tests need DynamoDB running — `podman compose up -d` first",
+"skip that flaky check", "you misread the spec: do X" — which restarts the
+worker with a fresh iteration budget.
+
+**By default that answer is sent without waiting for you.** `taskGate.decidedBy`
+names the skill that gives it (`product-manager` out of the box); the advisor
+wears that hat, with the skill's playbook in front of it, and the run carries on.
+You still see the escalation and the answer, in the terminal and in the run's
+events. Two things bring the question back to you: an answer only a person can
+give — a service to start, a credential to issue, a product decision nobody has
+made, or an investigation that came back genuinely unsure — and a task that has
+already been answered by the skill `taskGate.autoAnswerRounds` times (default 2),
+because an agent answering its own escalations resets the very counters that
+bound it.
+
+When it does come to you, it arrives as it always did — in the terminal, or as
+an amber panel (and a desktop notification) on the dashboard — with the
+advisor's draft prefilled. Leaving it blank, or clicking *Park it*, parks the
+task. Set `{"taskGate":{"decidedBy":"operator"}}` to be asked every time, which
+is what the harness used to do.
+
+One escalation is not like the others. A task's **completion probe** is checked
+before QA and the worker is forbidden to edit it, so when the probe itself is
+wrong, no answer can end the gate it opened: "the probe is a false positive,
+leave it alone" is correct, and leads straight back to the same gate. Run
+f338b5c8 went round that nine times on one task before anybody noticed the
+answer was never the thing that could help. So at *that* gate the decider may
+also rewrite the probe — narrowing it, usually, rather than dropping it — once
+per task (`taskGate.probeAmendments`), recorded as `task.probe_amended` with its
+name against it, and the new probe is tried on the spot rather than costing
+another worker round.
+
+You have the same power, unbounded, and you do not need to stop the run to use
+it:
+
+```bash
+harness probe ui-login "rg -q useShortcuts src/AppShell.vue" --why "the old one grepped a generated file"
+harness probe ui-login --clear      # withdraw it; QA alone judges the task
+```
+
+The task loop re-reads its task every iteration, so this lands on a run in
+flight. When the advisor believes a probe is wrong but is not the one who may
+change it, it logs that exact command with its proposed replacement already in
+it.
 
 Two more things happen between the last task and `PR_REVIEW`. First, a
 **validator agent** reads the integration branch whole and judges it against
@@ -468,9 +506,12 @@ paid for is paid for again. Takes the same `--dashboard` / `--no-dashboard` flag
 as `run`.
 
 A *finished* run still resumes when it has recoverable work. Each `NEEDS_HUMAN`
-task opens its escalation gate now — your answer revives it with a fresh
-iteration budget and puts its "unreachable" `CANCELLED` dependents back in the
-queue; declining (or an empty answer) leaves it parked. A `CANCELLED` task whose
+task opens its escalation gate now — the same gate, so `taskGate.decidedBy`
+applies here too: the skill re-reads each parked task in its worktree and either
+revives it with guidance or hands it to you, and a task that already spent its
+`autoAnswerRounds` is yours whatever the config says. An answer revives it with a
+fresh iteration budget and puts its "unreachable" `CANCELLED` dependents back in
+the queue; declining (or an empty answer) leaves it parked. A `CANCELLED` task whose
 blockers have **since merged** (revived in an earlier session, say) is requeued
 without any gate — the work it was waiting for exists now. Merged tasks whose
 pull requests never opened get them retried, and a run from before base-branch
@@ -541,6 +582,28 @@ there is never a moment with no PR open. PRs a human already merged or closed
 are left exactly as they are, and GitHub shrinks the rollup's diff to whatever
 the base branch is still missing. Also flips the run's `prMode` to `single`, so
 later resumes publish the same way. No agents, no tokens.
+
+### `harness probe <taskId> [command]`
+
+```bash
+harness probe ui-login "rg -q useShortcuts src/AppShell.vue"   # hold it to this instead
+harness probe ui-login --clear --why "it belonged to another task"
+harness probe ui-login                                          # print the current one
+```
+
+Rewrites the completion probe a task is stuck on — the definition of done the
+worker is forbidden to edit and QA never gets to argue with. A probe that cannot
+pass reopens the same escalation gate every few iterations for as long as the
+budget lasts, and until this command existed the only way to change one was to
+edit SQLite by hand.
+
+It lands on a run in flight: the task loop re-reads its task at the top of every
+iteration, so there is nothing to stop and nothing to resume. Defaults to the
+newest run holding that task (`--run` picks another), records the change as
+`task.probe_amended` against `operator`, and does nothing at all when given
+neither a command nor `--clear` — withdrawing a task's definition of done should
+never be a thing you did by leaving an argument off. Read-only as far as agents
+go: no tokens.
 
 ### `harness status`
 
@@ -623,6 +686,9 @@ Run configuration is a zod-validated `RunConfig`
 | `pitStop.demoMaxTurns` | `80` | — | ✅ | the demo agent has to start a product it has never seen; too low and its report says only "I could not start it" |
 | `pitStop.decidedBy` | `"product-manager"` | — | ✅ | who decides what the run does next, by skill name — or `"operator"` to be asked, which is what this used to be. The named skill reads the same report you would, plus what earlier pit stops in the run already decided, and answers the same four ways (continue / redirect / re-plan / stop). One that fails, or answers with something that is not one of the four, falls back to asking you. |
 | `pitStop.backToWorkRounds` | `2` | — | ✅ | how many times the **closing** pit stop — the one a FAIL from the intent check opens — may send the run back to work before the next one comes to you whatever `decidedBy` says. It is the only pit stop that repeats over the same tree, and a loop a human ends by losing patience needs another way to end. |
+| `taskGate.decidedBy` | `"product-manager"` | — | ✅ | who answers a task that hits its cap, by skill name — or `"operator"` to be asked yourself, which is what this used to be. The advisor investigates exactly as before; naming a skill means it answers as that skill and the answer goes straight to the worker. It hands the question back to you when only a person can settle it (something to start or provide outside the repo, an unmade product decision, a plan that is wrong rather than an attempt that is) or when its session returned nothing usable. |
+| `taskGate.autoAnswerRounds` | `2` | — | ✅ | how many times a skill may answer the **same** task's escalation before the next one comes to you whatever `decidedBy` says. Each answer resets that task's iteration and respawn counters, so this is the bound on an agent answering its own escalation in a circle. `0` asks every time. |
+| `taskGate.probeAmendments` | `1` | — | ✅ | how many times the decider may rewrite the **completion probe** it is escalating about, rather than answering around a probe no answer can satisfy. Recorded as `task.probe_amended`. `0` makes probes unamendable by any agent; your own `harness probe` is never bounded. |
 | `budget.runCapUsd` | `30` | `--run-cap` | ✅ | checked **before every agent turn**; the plan gate prices the plan against it before you approve |
 | `budget.taskCapUsd` | `10` | `--task-cap` | ✅ | |
 | `intentFixRounds` | `1` | — | ✅ | how many times a FAIL from the intent validator may queue work to close its own gaps; `0` reports the verdict and stops there |

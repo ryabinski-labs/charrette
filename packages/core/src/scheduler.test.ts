@@ -192,7 +192,12 @@ describe("parallel scheduler", () => {
 
     // One slot. Before the fix, task-b could not start until task-a's gate was
     // answered, because the gate held the only slot.
-    const finished = controller.startRun("do things", RunConfig.parse({ deterministicChecks: [], maxParallelWorkers: 1, qaIterationCap: 1 }));
+    // The gate must reach the handler for this test to be about slots at all:
+    // a decider would answer it before it ever blocked on anyone.
+    const finished = controller.startRun(
+      "do things",
+      RunConfig.parse({ deterministicChecks: [], maxParallelWorkers: 1, qaIterationCap: 1, taskGate: { decidedBy: "operator" } })
+    );
     await gateIsOpen;
     // task-b must reach MERGED while task-a is still sitting at its gate.
     const deadline = Date.now() + 10_000;
@@ -281,7 +286,11 @@ describe("parallel scheduler", () => {
     );
     // Two slots, so once task-parked parks there is a free one — and nothing
     // runnable to put in it. That is exactly the state the loop used to sleep in.
-    const finished = controller.startRun("do things", RunConfig.parse({ deterministicChecks: [], maxParallelWorkers: 2, qaIterationCap: 1 }));
+    const finished = controller.startRun(
+      "do things",
+      // Parking is the state this test needs, so the gate is the operator's.
+      RunConfig.parse({ deterministicChecks: [], maxParallelWorkers: 2, qaIterationCap: 1, taskGate: { decidedBy: "operator" } })
+    );
     await slowWorkerIsRunning;
 
     const runId = store.listRuns()[0]!.id;

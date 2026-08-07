@@ -15,6 +15,8 @@ const h = vi.hoisted(() => {
     listRuns: vi.fn(() => [] as { id: string; state: string; assignment: string }[]),
     getRun: vi.fn(() => undefined as unknown),
     listTasks: vi.fn(() => [] as unknown[]),
+    getTask: vi.fn(() => undefined as unknown),
+    amendProbe: vi.fn(),
     patchRunConfig: vi.fn(),
     spentUsd: vi.fn(() => 0),
     deployStatus: vi.fn(() => null as unknown),
@@ -221,6 +223,7 @@ beforeEach(() => {
   h.storeMethods.listRuns.mockReturnValue([]);
   h.storeMethods.getRun.mockReturnValue(undefined);
   h.storeMethods.listTasks.mockReturnValue([]);
+  h.storeMethods.getTask.mockReturnValue(undefined);
   h.storeMethods.spentUsd.mockReturnValue(0);
   h.storeMethods.deployStatus.mockReturnValue(null);
   h.storeMethods.prodVerdict.mockReturnValue(null);
@@ -814,6 +817,16 @@ describe("what the run narrates to the terminal", () => {
     expect(printed()).toBe("");
   });
 
+  it("says when a skill answered an escalation you were never asked about", () => {
+    // The whole point of `taskGate.decidedBy` is that nobody is interrupted —
+    // which must not become nobody being told. The gate you *were* asked is
+    // already on screen as a prompt, so printing it again would be noise.
+    publish({ type: "task.gate_resolved", taskId: "auth", parked: false, guidance: "the fixture moved\nto test/fixtures", decidedBy: "product-manager" });
+    publish({ type: "task.gate_resolved", taskId: "auth", parked: true, guidance: "", decidedBy: "operator" });
+
+    expect(printed()).toBe("  ⚑ product-manager answered auth's escalation: the fixture moved\n");
+  });
+
   it("stays silent for the intake agent, which owns the terminal while it talks", () => {
     publish({ type: "agent.spawned", role: "intake", sessionId: "sess-intake" });
     publish({ type: "agent.log", sessionId: "sess-intake", taskId: null, text: "asking a question" });
@@ -1335,6 +1348,93 @@ describe("harness resume — settings the operator changed since the run started
     await cli("resume", "run-x", "--repo", "/repo", "--no-dashboard");
 
     expect(h.storeMethods.patchRunConfig).not.toHaveBeenCalled();
+  });
+});
+
+describe("harness probe", () => {
+  const stuck = { id: "ui-login", state: "WORKING", completionProbe: "! rg -qi 'passkey' src" };
+
+  beforeEach(() => {
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "EXECUTING", assignment: "a" }]);
+    h.storeMethods.getTask.mockReturnValue(stuck);
+    process.exitCode = undefined;
+  });
+
+  it("rewrites the probe of the newest run holding that task, and says it lands without a restart", async () => {
+    await cli("probe", "ui-login", "! rg -qi 'passkey' src -g '!**/*.gen.ts'", "--repo", "/repo", "--why", "the only hit is a generated enum");
+
+    expect(h.storeMethods.amendProbe).toHaveBeenCalledWith("run-1", "ui-login", "! rg -qi 'passkey' src -g '!**/*.gen.ts'", "operator", "the only hit is a generated enum");
+    expect(printed()).toContain("was  ! rg -qi 'passkey' src");
+    expect(printed()).toContain("now  ! rg -qi 'passkey' src -g '!**/*.gen.ts'");
+    expect(printed()).toContain("you do not need to resume it");
+  });
+
+  it("withdraws the probe on --clear", async () => {
+    await cli("probe", "ui-login", "--clear", "--repo", "/repo");
+
+    expect(h.storeMethods.amendProbe).toHaveBeenCalledWith("run-1", "ui-login", "", "operator", "");
+    expect(printed()).toContain("QA alone decides this task");
+  });
+
+  it("shows the current probe rather than guessing when given neither", async () => {
+    // "No new probe" and "withdraw the probe" are one keystroke apart and one is
+    // irreversible, so the empty case asks rather than acts.
+    await cli("probe", "ui-login", "--repo", "/repo");
+
+    expect(h.storeMethods.amendProbe).not.toHaveBeenCalled();
+    expect(printed()).toContain("! rg -qi 'passkey' src");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("does not report a change when the probe is already what you typed", async () => {
+    await cli("probe", "ui-login", "! rg -qi 'passkey' src", "--repo", "/repo");
+
+    expect(h.storeMethods.amendProbe).not.toHaveBeenCalled();
+    expect(printed()).toContain("already held to exactly that");
+  });
+
+  it("says so when no run in the repo has that task", async () => {
+    h.storeMethods.getTask.mockReturnValue(undefined);
+
+    await cli("probe", "nope", "true", "--repo", "/repo");
+
+    expect(printed()).toContain("No run in this repo has a task called nope");
+    expect(h.storeMethods.amendProbe).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("names the run you asked about when the task is not in that one", async () => {
+    // Different mistake, different fix: with --run the task may well exist, in
+    // the run next to the one you typed, and "no run has this task" would send
+    // you looking for a typo in the task id instead.
+    h.storeMethods.getTask.mockReturnValue(undefined);
+
+    await cli("probe", "ui-login", "true", "--run", "run-9", "--repo", "/repo");
+
+    expect(printed()).toContain("No task ui-login in run run-9");
+    expect(h.storeMethods.amendProbe).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("says a task has no probe rather than printing an empty line where one goes", async () => {
+    // Most tasks have no probe at all, so this is the common way to arrive here
+    // — and a blank line under "currently held to:" reads as a display bug.
+    h.storeMethods.getTask.mockReturnValue({ ...stuck, completionProbe: "" });
+
+    await cli("probe", "ui-login", "--repo", "/repo");
+
+    expect(printed()).toContain("currently held to:\n  (no probe)");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("gives a task that never had a probe one, and shows what it was before", async () => {
+    h.storeMethods.getTask.mockReturnValue({ ...stuck, completionProbe: "" });
+
+    await cli("probe", "ui-login", "test -f dist/main.js", "--repo", "/repo");
+
+    expect(h.storeMethods.amendProbe).toHaveBeenCalledWith("run-1", "ui-login", "test -f dist/main.js", "operator", "");
+    expect(printed()).toContain("was  (no probe)");
+    expect(printed()).toContain("now  test -f dist/main.js");
   });
 });
 

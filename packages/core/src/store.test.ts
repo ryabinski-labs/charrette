@@ -234,6 +234,48 @@ describe("what a task remembers about the plan that made it", () => {
   });
 });
 
+describe("rewriting a task's definition of done", () => {
+  const probeTask = (probe: string) => ({
+    id: "a", epicId: "e1", title: "A", spec: "s", acceptanceCriteria: ["ok"], dependsOn: [],
+    state: "PENDING" as TaskState, branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null,
+    qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null,
+    touchedPaths: [] as string[], completionProbe: probe, estimatedSize: "M" as const,
+  });
+
+  const amendments = (store: Store) =>
+    store.eventsSince("run1", 0).map((e) => e.event).filter((e) => e.type === "task.probe_amended");
+
+  it("records who moved the bar and what it moved from", () => {
+    const store = makeStore();
+    makeRun(store);
+    store.insertTasks("run1", [{ id: "e1", title: "E" }], [probeTask("test -f nope.txt")]);
+
+    store.amendProbe("run1", "a", "  test -f feature.txt  ", "product-manager", "the probe named the wrong artifact");
+
+    expect(store.getTask("run1", "a")!.completionProbe).toBe("test -f feature.txt");
+    expect(amendments(store)).toMatchObject([
+      { from: "test -f nope.txt", to: "test -f feature.txt", by: "product-manager", why: "the probe named the wrong artifact" },
+    ]);
+  });
+
+  it("writes nothing when the new probe is the one already in force", () => {
+    // The advisor is asked for a probe on every amendable gate, and the honest
+    // answer is often the probe as it stands. That is not a judgment about the
+    // work, so it must not reach the event log — a postmortem reading
+    // `task.probe_amended` is asking what changed, and `probeAmendments` spends
+    // a run's whole amendment allowance on whatever it counts.
+    const store = makeStore();
+    makeRun(store);
+    store.insertTasks("run1", [{ id: "e1", title: "E" }], [probeTask("test -f nope.txt")]);
+
+    store.amendProbe("run1", "a", "  test -f nope.txt  ", "product-manager", "still right");
+
+    expect(amendments(store)).toEqual([]);
+    expect(store.taskProbeAmendments("run1", "a")).toBe(0);
+    expect(store.getTask("run1", "a")!.completionProbe).toBe("test -f nope.txt");
+  });
+});
+
 describe("what previous runs in this repository cost", () => {
   const merged = (id: string, size: "S" | "M" | "L") => ({
     id, epicId: "e1", title: id, spec: "s", acceptanceCriteria: ["ok"], dependsOn: [],

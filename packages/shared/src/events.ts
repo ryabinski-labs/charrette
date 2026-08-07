@@ -18,7 +18,31 @@ export const HarnessEvent = z.discriminatedUnion("type", [
   // The task-escalation gate (GateKind has named it since v0.0): a task hit a cap
   // and the operator is being asked for guidance before it is parked for good.
   z.object({ ...base, type: z.literal("task.gate_opened"), taskId: z.string(), why: z.string(), iterations: z.number().int(), recommendation: z.string().default("") }),
-  z.object({ ...base, type: z.literal("task.gate_resolved"), taskId: z.string(), parked: z.boolean(), guidance: z.string().default("") }),
+  // `decidedBy` names the skill that answered, or "operator" when a person did.
+  // The old rows have no such field and were all answered by a person, which is
+  // exactly what the default reads back as.
+  z.object({
+    ...base,
+    type: z.literal("task.gate_resolved"),
+    taskId: z.string(),
+    parked: z.boolean(),
+    guidance: z.string().default(""),
+    decidedBy: z.string().default("operator"),
+  }),
+  // A task's definition of done, rewritten by whoever answered the escalation it
+  // caused — the only edit to a probe anything is allowed to make, and the only
+  // way out of a gate that reopens on a probe that cannot pass. `to` empty means
+  // the probe was dropped and QA's judgment is all that is left of it. `by` is
+  // the skill that decided, or "operator".
+  z.object({
+    ...base,
+    type: z.literal("task.probe_amended"),
+    taskId: z.string(),
+    from: z.string(),
+    to: z.string().default(""),
+    by: z.string().default("operator"),
+    why: z.string().default(""),
+  }),
   // Unprompted operator feedback on a task mid-run: "live" went straight into the
   // running session; "queued" waits for the next agent dispatched on the task.
   z.object({ ...base, type: z.literal("task.feedback"), taskId: z.string(), text: z.string(), delivery: z.enum(["live", "queued", "revived"]) }),

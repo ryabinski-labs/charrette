@@ -145,7 +145,7 @@ describe("why a run produced what it produced", () => {
     const { store, bus } = run();
     task(store, { id: "task-a" });
     bus.publish({ type: "task.gate_opened", runId: "run-1", taskId: "task-a", why: "qa rejected it twice", iterations: 2, recommendation: "", ts: 0 });
-    bus.publish({ type: "task.gate_resolved", runId: "run-1", taskId: "task-a", parked: false, guidance: "go", ts: 7_200_000 });
+    bus.publish({ type: "task.gate_resolved", runId: "run-1", taskId: "task-a", parked: false, guidance: "go", decidedBy: "operator", ts: 7_200_000 });
     bus.publish({ type: "run.gate_opened", runId: "run-1", gateId: "g1", kind: "budget", payload: {}, ts: 8_000_000 });
 
     const p = postmortem(store, "run-1");

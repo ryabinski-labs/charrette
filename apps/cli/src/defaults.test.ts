@@ -128,6 +128,15 @@ describe("loadFileConfig", () => {
     expect(loadFileConfig(repo).config).toEqual(declared);
   });
 
+  it("accepts who answers a task that hits its cap", () => {
+    // Same trap as above: a knob only settable in the type is not settable.
+    // `decidedBy: "operator"` is the whole opt-out from the harness answering
+    // its own escalations, and it has to be writable in the file that opts out.
+    const declared = { taskGate: { decidedBy: "operator" as const }, pitStop: { decidedBy: "operator" as const } };
+    const repo = tmpRepo({ "harness.config.json": JSON.stringify(declared) });
+    expect(loadFileConfig(repo).config).toEqual(declared);
+  });
+
   it("still rejects a routing rule that is not one", () => {
     const repo = tmpRepo({ "harness.config.json": JSON.stringify({ skillRouting: [{ when: "x" }] }) });
     expect(() => loadFileConfig(repo)).toThrow(/is invalid/);

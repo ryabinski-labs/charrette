@@ -462,6 +462,25 @@ export class Store {
     );
   }
 
+  /**
+   * How many times a skill — rather than a person — has answered this task's
+   * escalation gate.
+   *
+   * The bound on `taskGate.autoAnswerRounds` reads this. It counts answers, not
+   * openings: an escalation the decider handed back to the operator is one the
+   * decider did not spend, and a task whose gate a person answered is not any
+   * closer to the round where the harness stops trusting an agent with it.
+   */
+  taskGateAutoAnswers(runId: string, taskId: string): number {
+    const rows = this.db
+      .prepare("SELECT payload FROM events WHERE runId = ? AND taskId = ? AND type = 'task.gate_resolved'")
+      .all(runId, taskId) as { payload: string }[];
+    return rows.filter((r) => {
+      const p = JSON.parse(r.payload) as { decidedBy?: string; parked?: boolean };
+      return !p.parked && Boolean(p.decidedBy) && p.decidedBy !== "operator";
+    }).length;
+  }
+
   /** How many of this event a run has recorded — how many times round it has been. */
   eventCount(runId: string, type: string): number {
     return (this.db.prepare("SELECT COUNT(*) c FROM events WHERE runId = ? AND type = ?").get(runId, type) as { c: number }).c;
@@ -625,6 +644,45 @@ export class Store {
         this.db.prepare("UPDATE tasks SET state = ? WHERE runId = ? AND id = ?").run(to, runId, taskId);
       }
     );
+  }
+
+  /**
+   * Rewrite the task's definition of done, and say on the record who did it and
+   * why. Deliberately not part of `updateTask`: every other field there is
+   * bookkeeping the harness owns, and this one is a judgment about the work that
+   * has to survive in the event log for a postmortem to explain why a probe the
+   * planner wrote is not the probe the task was held to.
+   *
+   * Safe against a live run: the task loop re-reads the task at the top of every
+   * iteration, so an amendment written from another process lands on the next
+   * pass rather than needing a restart.
+   */
+  amendProbe(runId: string, taskId: string, probe: string, by: string, why = ""): void {
+    const from = this.getTask(runId, taskId)!.completionProbe;
+    const to = probe.trim();
+    if (to === from) return;
+    this.appendEvent({ type: "task.probe_amended", runId, taskId, from, to, by, why: why.slice(0, 300), ts: Date.now() }, () => {
+      // Empty, not null: a withdrawn probe reads back as the same "this task has
+      // no probe" every task without one has always read back as.
+      this.db.prepare("UPDATE tasks SET completionProbe = ? WHERE runId = ? AND id = ?").run(to, runId, taskId);
+    });
+  }
+
+  /**
+   * How many times an agent has rewritten this task's probe. Read off the event
+   * log for the same reason the auto-answer count is: it is the only thing that
+   * survives the process, and the bound exists precisely for the run that keeps
+   * coming back to the same gate. The operator's own amendments do not count
+   * against a skill's allowance — they are not the thing being bounded.
+   */
+  taskProbeAmendments(runId: string, taskId: string): number {
+    const rows = this.db
+      .prepare("SELECT payload FROM events WHERE runId = ? AND taskId = ? AND type = 'task.probe_amended'")
+      .all(runId, taskId) as { payload: string }[];
+    return rows.filter((r) => {
+      const p = JSON.parse(r.payload) as { by?: string };
+      return Boolean(p.by) && p.by !== "operator";
+    }).length;
   }
 
   updateTask(runId: string, taskId: string, patch: Partial<Pick<TaskRow, "branch" | "worktreePath" | "githubIssueNumber" | "prNumber" | "qaIterations" | "respawns" | "errorSummary" | "assignedSkills">>): void {
