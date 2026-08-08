@@ -41,6 +41,7 @@ const h = vi.hoisted(() => {
     hasRecoverableWork: vi.fn(() => false),
     awaitingVerification: vi.fn(() => false),
     replannable: vi.fn(() => false),
+    raiseBudget: vi.fn(() => "ok"),
   };
   const dashboardMethods = {
     start: vi.fn(async () => "http://localhost:4777/#tok"),
@@ -234,6 +235,7 @@ beforeEach(() => {
   h.controllerMethods.hasRecoverableWork.mockReturnValue(false);
   h.controllerMethods.awaitingVerification.mockReturnValue(false);
   h.controllerMethods.replannable.mockReturnValue(false);
+  h.controllerMethods.raiseBudget.mockReturnValue("ok");
   h.dashboardMethods.start.mockResolvedValue("http://localhost:4777/#tok");
   h.dashboardMethods.stop.mockResolvedValue(undefined);
 
@@ -761,6 +763,44 @@ describe("wiring the controller", () => {
     await cli("run", "x", "--repo", "/repo", "--no-dashboard");
 
     expect(h.GitHubAdapterMock).toHaveBeenCalledWith("gh-tok", "acme/widgets");
+  });
+});
+
+describe("the live budget command channel", () => {
+  /** Fakes a TTY stdin and gives back the handler watchBudgetCommands registered, plus the "off" spy. */
+  function fakeTty() {
+    Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+    let handler: ((chunk: Buffer | string) => void) | undefined;
+    vi.spyOn(process.stdin, "on").mockImplementation((event: string, fn: unknown) => {
+      if (event === "data") handler = fn as (chunk: Buffer | string) => void;
+      return process.stdin;
+    });
+    const offSpy = vi.spyOn(process.stdin, "off").mockReturnValue(process.stdin);
+    return { emit: (text: string) => handler?.(text), offSpy };
+  }
+
+  afterEach(() => {
+    Object.defineProperty(process.stdin, "isTTY", { value: undefined, configurable: true });
+  });
+
+  it("raises the cap for the run in progress once the run id is known from the bus", async () => {
+    const tty = fakeTty();
+
+    await cli("run", "x", "--repo", "/repo", "--no-dashboard");
+    busListener()({ event: { type: "run.state_changed", runId: "run-1", from: "PLANNING", to: "EXECUTING" } });
+    tty.emit("budget run 50\n");
+
+    expect(h.controllerMethods.raiseBudget).toHaveBeenCalledWith("run-1", "run", 50);
+    expect(tty.offSpy).toHaveBeenCalledWith("data", expect.any(Function));
+  });
+
+  it("raises the cap for a resumed run by the id resume already knows", async () => {
+    const tty = fakeTty();
+
+    await cli("resume", "run-9", "--repo", "/repo", "--no-dashboard");
+    tty.emit("budget task 10\n");
+
+    expect(h.controllerMethods.raiseBudget).toHaveBeenCalledWith("run-9", "task", 10);
   });
 });
 

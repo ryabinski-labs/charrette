@@ -4156,6 +4156,30 @@ export class RunController {
   }
 
   /**
+   * Move a cap before it is ever reached, instead of waiting for `enforceNow`
+   * to open a gate and ask. This is the operator watching spend climb who
+   * would rather act now than be interrupted later — typed straight into the
+   * run's own terminal (see `watchBudgetCommands` in the CLI) while the run
+   * keeps going, so a fast-moving task never has to pause for a gate that a
+   * pre-emptive raise would have made unnecessary.
+   *
+   * A task cap is one number shared by every task, not a per-task ledger, so
+   * raising it changes what every task is allowed to spend going forward —
+   * there is no `taskId` to check spend against here.
+   */
+  raiseBudget(runId: string, scope: "run" | "task", capUsd: number): string {
+    const run = this.store.getRun(runId);
+    if (!run) return `no run ${runId}`;
+    if (!Number.isFinite(capUsd) || capUsd <= 0) return "a cap must be a positive number";
+    const spent = this.store.spentUsd(runId);
+    if (scope === "run" && capUsd <= spent) return `the run has already spent $${spent.toFixed(2)} — the cap must be above that`;
+    const budget = { ...run.config.budget, [scope === "run" ? "runCapUsd" : "taskCapUsd"]: capUsd };
+    this.store.setRunBudget(runId, budget);
+    this.bus.publish({ type: "run.budget_updated", runId, spentUsd: spent, capUsd, ts: Date.now() });
+    return `${scope} cap raised to $${capUsd.toFixed(2)}`;
+  }
+
+  /**
    * Answer a cap that has been reached, or hand it to the operator
    * (`budget.decidedBy`).
    *

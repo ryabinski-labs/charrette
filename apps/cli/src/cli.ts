@@ -5,7 +5,7 @@ import path from "node:path";
 import { ModelRoutingShape, RunConfig, providerFor } from "@harness/shared";
 import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, checkMemoryBanner, detectToolbelt, ensureIgnored, harnessBuild, missingKeys, originSlug, postmortem, renderPostmortem, repoUnusable } from "@harness/core";
 import { Dashboard } from "@harness/dashboard";
-import { promptForNewCap } from "./budget.js";
+import { promptForNewCap, watchBudgetCommands } from "./budget.js";
 import {
   CONFIG_FILENAME,
   DEFAULT_SKILLS_DIRS,
@@ -58,7 +58,10 @@ function makeDashboardFactory(want: boolean, port: number | undefined, repoPath:
   };
 }
 
-function makeController(repoPath: string, gateOverride?: (bus: Bus, store: Store) => GateHandler): { controller: RunController; store: Store; bus: Bus } {
+function makeController(
+  repoPath: string,
+  gateOverride?: (bus: Bus, store: Store) => GateHandler
+): { controller: RunController; store: Store; bus: Bus; liveRunId: () => string | undefined } {
   const stateDir = path.join(repoPath, ".harness");
   mkdirSync(stateDir, { recursive: true });
   // The first moment there is somewhere durable to write down why this process
@@ -72,7 +75,13 @@ function makeController(repoPath: string, gateOverride?: (bus: Bus, store: Store
   // The intake agent owns the terminal while it is talking to the operator, so
   // its own log/tool traffic must not interleave with the conversation.
   const intakeSessions = new Set<string>();
+  // The run does not exist until `startRun` creates it, so this is how a
+  // stdin budget command (typed before the id is known any other way) finds
+  // out what to raise the cap on: every event carries it, and this process
+  // never publishes for more than one run at a time.
+  let runId: string | undefined;
   bus.subscribe(({ event }) => {
+    runId = event.runId;
     if (event.type === "agent.spawned" && event.role === "intake") {
       intakeSessions.add(event.sessionId);
       return;
@@ -165,7 +174,7 @@ function makeController(repoPath: string, gateOverride?: (bus: Bus, store: Store
     },
   };
   const gates = gateOverride ? gateOverride(bus, store) : terminalGates;
-  return { controller: new RunController(store, bus, pool, github, gates, repoPath), store, bus };
+  return { controller: new RunController(store, bus, pool, github, gates, repoPath), store, bus, liveRunId: () => runId };
 }
 
 /**
@@ -515,7 +524,7 @@ export function buildProgram(): Command {
       if (await repoBlocked(resolveRepoRoot(opts.repo))) return;
       const { repo, config, dashboard: wantDashboard, dashboardPort, chat: wantChat, banner } = resolveRun(cmd, opts, assignment);
       const dash = makeDashboardFactory(wantDashboard, dashboardPort, repo);
-      const { controller, store } = makeController(repo, dash.gateOverride);
+      const { controller, store, liveRunId } = makeController(repo, dash.gateOverride);
       // A new run forks from the base branch as it is right now. Another run whose
       // work is merged locally but not yet in that base is invisible to it — so the
       // two plan against different trees, build the same thing twice, and the second
@@ -543,10 +552,12 @@ export function buildProgram(): Command {
       } else {
         banner.push("dashboard  off — the plan gate will be resolved in this terminal");
       }
+      banner.push("           type 'budget run <usd>' or 'budget task <usd>' any time to raise a cap before it's hit");
       process.stdout.write(`\n${banner.map((l) => `  ${l}`).join("\n")}\n`);
 
       const chat = wantChat || assignment === undefined ? new TerminalChat() : undefined;
       const seed = assignment ?? (await chat!.promptSeed(wantChat));
+      const stopBudgetWatch = watchBudgetCommands(controller, liveRunId);
       try {
         const runId = await controller.startRun(seed, config, wantChat ? chat : undefined);
         await reportOutcome(controller, repo, runId);
@@ -554,6 +565,7 @@ export function buildProgram(): Command {
         notifyDone(`${path.basename(repo)} — run stopped`, e instanceof Error ? e.message : String(e));
         throw e;
       } finally {
+        stopBudgetWatch();
         chat?.close();
         await dash.stop();
       }
@@ -691,10 +703,12 @@ export function buildProgram(): Command {
       if (remembered.length) process.stdout.write(`${remembered.join("\n")}\n`);
       const url = await dash.start();
       if (url) process.stdout.write(`Dashboard: ${url}\n(keep the fragment — it is your auth token)\n`);
+      process.stdout.write("Type 'budget run <usd>' or 'budget task <usd>' any time to raise a cap before it's hit.\n");
       // Only a run interrupted mid-conversation needs the terminal back: opening
       // readline for any other resume would hold stdin for a question never asked.
       const chat = existing?.state === "INTAKE" ? new TerminalChat() : undefined;
       if (chat) process.stdout.write("This run stopped mid-conversation — picking it up where it left off.\n");
+      const stopBudgetWatch = watchBudgetCommands(controller, () => runId);
       try {
         await controller.resume(runId, chat);
         await reportOutcome(controller, repo, runId);
@@ -702,6 +716,7 @@ export function buildProgram(): Command {
         notifyDone(`${path.basename(repo)} — run stopped`, e instanceof Error ? e.message : String(e));
         throw e;
       } finally {
+        stopBudgetWatch();
         chat?.close();
         await dash.stop();
       }
