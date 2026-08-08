@@ -235,7 +235,7 @@ describe("a session that dies mid-thought because the account is out of quota", 
       })()
     );
 
-    await expect(pool.run(spec({ budgetCheck: () => { throw new BudgetExceeded("run", 41, 40, "run1"); } }))).rejects.toThrow(BudgetExceeded);
+    await expect(pool.run(spec({ budgetCheck: () => { throw new BudgetExceeded(41, 40, "run1"); } }))).rejects.toThrow(BudgetExceeded);
     expect(slept).toEqual([]);
   });
 

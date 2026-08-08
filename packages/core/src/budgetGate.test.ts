@@ -70,7 +70,7 @@ function harness(opts: {
     },
     repo
   );
-  const config = RunConfig.parse({ budget: { runCapUsd: opts.runCapUsd, taskCapUsd: opts.runCapUsd } });
+  const config = RunConfig.parse({ budget: { runCapUsd: opts.runCapUsd } });
   const runId = () => (store.db.prepare("SELECT id FROM runs").get() as { id: string }).id;
   return { repo, store, controller, config, events, seen, calls, runId };
 }
@@ -82,7 +82,7 @@ describe("budget gate", () => {
     await h.controller.startRun("do a thing", h.config).catch(() => undefined);
 
     expect(h.seen).toHaveLength(1);
-    expect(h.seen[0]).toMatchObject({ scope: "run", capUsd: 1 });
+    expect(h.seen[0]).toMatchObject({ capUsd: 1 });
     expect(h.seen[0]!.spentUsd).toBeCloseTo(1.2, 5);
     // Raised, so planning ran to its own attempt limit rather than dying at the cap:
     // one call for the documents, three for the DAG.
@@ -126,13 +126,6 @@ describe("budget gate", () => {
     expect(opened).toBeTruthy();
     expect(resolved).toMatchObject({ resolution: "approved" });
     expect(h.events.some((e) => e.type === "run.budget_updated" && e.capUsd === 10)).toBe(true);
-  });
-
-  it("never puts a raised cap below the one already agreed for the other scope", async () => {
-    const h = harness({ perCallUsd: 0.6, runCapUsd: 1, onBudget: async () => 10 });
-    await h.controller.startRun("do a thing", h.config).catch(() => undefined);
-    // Raising the run cap must not disturb the task cap.
-    expect(h.store.getRun(h.runId())!.config.budget.taskCapUsd).toBe(1);
   });
 });
 
@@ -188,7 +181,7 @@ describe("budget hold", () => {
       repo
     );
     // $0.60 a call: planning spends $1.20, so the worker's check is the first over.
-    const config = RunConfig.parse({ budget: { runCapUsd: 1.1, taskCapUsd: 100 }, deterministicChecks: [] });
+    const config = RunConfig.parse({ budget: { runCapUsd: 1.1 }, deterministicChecks: [] });
     await expect(controller.startRun("do a thing", config)).rejects.toThrow(/budget exceeded/);
 
     const runId = (store.db.prepare("SELECT id FROM runs").get() as { id: string }).id;
@@ -233,7 +226,7 @@ describe("budget hold", () => {
       repo
     );
     const config = RunConfig.parse({
-      budget: { runCapUsd: 1.1, taskCapUsd: 100 },
+      budget: { runCapUsd: 1.1 },
       deterministicChecks: [],
       maxParallelWorkers: 2,
       planIntentCheck: false,

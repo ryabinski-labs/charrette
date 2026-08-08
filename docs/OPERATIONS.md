@@ -644,7 +644,7 @@ typo surfaces immediately.
 
 ```json
 {
-  "budget": { "runCapUsd": 50, "taskCapUsd": 12 },
+  "budget": { "runCapUsd": 50 },
   "deterministicChecks": ["pnpm test", "pnpm lint"],
   "dashboard": true,
   "chat": true,
@@ -689,11 +689,10 @@ Run configuration is a zod-validated `RunConfig`
 | `taskGate.decidedBy` | `"product-manager"` | — | ✅ | who answers a task that has **escalated** — one QA keeps rejecting, or one stuck on a probe it may not edit — by skill name, or `"operator"` to be asked yourself, which is what this used to be. Not `budget.decidedBy`, four rows down, which answers a task that has run out of *money*; a task can hit either without hitting the other. The advisor investigates exactly as before; naming a skill means it answers as that skill and the answer goes straight to the worker. It hands the question back to you when only a person can settle it (something to start or provide outside the repo, an unmade product decision, a plan that is wrong rather than an attempt that is) or when its session returned nothing usable. |
 | `taskGate.autoAnswerRounds` | `2` | — | ✅ | how many times a skill may answer the **same** task's escalation before the next one comes to you whatever `decidedBy` says. Each answer resets that task's iteration and respawn counters, so this is the bound on an agent answering its own escalation in a circle. `0` asks every time. |
 | `taskGate.probeAmendments` | `1` | — | ✅ | how many times the decider may rewrite the **completion probe** it is escalating about, rather than answering around a probe no answer can satisfy. Recorded as `task.probe_amended`. `0` makes probes unamendable by any agent; your own `harness probe` is never bounded. |
-| `budget.runCapUsd` | `30` | `--run-cap` | ✅ | checked **before every agent turn**; the plan gate prices the plan against it before you approve |
-| `budget.taskCapUsd` | `10` | `--task-cap` | ✅ | |
-| `budget.decidedBy` | `"product-manager"` | — | ✅ | who answers a cap that is reached, by skill name — or `"operator"` to be asked, which is what this used to be. A task cap is a planner's guess at the size of the work, not a decision about money, and the skill is shown what the task is, what is queued behind it and what is still unbuilt before it names a figure. It may also decline, which parks the run exactly as your own `s` did. |
-| `budget.ceilingUsd` | *(unset)* | — | ✅ | how far a skill may raise the **run** cap. Unset means run-scope caps are always yours: task raises only redistribute money you already agreed to — no sequence of them spends a dollar past `runCapUsd`, because the run gate fires on its own — but the run cap *is* the agreement, and an agent that can raise its own ceiling has none. `{"budget":{"runCapUsd":100,"ceilingUsd":600}}` reads as "go to 600 without me if the work is worth it". A figure above the ceiling is held at it. |
-| `budget.autoRaiseRounds` | `3` | — | ✅ | how many times a skill may raise the **same** cap — per task for task scope, per run for run scope — before the next one comes to you whatever `decidedBy` says. A cap reached three times is not an estimate that was slightly off. `0` asks every time. |
+| `budget.runCapUsd` | `30` | `--run-cap` | ✅ | one cap for the whole run, checked **before every agent turn**; the plan gate prices the plan against it before you approve. Raise it any time — reactively from the `BUDGET_HOLD` gate, or proactively from the dashboard header (click the `$` figure) or the CLI's live `budget run <usd>` stdin command — without waiting for it to be reached. |
+| `budget.decidedBy` | `"product-manager"` | — | ✅ | who answers the cap once it is reached, by skill name — or `"operator"` to be asked, which is what this used to be. The skill is shown what is still in flight, what is queued behind it and what is still unbuilt before it names a figure. It may also decline, which parks the run exactly as your own `s` did. |
+| `budget.ceilingUsd` | *(unset)* | — | ✅ | how far a skill may raise the cap. Unset means the gate is always yours — the run cap is the agreement, and an agent that can raise its own ceiling has none. `{"budget":{"runCapUsd":100,"ceilingUsd":600}}` reads as "go to 600 without me if the work is worth it". A figure above the ceiling is held at it. |
+| `budget.autoRaiseRounds` | `3` | — | ✅ | how many times a skill may raise the cap before the next one comes to you whatever `decidedBy` says. A cap reached three times is not an estimate that was slightly off. `0` asks every time. |
 | `planGate.decidedBy` | `"product-manager"` | — | ✅ | who weighs the plan-intent check's gaps before you approve past them, by skill name — or `"operator"` to be shown the list and asked, which is what this used to be. It has two actions and **approve is not one of them**: it either sends the plan back to the planner on its own authority, or accepts the gaps in writing, with its reasoning printed underneath the gap list you then approve or reject. Runs only when the check FAILs; a decider that fails leaves you the gate you always had. |
 | `planGate.replanRounds` | `1` | — | ✅ | how many times the adjudicator may send a plan back over the intent check's gaps before the gate is yours however it answers. Each round is a planner session and another check, and a gap the planner cannot close twice is a question about the assignment rather than about the plan. `0` turns the veto off and leaves its reasoning as a note on the gate. |
 | `intentFixRounds` | `1` | — | ✅ | how many times a FAIL from the intent validator may queue work to close its own gaps; `0` reports the verdict and stops there |
@@ -723,7 +722,7 @@ const controller = new RunController(
 );
 await controller.startRun("assignment", RunConfig.parse({
   models: { planner: "claude-opus-5", worker: "claude-sonnet-5", qa: "claude-sonnet-5", integrator: "claude-sonnet-5" },
-  budget: { runCapUsd: 50, taskCapUsd: 12 },
+  budget: { runCapUsd: 50 },
   deterministicChecks: ["pnpm test"],
 }));
 ```
@@ -1239,12 +1238,25 @@ The agent is paused, not cancelled — raising the cap continues it.
 New run cap in USD? [enter = $16.50 / s = stop and park the run]
 ```
 
-On the dashboard the same choice appears as an amber panel above the board, with
-the suggested cap pre-filled.
+On the dashboard the same choice appears as an amber panel above the board — it
+points you at the header's `$` figure rather than duplicating its own input,
+because that figure is the one control for both raising the cap reactively (once
+it's reached) and proactively (any time before then).
 
-- **Enter / "Raise cap & continue"** — the new cap is written to the run's config
-  in SQLite, so a later `resume` runs under the cap you agreed to rather than
-  tripping on the old one immediately.
+- **The header's spend figure is always live-editable.** Click (or tab to and
+  press enter on) the `/ $<cap>` next to the spend total, type a new figure, and
+  press enter or click away. This works at any point in the run, not only while
+  `BUDGET_HOLD` is open — moving the cap before it is ever reached is the whole
+  point. If a `BUDGET_HOLD` gate happens to be open at that moment, the same raise
+  answers it too, so the paused agent carries on immediately rather than waiting
+  on a second confirmation.
+- The same thing from a live terminal: type `budget run <usd>` into the process
+  running `harness run`/`resume` at any time — it doesn't fight the plan/task/
+  pit-stop/budget gate prompts for stdin.
+- **Enter / "Raise cap & continue"** in the terminal prompt (or the dashboard's
+  live-edit control) writes the new cap to the run's config in SQLite, so a later
+  `resume` runs under the cap you agreed to rather than tripping on the old one
+  immediately.
 - **A cap at or below what is already spent is refused**, in the terminal and over
   the API. It would trip again on the very next check.
 - **"s" / "Stop & park the run"** — the run moves to `BUDGET_HOLD` and the process
@@ -1252,32 +1264,27 @@ the suggested cap pre-filled.
   Nothing is lost: committed worker output stays on its branch.
 - Resuming from `BUDGET_HOLD` under the *same* cap simply re-opens the gate, so
   you get asked again rather than failing.
-- A task cap trips the same way and names the task; the run total is shown too, so
-  you can tell "this one task is expensive" from "the whole run is".
 
-**A task cap is answered without waiting for you.** It is not really a question
-about money: the cap came from a planner guessing at the size of a piece of work
-before anyone read the code, and reaching it says the guess was wrong. Your half
-of that had already shrunk to pressing enter on the suggested figure — run
-f338b5c8 did it twice, unchanged both times, and one of them sat **six hours and
-forty-two minutes** with a worker paused mid-task and three tasks queued behind
-it.
+**The cap can be answered without waiting for you.** It is not really a question
+about money: the cap is your own estimate of what the whole run would cost, made
+before the plan's real size was known, and reaching it says the estimate was
+wrong. Your half of that had already shrunk to pressing enter on the suggested
+figure — run f338b5c8's gate sat **six hours and forty-two minutes** with a
+worker paused mid-task and three tasks queued behind it.
 
 `budget.decidedBy` (`product-manager` out of the box) answers it instead, and is
-shown what the terminal prompt never showed anyone: what the task is meant to
-build, how many times QA has failed it, what cannot start until it finishes, and
-what is still unbuilt. It may decline, which parks the run exactly as `s` does.
+shown what the terminal prompt never showed anyone: what is in flight, how many
+times QA has failed it, and what is still unbuilt. It may decline, which parks
+the run exactly as `s` does.
 
-Two bounds, deliberately asymmetric:
+Two bounds:
 
-- **The run cap stays yours** unless you named a `budget.ceilingUsd` in advance.
-  Task raises only move money you already agreed to spend — no sequence of them
-  gets past `runCapUsd`, because the run gate fires on its own — but the run cap
-  *is* the agreement, and an agent that can raise its own ceiling has none. Set
-  `{"budget":{"runCapUsd":100,"ceilingUsd":600}}` to mean "go to 600 without me
-  if the work is worth it"; a decision above the ceiling is held at it.
-- **`budget.autoRaiseRounds` (default 3) per cap.** A task at its third raise is
-  not a slightly wrong estimate, it is a task that does not know how to finish.
+- **The cap stays yours** unless you named a `budget.ceilingUsd` in advance — the
+  run cap *is* the agreement, and an agent that can raise its own ceiling has
+  none. Set `{"budget":{"runCapUsd":100,"ceilingUsd":600}}` to mean "go to 600
+  without me if the work is worth it"; a decision above the ceiling is held at it.
+- **`budget.autoRaiseRounds` (default 3).** A cap raised three times is not a
+  slightly wrong estimate, it is a run that does not know how to finish.
 
 Everything outside those bounds, and every way the decider can fail, comes to
 you as it always did. `{"budget":{"decidedBy":"operator"}}` restores asking every

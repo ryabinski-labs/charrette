@@ -125,7 +125,7 @@ describe("serving the page", () => {
     for (const path of ["/api/state", "/api/runs/r1/events"]) {
       expect((await fetch(new URL(path, url), { headers: { connection: "close" } })).status).toBe(401);
     }
-    for (const path of ["/api/gates/plan", "/api/gates/budget", "/api/gates/task", "/api/feedback"]) {
+    for (const path of ["/api/gates/plan", "/api/gates/budget", "/api/gates/task", "/api/runs/r1/budget", "/api/feedback"]) {
       const res = await fetch(new URL(path, url), {
         method: "POST",
         headers: { "content-type": "application/json", connection: "close" },
@@ -142,7 +142,7 @@ describe("serving the page", () => {
   it("refuses a state-changing request from another origin", async () => {
     const { dash, url } = await serving();
 
-    for (const path of ["/api/gates/plan", "/api/gates/budget", "/api/gates/task", "/api/feedback"]) {
+    for (const path of ["/api/gates/plan", "/api/gates/budget", "/api/gates/task", "/api/runs/r1/budget", "/api/feedback"]) {
       const res = await fetch(new URL(path, url), {
         method: "POST",
         headers: { ...auth(dash), "content-type": "application/json", origin: "https://evil.example.com" },
@@ -250,7 +250,7 @@ describe("guards that should never fire", () => {
 
   it("refuses feedback with no message, however it is left out", async () => {
     const { dash, url } = await serving();
-    dash.attach({ sendFeedback: () => "live" });
+    dash.attach({ sendFeedback: () => "live", raiseBudget: () => "cap raised to $0.00" });
 
     for (const body of [{ runId: "r1", taskId: "t1" }, { runId: "r1", taskId: "t1", text: "   " }]) {
       const res = await fetch(new URL("/api/feedback", url), {
@@ -268,6 +268,7 @@ describe("guards that should never fire", () => {
       sendFeedback: () => {
         throw "task t1 has already finished";
       },
+      raiseBudget: () => "cap raised to $0.00",
     });
 
     const res = await fetch(new URL("/api/feedback", url), {

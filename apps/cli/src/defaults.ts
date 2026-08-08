@@ -149,16 +149,14 @@ export const FileConfig = z
     budget: z
       .object({
         runCapUsd: z.number().positive().optional(),
-        taskCapUsd: z.number().positive().optional(),
         /**
          * Who answers a cap that is reached — a skill name, or `"operator"` to
          * be asked yourself, which is what this always used to do.
          */
         decidedBy: z.string().min(1).optional(),
         /**
-         * How far a skill may raise the **run** cap. Leave it out and run-scope
-         * caps are always yours: task raises only redistribute money you have
-         * already agreed to, but the run cap is the agreement.
+         * How far a skill may raise the run cap. Leave it out and it's always
+         * yours to raise — the run cap is the agreement.
          */
         ceilingUsd: z.number().positive().optional(),
         /** How many times a skill may raise the same cap before you are asked. */

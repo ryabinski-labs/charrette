@@ -225,8 +225,11 @@ export const PAGE_HTML = `<!doctype html>
   #pitstop .report blockquote { margin:.35rem 0; padding-left:.6rem; border-left:2px solid var(--amber);
                                 color:var(--mute); }
   #pitstop textarea { width:100%; }
-  #budget input { background:var(--sunken); color:var(--fg); border:1px solid var(--line); border-radius:6px;
-                  padding:.42rem .55rem; font:inherit; width:9rem; margin-right:.5rem; }
+  #capinput { background:var(--sunken); color:var(--fg); border:1px solid var(--blue); border-radius:6px;
+              padding:.1rem .35rem; font:inherit; font-weight:600; width:6rem; }
+  #cap.editable { cursor:pointer; border-bottom:1px dotted var(--dim); }
+  #cap.editable:hover, #cap.editable:focus-visible { color:var(--fg); border-bottom-color:var(--fg); }
+  #cap.flash { transition:color .15s; color:var(--green); }
   #gate .plan { display:flex; gap:.4rem; flex-wrap:wrap; margin-bottom:.6rem; max-height:26vh; overflow-y:auto; }
   #gate .plan div { border:1px solid var(--line); border-radius:6px; padding:.25rem .55rem;
                     background:var(--sunken); font-size:.82rem; }
@@ -277,7 +280,7 @@ export const PAGE_HTML = `<!doctype html>
   <span id="runpills"></span>
   <button id="notify" class="ghost" aria-pressed="false" onclick="toggleNotify()">Notify me</button>
   <div class="meter">
-    <b id="spend">$0.00</b> <span id="cap" style="color:var(--dim)"></span>
+    <b id="spend">$0.00</b> <span id="cap" style="color:var(--dim)" tabindex="-1"></span><input id="capinput" type="number" step="1" min="0" aria-label="New run budget cap in USD" hidden>
     <div class="bar" id="bar"><i></i></div>
     <small id="spendnote">no runs yet</small>
   </div>
@@ -316,8 +319,6 @@ export const PAGE_HTML = `<!doctype html>
 <section id="budget" aria-labelledby="budget-h">
   <h2 id="budget-h">Budget cap reached</h2>
   <p id="budget-detail"></p>
-  <input id="budget-cap" type="number" step="0.01" min="0" aria-label="New cap in USD">
-  <button onclick="resolveBudget(false)">Raise cap &amp; continue</button>
   <button class="reject" onclick="resolveBudget(true)">Stop &amp; park the run</button>
   <p id="budget-error" style="color:var(--red)" role="alert"></p>
 </section>
@@ -601,7 +602,19 @@ function renderHeader() {
     pills.append(p);
   }
   $("spend").textContent = "$" + spent.toFixed(2);
-  $("cap").textContent = cap ? "/ $" + cap.toFixed(0) : "";
+  // Editable only when there is exactly one run to point the raise at \\u2014
+  // an aggregate spread across several runs has no single cap to move.
+  const editable = runs.length === 1 && cap > 0;
+  if ($("capinput").hidden) {
+    $("cap").textContent = cap ? "/ $" + cap.toFixed(0) : "";
+    $("cap").classList.toggle("editable", editable);
+    $("cap").tabIndex = editable ? 0 : -1;
+    $("cap").title = editable ? "Click to change the run's budget cap" : "";
+    // A screen reader has no use for "button" on a figure that does nothing
+    // when activated \\u2014 only claim the role while it actually is one.
+    if (editable) $("cap").setAttribute("role", "button");
+    else $("cap").removeAttribute("role");
+  }
   const pct = cap ? Math.min(100, (spent / cap) * 100) : 0;
   const bar = $("bar");
   bar.className = "bar" + (pct > 85 ? " hot" : pct > 60 ? " warn" : "");
@@ -1037,7 +1050,7 @@ function renderRunInfo() {
   const sig = runs.map((run) => [
     run.id, run.repoPath, run.integrationBranch, run.createdAt, run.assignment,
     run.config.deterministicChecks.join(","), run.config.qaIterationCap,
-    run.config.budget.taskCapUsd,
+    run.config.budget.runCapUsd,
   ].join("\\u0000")).join("\\u0001");
   if (sig === runInfoSig) { tickRunAges(); return; }
   runInfoSig = sig;
@@ -1083,7 +1096,7 @@ function renderRunInfo() {
     d.append(pre);
     box.append(d);
     const cfg = el("div", "empty", "checks: " + (run.config.deterministicChecks.join(" \\u00b7 ") || "none") +
-      "  \\u00b7  QA cap " + run.config.qaIterationCap + "  \\u00b7  task cap $" + run.config.budget.taskCapUsd);
+      "  \\u00b7  QA cap " + run.config.qaIterationCap);
     cfg.style.fontSize = ".76rem";
     cfg.style.marginTop = ".4rem";
     box.append(cfg);
@@ -1376,12 +1389,8 @@ async function refresh() {
   $("budget").style.display = bg ? "block" : "none";
   if (bg) {
     $("budget-detail").textContent =
-      "The " + bg.scope + " cap of $" + bg.capUsd.toFixed(2) + " was reached" +
-      (bg.taskId ? " on task " + bg.taskId : "") + ": $" + bg.spentUsd.toFixed(2) + " spent" +
-      (bg.scope === "task" ? " ($" + bg.runSpentUsd.toFixed(2) + " across the run)" : "") +
-      ". The agent is paused, not cancelled — raising the cap continues it.";
-    // Only prefill an untouched field, so a typed value survives the 5s refresh.
-    if (document.activeElement !== $("budget-cap")) $("budget-cap").value = bg.suggestedUsd.toFixed(2);
+      "The run cap of $" + bg.capUsd.toFixed(2) + " was reached: $" + bg.spentUsd.toFixed(2) + " spent. " +
+      "The agent is paused, not cancelled — raise the cap in the header above to continue.";
   }
   renderHeader(); renderNow(); renderFeedback(); renderBoard(); renderPrs(); renderRunInfo();
   for (const run of runs) stream(run.id);
@@ -1426,16 +1435,66 @@ async function resolveGate(approved) {
 }
 
 async function resolveBudget(stop) {
-  const body = stop ? { stop: true } : { capUsd: Number($("budget-cap").value) };
   const res = await fetch("/api/gates/budget", {
     method: "POST",
     headers: Object.assign({ "content-type": "application/json" }, headers),
-    body: JSON.stringify(body),
+    body: JSON.stringify({ stop: Boolean(stop) }),
   });
-  // A rejected cap must not look like it worked: the agent is still waiting.
   $("budget-error").textContent = res.ok ? "" : ((await res.json().catch(() => ({}))).error || "could not resolve the gate");
   refresh();
 }
+
+/**
+ * The header's "/ $500" is itself the affordance: a run at a time, one cap to
+ * move, so clicking straight on the figure the operator is already watching
+ * beats a separate pencil icon competing for the same few pixels.
+ */
+function openCapEdit() {
+  if (runs.length !== 1) return;
+  const input = $("capinput");
+  input.value = runs[0].config.budget.runCapUsd;
+  $("cap").hidden = true;
+  input.hidden = false;
+  input.focus();
+  input.select();
+}
+
+function closeCapEdit() {
+  $("capinput").hidden = true;
+  $("cap").hidden = false;
+}
+
+async function saveCapEdit() {
+  if ($("capinput").hidden) return;
+  const run = runs[0];
+  const capUsd = Number($("capinput").value);
+  closeCapEdit();
+  if (!run) return;
+  // Untouched or unchanged: nothing to send, and nothing to flash.
+  if (!Number.isFinite(capUsd) || capUsd <= 0 || capUsd === run.config.budget.runCapUsd) return;
+  const res = await fetch("/api/runs/" + run.id + "/budget", {
+    method: "POST",
+    headers: Object.assign({ "content-type": "application/json" }, headers),
+    body: JSON.stringify({ capUsd: capUsd }),
+  });
+  if (res.ok) {
+    $("cap").classList.add("flash");
+    setTimeout(() => $("cap").classList.remove("flash"), 600);
+  } else {
+    // Next poll's renderHeader() overwrites this, which is the point \\u2014 a
+    // rejected raise gets one visible beat, not a sticky error widget.
+    $("spendnote").textContent = (await res.json().catch(() => ({}))).error || "could not raise the cap";
+  }
+  refresh();
+}
+
+$("cap").addEventListener("click", openCapEdit);
+$("cap").addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openCapEdit(); } });
+$("capinput").addEventListener("blur", saveCapEdit);
+$("capinput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") $("capinput").blur();
+  if (e.key === "Escape") closeCapEdit();
+});
 
 buildFilters();
 renderNotifyButton();

@@ -233,7 +233,7 @@ describe("a budget stop inside the stages that catch everything", () => {
     await expect(
       controller.startRun(
         "build a thing",
-        RunConfig.parse({ ...BASE, prodUrl: "https://app.example.com", deployTimeoutMinutes: 1, budget: { runCapUsd: 40, taskCapUsd: 1000 } })
+        RunConfig.parse({ ...BASE, prodUrl: "https://app.example.com", deployTimeoutMinutes: 1, budget: { runCapUsd: 40 } })
       )
     ).rejects.toThrow(/budget exceeded/);
 
@@ -259,7 +259,7 @@ describe("a budget stop inside the stages that catch everything", () => {
     ref.store = store;
 
     await expect(
-      controller.startRun("build a thing", RunConfig.parse({ ...BASE, budget: { runCapUsd: 45, taskCapUsd: 1000 } }))
+      controller.startRun("build a thing", RunConfig.parse({ ...BASE, budget: { runCapUsd: 45 } }))
     ).rejects.toThrow(/budget exceeded/);
   });
 });

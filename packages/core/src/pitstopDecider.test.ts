@@ -138,7 +138,7 @@ const config = (decidedBy?: string) =>
   RunConfig.parse({
     ...BASE,
     pitStop: { every: { tasks: 1 }, ...(decidedBy === undefined ? {} : { decidedBy }) },
-    budget: { runCapUsd: 1000, taskCapUsd: 1000 },
+    budget: { runCapUsd: 1000 },
   });
 
 const resolved = (events: HarnessEvent[]) => events.filter((e) => e.type === "run.pitstop_resolved");
@@ -303,7 +303,7 @@ describe("a decider that cannot decide", () => {
       demo: () => DEMO_OK,
       reviewer: () => REVIEW_OK,
       pm: () => {
-        throw new BudgetExceeded("run", 41, 40, "run1");
+        throw new BudgetExceeded(41, 40, "run1");
       },
     });
     const { controller, events, asked } = build({ repoPath: dir, pool });
@@ -347,7 +347,7 @@ describe("the closing pit stop, which is the one that repeats", () => {
         // Only the closing pit stop fires: nothing else should be in this.
         pitStop: { every: { usd: 1000 }, backToWorkRounds: 2 },
         intentFixRounds: 0,
-        budget: { runCapUsd: 1000, taskCapUsd: 1000 },
+        budget: { runCapUsd: 1000 },
       })
     );
 
@@ -383,7 +383,7 @@ describe("the closing pit stop, which is the one that repeats", () => {
 
     const runId = await controller.startRun(
       "build a thing",
-      RunConfig.parse({ ...BASE, pitStop: { every: { usd: 1000 } }, intentFixRounds: 0, budget: { runCapUsd: 1000, taskCapUsd: 1000 } })
+      RunConfig.parse({ ...BASE, pitStop: { every: { usd: 1000 } }, intentFixRounds: 0, budget: { runCapUsd: 1000 } })
     );
 
     // A run history that tells the operator they stopped their own run at 3am

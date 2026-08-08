@@ -6,7 +6,7 @@ vi.mock("node:readline/promises", () => ({ createInterface: createInterfaceMock 
 import { promptForNewCap, watchBudgetCommands } from "./budget.js";
 import type { RunController } from "@harness/core";
 
-const GATE = { scope: "run" as const, spentUsd: 8.5, capUsd: 8, runSpentUsd: 8.5 };
+const GATE = { spentUsd: 8.5, capUsd: 8 };
 
 /** Feeds scripted answers to the prompt and captures what the operator was shown. */
 function scripted(answers: string[]) {
@@ -53,14 +53,6 @@ describe("terminal budget prompt", () => {
     const io = scripted(["s"]);
     await promptForNewCap(GATE, io.ask, io.write);
     expect(io.shown.join("")).toMatch(/paused, not cancelled/);
-  });
-
-  it("names the task and the whole-run spend when it is the task cap that tripped", async () => {
-    const io = scripted(["s"]);
-    await promptForNewCap({ scope: "task", taskId: "publisher-reindex", spentUsd: 10, capUsd: 10, runSpentUsd: 22.4 }, io.ask, io.write);
-    const text = io.shown.join("");
-    expect(text).toMatch(/on task publisher-reindex/);
-    expect(text).toMatch(/\$22\.40 in total/);
   });
 
   /**
@@ -133,14 +125,14 @@ describe("watchBudgetCommands", () => {
 
   it("raises the cap for a well-formed command and writes back what happened", () => {
     const tty = fakeTty();
-    const controller = { raiseBudget: vi.fn(() => "run cap raised to $50.00") } as unknown as RunController;
+    const controller = { raiseBudget: vi.fn(() => "cap raised to $50.00") } as unknown as RunController;
     const written: string[] = [];
 
     watchBudgetCommands(controller, () => "run1", (s) => void written.push(s));
     tty.emit("budget run 50\n");
 
-    expect(controller.raiseBudget).toHaveBeenCalledWith("run1", "run", 50);
-    expect(written.join("")).toContain("run cap raised to $50.00");
+    expect(controller.raiseBudget).toHaveBeenCalledWith("run1", 50);
+    expect(written.join("")).toContain("cap raised to $50.00");
   });
 
   it("ignores lines that are not a budget command, without touching the controller", () => {
@@ -167,8 +159,8 @@ describe("watchBudgetCommands", () => {
 
     expect(controller.raiseBudget).not.toHaveBeenCalled();
     expect(written).toEqual([
-      '  not a budget command: "budget run -5" — try \'budget run <usd>\' or \'budget task <usd>\'\n',
-      '  not a budget command: "budget xyz" — try \'budget run <usd>\' or \'budget task <usd>\'\n',
+      '  not a budget command: "budget run -5" — try \'budget run <usd>\'\n',
+      '  not a budget command: "budget xyz" — try \'budget run <usd>\'\n',
     ]);
   });
 
@@ -177,11 +169,11 @@ describe("watchBudgetCommands", () => {
     const controller = { raiseBudget: vi.fn(() => "ok") } as unknown as RunController;
 
     watchBudgetCommands(controller, () => "run1");
-    tty.emit("budget ta");
-    tty.emit("sk 12.5\nbudget run 99\n");
+    tty.emit("budget ru");
+    tty.emit("n 12.5\nbudget run 99\n");
 
-    expect(controller.raiseBudget).toHaveBeenNthCalledWith(1, "run1", "task", 12.5);
-    expect(controller.raiseBudget).toHaveBeenNthCalledWith(2, "run1", "run", 99);
+    expect(controller.raiseBudget).toHaveBeenNthCalledWith(1, "run1", 12.5);
+    expect(controller.raiseBudget).toHaveBeenNthCalledWith(2, "run1", 99);
   });
 
   it("says there is no run yet when the id getter has nothing", () => {

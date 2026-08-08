@@ -128,47 +128,38 @@ export type PitStopConfig = z.infer<typeof PitStopConfig>;
 
 export const Budget = z.object({
   runCapUsd: z.number().positive().default(30),
-  taskCapUsd: z.number().positive().default(10),
   /**
-   * Who answers when a cap is reached, by skill name — or `"operator"` to be
-   * asked, which is what this used to be unconditionally.
+   * Who answers when the run cap is reached, by skill name — or `"operator"`
+   * to be asked, which is what this used to be unconditionally.
    *
-   * A task cap is not a decision about money, it is a decision about an
-   * estimate: the planner guessed S and the work was L, and the only question
-   * on the table is whether this task is worth more than the guess. The
-   * operator's half of that has always been pressing enter on a suggested
-   * figure — run f338b5c8's two task gates were both accepted unchanged, one of
-   * them **six hours and forty minutes** after it opened, with a worker slot
-   * idle for every one of them.
+   * The operator's half of that has always been pressing enter on a suggested
+   * figure — run f338b5c8's budget gate was accepted unchanged **six hours and
+   * forty minutes** after it opened, with a worker slot idle the whole time.
    *
    * A skill answers the same question against something the terminal prompt
-   * never showed: what this task is, what still depends on it, and what the run
-   * has left. It may decline, and a decline parks the run exactly as the
-   * operator's `s` did.
+   * never showed: what the plan still has left, and what the last iterations
+   * actually produced. It may decline, and a decline parks the run exactly as
+   * the operator's `s` did.
    */
   decidedBy: z.string().min(1).default("product-manager"),
   /**
-   * The run-spend figure a skill may raise the **run** cap up to, and never
-   * past. Unset — the default — means run-scope gates are always the
-   * operator's, whatever `decidedBy` says.
+   * The run-spend figure a skill may raise the cap up to, and never past.
+   * Unset — the default — means the gate is always the operator's, whatever
+   * `decidedBy` says.
    *
-   * The asymmetry is the point. A task cap raise redistributes money the
-   * operator has already agreed to spend, and the run cap is still there to
-   * catch it: no sequence of task raises can spend a dollar past `runCapUsd`,
-   * because the run gate fires on its own. The run cap is the agreed number
-   * itself, and an agent that can raise its own ceiling has no ceiling. So
-   * raising it needs a second number, typed by a person, in advance —
-   * `{"budget":{"runCapUsd":100,"ceilingUsd":600}}` reads as "go to 600 without
-   * me if the work is worth it", which is a thing an operator can mean.
+   * The run cap is the agreed number itself, and an agent that can raise its
+   * own ceiling has no ceiling. So raising it needs a second number, typed by
+   * a person, in advance — `{"budget":{"runCapUsd":100,"ceilingUsd":600}}`
+   * reads as "go to 600 without me if the work is worth it", which is a thing
+   * an operator can mean.
    */
   ceilingUsd: z.number().positive().optional(),
   /**
-   * How many times a skill may raise the same cap — per task for task scope,
-   * per run for run scope — before the next one goes to the operator whatever
-   * `decidedBy` says.
+   * How many times a skill may raise the run cap before the next one goes to
+   * the operator whatever `decidedBy` says.
    *
-   * A cap reached three times is not an estimate that was slightly off. It is a
-   * task that does not know how to finish, and the fourth raise buys another
+   * A cap reached three times is not an estimate that was slightly off. It is
+   * a run that does not know how to finish, and the fourth raise buys another
    * round of whatever the first three bought. `0` asks every time, which is
    * `decidedBy: "operator"` with extra steps.
    */

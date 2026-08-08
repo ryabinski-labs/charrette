@@ -23,13 +23,11 @@ export async function promptForNewCap(
   const suggested = Math.ceil((gate.spentUsd + gate.capUsd) * 100) / 100;
   write(
     `\n===== BUDGET =====\n` +
-      `The ${gate.scope} cap of $${gate.capUsd.toFixed(2)} was reached${gate.taskId ? ` on task ${gate.taskId}` : ""}: ` +
-      `$${gate.spentUsd.toFixed(2)} spent.\n` +
-      (gate.scope === "task" ? `This run has spent $${gate.runSpentUsd.toFixed(2)} in total.\n` : "") +
+      `The run cap of $${gate.capUsd.toFixed(2)} was reached: $${gate.spentUsd.toFixed(2)} spent.\n` +
       `The agent is paused, not cancelled — raising the cap continues it.\n`
   );
   for (;;) {
-    const answer = (await ask(`New ${gate.scope} cap in USD? [enter = $${suggested} / s = stop and park the run] `)).trim();
+    const answer = (await ask(`New run cap in USD? [enter = $${suggested} / s = stop and park the run] `)).trim();
     if (answer.toLowerCase() === "s") return null;
     if (answer === "") return suggested;
     const parsed = Number(answer);
@@ -38,7 +36,7 @@ export async function promptForNewCap(
   }
 }
 
-const BUDGET_COMMAND = /^budget\s+(run|task)\s+([0-9]*\.?[0-9]+)\s*$/i;
+const BUDGET_COMMAND = /^budget\s+run\s+([0-9]*\.?[0-9]+)\s*$/i;
 const BUDGET_ATTEMPT = /^budget\b/i;
 
 /**
@@ -51,8 +49,8 @@ const BUDGET_ATTEMPT = /^budget\b/i;
  * plan, task, or pit-stop gate may have one open and waiting for its own
  * answer at the same moment, and a second interface fighting the same
  * stream for line-buffering is the more fragile way to coexist with it.
- * Watching quietly and only ever acting on a line that matches `budget
- * run|task <amount>` costs those prompts nothing when it does not.
+ * Watching quietly and only ever acting on a line that matches `budget run
+ * <amount>` costs those prompts nothing when it does not.
  */
 export function watchBudgetCommands(
   controller: RunController,
@@ -72,7 +70,7 @@ export function watchBudgetCommands(
         // Only for a line that was clearly an attempt at this command — every
         // other line typed anywhere in the run (chat, gate answers, "y") passes
         // through here too, and those must stay silent.
-        if (BUDGET_ATTEMPT.test(line)) write(`  not a budget command: "${line}" — try 'budget run <usd>' or 'budget task <usd>'\n`);
+        if (BUDGET_ATTEMPT.test(line)) write(`  not a budget command: "${line}" — try 'budget run <usd>'\n`);
         continue;
       }
       const id = runId();
@@ -80,7 +78,7 @@ export function watchBudgetCommands(
         write("  no run yet to raise a budget for\n");
         continue;
       }
-      write(`  ${controller.raiseBudget(id, m[1]!.toLowerCase() as "run" | "task", Number(m[2]))}\n`);
+      write(`  ${controller.raiseBudget(id, Number(m[1]))}\n`);
     }
   };
   process.stdin.on("data", onData);

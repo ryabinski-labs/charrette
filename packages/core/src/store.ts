@@ -482,18 +482,15 @@ export class Store {
   }
 
   /**
-   * How many times a skill — rather than a person — has raised this cap.
-   *
-   * The bound on `budget.autoRaiseRounds` reads this, and it is per cap rather
-   * than per run: a task on its third raise and the run on its first are not
-   * the same amount of trust spent. Scope and task id live on the *opened*
-   * event and the decider on the *resolved* one, so the two are paired by gate
-   * id here rather than duplicated into the schema.
+   * How many times a skill — rather than a person — has raised this run's
+   * budget cap. The bound on `budget.autoRaiseRounds` reads this. Gate id
+   * pairs the *opened* event (which kind it was) with the *resolved* one
+   * (who decided it) rather than duplicating that into the schema.
    *
    * Declines are not counted. A decider that parked the run did not spend a
    * round of anyone's patience — it used the gate exactly as intended.
    */
-  budgetAutoRaises(runId: string, scope: "run" | "task", taskId?: string): number {
+  budgetAutoRaises(runId: string): number {
     const rows = this.db
       .prepare("SELECT type, payload FROM events WHERE runId = ? AND type IN ('run.gate_opened','run.gate_resolved') ORDER BY seq")
       .all(runId) as { type: string; payload: string }[];
@@ -503,13 +500,12 @@ export class Store {
       const e = JSON.parse(row.payload) as {
         gateId: string;
         kind: string;
-        payload?: { scope?: string; taskId?: string };
         resolution?: string;
         decidedBy?: string;
       };
       if (e.kind !== "budget") continue;
       if (row.type === "run.gate_opened") {
-        if (e.payload?.scope === scope && (e.payload?.taskId ?? undefined) === taskId) mine.add(e.gateId);
+        mine.add(e.gateId);
       } else if (mine.has(e.gateId) && e.resolution === "approved" && e.decidedBy && e.decidedBy !== "operator") {
         raises++;
       }

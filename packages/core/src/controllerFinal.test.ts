@@ -252,7 +252,7 @@ describe("following a deploy the repo cannot report on", () => {
     await expect(
       controller.startRun(
         "build a thing",
-        RunConfig.parse({ ...BASE, prodUrl: "https://app.example.com", deployTimeoutMinutes: 1, budget: { runCapUsd: 45, taskCapUsd: 1000 } })
+        RunConfig.parse({ ...BASE, prodUrl: "https://app.example.com", deployTimeoutMinutes: 1, budget: { runCapUsd: 45 } })
       )
     ).rejects.toThrow(/budget exceeded/);
   });

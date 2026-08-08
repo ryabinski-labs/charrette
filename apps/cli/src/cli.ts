@@ -278,12 +278,10 @@ async function reportOutcome(
 }
 
 const DEFAULT_RUN_CAP = 30;
-const DEFAULT_TASK_CAP = 10;
 
 interface RunOpts {
   repo: string;
   runCap: string;
-  taskCap: string;
   check?: string[];
   checks: boolean;
   dashboard?: boolean;
@@ -354,11 +352,8 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
   const runCapUsd = fromCli("runCap")
     ? positive(opts.runCap, "--run-cap")
     : file.budget?.runCapUsd ?? DEFAULT_RUN_CAP;
-  const taskCapUsd = fromCli("taskCap")
-    ? positive(opts.taskCap, "--task-cap")
-    : file.budget?.taskCapUsd ?? DEFAULT_TASK_CAP;
-  const budgetFrom = fromCli("runCap") || fromCli("taskCap") ? "flags" : file.budget ? via : "defaults";
-  banner.push(`budget     run $${runCapUsd} · task $${taskCapUsd}   (${budgetFrom})`);
+  const budgetFrom = fromCli("runCap") ? "flags" : file.budget ? via : "defaults";
+  banner.push(`budget     $${runCapUsd}   (${budgetFrom})`);
 
   const every = file.pitStop?.every ?? "epic";
   banner.push(
@@ -417,7 +412,7 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
     // The flag wins over the file: it is the thing you reach for when the run
     // in front of you needs to get cheaper right now.
     models: { ...file.models, ...modelOverrides(opts.model) },
-    budget: { runCapUsd, taskCapUsd },
+    budget: { runCapUsd },
     pitStop: file.pitStop,
     skillsDirs,
     skillRouting: file.skillRouting,
@@ -511,7 +506,6 @@ export function buildProgram(): Command {
     .argument("[assignment]", "what to build; omit to describe it in a conversation")
     .option("-r, --repo <path>", "target repo (default: the git repo containing the cwd)", process.cwd())
     .option("--run-cap <usd>", "run budget cap in USD", String(DEFAULT_RUN_CAP))
-    .option("--task-cap <usd>", "task budget cap in USD", String(DEFAULT_TASK_CAP))
     .option("--check <cmd...>", "deterministic checks run before QA (default: auto-detected)")
     .option("--no-checks", "run no deterministic checks")
     .option("--dashboard", "serve the monitoring dashboard and resolve gates there (default)")
@@ -552,7 +546,7 @@ export function buildProgram(): Command {
       } else {
         banner.push("dashboard  off — the plan gate will be resolved in this terminal");
       }
-      banner.push("           type 'budget run <usd>' or 'budget task <usd>' any time to raise a cap before it's hit");
+      banner.push("           type 'budget run <usd>' any time to raise the cap before it's hit");
       process.stdout.write(`\n${banner.map((l) => `  ${l}`).join("\n")}\n`);
 
       const chat = wantChat || assignment === undefined ? new TerminalChat() : undefined;
@@ -703,7 +697,7 @@ export function buildProgram(): Command {
       if (remembered.length) process.stdout.write(`${remembered.join("\n")}\n`);
       const url = await dash.start();
       if (url) process.stdout.write(`Dashboard: ${url}\n(keep the fragment — it is your auth token)\n`);
-      process.stdout.write("Type 'budget run <usd>' or 'budget task <usd>' any time to raise a cap before it's hit.\n");
+      process.stdout.write("Type 'budget run <usd>' any time to raise the cap before it's hit.\n");
       // Only a run interrupted mid-conversation needs the terminal back: opening
       // readline for any other resume would hold stdin for a question never asked.
       const chat = existing?.state === "INTAKE" ? new TerminalChat() : undefined;
@@ -910,7 +904,7 @@ export function buildProgram(): Command {
       }
       const detected = detectChecks(repo);
       const contents = {
-        budget: { runCapUsd: DEFAULT_RUN_CAP, taskCapUsd: DEFAULT_TASK_CAP },
+        budget: { runCapUsd: DEFAULT_RUN_CAP },
         deterministicChecks: detected.checks,
         dashboard: true,
         skillsDirs: DEFAULT_SKILLS_DIRS,

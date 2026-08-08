@@ -129,7 +129,7 @@ describe("a pit stop before anything has been built", () => {
     const { controller, store, stops } = build({ repoPath: dir, pool });
     ref.store = store;
 
-    await controller.startRun("build a thing", RunConfig.parse({ ...BASE, pitStop: { every: { usd: 1 } }, budget: { runCapUsd: 1000, taskCapUsd: 1000 } }));
+    await controller.startRun("build a thing", RunConfig.parse({ ...BASE, pitStop: { every: { usd: 1 } }, budget: { runCapUsd: 1000 } }));
 
     expect(stops[0]!.merged).toEqual([]);
     expect(stops[0]!.projectedUsd).toBe(stops[0]!.spentUsd);
@@ -158,7 +158,7 @@ describe("a pit stop before anything has been built", () => {
     });
     ref.store = store;
 
-    const runId = await controller.startRun("build a thing", RunConfig.parse({ ...BASE, pitStop: { every: { usd: 1 } }, budget: { runCapUsd: 1000, taskCapUsd: 1000 } }));
+    const runId = await controller.startRun("build a thing", RunConfig.parse({ ...BASE, pitStop: { every: { usd: 1 } }, budget: { runCapUsd: 1000 } }));
 
     expect(specs.filter((s) => s.role === "planner").at(-1)!.prompt).toContain("(nothing yet)");
     expect(store.getTask(runId, "task-new")!.state).toBe("MERGED");
@@ -182,7 +182,7 @@ describe("a demo with nowhere to run", () => {
 
     await controller.startRun(
       "build a thing",
-      RunConfig.parse({ ...BASE, pitStop: { every: { usd: 1 } }, budget: { runCapUsd: 1000, taskCapUsd: 1000 } })
+      RunConfig.parse({ ...BASE, pitStop: { every: { usd: 1 } }, budget: { runCapUsd: 1000 } })
     );
 
     // The pit stop still happens, and says why there is nothing to look at. A
@@ -205,12 +205,12 @@ describe("a cap reached inside a pit stop", () => {
       const dir = repo();
       const { pool } = rolePool({
         planner: (s: AgentSpec, nth: number) =>
-          nth === 1 ? DOCS : nth === 2 ? dag(["task-a"]) : (void s, new BudgetExceeded("run", 99, 50, "run1")),
+          nth === 1 ? DOCS : nth === 2 ? dag(["task-a"]) : (void s, new BudgetExceeded(99, 50, "run1")),
         worker,
         qa: () => QA_PASS,
         validator: () => '```json\n{"verdict":"PASS","gaps":[],"summary":"ok"}\n```',
-        demo: () => (role === "demo" ? new BudgetExceeded("run", 99, 50, "run1") : DEMO_OK),
-        reviewer: () => (role === "reviewer" ? new BudgetExceeded("run", 99, 50, "run1") : REVIEW_OK),
+        demo: () => (role === "demo" ? new BudgetExceeded(99, 50, "run1") : DEMO_OK),
+        reviewer: () => (role === "reviewer" ? new BudgetExceeded(99, 50, "run1") : REVIEW_OK),
       });
       const { controller } = build({ repoPath: dir, pool, decide });
 
