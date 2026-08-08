@@ -65,8 +65,33 @@ describe("crashlog", () => {
     expect(written).toContain("the pool died");
     expect(written).toContain(`pid=${process.pid}`);
     expect(written.endsWith("\n")).toBe(true);
-    // The operator watching the terminal gets the first line, without the stack.
+    // The operator watching the terminal gets the message, without the stack.
     expect(stderr.join("")).toBe("\nharness: fatal — the pool died\n");
+  });
+
+  it("shows the whole message when the message is deliberately several lines", async () => {
+    // A config rejection lists one line per bad field. Printing only the first
+    // gives the operator the heading and none of the reasons — which is what
+    // happened: "that run configuration cannot be used:" and nothing under it.
+    const { armCrashLog, recordFatal } = await freshCrashLog();
+    armCrashLog(stateDir);
+
+    recordFatal(new Error("that run configuration cannot be used:\n  models: qa is below the floor\n  budget: must be positive"));
+
+    expect(stderr.join("")).toContain("  models: qa is below the floor");
+    expect(stderr.join("")).toContain("  budget: must be positive");
+    // The stack still does not reach the terminal — that was the right half of
+    // the old rule and the reason it existed.
+    expect(stderr.join("")).not.toContain("crashlog.test.ts");
+    expect(readFileSync(logFile(), "utf8")).toContain("crashlog.test.ts");
+  });
+
+  it("says what a thrown non-Error was, rather than printing nothing", async () => {
+    const { recordFatal } = await freshCrashLog();
+
+    recordFatal("the transport closed");
+
+    expect(stderr.join("")).toContain("the transport closed");
   });
 
   it("still says why on stderr when it crashed before the repo was resolved", async () => {

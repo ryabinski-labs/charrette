@@ -313,6 +313,28 @@ function port(value: string): number {
 }
 
 /**
+ * `RunConfig.parse`, with the failure written for the person who typed the
+ * flag.
+ *
+ * Zod's own `.parse` throws a ZodError whose `message` is a JSON dump of its
+ * issues, and `recordFatal` prints that plus a stack trace — so refusing
+ * `-m qa=claude-haiku-4-5-…` produced fourteen lines of JSON and a trace
+ * around one sentence that was already written to be read on its own. The
+ * routing rules are the ones an operator trips while deliberately
+ * experimenting with cheaper models, which is exactly when the message needs
+ * to survive being skimmed.
+ *
+ * Same shape `loadFileConfig` uses for the config file, so a bad flag and a bad
+ * file read the same way.
+ */
+export function parseRunConfig(input: unknown): RunConfig {
+  const parsed = RunConfig.safeParse(input);
+  if (parsed.success) return parsed.data;
+  const issues = parsed.error.issues.map((i) => `  ${i.path.join(".") || "(root)"}: ${i.message}`).join("\n");
+  throw new Error(`that run configuration cannot be used:\n${issues}`);
+}
+
+/**
  * Layer the run settings: CLI flag > harness.config.json > auto-detection >
  * built-in default. Every resolved value is reported in the banner so a bare
  * `harness run` is never silently doing something surprising.
@@ -401,7 +423,7 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
       : `intake     off — planning directly from the assignment`
   );
 
-  const config = RunConfig.parse({
+  const config = parseRunConfig({
     maxParallelWorkers: file.maxParallelWorkers,
     qaIterationCap: file.qaIterationCap,
     qaMaxTurns: file.qaMaxTurns,
@@ -679,6 +701,11 @@ export function buildProgram(): Command {
           if (missing.length) {
             throw new Error(`${missing.join(" ")} Export the key, or route that role somewhere else.`);
           }
+          // `patchRunConfig` is the enforcement — it re-parses the whole config
+          // and a rejected routing never reaches the database. This is the same
+          // check run a moment earlier only so the operator gets the sentence
+          // instead of the ZodError the store would throw.
+          parseRunConfig({ ...existing.config, models });
           store.patchRunConfig(runId, { models });
           for (const [role, model] of changed) {
             process.stdout.write(`${role} re-routed for the rest of the run: ${existing.config.models[role as keyof typeof existing.config.models]} → ${model}\n`);
