@@ -49,6 +49,11 @@ export const AgentRole = z.enum([
   "demo",
   "reviewer",
   "pm",
+  // Resumes a session that finished without formatting its answer and asks for
+  // nothing but the answer. Its own role rather than the role it is repairing,
+  // so that a cheap two-turn re-ask cannot be mistaken for the judgment it is
+  // transcribing — the ledger would otherwise show a Haiku row labelled `qa`.
+  "repair",
 ]);
 export type AgentRole = z.infer<typeof AgentRole>;
 

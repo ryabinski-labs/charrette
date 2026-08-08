@@ -188,6 +188,20 @@ export class Store {
       // column are not a build the postmortem should name, and the report says
       // so in its own words.
       sessions: { build: "TEXT NOT NULL DEFAULT ''" },
+      // What a dollar was spent ON, not just how many were spent.
+      //
+      // The ledger could always answer "what did this run cost" and "what did
+      // this task cost". It could not answer the question that decides whether
+      // a cheaper worker model is worth having — what did a *merged* task cost,
+      // counting every attempt, retry and escalation on it, split by the role
+      // that spent it. Without the role, a task's worker bill and its QA bill
+      // are one number, and a cheap worker that doubles the QA it needs looks
+      // like a saving.
+      //
+      // Empty defaults are honest for rows written before this: those runs did
+      // not have tiers, and the role of a session recorded then is recoverable
+      // from `sessions` if anyone needs it.
+      ledger: { role: "TEXT NOT NULL DEFAULT ''", tier: "TEXT NOT NULL DEFAULT ''" },
     };
     for (const [table, columns] of Object.entries(added)) {
       const have = new Set((this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name));
@@ -767,12 +781,52 @@ export class Store {
     );
   }
 
-  recordUsage(row: { runId: string; taskId?: string; sessionId: string; model: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; costUsd: number }): void {
+  recordUsage(row: { runId: string; taskId?: string; sessionId: string; model: string; role?: string; tier?: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; costUsd: number }): void {
     this.db
       .prepare(
-        "INSERT INTO ledger (runId, taskId, sessionId, model, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, costUsd, ts) VALUES (?,?,?,?,?,?,?,?,?,?)"
+        "INSERT INTO ledger (runId, taskId, sessionId, model, role, tier, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, costUsd, ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
       )
-      .run(row.runId, row.taskId ?? null, row.sessionId, row.model, row.inputTokens, row.outputTokens, row.cacheReadTokens, row.cacheWriteTokens, row.costUsd, Date.now());
+      .run(row.runId, row.taskId ?? null, row.sessionId, row.model, row.role ?? "", row.tier ?? "", row.inputTokens, row.outputTokens, row.cacheReadTokens, row.cacheWriteTokens, row.costUsd, Date.now());
+  }
+
+  /**
+   * What each finished task cost, by role, and which worker tier it ran on.
+   *
+   * The query the tiering experiment is settled by. `merged` is the only
+   * outcome worth pricing — a cheap worker that halves the bill on tasks that
+   * never land has not saved anything — and `escalated` marks the tasks that
+   * started light and finished on the standard model, because those carry the
+   * cost of both and are what the break-even actually turns on.
+   *
+   * Reported per task rather than summed, so a single catastrophic task cannot
+   * hide inside an average that still looks like a saving.
+   */
+  taskSpend(runId: string): { taskId: string; state: string; tier: string; escalated: boolean; workerUsd: number; qaUsd: number; totalUsd: number }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT l.taskId AS taskId, t.state AS state,
+                COALESCE(MIN(NULLIF(l.tier,'')),'') AS tier,
+                COUNT(DISTINCT CASE WHEN l.role = 'worker' THEN l.model END) AS workerModels,
+                COALESCE(SUM(CASE WHEN l.role = 'worker' THEN l.costUsd END),0) AS workerUsd,
+                COALESCE(SUM(CASE WHEN l.role = 'qa' THEN l.costUsd END),0) AS qaUsd,
+                COALESCE(SUM(l.costUsd),0) AS totalUsd
+           FROM ledger l LEFT JOIN tasks t ON t.runId = l.runId AND t.id = l.taskId
+          WHERE l.runId = ? AND l.taskId IS NOT NULL
+          GROUP BY l.taskId, t.state
+          ORDER BY totalUsd DESC`
+      )
+      .all(runId) as { taskId: string; state: string | null; tier: string; workerModels: number; workerUsd: number; qaUsd: number; totalUsd: number }[];
+    return rows.map((r) => ({
+      taskId: r.taskId,
+      state: r.state ?? "",
+      tier: r.tier,
+      // More than one worker model on one task is exactly what an escalation
+      // looks like from here, and it needs no extra column to record it.
+      escalated: r.workerModels > 1,
+      workerUsd: r.workerUsd,
+      qaUsd: r.qaUsd,
+      totalUsd: r.totalUsd,
+    }));
   }
 
   spentUsd(runId: string, taskId?: string): number {

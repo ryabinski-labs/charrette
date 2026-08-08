@@ -133,7 +133,10 @@ export const FileConfig = z
         intake: z.string().optional(),
         planner: z.string().optional(),
         worker: z.string().optional(),
+        /** The worker model for tasks the light-tier rule admits (modelTier.ts). */
+        workerLight: z.string().optional(),
         qa: z.string().optional(),
+        /** Accepted and ignored: no agent is ever dispatched with it. */
         integrator: z.string().optional(),
         // The rest of the roles, which this list simply never caught up with:
         // `RunConfig` routes ten and the file accepted five, and because this
@@ -144,6 +147,8 @@ export const FileConfig = z
         demo: z.string().optional(),
         reviewer: z.string().optional(),
         pm: z.string().optional(),
+        /** The two-turn re-ask that transcribes an answer already reached. */
+        repair: z.string().optional(),
       })
       .optional(),
     budget: z

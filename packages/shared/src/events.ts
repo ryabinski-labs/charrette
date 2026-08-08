@@ -55,6 +55,20 @@ export const HarnessEvent = z.discriminatedUnion("type", [
     by: z.string().default("operator"),
     why: z.string().default(""),
   }),
+  // Which worker model a task was dispatched on, and what the rule in
+  // modelTier.ts made of it. Recorded for every task, refused ones included, and
+  // still recorded when `models.workerLight` is pointed back at `models.worker`
+  // and the decision changes nothing: the reason to publish a no-op is so the
+  // light tier can be counted from the operator's own plans whether or not it is
+  // switched on.
+  z.object({
+    ...base,
+    type: z.literal("task.tier_decided"),
+    taskId: z.string(),
+    tier: z.enum(["light", "standard"]),
+    model: z.string(),
+    why: z.string().default(""),
+  }),
   // Unprompted operator feedback on a task mid-run: "live" went straight into the
   // running session; "queued" waits for the next agent dispatched on the task.
   z.object({ ...base, type: z.literal("task.feedback"), taskId: z.string(), text: z.string(), delivery: z.enum(["live", "queued", "revived"]) }),

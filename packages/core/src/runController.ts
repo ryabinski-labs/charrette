@@ -23,6 +23,7 @@ import {
   demoUnavailable,
   pitStopDue,
   renderPitStop,
+  type DemoFindings,
   type DemoReport,
   type PitStop,
   type PitStopDecision,
@@ -32,6 +33,7 @@ import {
 import {
   checkCommands,
   checkEvidence,
+  demoCoverage,
   evidenceFaults,
   repeatable,
   retryableFaults,
@@ -57,6 +59,7 @@ import {
   extractSection,
   operatorFeedbackMessage,
   pitStopDeciderPrompt,
+  priorDecisionsBlock,
   pitStopDeciderSystemPrompt,
   planGateDeciderPrompt,
   planGateDeciderSystemPrompt,
@@ -89,6 +92,7 @@ import { renderIntegrations, scanIntegrations } from "./integrationScan.js";
 import { renderCi, scanCi } from "./ciScan.js";
 import { renderProduction, scanProduction } from "./productionScan.js";
 import { detectToolbelt, toolbeltBlock } from "./toolbelt.js";
+import { workerModelFor } from "./modelTier.js";
 import { Store, TaskRow, type RunRow } from "./store.js";
 
 const execFileP = promisify(execFile);
@@ -334,6 +338,11 @@ const DemoJson = z.object({
   started: z.boolean(),
   howStarted: z.string().default(""),
   summary: z.string().default(""),
+  // What the demo set out to drive, by name, so that what it did drive can be
+  // measured against something it committed to first. Defaulting to empty is
+  // not a loophole — a demo with no plan is scored inconclusive precisely
+  // because there is nothing to hold its results against. See `demoCoverage`.
+  plannedJourneys: z.array(z.string()).default([]),
   journeys: z
     .array(
       z.object({
@@ -1941,8 +1950,13 @@ export class RunController {
       const retry = await this.pool.run({
         runId,
         taskId,
-        role: "qa",
-        model: run.config.models.qa,
+        role: "repair",
+        // Not the QA model. This resumes the session that already judged the
+        // task and asks it to restate the conclusion it reached — the judging
+        // happened on the judging model, in the conversation being resumed, and
+        // what is left is transcription. Two turns, no investigation, and the
+        // prompt below forbids changing the verdict.
+        model: run.config.models.repair,
         systemPrompt: "You are finishing a verification you have already done. Answer with JSON and nothing else.",
         prompt:
           "Your previous message did not contain the verdict JSON this task requires. Do not investigate anything further and do not change your judgment — just state the conclusion you already reached, as exactly one JSON object inside a ```json fence:\n" +
@@ -2526,7 +2540,9 @@ export class RunController {
     // instantly — which is the only reason it is safe to put one in front of
     // every `harness resume`, including the resume of a run already at its cap.
     const demo = withDemo ? await this.runDemo(runId, run, number, dir, allMerged.join("\n") || "(nothing yet)", upcoming.join("\n")) : null;
-    const reviews = demo ? await this.runReviews(runId, run, demo, tasks, upcoming.join("\n")) : [];
+    const reviewed = demo
+      ? await this.runReviews(runId, run, demo, tasks, upcoming.join("\n"))
+      : { reviews: [], skipped: [] };
     // Measured rather than estimated, and shown: a checkpoint whose price is
     // invisible is one the operator cannot decide they do not want.
     const afterUsd = this.store.spentUsd(runId);
@@ -2536,7 +2552,8 @@ export class RunController {
       number,
       reason: due.reason,
       demo,
-      reviews,
+      reviews: reviewed.reviews,
+      skippedReviewers: reviewed.skipped,
       merged: mergedSince,
       upcoming,
       parked,
@@ -2759,8 +2776,10 @@ export class RunController {
     let head = "";
     // Overwritten on both paths below. It starts as the failure report because
     // that is what an unfinished demo *is*, and because a pit stop that cannot
-    // demo anything must still open.
-    let report = demoUnavailable("the demo agent did not run");
+    // demo anything must still open. Held as findings rather than a full report:
+    // the coverage on it is the one `demoUnavailable` supplies, and the real one
+    // is not known until the evidence gate has run.
+    let report: DemoFindings = demoUnavailable("the demo agent did not run");
     let checks: EvidenceCheck[] = [];
     let commandChecks: CommandCheck[] = [];
     try {
@@ -2842,7 +2861,21 @@ export class RunController {
     // Whatever survived the second look is what the operator is shown as
     // evidence; the rest is filed under what this pit stop did not verify.
     const withFiles = checks.length ? strikeEvidence(report, checks) : report;
-    return commandChecks.length ? strikeCommands(withFiles, commandChecks) : withFiles;
+    const verified = commandChecks.length ? strikeCommands(withFiles, commandChecks) : withFiles;
+    // Coverage is read from the *struck* report, after the evidence gate, not
+    // from what the agent claimed. A demo whose every screenshot came back blank
+    // reached its journeys and proved none of them, and the number that decides
+    // whether the expensive reviewers are worth buying has to be the one that
+    // survived checking.
+    const coverage = demoCoverage(verified);
+    this.bus.publish({
+      type: "agent.log",
+      runId,
+      sessionId: `pitstop-${number}`,
+      text: `demo coverage: ${coverage.status} — ${coverage.why}`,
+      ts: Date.now(),
+    });
+    return { ...verified, coverage };
   }
 
   /**
@@ -2864,7 +2897,7 @@ export class RunController {
    * stop could not check, with the command printed beside them so the operator
    * can run it themselves.
    */
-  private async verifyDemoCommands(runId: string, wtPath: string, report: DemoReport): Promise<CommandCheck[]> {
+  private async verifyDemoCommands(runId: string, wtPath: string, report: DemoFindings): Promise<CommandCheck[]> {
     const claims = report.commands;
     if (!claims.length) return [];
     const runnable = [...new Set(claims.map((c) => c.command.trim()).filter((c) => c && repeatable(c).ok))];
@@ -2893,7 +2926,7 @@ export class RunController {
   }
 
   /** Read every file the demo agent offered and decide which of them are evidence. */
-  private inspectDemoEvidence(dir: string, report: DemoReport): EvidenceCheck[] {
+  private inspectDemoEvidence(dir: string, report: DemoFindings): EvidenceCheck[] {
     return checkEvidence(report.artifacts, (file) => {
       // Confined to the pit stop's own directory: an agent that lists
       // `../../README.md` is not offering evidence it produced.
@@ -2908,11 +2941,24 @@ export class RunController {
   }
 
   /**
-   * One short session per lens, in parallel, each reading the demo.
+   * One short session per lens, in parallel, each reading the demo — bought in
+   * two passes.
    *
-   * Three named perspectives rather than one neutral summary: the drift a
-   * product lens sees and the drift a QA lens sees are different failures, and
-   * a single reviewer asked for both reliably returns neither.
+   * Named perspectives rather than one neutral summary: the drift a product lens
+   * sees and the drift a QA lens sees are different failures, and a single
+   * reviewer asked for both reliably returns neither. That is why there are
+   * four, and it is also why they are expensive — four Opus sessions at every
+   * epic boundary, bought before anyone has looked at what the demo said.
+   *
+   * Most of those purchases buy agreement. A healthy run's pit stop is four
+   * lenses independently reporting that it is on track, which is the answer the
+   * first two already gave. So the first `reviewFirstPass` lenses go first, and
+   * the rest are bought only when there is reason to think they will find
+   * something the first pass did not — see `worthMoreLenses` below.
+   *
+   * The lenses that were not bought are returned as well, marked, because a
+   * report that quietly showed two opinions where the config promises four is
+   * the same lie as an evidence list that quietly dropped its blank captures.
    */
   private async runReviews(
     runId: string,
@@ -2920,43 +2966,104 @@ export class RunController {
     demo: DemoReport,
     tasks: TaskRow[],
     upcomingLines: string
-  ): Promise<ReviewReport[]> {
+  ): Promise<{ reviews: ReviewReport[]; skipped: string[] }> {
     const lenses = run.config.pitStop.reviewers;
-    if (!lenses.length) return [];
+    if (!lenses.length) return { reviews: [], skipped: [] };
     const indexed = indexSkills(run.config.skillsDirs);
     const wtPath = await this.wt.ensureIntegrationWorktree(runId).catch(() => this.repoPath);
     const taskLines = tasks.map((t) => `- ${t.title} (${t.id}): ${t.state}`).join("\n");
     const demoText = JSON.stringify(demo, null, 2).slice(0, 6000);
     const prd = this.planPrd(runId);
-    const settled = await Promise.all(
-      lenses.map(async (lens): Promise<ReviewReport | null> => {
-        try {
-          // The lens is a skill name, so it is looked up by name rather than
-          // scored: "review it as the product manager" and "review it as
-          // whatever the matcher thinks product management sounds like" are not
-          // the same instruction.
-          const skills = indexed.filter((s) => s.name === lens && verifyHash(s));
-          const result = await this.pool.run({
-            runId,
-            role: "reviewer",
-            model: run.config.models.reviewer,
-            systemPrompt: reviewerSystemPrompt(lens, toolbeltBlock(detectToolbelt(run.config.externalTools)), skillsBlock(skills)),
-            prompt: reviewerPrompt(lens, run.assignment, prd, demoText, taskLines, upcomingLines),
-            cwd: wtPath,
-            disallowedTools: ["Write", "Edit", "NotebookEdit", "WebSearch"],
-            maxTurns: 30,
-            budgetCheck: () => this.checkBudget(runId),
-          });
-          return { lens, ...ReviewJson.parse(extractJson(result.resultText)) };
-        } catch (e) {
-          if (e instanceof BudgetExceeded) throw e;
-          // A lens that failed is reported as a lens that failed. Dropping it
-          // silently would show the operator two opinions and imply three.
-          return { lens, verdict: "on-track", findings: [`(this reviewer did not finish: ${String(e).slice(0, 200)})`], question: "" };
-        }
-      })
-    );
-    return settled.filter((r): r is ReviewReport => r !== null);
+
+    /** One lens. `finished` is false when the session died — see `worthMoreLenses`. */
+    const runLens = async (lens: string): Promise<{ report: ReviewReport; finished: boolean }> => {
+      try {
+        // The lens is a skill name, so it is looked up by name rather than
+        // scored: "review it as the product manager" and "review it as
+        // whatever the matcher thinks product management sounds like" are not
+        // the same instruction.
+        const skills = indexed.filter((s) => s.name === lens && verifyHash(s));
+        const result = await this.pool.run({
+          runId,
+          role: "reviewer",
+          model: run.config.models.reviewer,
+          systemPrompt: reviewerSystemPrompt(lens, toolbeltBlock(detectToolbelt(run.config.externalTools)), skillsBlock(skills)),
+          prompt: reviewerPrompt(lens, run.assignment, prd, demoText, taskLines, upcomingLines),
+          cwd: wtPath,
+          disallowedTools: ["Write", "Edit", "NotebookEdit", "WebSearch"],
+          maxTurns: 30,
+          budgetCheck: () => this.checkBudget(runId),
+        });
+        return { report: { lens, ...ReviewJson.parse(extractJson(result.resultText)) }, finished: true };
+      } catch (e) {
+        if (e instanceof BudgetExceeded) throw e;
+        // A lens that failed is reported as a lens that failed. Dropping it
+        // silently would show the operator two opinions and imply three.
+        //
+        // `finished: false` matters more than it used to: this report carries
+        // the verdict `on-track` because there is no honest verdict to carry,
+        // and letting a crashed session's placeholder suppress the second pass
+        // would turn a transport error into a cheaper, quieter pit stop.
+        return {
+          report: { lens, verdict: "on-track", findings: [`(this reviewer did not finish: ${String(e).slice(0, 200)})`], question: "" },
+          finished: false,
+        };
+      }
+    };
+
+    const firstPass = run.config.pitStop.reviewFirstPass;
+    // `0` disables staging, and so does a first pass that is not actually
+    // smaller than the list — buying two of two and then "escalating" to the
+    // remaining zero is just the old behaviour with extra bookkeeping.
+    if (firstPass <= 0 || firstPass >= lenses.length) {
+      const all = await Promise.all(lenses.map(runLens));
+      return { reviews: all.map((r) => r.report), skipped: [] };
+    }
+
+    const head = lenses.slice(0, firstPass);
+    const tail = lenses.slice(firstPass);
+    const first = await Promise.all(head.map(runLens));
+    const why = this.worthMoreLenses(demo, first);
+    const say = (text: string) => this.bus.publish({ type: "agent.log", runId, sessionId: "pitstop", text, ts: Date.now() });
+
+    if (!why) {
+      say(`staged review: ${head.join(", ")} agreed the run is on track, so ${tail.join(", ")} were not run`);
+      return { reviews: first.map((r) => r.report), skipped: tail };
+    }
+    say(`staged review: ${why} — buying ${tail.join(", ")} as well`);
+    const second = await Promise.all(tail.map(runLens));
+    return { reviews: [...first, ...second].map((r) => r.report), skipped: [] };
+  }
+
+  /**
+   * Whether the rest of the lenses are worth their price, given what the first
+   * pass came back with. Returns the reason, or empty for "no".
+   *
+   * Deliberately generous. Every condition here is a reason to spend, the
+   * default is to spend, and only unanimous, finished, well-founded agreement
+   * stops the second pass. The asymmetry is the point: the money this saves is
+   * saved on the boring pit stops, and the drift a pit stop exists to catch is
+   * worth more than every reviewer session it would ever skip.
+   */
+  private worthMoreLenses(demo: DemoReport, first: { report: ReviewReport; finished: boolean }[]): string {
+    // Nothing the first pass says is well-founded if the demo it read was not.
+    // This is the condition that ties the cheap demo to the expensive reviewers:
+    // a Haiku demo that came back thin must not also buy a quieter review.
+    if (demo.coverage.status !== "demonstrated") {
+      return `the demo was ${demo.coverage.status} (${demo.coverage.why})`;
+    }
+    const unfinished = first.filter((r) => !r.finished).map((r) => r.report.lens);
+    if (unfinished.length) return `${unfinished.join(", ")} did not finish, so nothing was learned from ${unfinished.length === 1 ? "it" : "them"}`;
+    const off = first.filter((r) => r.report.verdict !== "on-track");
+    if (off.length) return `${off.map((r) => `${r.report.lens} says ${r.report.verdict}`).join(" and ")}`;
+    // Unanimous on-track by this point, so a disagreement can only be about
+    // findings: a lens that reports the run on track *and* lists things wrong
+    // with it has not settled anything the other lenses might not deepen.
+    const withFindings = first.filter((r) => r.report.findings.length).map((r) => r.report.lens);
+    if (withFindings.length) return `${withFindings.join(", ")} called it on-track but still had findings`;
+    const asked = first.filter((r) => r.report.question).map((r) => r.report.lens);
+    if (asked.length) return `${asked.join(", ")} had a question for the operator`;
+    return "";
   }
 
   /**
@@ -3000,10 +3107,7 @@ export class RunController {
           this.planPrd(runId),
           stop.markdown,
           `The run has spent $${stop.spentUsd.toFixed(2)} of its $${cap.toFixed(2)} cap and the whole plan projects to about $${stop.projectedUsd.toFixed(2)}.\n\n`,
-          this.store
-            .pitStopDecisions(runId)
-            .map((d, i) => `${i + 1}. **${d.action}** (${d.decidedBy})${d.why ? ` — ${d.why}` : ""}${d.feedback ? `\n   What the run was told: ${d.feedback.slice(0, 500)}` : ""}`)
-            .join("\n")
+          priorDecisionsBlock(this.store.pitStopDecisions(runId))
         ),
         cwd: await this.wt.ensureIntegrationWorktree(runId).catch(() => this.repoPath),
         disallowedTools: ["Write", "Edit", "NotebookEdit"],
@@ -3340,6 +3444,61 @@ export class RunController {
     // ran out of turns re-dispatched with the same ceiling runs out again in
     // the same place, having paid twice to reach it.
     let workerTurns = run.config.workerMaxTurns;
+    /**
+     * Which worker model this task starts on, and why — decided once, from
+     * fields the planner already emits, by the rule in modelTier.ts.
+     *
+     * Recorded for every task, including the ones the rule refused and the ones
+     * it changes nothing about — an operator who has set `models.workerLight`
+     * back to `models.worker` still gets a full record of what the light tier
+     * would have taken, from their own plans rather than from an estimate.
+     */
+    const tier = workerModelFor(task, run.config.models);
+    this.bus.publish({
+      type: "task.tier_decided",
+      runId,
+      taskId,
+      tier: tier.decision.tier,
+      model: tier.model,
+      why: tier.decision.why,
+      ts: Date.now(),
+    });
+    /**
+     * The model the next worker iteration runs on. Starts at the tier's model
+     * and only ever moves one way — up.
+     *
+     * A light-tier session that died is the case the whole tiering bet turns on.
+     * Re-dispatching it on the same model replays the same wall and bills for it
+     * twice, and a cheap model that needs three attempts costs more than the
+     * expensive one that needed a single: at 3x the price difference, break-even
+     * is somewhere under two attempts. So the first failure spends up, and the
+     * task finishes on the model it should have started on if the rule was
+     * wrong about it.
+     *
+     * Deliberately not triggered by a QA rejection. That is the normal loop —
+     * work comes back, gets fixed, goes again — and treating it as evidence the
+     * model is too weak would escalate most tasks on their first iteration and
+     * collect none of the saving.
+     */
+    let workerModel = tier.model;
+    /** Move this task up a tier for its next iteration. False when already there. */
+    const escalateWorker = (sessionId: string, why: string): boolean => {
+      if (workerModel === run.config.models.worker) return false;
+      const from = workerModel;
+      workerModel = run.config.models.worker;
+      // Not also written onto the task row: the ledger already carries one row
+      // per session with its model on it, so "this task ran on two models" is a
+      // question the ledger answers without a second copy to keep in step.
+      this.bus.publish({
+        type: "agent.log",
+        runId,
+        taskId,
+        sessionId,
+        text: `worker escalated from ${from} to ${workerModel}: ${why}`,
+        ts: Date.now(),
+      });
+      return true;
+    };
     /** Merges handed back to the worker so far; past the cap it is the operator's. */
     let conflictFixes = 0;
     /** Branches that arrived carrying nothing. Never reset — see EMPTY_DELIVERY_ATTEMPTS. */
@@ -3435,7 +3594,13 @@ export class RunController {
           runId,
           taskId,
           role: "worker",
-          model: run.config.models.worker,
+          model: workerModel,
+          // The tier the rule decided, not the tier this session ended up on:
+          // after an escalation the model has changed and the decision has not,
+          // and the question the ledger is being asked is what light-tier tasks
+          // cost in total — including the standard-model sessions they escalate
+          // into. `escalated` in `taskSpend` is what separates the two.
+          tier: tier.decision.tier,
           systemPrompt: workerSystemPrompt(conventions, skillsBlock(workerSkills), toolbelt),
           prompt: workerSession && qaFeedback ? workerResumePrompt(qaFeedback) : workerTaskPrompt(task, qaFeedback),
           resume: workerSession,
@@ -3453,6 +3618,12 @@ export class RunController {
           workerTurns = Math.min(400, Math.ceil(workerTurns * 1.5));
           this.raiseCeiling(runId, "workerMaxTurns", workerTurns);
           this.bus.publish({ type: "agent.log", runId, taskId, sessionId: worker.sessionId, text: `worker ran out of turns; the next dispatch on this task gets ${workerTurns}`, ts: Date.now() });
+          // The clearest signal the light tier can send that it was the wrong
+          // call: it did not fail to understand the task, it failed to finish
+          // it, and the remedy the line above buys — half as many turns again —
+          // is being bought for a model that already spent more of them than
+          // the task was priced for. Raise both.
+          escalateWorker(worker.sessionId, "it exhausted its turn ceiling on the light tier");
         } else if (worker.outcome === "error") {
           // A worker that hit the turn ceiling stopped; a worker that died was
           // stopped, mid-thought, and its worktree is whatever it happened to
@@ -3465,6 +3636,12 @@ export class RunController {
       } catch (e) {
         if (e instanceof BudgetExceeded) throw e;
         workerSession = undefined;
+        // A session that died is not evidence about the model the way a turn
+        // ceiling is — transports drop, quotas close, machines run out of disk,
+        // and none of that is Haiku's doing. It escalates anyway, because the
+        // alternative is telling the difference from an error string, and a
+        // respawn that guesses wrong on a cheap model pays the crash twice.
+        escalateWorker(taskId, `the session died on the light tier: ${String(e).slice(0, 120)}`);
         const respawns = task.respawns + 1;
         this.store.updateTask(runId, taskId, { respawns, errorSummary: String(e).slice(0, 500) });
         if (respawns >= run.config.workerRespawnCap) {

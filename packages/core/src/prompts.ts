@@ -726,14 +726,15 @@ export function demoSystemPrompt(artifactsDir: string, toolbelt = "", skills = "
 You are not reviewing code. Nobody needs another reading of the diff. They need to know whether the thing runs and what it does.
 
 Procedure:
-1. Find out how this repo starts. Its README, its compose file, its dev script, its Makefile, its emulator target. Use the repo's own documented way before inventing one.
-2. Start it. Install and build if that is what it takes. Give it a fair attempt — a missing dependency you can install is not a reason to give up.
-3. Drive the journeys the merged work claims to deliver, end to end, the way a user would: real request, real page, real handler, real store. A unit test passing is not a demo.
-4. Capture evidence as you go into ${artifactsDir} (it already exists): screenshots for anything rendered, saved request/response pairs for anything served, command output for anything CLI. Name the files for what they show. Photograph every rendered surface at desktop width and again at mobile width, and capture the empty and error states wherever you can reach them — a design reviewer reads this pit stop after you and can only judge what you photographed. A surface you described but did not capture is a surface nobody reviewed.
-5. LOOK AT EVERY SCREENSHOT YOU TAKE, with Read, before you list it. A capture that is one flat colour is a failed capture, not a picture of the product: the page had not painted (add \`--wait-for-timeout=3000\`, or wait for a selector), or the device descriptor pinned a browser that is not installed (stay on chromium devices — \`--viewport-size=390,844\` needs no descriptor at all). Retake it. The harness inspects every image you list and strikes the blank ones, so a blank file costs you the surface entirely: it is reported to the operator as a width you did not check.
-6. Say plainly what you could NOT reach, and why.
+1. Read the list of merged work below and decide, BEFORE you start anything, which user journeys this pit stop should cover. Write them down as \`plannedJourneys\` — short names, one per journey, the ones a person would care about. This is a commitment you make while you still know nothing about how hard they will be, and it is the list your report is measured against.
+2. Find out how this repo starts. Its README, its compose file, its dev script, its Makefile, its emulator target. Use the repo's own documented way before inventing one.
+3. Start it. Install and build if that is what it takes. Give it a fair attempt — a missing dependency you can install is not a reason to give up.
+4. Drive the journeys you planned, end to end, the way a user would: real request, real page, real handler, real store. A unit test passing is not a demo.
+5. Capture evidence as you go into ${artifactsDir} (it already exists): screenshots for anything rendered, saved request/response pairs for anything served, command output for anything CLI. Name the files for what they show. Photograph every rendered surface at desktop width and again at mobile width, and capture the empty and error states wherever you can reach them — a design reviewer reads this pit stop after you and can only judge what you photographed. A surface you described but did not capture is a surface nobody reviewed.
+6. LOOK AT EVERY SCREENSHOT YOU TAKE, with Read, before you list it. A capture that is one flat colour is a failed capture, not a picture of the product: the page had not painted (add \`--wait-for-timeout=3000\`, or wait for a selector), or the device descriptor pinned a browser that is not installed (stay on chromium devices — \`--viewport-size=390,844\` needs no descriptor at all). Retake it. The harness inspects every image you list and strikes the blank ones, so a blank file costs you the surface entirely: it is reported to the operator as a width you did not check.
+7. Say plainly what you could NOT reach, and why.
 
-Step 6 is the most valuable thing you produce. A demo that honestly says "sign-in works, the map screen does not exist yet, and I could not test payments without Stripe keys" is worth more than one that quietly shows only the parts that worked. Never imply coverage you do not have. Never invent a journey you did not run.
+Step 7 is the most valuable thing you produce. A demo that honestly says "sign-in works, the map screen does not exist yet, and I could not test payments without Stripe keys" is worth more than one that quietly shows only the parts that worked. Never imply coverage you do not have. Never invent a journey you did not run.
 
 Rules:
 - Do not modify the repository. You may create scratch files under ${artifactsDir} and install dependencies, but the working tree must be clean of source changes when you finish — the operator's diff is not yours to touch. Anything you do change there will be discarded.
@@ -745,10 +746,15 @@ Your FINAL message must be exactly one JSON object inside a \`\`\`json fence:
 {"started":boolean,
  "howStarted":string,
  "summary":string,
+ "plannedJourneys":[string],
  "journeys":[{"name":string,"result":"worked"|"broken"|"not-reachable","evidence":string}],
  "couldNotReach":[string],
  "artifacts":[{"file":string,"shows":string}],
  "commands":[{"command":string,"shows":string}]}
+
+plannedJourneys is the list you wrote in step 1, UNCHANGED. Do not edit it to match what you managed to do — the harness compares the two lists and reports the difference to the operator, and a plan trimmed to fit the results is the one thing that turns this check into theatre. Every name in \`journeys\` that was also planned must use the SAME name, or it will not be counted against the plan.
+
+Falling short is not a failure. A demo that planned six journeys, drove two, and says so is doing its job; a demo that planned two easy ones to look complete is not. If you could only reach some of it, plan honestly and report honestly — the harness will mark the stop as partial or inconclusive, which is a true statement about what this pit stop established, not a mark against you.
 
 howStarted is the command(s) that worked, or the specific reason nothing did. Each journey's evidence is what you actually observed — the status code, the text on the screen, the row that changed — plus the artifact file that shows it.
 
@@ -764,7 +770,7 @@ ${assignment}
 What has merged so far — this is what you are demoing:
 ${mergedLines}
 
-${upcomingLines ? `Not built yet, so do not go looking for it:\n${upcomingLines}\n\n` : ""}Start the product and drive what exists. Then report.`;
+${upcomingLines ? `Not built yet, so do not go looking for it:\n${upcomingLines}\n\n` : ""}Decide your plannedJourneys from the merged list above first. Then start the product, drive them, and report.`;
 }
 
 /**
@@ -838,6 +844,8 @@ ${assignment}
 ${prd ? `The PRD:\n${prd.slice(0, 6000)}\n\n` : ""}What the demo agent found when it ran the product:
 ${demoReport}
 
+Read the \`coverage\` block in that report before you weigh anything else in it. The demo declared which journeys it meant to drive and the harness compared that against what it actually reached: \`demonstrated\` means it got through all of them with proof that survived inspection, \`partial\` means it fell short, \`inconclusive\` means this demo established nothing either way. Your confidence is capped by that number. On a partial or inconclusive demo, say plainly which of your findings are about the product and which are about not having seen enough of it — "the onboarding is unfinished" and "nobody drove the onboarding" are different findings, and only one of them is about the run drifting.
+
 Every task in the plan and where it ended up:
 ${taskLines}
 
@@ -908,6 +916,71 @@ Your FINAL message must be exactly one JSON object inside a \`\`\`json fence:
 \`feedback\` is what the run acts on, and it is read by agents, not by you. For "redirect" and "replan" it must be instructions someone can follow without having read this report — say what to do and what not to do, name tasks and files where you can. For "continue" leave it empty unless there is something the run genuinely needs to carry forward. For "stop" it is what the human has to answer: put the question first, in one line, and everything you already worked out underneath it, so they are deciding rather than investigating.`;
 }
 
+/**
+ * How much of the earlier pit stops' feedback the decider is shown, in
+ * characters, across all of them together.
+ *
+ * There was a per-decision cap of 500 here, and it made the block it fills
+ * actively misleading. Run 407c2b0b's eight pit stops wrote feedback of 5,028
+ * to 10,415 characters each; the decider saw the first 500 of every one — five
+ * to ten percent — and 136 of those 500 were the same "KEEP EVERYTHING MERGED,
+ * do not revert, do not re-plan" preamble in every single stop. So the block
+ * headed "what was decided at this run's earlier pit stops" showed eight
+ * near-identical paragraphs and almost none of what was actually instructed.
+ *
+ * What that cost is visible in the run. At stop 5 the decider wrote "I have now
+ * answered this twice"; at stop 7, "I have flagged item A twice before without
+ * naming an owner and it did not get built"; at stop 6, "THE BASELINE RATE IS
+ * WRONG AND I AM THE ONE WHO GAVE IT TO YOU". It was reasoning about standing
+ * instructions it could only see the preamble of, and the prompt's own advice —
+ * "if you are about to say something you have already said, work out why it did
+ * not take" — asks for exactly the comparison the truncation prevented.
+ */
+export const PRIOR_DECISIONS_BUDGET = 12_000;
+
+/** The most any single pit stop's feedback may take out of that budget. */
+export const PRIOR_DECISION_MAX = 4_000;
+
+/**
+ * The earlier pit stops, oldest first, with as much of each one's instructions
+ * as the budget allows.
+ *
+ * Budgeted newest-first and printed oldest-first. Both halves of that matter: a
+ * later instruction supersedes an earlier one — stop 6 above is a decider
+ * explicitly overriding itself — so when something has to be dropped it should
+ * be the oldest, but the decider still needs to read them in the order they were
+ * given to see what did not take. A run with twenty pit stops degrades by losing
+ * its ancient history rather than by pushing the report out of the prompt.
+ */
+export function priorDecisionsBlock(
+  decisions: { action: string; decidedBy: string; why: string; feedback: string }[],
+  budget = PRIOR_DECISIONS_BUDGET
+): string {
+  let left = budget;
+  const lines: string[] = [];
+  // Newest first, so the instructions currently in force are the ones that
+  // survive a tight budget.
+  for (let i = decisions.length - 1; i >= 0; i--) {
+    const d = decisions[i]!;
+    let line = `${i + 1}. **${d.action}** (${d.decidedBy})${d.why ? ` — ${d.why}` : ""}`;
+    if (d.feedback) {
+      const room = Math.min(PRIOR_DECISION_MAX, left);
+      // Below this there is no room for a sentence, only for a fragment that
+      // reads like the whole instruction. Say it was dropped instead.
+      if (room < 400) {
+        line += `\n   What the run was told: [omitted — ${d.feedback.length} characters, older than this prompt has room for]`;
+      } else {
+        const shown = d.feedback.slice(0, room);
+        left -= shown.length;
+        line += `\n   What the run was told: ${shown}`;
+        if (shown.length < d.feedback.length) line += `\n   […${d.feedback.length - shown.length} more characters]`;
+      }
+    }
+    lines.push(line);
+  }
+  return lines.reverse().join("\n");
+}
+
 export function pitStopDeciderPrompt(assignment: string, prd: string, report: string, capLine: string, priorDecisions = ""): string {
   return `What the operator asked for:
 ${assignment}
@@ -918,7 +991,7 @@ ${report}
 
 ${
   priorDecisions
-    ? `What was decided at this run's earlier pit stops, oldest first:\n${priorDecisions}\n\nYou are not obliged to agree with any of it. But if you are about to say something you have already said, the thing to work out is why it did not take — repeating it is how a run spends its budget going round.\n\n`
+    ? `What was decided at this run's earlier pit stops, oldest first:\n${priorDecisions}\n\nYou are not obliged to agree with any of it. But if you are about to say something you have already said, the thing to work out is why it did not take — repeating it is how a run spends its budget going round.\n\nThe most recent feedback above is not history. For a redirect or a re-plan it was attached to every task that had not started, so unless you replace it, it is the instruction those tasks are still carrying — including any of it that has since turned out to be wrong. If you are contradicting something you told the run earlier, say so in the feedback itself and say which instruction it replaces: the tasks read your feedback, not your reasoning, and an instruction you have quietly stopped believing is one they are still following.\n\n`
     : ""
 }${capLine}Decide.`;
 }
