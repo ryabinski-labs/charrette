@@ -64,6 +64,48 @@ describe("the roles that may not leave Anthropic", () => {
     expect(routingViolations({})).toEqual([]);
   });
 
+  it("refuses the small tier for a judging role, not only another vendor", () => {
+    // The gap this closes: `PINNED_ROLES` exists because "a weaker judge does
+    // not report that it judged worse, it reports PASS" — and until this check
+    // it only stopped a judge changing *company*. Haiku is an Anthropic model,
+    // so the vendor rule waved through the exact routing the pin was written
+    // to prevent.
+    const [message, ...rest] = routingViolations({ qa: "claude-haiku-4-5-20251001" });
+    expect(rest).toEqual([]);
+    expect(message).toContain("models.qa");
+    expect(message).toContain("below the capability floor");
+    expect(message).toContain("decides whether a task merges");
+    expect(message).toContain("Sonnet or Opus");
+  });
+
+  it("refuses a Haiku that does not exist yet", () => {
+    // Matched on the family rather than on today's ids, so the next one is
+    // refused the day it ships rather than the day somebody updates a list.
+    expect(routingViolations({ reviewer: "claude-haiku-9" })).toHaveLength(1);
+    expect(routingViolations({ prod: "anthropic/claude-haiku-4-5-20251001" })).toHaveLength(1);
+  });
+
+  it("reports a moved judge once, for the vendor, rather than twice", () => {
+    // A judge on another vendor's small model is one decision to reverse, and
+    // two sentences saying so reads like two problems.
+    const violations = routingViolations({ qa: "google/gemini-3.5-haiku-ish" });
+    expect(violations).toHaveLength(1);
+    expect(violations[0]).toContain("pinned to Anthropic");
+  });
+
+  it("leaves the working roles free to run on the small tier", () => {
+    // demo and repair are pointed there by default — the floor is about the
+    // roles whose verdict ends something, not about cheap models.
+    expect(
+      routingViolations({
+        demo: "claude-haiku-4-5-20251001",
+        repair: "claude-haiku-4-5-20251001",
+        workerLight: "claude-haiku-4-5-20251001",
+        worker: "claude-sonnet-5",
+      })
+    ).toEqual([]);
+  });
+
   it("pins intake for a capability reason, not a policy one", () => {
     // If this ever stops being true the tool loop grew an ask-the-operator
     // tool, and the pin should be reconsidered rather than quietly kept.
@@ -86,9 +128,36 @@ describe("the run config refuses a routing it cannot honour", () => {
     expect(result.error?.issues[0]?.message).toContain("pinned to Anthropic");
   });
 
+  it("rejects the whole config when a judging role is dropped to the small tier", () => {
+    const result = ModelRouting.safeParse({ qa: "claude-haiku-4-5-20251001" });
+    expect(result.success).toBe(false);
+    expect(result.error?.issues[0]?.message).toContain("below the capability floor");
+  });
+
   it("still applies the defaults, so an empty table is the all-Anthropic one", () => {
     const parsed = ModelRouting.parse({});
     expect(providerFor(parsed.worker)).toBe("anthropic");
     expect(Object.keys(ModelRoutingShape.shape)).toContain("reviewer");
+  });
+
+  it("ships the cheap tier on exactly the roles that were argued for it", () => {
+    // Pinned because these defaults are what the operator actually pays, and a
+    // change to one of them is invisible in a diff of anything else. The whole
+    // suite passed unchanged when `workerLight` moved from Sonnet to Haiku,
+    // which is how a default gets changed by accident.
+    const d = ModelRouting.parse({});
+    expect({ demo: d.demo, repair: d.repair, workerLight: d.workerLight }).toEqual({
+      demo: "claude-haiku-4-5-20251001",
+      repair: "claude-haiku-4-5-20251001",
+      workerLight: "claude-haiku-4-5-20251001",
+    });
+    // And the judges are not among them — which the floor now also enforces.
+    expect({ qa: d.qa, reviewer: d.reviewer, prod: d.prod, pm: d.pm, advisor: d.advisor }).toEqual({
+      qa: "claude-sonnet-5",
+      reviewer: "claude-opus-5",
+      prod: "claude-opus-5",
+      pm: "claude-opus-5",
+      advisor: "claude-sonnet-5",
+    });
   });
 });

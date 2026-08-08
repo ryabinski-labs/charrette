@@ -916,6 +916,71 @@ Your FINAL message must be exactly one JSON object inside a \`\`\`json fence:
 \`feedback\` is what the run acts on, and it is read by agents, not by you. For "redirect" and "replan" it must be instructions someone can follow without having read this report — say what to do and what not to do, name tasks and files where you can. For "continue" leave it empty unless there is something the run genuinely needs to carry forward. For "stop" it is what the human has to answer: put the question first, in one line, and everything you already worked out underneath it, so they are deciding rather than investigating.`;
 }
 
+/**
+ * How much of the earlier pit stops' feedback the decider is shown, in
+ * characters, across all of them together.
+ *
+ * There was a per-decision cap of 500 here, and it made the block it fills
+ * actively misleading. Run 407c2b0b's eight pit stops wrote feedback of 5,028
+ * to 10,415 characters each; the decider saw the first 500 of every one — five
+ * to ten percent — and 136 of those 500 were the same "KEEP EVERYTHING MERGED,
+ * do not revert, do not re-plan" preamble in every single stop. So the block
+ * headed "what was decided at this run's earlier pit stops" showed eight
+ * near-identical paragraphs and almost none of what was actually instructed.
+ *
+ * What that cost is visible in the run. At stop 5 the decider wrote "I have now
+ * answered this twice"; at stop 7, "I have flagged item A twice before without
+ * naming an owner and it did not get built"; at stop 6, "THE BASELINE RATE IS
+ * WRONG AND I AM THE ONE WHO GAVE IT TO YOU". It was reasoning about standing
+ * instructions it could only see the preamble of, and the prompt's own advice —
+ * "if you are about to say something you have already said, work out why it did
+ * not take" — asks for exactly the comparison the truncation prevented.
+ */
+export const PRIOR_DECISIONS_BUDGET = 12_000;
+
+/** The most any single pit stop's feedback may take out of that budget. */
+export const PRIOR_DECISION_MAX = 4_000;
+
+/**
+ * The earlier pit stops, oldest first, with as much of each one's instructions
+ * as the budget allows.
+ *
+ * Budgeted newest-first and printed oldest-first. Both halves of that matter: a
+ * later instruction supersedes an earlier one — stop 6 above is a decider
+ * explicitly overriding itself — so when something has to be dropped it should
+ * be the oldest, but the decider still needs to read them in the order they were
+ * given to see what did not take. A run with twenty pit stops degrades by losing
+ * its ancient history rather than by pushing the report out of the prompt.
+ */
+export function priorDecisionsBlock(
+  decisions: { action: string; decidedBy: string; why: string; feedback: string }[],
+  budget = PRIOR_DECISIONS_BUDGET
+): string {
+  let left = budget;
+  const lines: string[] = [];
+  // Newest first, so the instructions currently in force are the ones that
+  // survive a tight budget.
+  for (let i = decisions.length - 1; i >= 0; i--) {
+    const d = decisions[i]!;
+    let line = `${i + 1}. **${d.action}** (${d.decidedBy})${d.why ? ` — ${d.why}` : ""}`;
+    if (d.feedback) {
+      const room = Math.min(PRIOR_DECISION_MAX, left);
+      // Below this there is no room for a sentence, only for a fragment that
+      // reads like the whole instruction. Say it was dropped instead.
+      if (room < 400) {
+        line += `\n   What the run was told: [omitted — ${d.feedback.length} characters, older than this prompt has room for]`;
+      } else {
+        const shown = d.feedback.slice(0, room);
+        left -= shown.length;
+        line += `\n   What the run was told: ${shown}`;
+        if (shown.length < d.feedback.length) line += `\n   […${d.feedback.length - shown.length} more characters]`;
+      }
+    }
+    lines.push(line);
+  }
+  return lines.reverse().join("\n");
+}
+
 export function pitStopDeciderPrompt(assignment: string, prd: string, report: string, capLine: string, priorDecisions = ""): string {
   return `What the operator asked for:
 ${assignment}
@@ -926,7 +991,7 @@ ${report}
 
 ${
   priorDecisions
-    ? `What was decided at this run's earlier pit stops, oldest first:\n${priorDecisions}\n\nYou are not obliged to agree with any of it. But if you are about to say something you have already said, the thing to work out is why it did not take — repeating it is how a run spends its budget going round.\n\n`
+    ? `What was decided at this run's earlier pit stops, oldest first:\n${priorDecisions}\n\nYou are not obliged to agree with any of it. But if you are about to say something you have already said, the thing to work out is why it did not take — repeating it is how a run spends its budget going round.\n\nThe most recent feedback above is not history. For a redirect or a re-plan it was attached to every task that had not started, so unless you replace it, it is the instruction those tasks are still carrying — including any of it that has since turned out to be wrong. If you are contradicting something you told the run earlier, say so in the feedback itself and say which instruction it replaces: the tasks read your feedback, not your reasoning, and an instruction you have quietly stopped believing is one they are still following.\n\n`
     : ""
 }${capLine}Decide.`;
 }

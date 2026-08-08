@@ -59,6 +59,7 @@ import {
   extractSection,
   operatorFeedbackMessage,
   pitStopDeciderPrompt,
+  priorDecisionsBlock,
   pitStopDeciderSystemPrompt,
   planGateDeciderPrompt,
   planGateDeciderSystemPrompt,
@@ -3106,10 +3107,7 @@ export class RunController {
           this.planPrd(runId),
           stop.markdown,
           `The run has spent $${stop.spentUsd.toFixed(2)} of its $${cap.toFixed(2)} cap and the whole plan projects to about $${stop.projectedUsd.toFixed(2)}.\n\n`,
-          this.store
-            .pitStopDecisions(runId)
-            .map((d, i) => `${i + 1}. **${d.action}** (${d.decidedBy})${d.why ? ` — ${d.why}` : ""}${d.feedback ? `\n   What the run was told: ${d.feedback.slice(0, 500)}` : ""}`)
-            .join("\n")
+          priorDecisionsBlock(this.store.pitStopDecisions(runId))
         ),
         cwd: await this.wt.ensureIntegrationWorktree(runId).catch(() => this.repoPath),
         disallowedTools: ["Write", "Edit", "NotebookEdit"],
@@ -3450,11 +3448,10 @@ export class RunController {
      * Which worker model this task starts on, and why — decided once, from
      * fields the planner already emits, by the rule in modelTier.ts.
      *
-     * The decision is recorded even when it changes nothing, which is the usual
-     * case until the operator points `models.workerLight` somewhere cheaper.
-     * That is the point: the ledger carries which tasks *would* have gone cheap
-     * for as long as the operator wants before any of them do, so the experiment
-     * can be priced from this repo's own plans rather than from an estimate.
+     * Recorded for every task, including the ones the rule refused and the ones
+     * it changes nothing about — an operator who has set `models.workerLight`
+     * back to `models.worker` still gets a full record of what the light tier
+     * would have taken, from their own plans rather than from an estimate.
      */
     const tier = workerModelFor(task, run.config.models);
     this.bus.publish({

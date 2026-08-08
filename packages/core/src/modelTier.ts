@@ -35,11 +35,20 @@ import type { PlannedTask } from "@harness/shared";
  * How many files a light-tier task may name.
  *
  * `touchedPaths` is the planner's estimate of blast radius, and the number is
- * low on purpose. The point is not that four files are easy — it is that a task
+ * low on purpose. The point is not that two files are easy — it is that a task
  * which cannot say in advance where it lands is a task nobody has scoped, and
  * an unscoped task is the last one to send down the cheap road.
+ *
+ * Two rather than four because the light tier ships *enabled* (see
+ * `models.workerLight`), and the first real data about what a Haiku worker does
+ * to the merge rate is going to be collected on the operator's money either
+ * way. Two is the width of the work this rule can most confidently describe —
+ * a change and its test — and it is the slice where a wrong admission is
+ * cheapest to discover. It is the obvious knob to widen once the ledger has
+ * something to say; widening it before that would be guessing with a bigger
+ * bet on the table.
  */
-export const LIGHT_TIER_MAX_PATHS = 4;
+export const LIGHT_TIER_MAX_PATHS = 2;
 
 /**
  * Work whose failures are quiet, expensive, or both — refused whatever else the

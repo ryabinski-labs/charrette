@@ -18,17 +18,26 @@ export const ModelRoutingShape = z.object({
    * what "admits" means — it is a deterministic rule over fields the planner
    * already emits, not a tier the planner names for itself.
    *
-   * Defaults to the same model as `worker`, which makes the whole tiering path
-   * inert: the rule still runs, still records which tasks it would have sent
-   * down the cheap road, and still changes nothing about what they cost. That is
-   * deliberate. Nobody can say today what fraction of a real plan the rule
-   * admits, or what a Haiku worker does to the merge rate, because the ledger
-   * has never carried a row that would answer either question. Pointing this at
-   * `claude-haiku-4-5-20251001` is the experiment; shipping it already pointed
-   * there would be the experiment run on the operator's money without the
-   * before-measurement.
+   * The worker is where the money is — one recorded run spent $65 across
+   * seventeen worker sessions against $14 across eight QA ones — so this is the
+   * only line in this table that can move the total much.
+   *
+   * Two things carry the risk rather than a threshold. The rule admits a
+   * deliberately narrow slice (sized S, at most `LIGHT_TIER_MAX_PATHS` files, a
+   * completion probe, no risky domain), and a light-tier session that dies of
+   * `error_max_turns` is re-dispatched on `worker` rather than retried here —
+   * see `escalateWorker` in runController.ts. A cheap model that needs three
+   * attempts costs more than the expensive one that needed one, so the first
+   * failure spends up instead of replaying the same wall.
+   *
+   * Set this to `models.worker` to switch the experiment off without losing the
+   * measurement: the rule still runs and still publishes `task.tier_decided`,
+   * so the ledger keeps recording which tasks it *would* have sent down the
+   * cheap road. `taskSpend()` in store.ts splits a task's bill by role and
+   * flags the ones that escalated, which is the number that says whether this
+   * paid for itself.
    */
-  workerLight: z.string().default("claude-sonnet-5"),
+  workerLight: z.string().default(HAIKU),
   qa: z.string().default("claude-sonnet-5"),
   /**
    * Unused. No agent is dispatched with this model.

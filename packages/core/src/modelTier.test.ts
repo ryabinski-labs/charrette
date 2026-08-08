@@ -97,8 +97,9 @@ describe("which model a decision buys", () => {
   });
 
   it("changes nothing while the light tier points at the same model", () => {
-    // The shipped default. The rule still runs and still records what it would
-    // have done, which is the whole point of shipping it switched off.
+    // How an operator switches the experiment off. The rule still runs and
+    // still reports what it would have done, so the measurement survives the
+    // decision not to spend on it.
     const inert = { worker: "claude-sonnet-5", workerLight: "claude-sonnet-5" };
     const out = workerModelFor(eligible, inert);
 

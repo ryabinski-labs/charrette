@@ -3,8 +3,11 @@ import {
   demoPrompt,
   demoSystemPrompt,
   intakeSystemPrompt,
+  PRIOR_DECISION_MAX,
+  PRIOR_DECISIONS_BUDGET,
   pitStopDeciderPrompt,
   pitStopDeciderSystemPrompt,
+  priorDecisionsBlock,
   replanPrompt,
   reviewerPrompt,
   reviewerSystemPrompt,
@@ -175,6 +178,97 @@ describe("the agent that decides what the run does next", () => {
 
   it("says nothing about earlier decisions at the first pit stop", () => {
     expect(pitStopDeciderPrompt("a", "", "b", "c")).not.toContain("earlier pit stops");
+  });
+
+  it("tells it that its last instruction is still in force, not history", () => {
+    // Run 407c2b0b's decider superseded its own earlier instruction at stop 6
+    // ("I am the one who gave it to you") — by then the tasks had been carrying
+    // the wrong figure for three stops.
+    const prompt = pitStopDeciderPrompt("a", "", "b", "c", "1. **redirect** (product-manager) — x");
+    expect(prompt).toContain("it is the instruction those tasks are still carrying");
+    expect(prompt).toContain("say which instruction it replaces");
+  });
+});
+
+describe("what the decider is shown of its own earlier instructions", () => {
+  const decision = (n: number, feedback: string) => ({
+    action: "redirect",
+    decidedBy: "product-manager",
+    why: `reason ${n}`,
+    feedback,
+  });
+
+  it("shows a short run's instructions in full, oldest first", () => {
+    const block = priorDecisionsBlock([decision(1, "do the thing"), decision(2, "do the other thing")]);
+
+    expect(block).toContain("1. **redirect** (product-manager) — reason 1");
+    expect(block).toContain("do the thing");
+    expect(block).toContain("do the other thing");
+    expect(block).not.toContain("more characters");
+    // Oldest first: the decider needs the order they were given to see what
+    // did not take.
+    expect(block.indexOf("reason 1")).toBeLessThan(block.indexOf("reason 2"));
+  });
+
+  it("shows enough of a real pit stop's feedback to read past the preamble", () => {
+    // The bug this replaces: run 407c2b0b's eight stops wrote 5,028–10,415
+    // characters of feedback each and the next decider saw the first 500 — of
+    // which 136 were the same "KEEP EVERYTHING MERGED" preamble every time. It
+    // was shown eight near-identical paragraphs and none of the instructions.
+    const preamble = "KEEP EVERYTHING MERGED. Nothing is reverted. ".padEnd(500, ".");
+    const real = `${preamble}THE ACTUAL INSTRUCTION: cut tiering to two sweeps.`;
+    const block = priorDecisionsBlock([decision(1, real)]);
+
+    expect(block).toContain("THE ACTUAL INSTRUCTION: cut tiering to two sweeps.");
+  });
+
+  it("spends the budget on the newest instructions when there is not enough for all", () => {
+    // Twenty stops of maximum-length feedback: the ones still in force survive
+    // and the ancient history is what degrades.
+    const long = "x".repeat(PRIOR_DECISION_MAX);
+    const block = priorDecisionsBlock(Array.from({ length: 20 }, (_, i) => decision(i + 1, `${i + 1}|${long}`)));
+
+    expect(block).toContain("20|xxx");
+    expect(block).toContain("19|xxx");
+    // And the oldest are named, with their reason, rather than vanishing — a
+    // decision missing from the list reads as a decision never made.
+    expect(block).toContain("1. **redirect** (product-manager) — reason 1");
+    expect(block).toContain("[omitted — ");
+  });
+
+  it("stays within its budget however much was written", () => {
+    const long = "y".repeat(PRIOR_DECISION_MAX * 2);
+    const block = priorDecisionsBlock(Array.from({ length: 30 }, (_, i) => decision(i + 1, long)));
+
+    // Headers and markers are outside the budget, so allow for them; what is
+    // bounded is the feedback, and the point is that thirty pit stops cannot
+    // push the report out of the prompt.
+    expect(block.length).toBeLessThan(PRIOR_DECISIONS_BUDGET * 2);
+    expect((block.match(/y/g) ?? []).length).toBeLessThanOrEqual(PRIOR_DECISIONS_BUDGET);
+  });
+
+  it("says how much it cut rather than ending mid-sentence", () => {
+    const block = priorDecisionsBlock([decision(1, "z".repeat(PRIOR_DECISION_MAX + 250))]);
+
+    expect(block).toContain("[…250 more characters]");
+  });
+
+  it("leaves out the feedback line entirely for a decision that carried none", () => {
+    // `continue` usually does. A dangling "What the run was told:" with nothing
+    // after it reads like the instruction was lost.
+    const block = priorDecisionsBlock([{ action: "continue", decidedBy: "product-manager", why: "on track", feedback: "" }]);
+
+    expect(block).toBe("1. **continue** (product-manager) — on track");
+  });
+
+  it("has nothing to say before the first pit stop resolves", () => {
+    expect(priorDecisionsBlock([])).toBe("");
+  });
+
+  it("still names a decision whose why was empty", () => {
+    const block = priorDecisionsBlock([{ action: "stop", decidedBy: "operator", why: "", feedback: "" }]);
+
+    expect(block).toBe("1. **stop** (operator)");
   });
 });
 

@@ -427,6 +427,35 @@ describe("a demo that goes wrong", () => {
     expect(stops[0]!.reviews.length).toBe(4);
   });
 
+  it("buys them when a first-pass reviewer had a question rather than a finding", async () => {
+    const dir = repo();
+    // On-track, nothing wrong, and something it could not resolve on its own.
+    // A lens that stopped to ask has not finished looking, so the run does not
+    // get to treat the cheap pass as conclusive.
+    const asking = '```json\n{"verdict":"on-track","findings":[],"question":"is the pack meant to be purchasable yet?"}\n```';
+    const { pool } = rolePool({ ...ROLES, reviewer: (_s, nth) => (nth === 1 ? asking : REVIEW_OK) });
+    const { controller, stops } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a thing", RunConfig.parse(BASE));
+
+    expect(stops[0]!.reviews.length).toBe(4);
+    expect(stops[0]!.skippedReviewers).toEqual([]);
+  });
+
+  it("says so in the plural when more than one first-pass lens did not finish", async () => {
+    const dir = repo();
+    // Both of the cheap pass's lenses died, so the first pass learned nothing
+    // at all — and the sentence that explains why the rest were bought has to
+    // read as English either way.
+    const { pool } = rolePool({ ...ROLES, reviewer: (_s, nth) => (nth <= 2 ? new Error("overloaded") : REVIEW_OK) });
+    const { controller, stops, events } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a thing", RunConfig.parse(BASE));
+
+    expect(stops[0]!.reviews.length).toBe(4);
+    expect(events.some((e) => e.type === "agent.log" && e.text.includes("did not finish, so nothing was learned from them"))).toBe(true);
+  });
+
   it("buys them when the demo never established anything, however clean the first pass reads", async () => {
     const dir = repo();
     // Same demo, no declared plan — so coverage is inconclusive. This is the

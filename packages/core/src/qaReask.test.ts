@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { RunConfig } from "@harness/shared";
 import { describe, expect, it } from "vitest";
+import { BudgetExceeded } from "./budget.js";
 import { Bus } from "./bus.js";
 import type { GitHubAdapter } from "./github.js";
 import type { AgentPool, AgentResult, AgentSpec } from "./pool.js";
@@ -49,7 +50,7 @@ const approveAll: GateHandler = {
 };
 
 /** Records every spec so the test can assert what was and was not re-dispatched. */
-function poolThatForgetsTheJson(opts: { retryAnswers: string }) {
+function poolThatForgetsTheJson(opts: { retryAnswers: string | Error }) {
   let planning = 0;
   const specs: AgentSpec[] = [];
   const pool = {
@@ -78,6 +79,7 @@ function poolThatForgetsTheJson(opts: { retryAnswers: string }) {
         };
       }
       if (spec.role === "repair") {
+        if (opts.retryAnswers instanceof Error) throw opts.retryAnswers;
         return { sessionId: `s${specs.length}`, sdkSessionId: "sdk-qa-1", resultText: opts.retryAnswers, costUsd: 0, turns: 1, outcome: "done" };
       }
       return { sessionId: `s${specs.length}`, resultText: '{"verdict":"PASS","summary":"n/a"}', costUsd: 0, turns: 1, outcome: "done" };
@@ -122,5 +124,22 @@ describe("QA that finished without writing its verdict", () => {
     // A QA agent that ignores its output contract twice is a real finding about
     // the run, and the task must not merge on the strength of prose.
     expect(store.getTask(runId, "task-a")!.state).not.toBe("MERGED");
+  });
+
+  it("lets a run that hit its cap stop, instead of swallowing it as another bad answer", async () => {
+    // Every other way the re-ask can fail is caught and turned into "keep the
+    // FAIL". The budget is the exception: a run over its cap does not get to
+    // spend two more turns being polite about it, and a `null` here would hide
+    // the stop behind a verdict and let the task loop carry on.
+    const { pool, specs } = poolThatForgetsTheJson({ retryAnswers: new BudgetExceeded(31, 30) });
+    const store = new Store(":memory:");
+    const controller = new RunController(store, new Bus(store), pool, noGithub, approveAll, repo());
+
+    await expect(controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], qaIterationCap: 3 }))).rejects.toThrow(
+      "run budget exceeded"
+    );
+    // It got as far as the re-ask, and the stop came back out rather than
+    // being turned into "the retry would not answer either".
+    expect(specs.some((s) => s.role === "repair")).toBe(true);
   });
 });

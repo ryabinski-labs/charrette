@@ -53,7 +53,9 @@ export function modelId(model: string): string {
 }
 
 /**
- * Roles that must run on Anthropic, and the reason each one is pinned.
+ * Roles that must run on Anthropic — and, per `BELOW_JUDGING_FLOOR` below, not
+ * on its small tier either. One list, because both restrictions exist for the
+ * same reason and have the same consequence: the run will not start.
  *
  * Two different kinds of reason, deliberately kept in one list because they
  * have the same consequence for the operator — the run will not start:
@@ -82,6 +84,30 @@ export const PINNED_ROLES: Record<string, string> = {
 };
 
 /**
+ * The small tier, refused for the roles above.
+ *
+ * `PINNED_ROLES` was written to stop a judging role leaving Anthropic, and for
+ * most of its life that was the same thing as stopping it getting weaker —
+ * every Anthropic model the harness routed to was Sonnet or Opus. Pointing
+ * `demo` and `repair` at Haiku ended that: `models.qa = "claude-haiku-4-5-…"`
+ * is an Anthropic model, so the vendor check waved it through, and the guard
+ * whose entire stated reason is "a weaker judge reports PASS rather than
+ * reporting that it judged worse" permitted exactly that.
+ *
+ * Matched on the family name rather than on a list of ids, so a future
+ * `claude-haiku-5` is refused the day it exists rather than the day somebody
+ * remembers to add it. Only reached for models that already passed the vendor
+ * check, which is what makes a bare family name enough to go on: within
+ * Anthropic, "haiku" names the small tier and has since the first one.
+ *
+ * The cost of being wrong here is asymmetric in the same direction as
+ * modelTier.ts: a refusal the operator disagrees with is a one-line config
+ * error at `harness run`, and a permission it should not have granted is a
+ * merge nobody caught.
+ */
+const BELOW_JUDGING_FLOOR = /haiku/i;
+
+/**
  * Which role→model assignments a run config may not have. Returns one sentence
  * per violation, ready to show the operator; an empty array means the routing
  * is allowed.
@@ -96,8 +122,16 @@ export function routingViolations(models: Record<string, string>): string[] {
     const model = models[role];
     if (model === undefined) continue;
     const provider = providerFor(model);
-    if (provider === "anthropic") continue;
-    out.push(`models.${role} is pinned to Anthropic but is set to "${model}" (${provider}): ${why}.`);
+    if (provider !== "anthropic") {
+      out.push(`models.${role} is pinned to Anthropic but is set to "${model}" (${provider}): ${why}.`);
+      continue;
+    }
+    if (BELOW_JUDGING_FLOOR.test(modelId(model))) {
+      out.push(
+        `models.${role} is set to "${model}", which is below the capability floor for a judging role: ${why}. ` +
+          `Point it at a Sonnet or Opus model.`
+      );
+    }
   }
   return out;
 }
