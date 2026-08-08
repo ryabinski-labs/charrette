@@ -125,7 +125,7 @@ describe("serving the page", () => {
     for (const path of ["/api/state", "/api/runs/r1/events"]) {
       expect((await fetch(new URL(path, url), { headers: { connection: "close" } })).status).toBe(401);
     }
-    for (const path of ["/api/gates/plan", "/api/gates/budget", "/api/gates/task", "/api/feedback"]) {
+    for (const path of ["/api/gates/plan", "/api/gates/budget", "/api/gates/task", "/api/runs/r1/budget", "/api/feedback"]) {
       const res = await fetch(new URL(path, url), {
         method: "POST",
         headers: { "content-type": "application/json", connection: "close" },
@@ -142,7 +142,7 @@ describe("serving the page", () => {
   it("refuses a state-changing request from another origin", async () => {
     const { dash, url } = await serving();
 
-    for (const path of ["/api/gates/plan", "/api/gates/budget", "/api/gates/task", "/api/feedback"]) {
+    for (const path of ["/api/gates/plan", "/api/gates/budget", "/api/gates/task", "/api/runs/r1/budget", "/api/feedback"]) {
       const res = await fetch(new URL(path, url), {
         method: "POST",
         headers: { ...auth(dash), "content-type": "application/json", origin: "https://evil.example.com" },

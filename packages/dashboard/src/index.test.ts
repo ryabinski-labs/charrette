@@ -612,6 +612,74 @@ describe("budget gate", () => {
   });
 });
 
+describe("live budget raises", () => {
+  const started: Dashboard[] = [];
+  afterEach(async () => {
+    for (const d of started.splice(0)) await d.stop();
+  });
+
+  async function withDash() {
+    const dash = dashboard();
+    started.push(dash);
+    const url = await dash.start();
+    const post = (body: unknown) =>
+      fetch(new URL("/api/runs/r1/budget", url), {
+        method: "POST",
+        headers: { authorization: `Bearer ${dash.token}`, "content-type": "application/json", connection: "close" },
+        body: JSON.stringify(body),
+      });
+    return { dash, post };
+  }
+
+  it("rejects raises until the dashboard is wired to a controller", async () => {
+    const { post } = await withDash();
+    expect((await post({ capUsd: 50 })).status).toBe(503);
+  });
+
+  it("rejects an invalid cap before asking the controller", async () => {
+    const { dash, post } = await withDash();
+    let calls = 0;
+    dash.attach({
+      sendFeedback: () => "live",
+      raiseBudget: () => {
+        calls++;
+        return "cap raised to $50.00";
+      },
+    });
+
+    expect((await post({ capUsd: 0 })).status).toBe(400);
+    expect(calls).toBe(0);
+  });
+
+  it("returns the controller's refusal rather than claiming the cap changed", async () => {
+    const { dash, post } = await withDash();
+    dash.attach({ sendFeedback: () => "live", raiseBudget: () => "cap must exceed $12.00 already spent" });
+
+    const res = await post({ capUsd: 10 });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("must exceed");
+  });
+
+  it("persists a raise and also resolves an already-open budget gate", async () => {
+    const { dash, post } = await withDash();
+    const raised: Array<[string, number]> = [];
+    dash.attach({
+      sendFeedback: () => "live",
+      raiseBudget: (runId, capUsd) => {
+        raised.push([runId, capUsd]);
+        return `cap raised to $${capUsd.toFixed(2)}`;
+      },
+    });
+    const pending = dash.resolveBudgetGate({ spentUsd: 8.5, capUsd: 8 });
+
+    const res = await post({ capUsd: 20 });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { message: string }).message).toBe("cap raised to $20.00");
+    expect(raised).toEqual([["r1", 20]]);
+    await expect(pending).resolves.toBe(20);
+  });
+});
+
 describe("mid-flight feedback", () => {
   const started: Dashboard[] = [];
   afterEach(async () => {
