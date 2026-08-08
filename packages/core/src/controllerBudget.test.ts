@@ -139,10 +139,10 @@ describe("reaching the run's cap", () => {
     poolStore.current = store;
 
     await expect(
-      controller.startRun("build a thing", RunConfig.parse({ deterministicChecks: [], budget: { runCapUsd: 30, taskCapUsd: 1000 } }))
+      controller.startRun("build a thing", RunConfig.parse({ deterministicChecks: [], budget: { runCapUsd: 30 } }))
     ).rejects.toThrow(/run budget exceeded[\s\S]*harness resume/);
 
-    expect(asked[0]).toMatchObject({ scope: "run", capUsd: 30 });
+    expect(asked[0]).toMatchObject({ capUsd: 30 });
     const resolutions = events.filter((e): e is HarnessEvent & { resolution?: string } => e.type === "run.gate_resolved");
     expect(resolutions[0]!.resolution).toBe("rejected");
   });
@@ -167,7 +167,7 @@ describe("reaching the run's cap", () => {
 
     const runId = await controller.startRun(
       "build a thing",
-      RunConfig.parse({ deterministicChecks: [], budget: { runCapUsd: 30, taskCapUsd: 1000 } })
+      RunConfig.parse({ deterministicChecks: [], budget: { runCapUsd: 30 } })
     );
 
     expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
@@ -192,38 +192,8 @@ describe("reaching the run's cap", () => {
     poolStore.current = store;
 
     await expect(
-      controller.startRun("build a thing", RunConfig.parse({ deterministicChecks: [], budget: { runCapUsd: 30, taskCapUsd: 1000 } }))
+      controller.startRun("build a thing", RunConfig.parse({ deterministicChecks: [], budget: { runCapUsd: 30 } }))
     ).rejects.toThrow(/run budget exceeded/);
-  });
-
-  it("raises the task cap rather than the run's when it is the task that tripped", async () => {
-    const dir = repo();
-    const asked: BudgetGate[] = [];
-    const { pool, store: poolStore } = billingPool({
-      planner: (s) => (s.prompt.includes("PRD") ? dagJson() : DOCS),
-      worker,
-      qa: () => QA_PASS,
-    }, 15);
-    const { controller, store } = build({
-      repoPath: dir,
-      pool,
-      gates: {
-        async resolveBudgetGate(gate) {
-          asked.push(gate);
-          return gate.spentUsd + 500;
-        },
-      },
-    });
-    poolStore.current = store;
-
-    const runId = await controller.startRun(
-      "build a thing",
-      RunConfig.parse({ deterministicChecks: [], budget: { runCapUsd: 10_000, taskCapUsd: 10 } })
-    );
-
-    expect(asked[0]).toMatchObject({ scope: "task", taskId: "task-a" });
-    expect(store.getRun(runId)!.config.budget.taskCapUsd).toBeGreaterThan(10);
-    expect(store.getRun(runId)!.config.budget.runCapUsd).toBe(10_000);
   });
 });
 

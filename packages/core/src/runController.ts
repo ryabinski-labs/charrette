@@ -271,16 +271,10 @@ function shellQuote(s: string): string {
   return `'${s.replaceAll("'", `'\\''`)}'`;
 }
 
-/** What the operator is told when a cap is reached. Never carries secrets. */
+/** What the operator is told when the run's budget cap is reached. Never carries secrets. */
 export interface BudgetGate {
-  /** Which cap tripped. A task cap stops one task; the run cap stops everything. */
-  scope: "run" | "task";
-  taskId?: string;
-  /** Spend measured against the cap that tripped. */
   spentUsd: number;
   capUsd: number;
-  /** Whole-run spend, for context when it was the task cap that tripped. */
-  runSpentUsd: number;
 }
 
 /**
@@ -1956,7 +1950,7 @@ export class RunController {
         cwd,
         resume: qa.sdkSessionId,
         maxTurns: 2,
-        budgetCheck: () => this.checkBudget(runId, taskId),
+        budgetCheck: () => this.checkBudget(runId),
       });
       return QaVerdict.parse(extractJson(retry.resultText));
     } catch (e) {
@@ -3450,7 +3444,7 @@ export class RunController {
           maxTurns: workerTurns,
           env: isolationEnv(iso),
           reapOnEnd: true,
-          budgetCheck: () => this.checkBudget(runId, taskId),
+          budgetCheck: () => this.checkBudget(runId),
           onLimitWait: creditLimitWait,
         });
         workerSummary = worker.resultText;
@@ -3741,7 +3735,7 @@ export class RunController {
           maxTurns: qaTurns,
           env: isolationEnv(iso),
           reapOnEnd: true,
-          budgetCheck: () => this.checkBudget(runId, taskId),
+          budgetCheck: () => this.checkBudget(runId),
           onLimitWait: creditLimitWait,
         });
         // A session cut off at its turn ceiling still returns a result message —
@@ -4064,13 +4058,12 @@ export class RunController {
 
   // ---- budget (PERF-7: checked before/while every agent turn) ----
 
-  private async checkBudget(runId: string, taskId?: string): Promise<void> {
-    await this.enforce(runId, "run");
-    if (taskId) await this.enforce(runId, "task", taskId);
+  private async checkBudget(runId: string): Promise<void> {
+    await this.enforce(runId);
   }
 
   /**
-   * With parallel workers, several sessions can trip a cap in the same tick,
+   * With parallel workers, several sessions can trip the cap in the same tick,
    * and the dashboard holds exactly one budget-gate slot — a second concurrent
    * gate would silently overwrite the first's resolver and hang its session
    * forever. Every enforcement queues here instead: whoever is second waits for
@@ -4086,30 +4079,29 @@ export class RunController {
    * up where it left off once they answer. Declining parks the run in BUDGET_HOLD,
    * which `resume` can continue from.
    */
-  private async enforce(runId: string, scope: "run" | "task", taskId?: string): Promise<void> {
+  private async enforce(runId: string): Promise<void> {
     // Fast path outside the queue: the overwhelmingly common under-cap check
     // must not serialize every streamed message of every parallel session.
-    if (this.store.spentUsd(runId, taskId) < this.capFor(runId, scope)) return;
+    if (this.store.spentUsd(runId) < this.capFor(runId)) return;
     const prev = this.budgetChain;
     let release!: () => void;
     this.budgetChain = new Promise((r) => (release = r));
     try {
       await prev;
-      await this.enforceNow(runId, scope, taskId);
+      await this.enforceNow(runId);
     } finally {
       release();
     }
   }
 
-  private capFor(runId: string, scope: "run" | "task"): number {
-    const run = this.store.getRun(runId)!;
-    return scope === "run" ? run.config.budget.runCapUsd : run.config.budget.taskCapUsd;
+  private capFor(runId: string): number {
+    return this.store.getRun(runId)!.config.budget.runCapUsd;
   }
 
-  private async enforceNow(runId: string, scope: "run" | "task", taskId?: string): Promise<void> {
+  private async enforceNow(runId: string): Promise<void> {
     const run = this.store.getRun(runId)!;
-    const cap = scope === "run" ? run.config.budget.runCapUsd : run.config.budget.taskCapUsd;
-    const spent = this.store.spentUsd(runId, taskId);
+    const cap = run.config.budget.runCapUsd;
+    const spent = this.store.spentUsd(runId);
     // `enforce` already returned for anything under the cap, and spend only
     // grows — so this is a re-check that cannot fire, kept because the queue
     // between the two makes "still over?" the honest question to ask here.
@@ -4117,14 +4109,14 @@ export class RunController {
     if (spent < cap) return;
     // The operator already declined while this check was queued — every other
     // session stops on its next check without opening the gate again.
-    if (run.state === "BUDGET_HOLD") throw new BudgetExceeded(scope, spent, cap, runId);
+    if (run.state === "BUDGET_HOLD") throw new BudgetExceeded(spent, cap, runId);
 
     const gateId = randomUUID().slice(0, 8);
     // BUDGET_HOLD is only reachable while building; during intake or planning the
     // gate still opens, the run just has no held state to sit in.
     const held = run.state === "EXECUTING" || run.state === "INTEGRATING" ? run.state : null;
-    if (held) this.store.transitionRun(runId, "BUDGET_HOLD", `${scope} cap $${cap.toFixed(2)} reached at $${spent.toFixed(2)}`);
-    const payload: BudgetGate = { scope, taskId, spentUsd: spent, capUsd: cap, runSpentUsd: this.store.spentUsd(runId) };
+    if (held) this.store.transitionRun(runId, "BUDGET_HOLD", `run cap $${cap.toFixed(2)} reached at $${spent.toFixed(2)}`);
+    const payload: BudgetGate = { spentUsd: spent, capUsd: cap };
     this.bus.publish({ type: "run.gate_opened", runId, gateId, kind: "budget", payload, ts: Date.now() });
 
     // Asked of the skill first, and of the operator only when it has no
@@ -4141,65 +4133,58 @@ export class RunController {
       kind: "budget",
       resolution: ok ? "approved" : "rejected",
       feedback:
-        (ok ? `${scope} cap raised to $${raised!.toFixed(2)}` : `${decided.decidedBy} declined to raise the cap`) +
+        (ok ? `cap raised to $${raised!.toFixed(2)}` : `${decided.decidedBy} declined to raise the cap`) +
         (decided.why ? ` — ${decided.why}` : ""),
       decidedBy: decided.decidedBy,
       ts: Date.now(),
     });
 
-    if (!ok) throw new BudgetExceeded(scope, spent, cap, runId);
+    if (!ok) throw new BudgetExceeded(spent, cap, runId);
 
-    const budget = { ...run.config.budget, [scope === "run" ? "runCapUsd" : "taskCapUsd"]: raised! };
+    const budget = { ...run.config.budget, runCapUsd: raised! };
     this.store.setRunBudget(runId, budget);
     this.bus.publish({ type: "run.budget_updated", runId, spentUsd: spent, capUsd: raised!, ts: Date.now() });
-    if (held) this.store.transitionRun(runId, held, `${scope} cap raised to $${raised!.toFixed(2)}`);
+    if (held) this.store.transitionRun(runId, held, `cap raised to $${raised!.toFixed(2)}`);
   }
 
   /**
-   * Move a cap before it is ever reached, instead of waiting for `enforceNow`
-   * to open a gate and ask. This is the operator watching spend climb who
-   * would rather act now than be interrupted later — typed straight into the
-   * run's own terminal (see `watchBudgetCommands` in the CLI) while the run
-   * keeps going, so a fast-moving task never has to pause for a gate that a
-   * pre-emptive raise would have made unnecessary.
-   *
-   * A task cap is one number shared by every task, not a per-task ledger, so
-   * raising it changes what every task is allowed to spend going forward —
-   * there is no `taskId` to check spend against here.
+   * Move the run's budget cap before it is ever reached, instead of waiting
+   * for `enforceNow` to open a gate and ask. This is the operator watching
+   * spend climb who would rather act now than be interrupted later — typed
+   * straight into the run's own terminal (see `watchBudgetCommands` in the
+   * CLI) or clicked in the dashboard header, while the run keeps going, so a
+   * fast-moving run never has to pause for a gate that a pre-emptive raise
+   * would have made unnecessary.
    */
-  raiseBudget(runId: string, scope: "run" | "task", capUsd: number): string {
+  raiseBudget(runId: string, capUsd: number): string {
     const run = this.store.getRun(runId);
     if (!run) return `no run ${runId}`;
     if (!Number.isFinite(capUsd) || capUsd <= 0) return "a cap must be a positive number";
     const spent = this.store.spentUsd(runId);
-    if (scope === "run" && capUsd <= spent) return `the run has already spent $${spent.toFixed(2)} — the cap must be above that`;
-    const budget = { ...run.config.budget, [scope === "run" ? "runCapUsd" : "taskCapUsd"]: capUsd };
+    if (capUsd <= spent) return `the run has already spent $${spent.toFixed(2)} — the cap must be above that`;
+    const budget = { ...run.config.budget, runCapUsd: capUsd };
     this.store.setRunBudget(runId, budget);
     this.bus.publish({ type: "run.budget_updated", runId, spentUsd: spent, capUsd, ts: Date.now() });
-    return `${scope} cap raised to $${capUsd.toFixed(2)}`;
+    return `cap raised to $${capUsd.toFixed(2)}`;
   }
 
   /**
-   * Answer a cap that has been reached, or hand it to the operator
-   * (`budget.decidedBy`).
+   * Answer the run's budget cap once it has been reached, or hand it to the
+   * operator (`budget.decidedBy`).
    *
-   * A task cap is a planner's guess about the size of a piece of work, made
-   * before anyone read the code, and reaching one says the guess was wrong. The
-   * operator's half of that conversation had already collapsed into pressing
-   * enter on a suggested figure — run f338b5c8 did it twice, unchanged both
-   * times, once **six hours and forty-two minutes** after the gate opened, with
-   * a worker paused mid-task and three tasks queued behind it.
+   * The operator's half of this conversation had already collapsed into
+   * pressing enter on a suggested figure — run f338b5c8's gate was accepted
+   * unchanged **six hours and forty-two minutes** after it opened, with a
+   * worker paused mid-task and three tasks queued behind it.
    *
-   * Two bounds keep this honest, and they are deliberately asymmetric:
+   * Two bounds keep this honest:
    *
-   * - **The run cap is not the skill's to raise** unless the operator named a
-   *   `ceilingUsd` in advance. Task raises redistribute money already agreed to
-   *   — no sequence of them can spend a dollar past `runCapUsd`, because the
-   *   run gate fires on its own — but the run cap *is* the agreed number, and an
-   *   agent that can raise its own ceiling has none.
-   * - **`autoRaiseRounds` per cap.** A task at its third raise is not a slightly
-   *   wrong estimate; it is a task that does not know how to finish, and the
-   *   fourth raise buys another round of exactly what the first three bought.
+   * - **The cap is not the skill's to raise** unless the operator named a
+   *   `ceilingUsd` in advance — that figure, typed by a person, is what makes
+   *   this the skill's to answer at all.
+   * - **`autoRaiseRounds`.** A cap raised three times is not a slightly wrong
+   *   estimate; it is a run that does not know how to finish, and the fourth
+   *   raise buys another round of exactly what the first three bought.
    *
    * Everything outside those bounds, and every failure, goes to the operator —
    * who has lost nothing, because asking them is all this ever did.
@@ -4211,25 +4196,22 @@ export class RunController {
     if (skill === "operator") return ask;
 
     const say = (text: string) => this.bus.publish({ type: "agent.log", runId, sessionId: "budget", text, ts: Date.now() });
-    // The most this decision may set the cap to. For a task that is the run's
-    // own cap — a task cap above it cannot buy anything the run gate will not
-    // stop — and for the run it is the figure the operator typed in advance,
-    // without which this is not theirs to answer at all.
-    const ceiling = gate.scope === "run" ? run.config.budget.ceilingUsd : run.config.budget.runCapUsd;
+    // The most this decision may set the cap to — the figure the operator
+    // typed in advance, without which this is not theirs to answer at all.
+    const ceiling = run.config.budget.ceilingUsd;
     if (ceiling === undefined) return ask;
     if (ceiling <= gate.spentUsd) {
-      say(`${skill} cannot answer this: the ${gate.scope} ceiling of $${ceiling.toFixed(2)} is already spent — asking you`);
+      say(`${skill} cannot answer this: the ceiling of $${ceiling.toFixed(2)} is already spent — asking you`);
       return ask;
     }
-    const spentRounds = this.store.budgetAutoRaises(runId, gate.scope, gate.taskId);
+    const spentRounds = this.store.budgetAutoRaises(runId);
     if (spentRounds >= run.config.budget.autoRaiseRounds) {
-      say(`${skill} has already raised this ${gate.scope} cap ${spentRounds} time(s) — this one is yours`);
+      say(`${skill} has already raised this cap ${spentRounds} time(s) — this one is yours`);
       return ask;
     }
 
     const tasks = this.store.listTasks(runId);
-    const task = gate.taskId ? tasks.find((t) => t.id === gate.taskId) : undefined;
-    const blocked = gate.taskId ? tasks.filter((t) => t.dependsOn.includes(gate.taskId!) && t.state !== "MERGED") : [];
+    const inFlight = tasks.filter((t) => t.state !== "PENDING" && t.state !== "MERGED");
     const notStarted = tasks.filter((t) => t.state === "PENDING");
     try {
       const skills = indexSkills(run.config.skillsDirs).filter((s) => s.name === skill && verifyHash(s));
@@ -4248,24 +4230,12 @@ export class RunController {
         ),
         prompt: budgetDeciderPrompt(
           run.assignment,
-          `The **${gate.scope}** cap has been reached${gate.taskId ? ` by task \`${gate.taskId}\`` : ""}.`,
-          task
-            ? [
-                `- **${task.title}** (\`${task.id}\`, ${task.estimatedSize}, state ${task.state})`,
-                `- QA has failed it ${task.qaIterations} time(s); its worker has been respawned ${task.respawns} time(s).`,
-                `- What it is meant to build: ${task.spec.slice(0, 1500)}`,
-                `- What would prove it done: ${task.acceptanceCriteria.map((c) => `\n    - ${c}`).join("")}`,
-                task.errorSummary ? `- Where it is stuck: ${task.errorSummary.slice(0, 800)}` : "",
-                blocked.length
-                  ? `- ${blocked.length} task(s) cannot start until it finishes: ${blocked.map((t) => t.id).join(", ")}`
-                  : "- Nothing is waiting on it.",
-              ]
-                .filter(Boolean)
-                .join("\n")
+          `The run's budget cap has been reached.`,
+          inFlight.length
+            ? inFlight.map((t) => `- **${t.title}** (\`${t.id}\`, ${t.estimatedSize}, state ${t.state}, QA failed it ${t.qaIterations} time(s))`).join("\n")
             : "",
           [
-            `This task has spent $${gate.spentUsd.toFixed(2)} against a cap of $${gate.capUsd.toFixed(2)}.`,
-            `The run has spent $${gate.runSpentUsd.toFixed(2)} of its $${run.config.budget.runCapUsd.toFixed(2)} cap.`,
+            `The run has spent $${gate.spentUsd.toFixed(2)} of its $${gate.capUsd.toFixed(2)} cap.`,
             spentRounds ? `This cap has already been raised ${spentRounds} time(s) without the operator being asked.` : "",
           ]
             .filter(Boolean)
@@ -4283,7 +4253,7 @@ export class RunController {
       });
       const parsed = BudgetDecisionJson.parse(extractJson(result.resultText));
       if (parsed.action === "park") {
-        say(`${skill} declined to raise the ${gate.scope} cap — ${parsed.why || "no reason given"}`);
+        say(`${skill} declined to raise the cap — ${parsed.why || "no reason given"}`);
         return { capUsd: null, decidedBy: skill, why: parsed.why };
       }
       // A cap at or below the spend trips again on the very next check, which is
@@ -4294,7 +4264,7 @@ export class RunController {
       }
       const capped = Math.min(parsed.capUsd, ceiling);
       say(
-        `${skill} raised the ${gate.scope} cap to $${capped.toFixed(2)}` +
+        `${skill} raised the cap to $${capped.toFixed(2)}` +
           (capped < parsed.capUsd ? ` (asked for $${parsed.capUsd.toFixed(2)}, held at the ceiling)` : "") +
           (parsed.why ? ` — ${parsed.why}` : "")
       );

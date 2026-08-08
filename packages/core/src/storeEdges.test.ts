@@ -61,7 +61,7 @@ describe("refusing what it cannot do", () => {
     const s = store();
 
     expect(() => s.transitionRun("nope", "PLANNING")).toThrow("unknown run nope");
-    expect(() => s.setRunBudget("nope", Budget.parse({ runCapUsd: 10, taskCapUsd: 5 }))).toThrow("unknown run nope");
+    expect(() => s.setRunBudget("nope", Budget.parse({ runCapUsd: 10 }))).toThrow("unknown run nope");
     expect(() => s.patchRunConfig("nope", { prMode: "single" })).toThrow("unknown run nope");
     expect(s.getRun("nope")).toBeUndefined();
   });

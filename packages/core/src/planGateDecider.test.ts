@@ -121,7 +121,7 @@ const config = (over: Record<string, unknown> = {}) =>
     maxParallelWorkers: 1,
     pitStop: { every: "never" },
     intentFixRounds: 0,
-    budget: { runCapUsd: 1000, taskCapUsd: 1000 },
+    budget: { runCapUsd: 1000 },
     ...over,
   });
 
@@ -333,7 +333,7 @@ describe("a plan gate that weighs its own intent check", () => {
       // that runs the run out of money. That is not "the skill had nothing to
       // say" — swallowing it would show the operator a gate to approve on a run
       // that has already stopped paying for the work behind it.
-      pm: () => new BudgetExceeded("run", 10, 1, "run-x"),
+      pm: () => new BudgetExceeded(10, 1, "run-x"),
       worker,
       qa: () => QA_PASS,
     });

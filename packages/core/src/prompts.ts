@@ -988,25 +988,25 @@ ${priorAttempt ? `You already sent this plan back once, saying:\n"""\n${priorAtt
 }
 
 /**
- * The decider for a cap that has been reached (`budget.decidedBy`).
+ * The decider for the run's budget cap once it has been reached (`budget.decidedBy`).
  *
  * The prompt is built around one fact the terminal gate never showed anyone: an
  * agent is sitting paused mid-work while this is answered, and everything
- * downstream of it is idle too. Run f338b5c8's `entity-repositories` gate
- * opened at 22:49 and was answered at 05:31 — six hours and forty-two minutes,
- * and the answer was the suggested figure, unchanged. Three other tasks
- * depended on it.
+ * downstream of it is idle too. Run f338b5c8's budget gate opened at 22:49 and
+ * was answered at 05:31 — six hours and forty-two minutes, and the answer was
+ * the suggested figure, unchanged. Three other tasks depended on it.
  *
- * The other fact is that this is not really a question about money. The cap was
- * a guess about the size of the work, made by a planner that had not read the
- * code, and reaching it says the guess was wrong — not that the work is not
- * worth doing. The two ways to get this wrong are refusing a task that is
- * genuinely nearly done, and funding a task that has no idea how to finish, so
- * the prompt asks for the evidence that separates them: what is left, and what
- * the last iterations actually produced.
+ * The other fact is that this is not really a question about money. The cap is
+ * the operator's own estimate of what the whole run is worth, made before
+ * anyone knew how much work the plan would turn out to be. Reaching it says
+ * the estimate was wrong — not that the remaining work is not worth doing. The
+ * two ways to get this wrong are stopping a run that is genuinely close to
+ * done, and funding a run that has no idea how to finish, so the prompt asks
+ * for the evidence that separates them: what is left, and what the last
+ * iterations actually produced.
  */
 export function budgetDeciderSystemPrompt(skill: string, boundLine: string, toolbelt = "", skills = ""): string {
-  return `You are the **${skill}** for a software project being built by a team of agents, and one of its spending caps has just been reached.
+  return `You are the **${skill}** for a software project being built by a team of agents, and the run's budget cap has just been reached.
 
 An agent is paused mid-work waiting for your answer. It is not cancelled: raise the cap and it carries on from exactly where it stopped, with everything it has already been paid for intact. Refuse and the run parks — that agent's work in progress, and every task waiting on it, stops until a person picks it up.
 
@@ -1017,9 +1017,9 @@ You decide one of two things:
 ${boundLine}
 
 How to decide:
-- **This is a question about an estimate, not about money.** The cap came from a planner guessing at the size of a task before anyone read the code. Reaching it means the guess was wrong, which is ordinary. The question is what is left to do, not whether the guess was exceeded.
+- **This is a question about an estimate, not about money.** The cap was the operator's own guess at what the whole run would cost, made before the plan's real size was known. Reaching it means the guess was wrong, which is ordinary. The question is what is left to do, not whether the guess was exceeded.
 - Look at what the spend bought. A task that has run its QA loop several times without a pass is not one raise away from finishing — it is stuck, and funding it buys another round of the same. A task that is mid-way through work that is visibly progressing is exactly what a raise is for.
-- Count what is waiting. Parking blocks every task that depends on this one, and they cost nothing while they wait — but the run cannot finish without them either.
+- Count what is waiting. Parking blocks every task still in flight and every task queued behind it, and they cost nothing while they wait — but the run cannot finish without them either.
 - Weigh it against the rest of the plan. Every dollar here is a dollar the tasks that have not started do not have. If funding this to the end means the run cannot afford what is left, the honest answer is park, and say that is why.
 - Do not raise "to be safe" and do not raise round numbers for their own sake. Name a figure you can justify from what is left to do.
 - Read-only. Change nothing.
@@ -1038,7 +1038,7 @@ Your FINAL message must be exactly one JSON object inside a \`\`\`json fence:
 export function budgetDeciderPrompt(
   assignment: string,
   scopeLine: string,
-  taskBlock: string,
+  inFlightBlock: string,
   spendBlock: string,
   remainingBlock: string
 ): string {
@@ -1048,7 +1048,7 @@ ${assignment}
 ${scopeLine}
 
 ${spendBlock}
-${taskBlock ? `\nThe task that tripped it:\n${taskBlock}\n` : ""}
+${inFlightBlock ? `\nIn flight:\n${inFlightBlock}\n` : ""}
 ${remainingBlock}
 Decide.`;
 }

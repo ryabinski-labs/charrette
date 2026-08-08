@@ -295,7 +295,7 @@ describe("harness run — resolving what the run will actually do", () => {
     // session it spawns is stamped with.
     expect(banner).toContain("build      0.0.1@7453d60");
     expect(banner).toContain("checks     npm test   (auto-detected from package.json)");
-    expect(banner).toContain("budget     run $30 · task $10   (defaults)");
+    expect(banner).toContain("budget     $30   (defaults)");
     expect(banner).toContain("github     acme/widgets   (git remote)");
     expect(banner).toContain("prs        one rollup PR for the whole run   (default)");
     expect(banner).toContain("tools      none detected on PATH");
@@ -403,27 +403,27 @@ describe("harness run — resolving what the run will actually do", () => {
     expect(printed()).toContain("checks     none (auto-detected from no test script)");
   });
 
-  it("takes budget caps from the flags when given", async () => {
-    await cli("run", "x", "--repo", "/repo", "--no-dashboard", "--run-cap", "120", "--task-cap", "15");
+  it("takes the budget cap from the flag when given", async () => {
+    await cli("run", "x", "--repo", "/repo", "--no-dashboard", "--run-cap", "120");
 
-    expect(printed()).toContain("budget     run $120 · task $15   (flags)");
+    expect(printed()).toContain("budget     $120   (flags)");
   });
 
-  it("takes budget caps from the config file otherwise", async () => {
+  it("takes the budget cap from the config file otherwise", async () => {
     h.loadFileConfigMock.mockReturnValue({
-      config: { budget: { runCapUsd: 500, taskCapUsd: 25 } },
+      config: { budget: { runCapUsd: 500 } },
       path: "/repo/harness.config.json",
     });
 
     await cli("run", "x", "--repo", "/repo", "--no-dashboard");
 
-    expect(printed()).toContain("budget     run $500 · task $25   (harness.config.json)");
+    expect(printed()).toContain("budget     $500   (harness.config.json)");
   });
 
   it.each([
     ["--run-cap", "0"],
     ["--run-cap", "-5"],
-    ["--task-cap", "not-a-number"],
+    ["--run-cap", "not-a-number"],
   ])("refuses %s %s rather than running with a nonsense cap", async (flag, value) => {
     await expect(cli("run", "x", "--repo", "/repo", "--no-dashboard", flag, value)).rejects.toThrow(
       `${flag} must be a positive number, got "${value}"`
@@ -790,7 +790,7 @@ describe("the live budget command channel", () => {
     busListener()({ event: { type: "run.state_changed", runId: "run-1", from: "PLANNING", to: "EXECUTING" } });
     tty.emit("budget run 50\n");
 
-    expect(h.controllerMethods.raiseBudget).toHaveBeenCalledWith("run-1", "run", 50);
+    expect(h.controllerMethods.raiseBudget).toHaveBeenCalledWith("run-1", 50);
     expect(tty.offSpy).toHaveBeenCalledWith("data", expect.any(Function));
   });
 
@@ -798,9 +798,9 @@ describe("the live budget command channel", () => {
     const tty = fakeTty();
 
     await cli("resume", "run-9", "--repo", "/repo", "--no-dashboard");
-    tty.emit("budget task 10\n");
+    tty.emit("budget run 10\n");
 
-    expect(h.controllerMethods.raiseBudget).toHaveBeenCalledWith("run-9", "task", 10);
+    expect(h.controllerMethods.raiseBudget).toHaveBeenCalledWith("run-9", 10);
   });
 });
 
@@ -943,9 +943,7 @@ describe("the terminal gates", () => {
   it("routes the budget gate to the cap prompt", async () => {
     answerOnce("s");
 
-    await expect(
-      gatesGiven().resolveBudgetGate({ scope: "run", spentUsd: 30, capUsd: 30, runSpentUsd: 30 })
-    ).resolves.toBeNull();
+    await expect(gatesGiven().resolveBudgetGate({ spentUsd: 30, capUsd: 30 })).resolves.toBeNull();
   });
 
   it("tells the operator where a stuck task's work is, and what is suggested", async () => {
@@ -1765,7 +1763,7 @@ describe("harness init", () => {
     const [target, body] = h.writeFileSyncMock.mock.calls[0] as [string, string];
     expect(target).toBe("/repo/harness.config.json");
     expect(JSON.parse(body)).toEqual({
-      budget: { runCapUsd: 30, taskCapUsd: 10 },
+      budget: { runCapUsd: 30 },
       deterministicChecks: ["npm test", "npm run lint"],
       dashboard: true,
       skillsDirs: expect.any(Array),

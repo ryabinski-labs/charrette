@@ -37,7 +37,7 @@ function run(over: Partial<Record<string, Any>> = {}): Any {
     assignment: "Build the thing.", spentUsd: 1, sessions: [],
     config: {
       deterministicChecks: ["build", "test"], qaIterationCap: 3,
-      budget: { runCapUsd: 100, taskCapUsd: 10 },
+      budget: { runCapUsd: 100 },
     },
     tasks: [task()], ...over,
   };
@@ -102,6 +102,39 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(NOW);
   return () => vi.useRealTimers();
+});
+
+describe("the header's budget cap", () => {
+  it("is an editable control only when exactly one run is showing", async () => {
+    const page = mount(state({ runs: [run()] }));
+    await page.refresh();
+
+    const cap = $("#cap")!;
+    expect(cap.getAttribute("role")).toBe("button");
+    expect((cap as HTMLElement).tabIndex).toBe(0);
+    expect(cap.textContent).toBe("/ $100");
+  });
+
+  it("is not exposed as interactive when there is no single run to point a raise at", async () => {
+    const page = mount(state({ runs: [run({ id: "r1" }), run({ id: "r2" })] }));
+    await page.refresh();
+
+    const cap = $("#cap")!;
+    // A screen reader has no use for "button" on a figure that does nothing
+    // when activated — the click handler itself already no-ops past one run,
+    // but the role must not claim otherwise.
+    expect(cap.getAttribute("role")).toBeNull();
+    expect((cap as HTMLElement).tabIndex).toBe(-1);
+  });
+
+  it("has no role to claim when there are no runs at all", async () => {
+    const page = mount(state({ runs: [] }));
+    await page.refresh();
+
+    const cap = $("#cap")!;
+    expect(cap.getAttribute("role")).toBeNull();
+    expect(cap.textContent).toBe("");
+  });
 });
 
 describe("the run panel", () => {

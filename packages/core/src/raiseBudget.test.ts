@@ -40,7 +40,7 @@ function makeRun(store: Store, id = "run1", budget: Partial<RunConfig["budget"]>
     prdPath: null,
     planHash: null,
     integrationBranch: `harness/${id}/main`,
-    config: RunConfig.parse({ budget: { runCapUsd: 30, taskCapUsd: 10, ...budget } }),
+    config: RunConfig.parse({ budget: { runCapUsd: 30, ...budget } }),
   });
 }
 
@@ -49,23 +49,12 @@ describe("raiseBudget", () => {
     const { controller, store, events } = build();
     makeRun(store);
 
-    const result = controller.raiseBudget("run1", "run", 100);
+    const result = controller.raiseBudget("run1", 100);
 
-    expect(result).toBe("run cap raised to $100.00");
+    expect(result).toBe("cap raised to $100.00");
     expect(store.getRun("run1")!.config.budget.runCapUsd).toBe(100);
     const updated = events.find((e) => e.type === "run.budget_updated");
     expect(updated).toMatchObject({ capUsd: 100 });
-  });
-
-  it("raises the task cap without touching the run cap", () => {
-    const { controller, store } = build();
-    makeRun(store);
-
-    const result = controller.raiseBudget("run1", "task", 25);
-
-    expect(result).toBe("task cap raised to $25.00");
-    expect(store.getRun("run1")!.config.budget.taskCapUsd).toBe(25);
-    expect(store.getRun("run1")!.config.budget.runCapUsd).toBe(30);
   });
 
   it("refuses a run cap at or below what has already been spent", () => {
@@ -73,7 +62,7 @@ describe("raiseBudget", () => {
     makeRun(store);
     store.recordUsage({ runId: "run1", sessionId: "s1", model: "claude-sonnet-5", inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 40 });
 
-    const result = controller.raiseBudget("run1", "run", 40);
+    const result = controller.raiseBudget("run1", 40);
 
     expect(result).toMatch(/already spent \$40\.00/);
     expect(store.getRun("run1")!.config.budget.runCapUsd).toBe(30);
@@ -83,14 +72,14 @@ describe("raiseBudget", () => {
     const { controller, store } = build();
     makeRun(store);
 
-    expect(controller.raiseBudget("run1", "run", 0)).toMatch(/positive number/);
-    expect(controller.raiseBudget("run1", "run", -5)).toMatch(/positive number/);
-    expect(controller.raiseBudget("run1", "run", NaN)).toMatch(/positive number/);
+    expect(controller.raiseBudget("run1", 0)).toMatch(/positive number/);
+    expect(controller.raiseBudget("run1", -5)).toMatch(/positive number/);
+    expect(controller.raiseBudget("run1", NaN)).toMatch(/positive number/);
   });
 
   it("reports an unknown run instead of throwing", () => {
     const { controller } = build();
 
-    expect(controller.raiseBudget("nope", "run", 100)).toBe("no run nope");
+    expect(controller.raiseBudget("nope", 100)).toBe("no run nope");
   });
 });

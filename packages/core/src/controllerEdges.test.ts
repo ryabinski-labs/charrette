@@ -186,7 +186,7 @@ describe("a budget stop reaching each stage that must let it through", () => {
     await expect(
       controller.startRun(
         "build a thing",
-        RunConfig.parse({ ...BASE, planIntentCheck: false, prodUrl: "https://app.example.com", budget: { runCapUsd: 22, taskCapUsd: 1000 } })
+        RunConfig.parse({ ...BASE, planIntentCheck: false, prodUrl: "https://app.example.com", budget: { runCapUsd: 22 } })
       )
     ).rejects.toThrow(/budget exceeded/);
   });
@@ -212,7 +212,7 @@ describe("a budget stop reaching each stage that must let it through", () => {
     ref.store = store;
 
     await expect(
-      controller.startRun("build a thing", RunConfig.parse({ ...BASE, budget: { runCapUsd: 3, taskCapUsd: 1000 } }))
+      controller.startRun("build a thing", RunConfig.parse({ ...BASE, budget: { runCapUsd: 3 } }))
     ).rejects.toThrow(/budget exceeded/);
   });
 
@@ -231,7 +231,7 @@ describe("a budget stop reaching each stage that must let it through", () => {
     ref.store = store;
 
     await expect(
-      controller.startRun("build a thing", RunConfig.parse({ ...BASE, budget: { runCapUsd: 22, taskCapUsd: 1000 } }))
+      controller.startRun("build a thing", RunConfig.parse({ ...BASE, budget: { runCapUsd: 22 } }))
     ).rejects.toThrow(/budget exceeded/);
   });
 
@@ -259,7 +259,7 @@ describe("a budget stop reaching each stage that must let it through", () => {
     ref.store = store;
 
     await expect(
-      controller.startRun("build a thing", RunConfig.parse({ ...BASE, maxParallelWorkers: 2, budget: { runCapUsd: 20, taskCapUsd: 1000 } }))
+      controller.startRun("build a thing", RunConfig.parse({ ...BASE, maxParallelWorkers: 2, budget: { runCapUsd: 20 } }))
     ).rejects.toThrow(/budget exceeded/);
 
     // The run sits in BUDGET_HOLD; every later check stops without asking again.

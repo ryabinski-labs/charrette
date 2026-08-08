@@ -562,7 +562,7 @@ describe("budget gate", () => {
     const dash = dashboard();
     started.push(dash);
     const url = await dash.start();
-    const pending = dash.resolveBudgetGate({ scope: "run", spentUsd: 8.5, capUsd: 8, runSpentUsd: 8.5 });
+    const pending = dash.resolveBudgetGate({ spentUsd: 8.5, capUsd: 8 });
     const post = (body: unknown) =>
       fetch(new URL("/api/gates/budget", url), {
         method: "POST",
@@ -639,6 +639,7 @@ describe("mid-flight feedback", () => {
         relayed.push(`${runId}/${taskId}: ${text}`);
         return "live";
       },
+      raiseBudget: () => "cap raised to $0.00",
     });
     const res = await post({ runId: "r1", taskId: "task-a", text: "skip the flaky suite" });
     expect(res.status).toBe(200);
@@ -652,6 +653,7 @@ describe("mid-flight feedback", () => {
       sendFeedback() {
         throw new Error("task task-a is MERGED — no agent will read this");
       },
+      raiseBudget: () => "cap raised to $0.00",
     });
     const res = await post({ runId: "r1", taskId: "task-a", text: "too late" });
     expect(res.status).toBe(409);
@@ -661,7 +663,7 @@ describe("mid-flight feedback", () => {
   it("rejects an empty message and an unwired dashboard", async () => {
     const { dash, post } = await withDash();
     expect((await post({ runId: "r1", taskId: "task-a", text: "hello" })).status).toBe(503);
-    dash.attach({ sendFeedback: () => "queued" });
+    dash.attach({ sendFeedback: () => "queued", raiseBudget: () => "cap raised to $0.00" });
     expect((await post({ runId: "r1", taskId: "task-a", text: "  " })).status).toBe(400);
     expect((await post({ taskId: "task-a", text: "hi" })).status).toBe(400);
   });

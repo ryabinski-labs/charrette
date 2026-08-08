@@ -408,7 +408,7 @@ describe("a planner session that dies before it answers", () => {
     // Three attempts against a cap the operator set would spend three times the
     // number they set. A budget stop is a decision, not a failure.
     const { controller } = harness([DOCS, dagJson()], undefined, undefined, (call) =>
-      call === 1 ? new BudgetExceeded("run", 12, 10, "run1") : undefined
+      call === 1 ? new BudgetExceeded(12, 10, "run1") : undefined
     );
 
     await expect(controller.startRun("do a thing", CONFIG)).rejects.toThrow(BudgetExceeded);

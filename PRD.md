@@ -127,7 +127,7 @@ Cross-cutting: pause/resume/abort from the dashboard at any time; budget caps pa
 
 ### Epic G — Budget
 
-- **US-16** As an operator, I set per-run and per-task caps; breaches pause before the next API call. *AC: synthetic low-cap run pauses with ≤5% overshoot (PERF-7); dashboard offers raise/skip/abort.*
+- **US-16** As an operator, I set one budget cap for the run, and can raise it live from the dashboard at any time, not only once it is reached; a breach pauses before the next API call. *AC: synthetic low-cap run pauses with ≤5% overshoot (PERF-7); dashboard offers raise/skip/abort.*
 - **US-17** As an operator, I can see where money went. *AC: per-task and per-phase cost breakdown, cache hit rate, and cost-per-merged-PR are queryable after every run.*
 
 ### Epic H — Resilience
@@ -256,7 +256,7 @@ The planner must emit tasks with explicit `dependsOn` edges; the orchestrator va
 - **QA rejection loop**: each `FAIL` verdict re-dispatches the *same worker session if alive* (cheap: context is warm) with the structured mustFix list; **cap 3 QA iterations per task**, then `NEEDS_HUMAN` gate with the diff, verdicts, and a one-paragraph agent-written summary of the disagreement. This cap is the primary cost-runaway defense.
 - **Merge conflicts**: integrator agent attempt (scoped to conflict hunks), max 2 attempts, full test suite must pass post-resolution; else `integration-conflict` gate — the human resolves in the worktree and clicks resume.
 - **API rate limits / 529 overload**: Agent SDK retries handle transient cases; on sustained 429/529 the pool applies global exponential backoff with jitter and halves effective parallelism until a 10-min clean window, emitting `run.throttled` so the dashboard explains the slowdown. Budget checks run *before* each turn, so backoff never bypasses caps.
-- **Budget breach**: per-task cap → task pauses at next turn boundary, task-escalation gate ("raise cap / skip / abort task"). Per-run cap → `BUDGET_HOLD`, everything quiesces, user decides.
+- **Budget breach**: the run's single budget cap trips at the next turn boundary → `BUDGET_HOLD`, everything quiesces, user (or a delegated skill) raises the cap or parks the run. The cap can also be raised proactively, before it is ever reached, from the dashboard header or the CLI's live `budget run <usd>` stdin command.
 - **Partial resume**: because task state, branches, worktrees, issues, and PRs are all idempotently keyed, `harness resume <runId>` after any crash — including mid-integration — reconciles and continues; completed tasks are never re-executed.
 
 ### 11.7 Key Decisions (ADR summaries)

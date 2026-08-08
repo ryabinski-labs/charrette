@@ -61,16 +61,16 @@ describe("pricing a model nobody has priced", () => {
 
 describe("what a budget refusal tells the operator", () => {
   it("says how to pick the run back up when it knows which run it was", () => {
-    const e = new BudgetExceeded("run", 31.5, 30, "40da9337");
+    const e = new BudgetExceeded(31.5, 30, "40da9337");
 
     expect(e.message).toContain("$31.50 >= $30.00");
     expect(e.message).toContain("harness resume 40da9337");
   });
 
   it("says only what it knows when there is no run to name", () => {
-    const e = new BudgetExceeded("task", 11, 10);
+    const e = new BudgetExceeded(11, 10);
 
-    expect(e.message).toBe("task budget exceeded: $11.00 >= $10.00");
+    expect(e.message).toBe("run budget exceeded: $11.00 >= $10.00");
     expect(e.message).not.toContain("resume");
   });
 });
