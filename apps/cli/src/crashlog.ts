@@ -27,9 +27,24 @@ export function armCrashLog(stateDir: string): void {
   logPath = path.join(stateDir, "harness.log");
 }
 
-function record(kind: string, detail: string): void {
+/**
+ * `detail` goes to the log, `human` to the terminal.
+ *
+ * They were the same string, printed as `detail.split("\n")[0]` — which is the
+ * right rule for the thing it was written against (an Error whose `detail` is
+ * its message *plus its stack*, and an operator who should not be shown a
+ * stack) and the wrong one for an error whose message is deliberately several
+ * lines. A config rejection listing three bad fields arrived as its own
+ * heading and nothing else: "harness: fatal — that run configuration cannot be
+ * used:" with the reasons cut off underneath.
+ *
+ * So the split is now by *what the text is* rather than by line count: the
+ * whole message reaches the terminal, the stack only reaches the log, and the
+ * log line itself is unchanged — `harness.log` is parsed elsewhere.
+ */
+function record(kind: string, detail: string, human = detail.split("\n")[0]!): void {
   const line = `${new Date().toISOString()} pid=${process.pid} ${kind} ${detail.replace(/\s+$/, "")}\n`;
-  process.stderr.write(`\nharness: ${kind} — ${detail.split("\n")[0]}\n`);
+  process.stderr.write(`\nharness: ${kind} — ${human}\n`);
   if (!logPath) return;
   try {
     appendFileSync(logPath, line);
@@ -52,7 +67,7 @@ function describe(e: unknown): string {
 export function recordFatal(e: unknown): void {
   if (done) return;
   done = true;
-  record("fatal", describe(e));
+  record("fatal", describe(e), e instanceof Error ? e.message : String(e));
 }
 
 /**

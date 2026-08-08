@@ -148,7 +148,7 @@ vi.mock("./dashboardLink.js", () => ({
 }));
 
 import type { GateHandler } from "@harness/core";
-import { buildProgram, modelOverrides } from "./cli.js";
+import { buildProgram, modelOverrides, parseRunConfig } from "./cli.js";
 
 let out: string[];
 
@@ -333,6 +333,32 @@ describe("harness run — resolving what the run will actually do", () => {
     // other entry point either.
     h.loadFileConfigMock.mockReturnValue({ config: { models: { qa: "gpt-5.6-terra" } }, path: "/repo/harness.config.json" });
     await expect(cli("run", "build a thing", "--repo", "/repo", "--no-dashboard")).rejects.toThrow(/pinned to Anthropic/);
+  });
+
+  it("refuses a judging role dropped to the small tier, whichever way it was asked for", async () => {
+    // Anthropic, so the vendor pin waves it through — and a weaker judge does
+    // not report that it judged worse, it reports PASS.
+    h.loadFileConfigMock.mockReturnValue({ config: {}, path: null });
+    await expect(
+      cli("run", "build a thing", "--repo", "/repo", "--no-dashboard", "--model", "qa=claude-haiku-4-5-20251001")
+    ).rejects.toThrow(/below the capability floor/);
+    expect(h.RunControllerMock).not.toHaveBeenCalled();
+  });
+
+  it("says what is wrong in a sentence, rather than handing over a JSON dump", async () => {
+    // `RunConfig.parse` throws a ZodError whose message is its serialised
+    // issue list, and the crash handler prints that plus a stack trace. The
+    // routing rules are the ones an operator trips on purpose, while trying to
+    // make a run cheaper, so the reason has to survive being skimmed.
+    h.loadFileConfigMock.mockReturnValue({ config: { models: { reviewer: "claude-haiku-4-5-20251001" } }, path: "/repo/harness.config.json" });
+    const err = await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard").then(
+      () => null,
+      (e: Error) => e
+    );
+
+    expect(err?.message).toContain("that run configuration cannot be used:");
+    expect(err?.message).toContain("  models: ");
+    expect(err?.message).not.toContain('"code": "custom"');
   });
 
   it("takes a routing change from the command line, over the config file", async () => {
@@ -1298,6 +1324,23 @@ describe("harness resume — settings the operator changed since the run started
 
     await expect(cli("resume", "run-1", "--repo", "/repo", "--no-dashboard", "--model", "worker=gpt-5.6-terra")).rejects.toThrow(/OPENAI_API_KEY/);
     expect(h.storeMethods.patchRunConfig).not.toHaveBeenCalled();
+  });
+
+  it("refuses to re-route a judge onto the small tier mid-run, readably", async () => {
+    // The resume line is where an operator reaches for a cheaper model, because
+    // the reason to re-route is almost always that the budget is going faster
+    // than the work. `qa` is the one that must not get cheaper.
+    existing({ models: { qa: "claude-sonnet-5" } });
+    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/harness.config.json" });
+
+    await expect(
+      cli("resume", "run-1", "--repo", "/repo", "--no-dashboard", "--model", "qa=claude-haiku-4-5-20251001")
+    ).rejects.toThrow(/that run configuration cannot be used:[\s\S]*below the capability floor/);
+    expect(h.storeMethods.patchRunConfig).not.toHaveBeenCalled();
+  });
+
+  it("names the whole config when what is wrong is the config, not one field", () => {
+    expect(() => parseRunConfig("not a config")).toThrow(/^that run configuration cannot be used:\n {2}\(root\): /);
   });
 
   it("rejects a malformed pair rather than guessing what was meant", () => {

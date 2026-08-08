@@ -209,6 +209,45 @@ export class Store {
         if (!have.has(name)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${decl}`);
       }
     }
+    this.freezeLightTier();
+  }
+
+  /**
+   * Give a run created before `models.workerLight` existed the model it was
+   * actually planned on.
+   *
+   * `getRun` re-parses the stored config on every read, so an absent key takes
+   * whatever today's default is — which is how a new field is *supposed* to
+   * work, and is wrong exactly once. `workerLight` decides which model writes
+   * the code. Without this, a run that was planned, priced and half-executed on
+   * Sonnet and then parked over a release would come back and finish on Haiku,
+   * having agreed to nothing; `patchRunConfig` writes the whole config back, so
+   * raising that run's budget was enough to make it permanent.
+   *
+   * Written into the row rather than defaulted at read time so the config keeps
+   * saying what the run is doing. Idempotent by construction: it only touches
+   * rows where the key is absent, and it puts the key there.
+   */
+  private freezeLightTier(): void {
+    const fallback = RunConfig.parse({}).models.worker;
+    const rows = this.db.prepare("SELECT id, config FROM runs").all() as { id: string; config: string }[];
+    const patch = this.db.prepare("UPDATE runs SET config = ? WHERE id = ?");
+    for (const row of rows) {
+      let config: { models?: Record<string, unknown> };
+      // A row this cannot read is one row. Throwing here happens in the
+      // constructor, which would take every other run in the database with it.
+      try {
+        config = JSON.parse(row.config) as { models?: Record<string, unknown> };
+      } catch {
+        continue;
+      }
+      const models = config?.models;
+      if (!models || typeof models !== "object" || "workerLight" in models) continue;
+      // That run's own worker, not the schema default: a run pointed at another
+      // vendor would otherwise have its light tier moved to Anthropic too.
+      models.workerLight = typeof models.worker === "string" ? models.worker : fallback;
+      patch.run(JSON.stringify(config), row.id);
+    }
   }
 
   /** Run fn inside a transaction (node:sqlite has no transaction helper). */
