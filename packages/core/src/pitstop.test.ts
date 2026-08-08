@@ -114,6 +114,17 @@ const DEMO: DemoReport = {
   started: true,
   howStarted: "`pnpm dev` on :5173",
   summary: "Sign-in works end to end against the real database.",
+  plannedJourneys: ["Sign in", "Download a pack", "The map"],
+  // Written out rather than computed, so a change to the coverage rule shows up
+  // as a failing coverage test and not as a mysteriously different report.
+  coverage: {
+    status: "partial",
+    planned: 3,
+    reached: 2,
+    proof: 3,
+    firstBlocked: "The map",
+    why: 'it reached 2 of the 3 journeys it planned, stopping at "The map"',
+  },
   journeys: [
     { name: "Sign in", result: "worked", evidence: "302 to /home; session row written (signin.png)" },
     { name: "Download a pack", result: "broken", evidence: "GET /v1/pack/current → 404 (pack-404.png)" },
@@ -132,6 +143,7 @@ const STOP: Omit<PitStop, "markdown"> = {
   number: 2,
   reason: 'the "Sign-in" epic is finished',
   demo: DEMO,
+  skippedReviewers: [],
   reviews: [
     { lens: "product-manager", verdict: "drifting", findings: ["The pack screen has no content behind it"], question: "Is the map still in scope?" },
     { lens: "qa-agent", verdict: "on-track", findings: [], question: "" },

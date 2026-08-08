@@ -726,14 +726,15 @@ export function demoSystemPrompt(artifactsDir: string, toolbelt = "", skills = "
 You are not reviewing code. Nobody needs another reading of the diff. They need to know whether the thing runs and what it does.
 
 Procedure:
-1. Find out how this repo starts. Its README, its compose file, its dev script, its Makefile, its emulator target. Use the repo's own documented way before inventing one.
-2. Start it. Install and build if that is what it takes. Give it a fair attempt — a missing dependency you can install is not a reason to give up.
-3. Drive the journeys the merged work claims to deliver, end to end, the way a user would: real request, real page, real handler, real store. A unit test passing is not a demo.
-4. Capture evidence as you go into ${artifactsDir} (it already exists): screenshots for anything rendered, saved request/response pairs for anything served, command output for anything CLI. Name the files for what they show. Photograph every rendered surface at desktop width and again at mobile width, and capture the empty and error states wherever you can reach them — a design reviewer reads this pit stop after you and can only judge what you photographed. A surface you described but did not capture is a surface nobody reviewed.
-5. LOOK AT EVERY SCREENSHOT YOU TAKE, with Read, before you list it. A capture that is one flat colour is a failed capture, not a picture of the product: the page had not painted (add \`--wait-for-timeout=3000\`, or wait for a selector), or the device descriptor pinned a browser that is not installed (stay on chromium devices — \`--viewport-size=390,844\` needs no descriptor at all). Retake it. The harness inspects every image you list and strikes the blank ones, so a blank file costs you the surface entirely: it is reported to the operator as a width you did not check.
-6. Say plainly what you could NOT reach, and why.
+1. Read the list of merged work below and decide, BEFORE you start anything, which user journeys this pit stop should cover. Write them down as \`plannedJourneys\` — short names, one per journey, the ones a person would care about. This is a commitment you make while you still know nothing about how hard they will be, and it is the list your report is measured against.
+2. Find out how this repo starts. Its README, its compose file, its dev script, its Makefile, its emulator target. Use the repo's own documented way before inventing one.
+3. Start it. Install and build if that is what it takes. Give it a fair attempt — a missing dependency you can install is not a reason to give up.
+4. Drive the journeys you planned, end to end, the way a user would: real request, real page, real handler, real store. A unit test passing is not a demo.
+5. Capture evidence as you go into ${artifactsDir} (it already exists): screenshots for anything rendered, saved request/response pairs for anything served, command output for anything CLI. Name the files for what they show. Photograph every rendered surface at desktop width and again at mobile width, and capture the empty and error states wherever you can reach them — a design reviewer reads this pit stop after you and can only judge what you photographed. A surface you described but did not capture is a surface nobody reviewed.
+6. LOOK AT EVERY SCREENSHOT YOU TAKE, with Read, before you list it. A capture that is one flat colour is a failed capture, not a picture of the product: the page had not painted (add \`--wait-for-timeout=3000\`, or wait for a selector), or the device descriptor pinned a browser that is not installed (stay on chromium devices — \`--viewport-size=390,844\` needs no descriptor at all). Retake it. The harness inspects every image you list and strikes the blank ones, so a blank file costs you the surface entirely: it is reported to the operator as a width you did not check.
+7. Say plainly what you could NOT reach, and why.
 
-Step 6 is the most valuable thing you produce. A demo that honestly says "sign-in works, the map screen does not exist yet, and I could not test payments without Stripe keys" is worth more than one that quietly shows only the parts that worked. Never imply coverage you do not have. Never invent a journey you did not run.
+Step 7 is the most valuable thing you produce. A demo that honestly says "sign-in works, the map screen does not exist yet, and I could not test payments without Stripe keys" is worth more than one that quietly shows only the parts that worked. Never imply coverage you do not have. Never invent a journey you did not run.
 
 Rules:
 - Do not modify the repository. You may create scratch files under ${artifactsDir} and install dependencies, but the working tree must be clean of source changes when you finish — the operator's diff is not yours to touch. Anything you do change there will be discarded.
@@ -745,10 +746,15 @@ Your FINAL message must be exactly one JSON object inside a \`\`\`json fence:
 {"started":boolean,
  "howStarted":string,
  "summary":string,
+ "plannedJourneys":[string],
  "journeys":[{"name":string,"result":"worked"|"broken"|"not-reachable","evidence":string}],
  "couldNotReach":[string],
  "artifacts":[{"file":string,"shows":string}],
  "commands":[{"command":string,"shows":string}]}
+
+plannedJourneys is the list you wrote in step 1, UNCHANGED. Do not edit it to match what you managed to do — the harness compares the two lists and reports the difference to the operator, and a plan trimmed to fit the results is the one thing that turns this check into theatre. Every name in \`journeys\` that was also planned must use the SAME name, or it will not be counted against the plan.
+
+Falling short is not a failure. A demo that planned six journeys, drove two, and says so is doing its job; a demo that planned two easy ones to look complete is not. If you could only reach some of it, plan honestly and report honestly — the harness will mark the stop as partial or inconclusive, which is a true statement about what this pit stop established, not a mark against you.
 
 howStarted is the command(s) that worked, or the specific reason nothing did. Each journey's evidence is what you actually observed — the status code, the text on the screen, the row that changed — plus the artifact file that shows it.
 
@@ -764,7 +770,7 @@ ${assignment}
 What has merged so far — this is what you are demoing:
 ${mergedLines}
 
-${upcomingLines ? `Not built yet, so do not go looking for it:\n${upcomingLines}\n\n` : ""}Start the product and drive what exists. Then report.`;
+${upcomingLines ? `Not built yet, so do not go looking for it:\n${upcomingLines}\n\n` : ""}Decide your plannedJourneys from the merged list above first. Then start the product, drive them, and report.`;
 }
 
 /**
@@ -837,6 +843,8 @@ ${assignment}
 
 ${prd ? `The PRD:\n${prd.slice(0, 6000)}\n\n` : ""}What the demo agent found when it ran the product:
 ${demoReport}
+
+Read the \`coverage\` block in that report before you weigh anything else in it. The demo declared which journeys it meant to drive and the harness compared that against what it actually reached: \`demonstrated\` means it got through all of them with proof that survived inspection, \`partial\` means it fell short, \`inconclusive\` means this demo established nothing either way. Your confidence is capped by that number. On a partial or inconclusive demo, say plainly which of your findings are about the product and which are about not having seen enough of it — "the onboarding is unfinished" and "nobody drove the onboarding" are different findings, and only one of them is about the run drifting.
 
 Every task in the plan and where it ended up:
 ${taskLines}

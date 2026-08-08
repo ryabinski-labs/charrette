@@ -109,6 +109,13 @@ export interface AgentSpec {
   sessionId?: string;
   role: AgentRole;
   model: string;
+  /**
+   * The worker tier this session was dispatched on, when the caller decided one
+   * — `"light"` or `"standard"`. Booked onto every ledger row so that what a
+   * task cost can be read back against the tier it was tried on, without
+   * inferring the tier from the model name months later.
+   */
+  tier?: string;
   systemPrompt: string;
   prompt: string;
   cwd: string;
@@ -635,7 +642,7 @@ export class AgentPool {
       if (Object.values(unbooked).reduce((a, b) => a + b, 0) === 0) return;
       const estimate = costUsd(spec.model, unbooked);
       cost += estimate;
-      this.store.recordUsage({ runId: spec.runId, taskId: spec.taskId, sessionId, model: spec.model, ...unbooked, costUsd: estimate });
+      this.store.recordUsage({ runId: spec.runId, taskId: spec.taskId, sessionId, model: spec.model, role: spec.role, tier: spec.tier, ...unbooked, costUsd: estimate });
       this.bus.publish({ type: "agent.usage", runId: spec.runId, taskId: spec.taskId, sessionId, model: spec.model, ...unbooked, costUsd: estimate, ts: Date.now() });
       unbooked = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
     };
@@ -826,7 +833,7 @@ export class AgentPool {
           // difference — an injected-feedback session must not double-bill.
           const costDelta = m.total_cost_usd !== undefined ? Math.max(0, m.total_cost_usd - cost) : costUsd(spec.model, usage);
           cost = m.total_cost_usd ?? cost + costDelta;
-          this.store.recordUsage({ runId: spec.runId, taskId: spec.taskId, sessionId, model: spec.model, ...usage, costUsd: costDelta });
+          this.store.recordUsage({ runId: spec.runId, taskId: spec.taskId, sessionId, model: spec.model, role: spec.role, tier: spec.tier, ...usage, costUsd: costDelta });
           this.bus.publish({ type: "agent.usage", runId: spec.runId, taskId: spec.taskId, sessionId, model: spec.model, ...usage, costUsd: costDelta, ts: Date.now() });
           // The bill is settled to here; anything counted before this result is
           // paid for and must not be booked a second time on the way out.

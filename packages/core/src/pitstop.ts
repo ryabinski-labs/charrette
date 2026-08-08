@@ -1,5 +1,5 @@
 import type { PitStopEvery, TaskState } from "@harness/shared";
-import type { ArtifactClaim, CommandClaim } from "./evidence.js";
+import type { ArtifactClaim, CommandClaim, CoverageReading } from "./evidence.js";
 
 /**
  * Pit stops: the checkpoint between "approve this plan" and "here is the diff".
@@ -91,7 +91,23 @@ export interface DemoReport {
   started: boolean;
   /** The commands that started it, or the reason none of them did. */
   howStarted: string;
+  /**
+   * The journeys the demo agent said it would drive, named before it drove
+   * them. Its half of a contract; `journeys` below is the delivery, and
+   * `coverage` is the comparison.
+   *
+   * It exists because the demo runs on the cheap tier and a thin demo is
+   * indistinguishable from a thorough one once it has been summarised. See
+   * `demoCoverage` in evidence.ts for why the comparison is made in code and
+   * not left to whoever reads the report.
+   */
+  plannedJourneys: string[];
   journeys: { name: string; result: "worked" | "broken" | "not-reachable"; evidence: string }[];
+  /**
+   * What the harness made of the two lists above. Derived, never agent-authored
+   * — an agent that grades its own thoroughness grades it "thorough".
+   */
+  coverage: CoverageReading;
   /**
    * What it could not exercise, and why. The single most valuable field in a
    * pit stop: run ec40b527's validator was right about a broken seam *and*
@@ -118,6 +134,15 @@ export interface DemoReport {
   summary: string;
 }
 
+/**
+ * A demo report before the harness has scored it.
+ *
+ * The shape the agent actually returns, and the shape the evidence gate strikes
+ * claims out of. `coverage` is attached last, from what survived — see
+ * `runDemo` — which is why it cannot be part of the type those steps operate on.
+ */
+export type DemoFindings = Omit<DemoReport, "coverage">;
+
 /** One named lens's answer to "is this still the thing the operator asked for?". */
 export interface ReviewReport {
   lens: string;
@@ -142,6 +167,16 @@ export interface PitStop {
    */
   demo: DemoReport | null;
   reviews: ReviewReport[];
+  /**
+   * Lenses the config asked for that this stop did not buy, because the first
+   * pass agreed the run was on track. See `runReviews`.
+   *
+   * Rendered rather than dropped. The reviewer list is a promise the operator
+   * configured — "these four perspectives will look at my product" — and a stop
+   * that shows two of them without saying so has quietly changed that promise.
+   * Empty on every stop that ran them all, which is the usual case.
+   */
+  skippedReviewers: string[];
   /** One line per task merged since the last pit stop. */
   merged: string[];
   /** Tasks not started yet, in the order they would be dispatched. */
@@ -221,6 +256,24 @@ export function renderPitStop(stop: Omit<PitStop, "markdown">): string {
     );
     if (demo.summary) lines.push(demo.summary, "");
 
+    // Before anything the demo claims, how much of its own plan it got through.
+    // Placed here rather than in a footnote because everything below is read in
+    // the light of it: "the checkout is broken" from a demo that drove one of
+    // six journeys is a different sentence from the same words after a full run.
+    const c = demo.coverage;
+    const badge =
+      c.status === "demonstrated" ? "**DEMONSTRATED**" : c.status === "partial" ? "**PARTIAL**" : "**INCONCLUSIVE**";
+    lines.push(
+      `${badge} — ${c.why}. (${c.reached}/${c.planned} planned journeys, ${c.proof} piece(s) of surviving proof.)`,
+      ""
+    );
+    if (c.status === "inconclusive") {
+      lines.push(
+        "> Treat everything below as unverified. This demo did not establish that the product does what it says — not that it doesn't.",
+        ""
+      );
+    }
+
     if (demo.journeys.length) {
       lines.push("## What it did", "");
       for (const j of demo.journeys) {
@@ -250,6 +303,14 @@ export function renderPitStop(stop: Omit<PitStop, "markdown">): string {
       for (const f of r.findings) lines.push(`- ${f}`);
       if (r.question) lines.push("", `> ${r.question}`);
       lines.push("");
+    }
+    if (stop.skippedReviewers.length) {
+      lines.push(
+        `Not run: ${stop.skippedReviewers.join(", ")}. The reviewers above agreed the run is on track with nothing outstanding, ` +
+          "so the remaining lenses were not bought. Nothing has looked at this product through them — a later stop will only " +
+          "do so if its own first pass finds something.",
+        ""
+      );
     }
   }
 
@@ -321,7 +382,16 @@ export function demoUnavailable(why: string): DemoReport {
   return {
     started: false,
     howStarted: `The demo agent did not finish: ${why}`,
+    plannedJourneys: [],
     journeys: [],
+    coverage: {
+      status: "inconclusive",
+      planned: 0,
+      reached: 0,
+      proof: 0,
+      firstBlocked: "",
+      why: `the demo agent did not finish: ${why}`,
+    },
     couldNotReach: ["everything — there is no demo for this pit stop, so nothing below was verified by running it"],
     artifacts: [],
     commands: [],

@@ -384,6 +384,110 @@ export function strikeCommands<T extends { commands: CommandClaim[]; couldNotRea
   };
 }
 
+/**
+ * How much of what the demo set out to do it actually did.
+ *
+ * The other half of this module. `strikeEvidence` asks whether a file the demo
+ * offered is really evidence; this asks whether the demo *covered* anything —
+ * and it exists because the demo agent now runs on the cheap tier, where the
+ * dangerous failure is not a wrong answer but a thin one.
+ *
+ * A weak demo does not announce itself. "I started it and clicked twice"
+ * arrives in exactly the same shape as "I drove six journeys and photographed
+ * each", gets summarised into the same report, and is read by four reviewers on
+ * the most expensive model in the harness who have no way to tell which one
+ * they were handed. They then reason confidently about a product nobody
+ * exercised. That is the same failure as a weak judge returning PASS: the
+ * output is not wrong, it is unfounded, and nothing downstream can see the
+ * difference.
+ *
+ * So the demo has to declare its intent before it reports its results, and the
+ * comparison is made here, in code. `plannedJourneys` is the contract; the
+ * journeys it came back with are the delivery. An agent cannot satisfy this by
+ * lowering its own bar, because planning nothing is itself inconclusive — the
+ * one reading that is never available is "I did everything I meant to" from a
+ * demo that never said what it meant to do.
+ *
+ * Deliberately threshold-free. There is no fraction to tune and no number to
+ * argue about: every planned journey reached with something to show for it is
+ * demonstrated, some of them is partial, none of them is inconclusive. The
+ * counts travel with the verdict so an operator can see 5-of-6 and 1-of-6 are
+ * both "partial" and tell them apart.
+ */
+export type DemoStatus = "demonstrated" | "partial" | "inconclusive";
+
+export interface CoverageReading {
+  status: DemoStatus;
+  /** Journeys the demo said it would drive. Zero is itself a finding. */
+  planned: number;
+  /**
+   * Journeys it actually reached. `broken` counts: a journey driven until it
+   * failed is the most useful thing a demo can come back with, and scoring it
+   * as a miss would push the agent towards only attempting what it expects to
+   * work — which is the opposite of the job.
+   */
+  reached: number;
+  /** Surviving proof: artifacts and commands that got past the checks above. */
+  proof: number;
+  /** The first planned journey it did not reach. Empty when it reached them all. */
+  firstBlocked: string;
+  /** One sentence, for the report and the reviewers' prompt. */
+  why: string;
+}
+
+export function demoCoverage(report: {
+  started: boolean;
+  plannedJourneys: string[];
+  journeys: { name: string; result: "worked" | "broken" | "not-reachable" }[];
+  artifacts: ArtifactClaim[];
+  commands: CommandClaim[];
+}): CoverageReading {
+  const planned = report.plannedJourneys.length;
+  const reachedNames = new Set(report.journeys.filter((j) => j.result !== "not-reachable").map((j) => j.name));
+  // Counted against the plan, not against the journeys list, so that a demo
+  // which drove three things it never planned and none of the six it did is
+  // read as having covered none of them.
+  const hit = report.plannedJourneys.filter((name) => reachedNames.has(name));
+  const proof = report.artifacts.length + report.commands.length;
+  const firstBlocked = report.plannedJourneys.find((name) => !reachedNames.has(name)) ?? "";
+  const base = { planned, reached: hit.length, proof, firstBlocked };
+
+  if (!report.started) {
+    return { ...base, status: "inconclusive", why: "the product never started, so nothing was exercised" };
+  }
+  if (planned === 0) {
+    // The loophole this closes: coverage measured against a plan the agent
+    // writes after the fact is always 100%.
+    return {
+      ...base,
+      status: "inconclusive",
+      why: "the demo never said which journeys it set out to drive, so there is nothing its results can be measured against",
+    };
+  }
+  if (hit.length === 0) {
+    return { ...base, status: "inconclusive", why: `it reached none of the ${planned} journeys it planned` };
+  }
+  if (hit.length < planned) {
+    return {
+      ...base,
+      status: "partial",
+      why: `it reached ${hit.length} of the ${planned} journeys it planned, stopping at "${firstBlocked}"`,
+    };
+  }
+  if (proof === 0) {
+    // Every journey reached and nothing survived the evidence gate. The claims
+    // may well be true; what is missing is any way to check them, and a report
+    // that says "all six worked" on the strength of an agent having typed it is
+    // the thing this module was written about.
+    return {
+      ...base,
+      status: "partial",
+      why: `it reached all ${planned} planned journeys but produced no artifact or command that survived checking`,
+    };
+  }
+  return { ...base, status: "demonstrated", why: `it reached all ${planned} planned journeys, with ${proof} piece(s) of surviving proof` };
+}
+
 /** The agent-facing list of what has to be fixed. Empty when nothing does. */
 export function evidenceFaults(checks: EvidenceCheck[]): string[] {
   return checks.filter((c) => !c.ok).map((c) => `${c.file || "(unnamed)"} — ${c.fault}`);

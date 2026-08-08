@@ -54,6 +54,10 @@ const demoJson = (artifacts: { file: string; shows: string }[], commands: { comm
     started: true,
     howStarted: "pnpm dev on :5173",
     summary: "sign-in works",
+    // Planned and delivered, so the default fixture is a demo that actually
+    // established something — which is what lets the staged review skip its
+    // second pass. `demoThin` below is the same demo without the plan.
+    plannedJourneys: ["Sign in"],
     journeys: [{ name: "Sign in", result: "worked", evidence: "302 to /home" }],
     couldNotReach: ["payments — no test keys"],
     artifacts,
@@ -179,19 +183,23 @@ describe("stopping at an epic boundary", () => {
     const demoSpec = specs.find((s) => s.role === "demo")!;
     expect(demoSpec.cwd).not.toBe(dir);
     expect(demoSpec.cwd).toContain(runId);
-    // One session per configured lens, at each stop, all of them named. The
-    // design lens is the fourth and last: the pit stop is the only place the
-    // whole product is looked at once, and six screens that each passed their
-    // own task's QA can still disagree with each other about every visual
-    // decision. It became worth paying for when the demo agent got a browser —
-    // before that it would have been reviewing a prose description of a screen.
-    expect(specs.filter((s) => s.role === "reviewer").length).toBe(8);
-    expect(first.reviews.map((r) => r.lens)).toEqual([
-      "product-manager",
-      "critical-challenger",
-      "qa-agent",
-      "ui-ux-cx-engineer",
-    ]);
+    // Four lenses are configured, and on a stop this clean only the first two
+    // are bought: a demonstrated demo, both reviewers on-track, no findings and
+    // no questions is the boring case the staging exists to stop paying full
+    // price for. Two lenses at each of two stops.
+    //
+    // The other two are still configured and still named — see the escalation
+    // tests below, where anything at all interesting buys them. The design lens
+    // in particular is worth its price when there is something to look at: the
+    // pit stop is the only place the whole product is seen at once, and six
+    // screens that each passed their own task's QA can still disagree with each
+    // other about every visual decision.
+    expect(specs.filter((s) => s.role === "reviewer").length).toBe(4);
+    expect(first.reviews.map((r) => r.lens)).toEqual(["product-manager", "critical-challenger"]);
+    expect(first.skippedReviewers).toEqual(["qa-agent", "ui-ux-cx-engineer"]);
+    // And the operator is told, rather than shown two opinions where the config
+    // promised four.
+    expect(first.markdown).toContain("Not run: qa-agent, ui-ux-cx-engineer");
     expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
   });
 
@@ -385,6 +393,71 @@ describe("a demo that goes wrong", () => {
     const reviews = stops[0]!.reviews;
     expect(reviews.length).toBe(RunConfig.parse(BASE).pitStop.reviewers.length);
     expect(reviews.filter((r) => r.findings.some((f) => f.includes("this reviewer did not finish"))).length).toBe(1);
+  });
+
+  /** Lenses actually dispatched, in order, across the whole run. */
+  const lensesRun = (specs: AgentSpec[]) =>
+    specs.filter((s) => s.role === "reviewer").map((s) => s.systemPrompt.match(/product-manager|critical-challenger|qa-agent|ui-ux-cx-engineer/)?.[0]);
+
+  it("buys the remaining lenses when a first-pass reviewer is not on-track", async () => {
+    const dir = repo();
+    const drifting = '```json\n{"verdict":"drifting","findings":["the pack screen has nothing behind it"],"question":""}\n```';
+    const { pool, specs } = rolePool({ ...ROLES, reviewer: (_s, nth) => (nth === 1 ? drifting : REVIEW_OK) });
+    const { controller, stops } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a thing", RunConfig.parse(BASE));
+
+    // The whole point of staging: the cheap path is only taken when there is
+    // nothing to find. One lens saying "drifting" buys the other two.
+    expect(stops[0]!.reviews.length).toBe(4);
+    expect(stops[0]!.skippedReviewers).toEqual([]);
+    expect(lensesRun(specs).slice(0, 4)).toEqual(["product-manager", "critical-challenger", "qa-agent", "ui-ux-cx-engineer"]);
+  });
+
+  it("buys them when a first-pass reviewer calls it on-track but still lists findings", async () => {
+    const dir = repo();
+    const niggle = '```json\n{"verdict":"on-track","findings":["the empty state is unstyled"],"question":""}\n```';
+    const { pool } = rolePool({ ...ROLES, reviewer: (_s, nth) => (nth === 2 ? niggle : REVIEW_OK) });
+    const { controller, stops } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a thing", RunConfig.parse(BASE));
+
+    // A lens that says "on track" and then lists what is wrong has not settled
+    // anything the other lenses might deepen.
+    expect(stops[0]!.reviews.length).toBe(4);
+  });
+
+  it("buys them when the demo never established anything, however clean the first pass reads", async () => {
+    const dir = repo();
+    // Same demo, no declared plan — so coverage is inconclusive. This is the
+    // condition that ties the cheap demo to the expensive reviewers: a thin demo
+    // must not also buy a quieter review.
+    const demoThin = (spec: AgentSpec) => {
+      writeFileSync(path.join(artifactsDir(spec), SIGNIN_EVIDENCE.file), '{"log":{"entries":[{"request":{}}]}}');
+      const json = JSON.parse(demoOk(spec).replace(/^```json\n|\n```$/g, ""));
+      return `\`\`\`json\n${JSON.stringify({ ...json, plannedJourneys: [] })}\n\`\`\``;
+    };
+    const { pool } = rolePool({ ...ROLES, demo: demoThin });
+    const { controller, stops } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a thing", RunConfig.parse(BASE));
+
+    expect(stops[0]!.demo!.coverage.status).toBe("inconclusive");
+    expect(stops[0]!.reviews.length).toBe(4);
+    expect(stops[0]!.skippedReviewers).toEqual([]);
+    // And the report says so before it says anything the demo claimed.
+    expect(stops[0]!.markdown).toContain("**INCONCLUSIVE**");
+  });
+
+  it("runs every lens every time when staging is switched off", async () => {
+    const dir = repo();
+    const { pool, specs } = rolePool(ROLES);
+    const { controller, stops } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a thing", RunConfig.parse({ ...BASE, pitStop: { reviewFirstPass: 0 } }));
+
+    expect(specs.filter((s) => s.role === "reviewer").length).toBe(8);
+    expect(stops[0]!.skippedReviewers).toEqual([]);
   });
 
   it("asks nobody when the operator configured no lenses", async () => {

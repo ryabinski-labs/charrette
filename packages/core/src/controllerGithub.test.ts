@@ -452,16 +452,20 @@ describe("QA that answers with prose", () => {
     const { pool, specs } = rolePool({
       planner: (s) => (s.prompt.includes("PRD") ? dagJson() : DOCS),
       worker: workerThatCommits,
-      // The first answer forgets the JSON; the re-ask produces it.
-      qa: (_spec, nth) => (nth === 1 ? "It all looks correct to me." : QA_PASS),
+      // QA forgets the JSON; the re-ask, which is its own role now, produces it.
+      qa: "It all looks correct to me.",
+      repair: QA_PASS,
     });
     const { controller, store } = build({ repoPath: dir, pool });
 
     const runId = await controller.startRun("build a thing", RunConfig.parse({ deterministicChecks: [] }));
 
-    const reask = specs.filter((s) => s.role === "qa").at(-1)!;
+    const reask = specs.filter((s) => s.role === "repair").at(-1)!;
     expect(reask.prompt).toContain("did not contain the verdict JSON");
     expect(reask.maxTurns).toBe(2);
+    // QA itself was asked once. The re-ask is not a second opinion, and billing
+    // it as one would make every unparseable verdict cost two verifications.
+    expect(specs.filter((s) => s.role === "qa")).toHaveLength(1);
     // The work is not sent back to the worker for a verdict QA had already
     // reached — one iteration, one verdict, merged.
     expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
@@ -474,6 +478,9 @@ describe("QA that answers with prose", () => {
       planner: (s) => (s.prompt.includes("PRD") ? dagJson() : DOCS),
       worker: workerThatCommits,
       qa: () => "still no JSON",
+      // Stated rather than left to the pool's empty default: the point of this
+      // test is that the re-ask was asked and would not answer either.
+      repair: () => "still no JSON",
     });
     const { controller, store } = build({ repoPath: dir, pool, gates: { async resolveTaskGate() { return null; } } });
 

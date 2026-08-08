@@ -1,18 +1,97 @@
 import { z } from "zod";
 import { routingViolations } from "./providers.js";
 
+/**
+ * The cheap tier. Named once because four roles reference it and a version
+ * string copied five times is four chances to price one of them wrong: the
+ * budget table in budget.ts keys on this exact id, and a model absent from that
+ * table is charged at the top tier rather than its own.
+ */
+const HAIKU = "claude-haiku-4-5-20251001";
+
 export const ModelRoutingShape = z.object({
   intake: z.string().default("claude-opus-5"),
   planner: z.string().default("claude-opus-5"),
   worker: z.string().default("claude-sonnet-5"),
+  /**
+   * The worker model for tasks the light-tier rule admits. See modelTier.ts for
+   * what "admits" means — it is a deterministic rule over fields the planner
+   * already emits, not a tier the planner names for itself.
+   *
+   * Defaults to the same model as `worker`, which makes the whole tiering path
+   * inert: the rule still runs, still records which tasks it would have sent
+   * down the cheap road, and still changes nothing about what they cost. That is
+   * deliberate. Nobody can say today what fraction of a real plan the rule
+   * admits, or what a Haiku worker does to the merge rate, because the ledger
+   * has never carried a row that would answer either question. Pointing this at
+   * `claude-haiku-4-5-20251001` is the experiment; shipping it already pointed
+   * there would be the experiment run on the operator's money without the
+   * before-measurement.
+   */
+  workerLight: z.string().default("claude-sonnet-5"),
   qa: z.string().default("claude-sonnet-5"),
+  /**
+   * Unused. No agent is dispatched with this model.
+   *
+   * Every `sessionId: "integrator"` in runController.ts is deterministic git
+   * work — merging a task branch, opening a pull request, waiting on checks —
+   * and none of it calls a model. The key is kept because run configs recorded
+   * before anyone noticed carry it, and because removing it would silently
+   * change nothing while looking like it changed something. Setting it has no
+   * effect and never had.
+   */
   integrator: z.string().default("claude-sonnet-5"),
-  /** Drafts the operator's answer when a task escalates (Gate: task-escalation). */
+  /**
+   * Drafts the operator's answer when a task escalates (Gate: task-escalation).
+   *
+   * Stays on Sonnet, and the reason is worth writing down because this role
+   * *looks* like the cheapest thing in the harness: it writes one short answer,
+   * and a human or a skill reads it before anything acts on it. What that
+   * framing misses is that the answer decides which hypothesis gets attention.
+   * Run f338b5c8 spent nine rounds and about $80 on a single task whose probe
+   * was a false positive, and every advisor answer in that loop was *correct* —
+   * "the probe is wrong, leave it alone" — and every one of them led straight
+   * back to the same gate. Correct-but-useless is the failure mode here, it is
+   * not visible in the draft, and a cheaper drafter makes more of it.
+   */
   advisor: z.string().default("claude-sonnet-5"),
   /** Judges the deployed system against the assignment. The last word, so: Opus. */
   prod: z.string().default("claude-opus-5"),
-  /** Starts the half-built product at a pit stop and drives it. Mostly tool work. */
-  demo: z.string().default("claude-sonnet-5"),
+  /**
+   * Starts the half-built product at a pit stop and drives it.
+   *
+   * The expensive half of a pit stop — an 80-turn ceiling against a product the
+   * agent has never seen — and mostly tool work, which is what Haiku is for.
+   *
+   * It is on the cheap tier only because the demo now has to say what it set out
+   * to do before it says what it did. A demo that degrades quietly is the one
+   * genuinely dangerous thing about this change: "started it and clicked twice"
+   * reaches four Opus reviewers looking exactly like "drove it and photographed
+   * six screens", and they reason about the product from whichever one they were
+   * handed. So `plannedJourneys` is compared against what came back, in code,
+   * and a demo that fell short of its own plan is published as INCONCLUSIVE
+   * rather than as thin evidence. See `demoCoverage` in evidence.ts.
+   *
+   * Break-even, if the operator wants to check the bet against the ledger: Haiku
+   * may burn up to 3x Sonnet's tokens at the same price, less whatever the
+   * fallback rate costs — under about 2.4x at a 20% fallback rate.
+   */
+  demo: z.string().default(HAIKU),
+  /**
+   * Re-asks a finished session for output it already produced but did not format.
+   *
+   * The only role in the harness that is genuinely mechanical, and the reason is
+   * structural rather than a judgment about how hard the work is: it runs with
+   * `maxTurns: 2` against a *resumed* session, and its entire instruction is to
+   * restate a conclusion someone else already reached without revisiting it.
+   * There is no judgment left to degrade — the judging was done, on the judging
+   * model, in the session being resumed. What is being bought here is JSON.
+   *
+   * It saves very little. A repair only fires when a QA agent ignored its output
+   * contract, and it is capped at two turns when it does. It is on this list
+   * because it is free of risk, not because it is worth money.
+   */
+  repair: z.string().default(HAIKU),
   /**
    * Reads the demo through one named lens and says whether the run is still
    * building the right thing. This is the judgment the whole pit stop exists to
@@ -82,6 +161,28 @@ export const PitStopConfig = z.object({
     .array(z.string())
     .max(4)
     .default(["product-manager", "critical-challenger", "qa-agent", "ui-ux-cx-engineer"]),
+  /**
+   * How many lenses read the demo before the harness decides whether the rest
+   * are worth paying for. `0` runs them all, every time, which is what this used
+   * to do unconditionally.
+   *
+   * Every lens is a separate Opus session, and four of them fire at every epic
+   * boundary whatever the demo said. Most pit stops in a healthy run are four
+   * reviewers agreeing that the run is on track — which is the answer the first
+   * two already gave, for half the money.
+   *
+   * So the remaining lenses are bought only when the first pass suggests there
+   * is something to find: any first-pass lens that is not `on-track`, any
+   * disagreement between them, a lens that did not finish, or a demo that came
+   * back INCONCLUSIVE. The escalation is deliberately generous — the second pass
+   * is cheap next to missing the drift a pit stop exists to catch, and the
+   * failure this saves money on is the boring case, not the interesting one.
+   *
+   * Which lenses were skipped, and why, is published with the report. A staged
+   * review that silently ran two lenses would read as four opinions, which is
+   * the same lie as a truncated evidence list reading as a complete one.
+   */
+  reviewFirstPass: z.number().int().min(0).max(4).default(2),
   /**
    * The demo agent's turn ceiling. It has to start a product it has never seen
    * and drive it, which is the expensive half of a pit stop; a ceiling that is
