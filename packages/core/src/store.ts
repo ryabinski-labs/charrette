@@ -593,9 +593,10 @@ export class Store {
   }
 
   /**
-   * Replace the run's caps. Only a resolved budget gate calls this, and it is
-   * persisted rather than held in memory so `harness resume` continues under the
-   * cap the operator agreed to instead of tripping again immediately.
+   * Replace the run's caps — from a resolved budget gate, or from an operator
+   * raising a cap live before it was ever reached (`RunController.raiseBudget`).
+   * Persisted rather than held in memory so `harness resume` continues under
+   * the cap that was last agreed to instead of tripping again immediately.
    */
   setRunBudget(runId: string, budget: RunConfig["budget"]): void {
     const run = this.getRun(runId);

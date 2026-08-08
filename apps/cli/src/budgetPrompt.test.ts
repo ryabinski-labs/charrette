@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const { createInterfaceMock } = vi.hoisted(() => ({ createInterfaceMock: vi.fn() }));
 vi.mock("node:readline/promises", () => ({ createInterface: createInterfaceMock }));
 
-import { promptForNewCap } from "./budget.js";
+import { promptForNewCap, watchBudgetCommands } from "./budget.js";
+import type { RunController } from "@harness/core";
 
 const GATE = { scope: "run" as const, spentUsd: 8.5, capUsd: 8, runSpentUsd: 8.5 };
 
@@ -99,5 +100,110 @@ describe("terminal budget prompt", () => {
 
       expect(written.join("")).toMatch(/===== BUDGET =====/);
     });
+  });
+});
+
+describe("watchBudgetCommands", () => {
+  /** Fakes a TTY stdin and gives back the function watchBudgetCommands registered on "data". */
+  function fakeTty(): { emit: (text: string) => void; stop: () => void } {
+    Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+    let handler: ((chunk: Buffer | string) => void) | undefined;
+    vi.spyOn(process.stdin, "on").mockImplementation((event: string, fn: unknown) => {
+      if (event === "data") handler = fn as (chunk: Buffer | string) => void;
+      return process.stdin;
+    });
+    vi.spyOn(process.stdin, "off").mockReturnValue(process.stdin);
+    return { emit: (text: string) => handler?.(text), stop: () => vi.restoreAllMocks() };
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    Object.defineProperty(process.stdin, "isTTY", { value: undefined, configurable: true });
+  });
+
+  it("does nothing outside a real terminal", () => {
+    Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true });
+    const onSpy = vi.spyOn(process.stdin, "on");
+    const controller = { raiseBudget: vi.fn() } as unknown as RunController;
+
+    watchBudgetCommands(controller, () => "run1");
+
+    expect(onSpy).not.toHaveBeenCalled();
+  });
+
+  it("raises the cap for a well-formed command and writes back what happened", () => {
+    const tty = fakeTty();
+    const controller = { raiseBudget: vi.fn(() => "run cap raised to $50.00") } as unknown as RunController;
+    const written: string[] = [];
+
+    watchBudgetCommands(controller, () => "run1", (s) => void written.push(s));
+    tty.emit("budget run 50\n");
+
+    expect(controller.raiseBudget).toHaveBeenCalledWith("run1", "run", 50);
+    expect(written.join("")).toContain("run cap raised to $50.00");
+  });
+
+  it("ignores lines that are not a budget command, without touching the controller", () => {
+    const tty = fakeTty();
+    const controller = { raiseBudget: vi.fn() } as unknown as RunController;
+
+    watchBudgetCommands(controller, () => "run1");
+    tty.emit("y\n");
+    tty.emit("hello there\n");
+
+    expect(controller.raiseBudget).not.toHaveBeenCalled();
+  });
+
+  it("hints at the syntax for a mistyped budget command, but stays silent on everything else", () => {
+    const tty = fakeTty();
+    const controller = { raiseBudget: vi.fn() } as unknown as RunController;
+    const written: string[] = [];
+
+    watchBudgetCommands(controller, () => "run1", (s) => void written.push(s));
+    tty.emit("budget run -5\n");
+    tty.emit("budget xyz\n");
+    tty.emit("y\n");
+    tty.emit("hello there\n");
+
+    expect(controller.raiseBudget).not.toHaveBeenCalled();
+    expect(written).toEqual([
+      '  not a budget command: "budget run -5" — try \'budget run <usd>\' or \'budget task <usd>\'\n',
+      '  not a budget command: "budget xyz" — try \'budget run <usd>\' or \'budget task <usd>\'\n',
+    ]);
+  });
+
+  it("reassembles a command split across chunks and handles multiple lines in one chunk", () => {
+    const tty = fakeTty();
+    const controller = { raiseBudget: vi.fn(() => "ok") } as unknown as RunController;
+
+    watchBudgetCommands(controller, () => "run1");
+    tty.emit("budget ta");
+    tty.emit("sk 12.5\nbudget run 99\n");
+
+    expect(controller.raiseBudget).toHaveBeenNthCalledWith(1, "run1", "task", 12.5);
+    expect(controller.raiseBudget).toHaveBeenNthCalledWith(2, "run1", "run", 99);
+  });
+
+  it("says there is no run yet when the id getter has nothing", () => {
+    const tty = fakeTty();
+    const controller = { raiseBudget: vi.fn() } as unknown as RunController;
+    const written: string[] = [];
+
+    watchBudgetCommands(controller, () => undefined, (s) => void written.push(s));
+    tty.emit("budget run 50\n");
+
+    expect(controller.raiseBudget).not.toHaveBeenCalled();
+    expect(written.join("")).toMatch(/no run yet/);
+  });
+
+  it("stops listening once the returned function is called", () => {
+    fakeTty();
+    const offSpy = vi.spyOn(process.stdin, "off");
+    const controller = { raiseBudget: vi.fn() } as unknown as RunController;
+
+    const stop = watchBudgetCommands(controller, () => "run1");
+    stop();
+
+    expect(offSpy).toHaveBeenCalledWith("data", expect.any(Function));
   });
 });
