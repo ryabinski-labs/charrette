@@ -1904,10 +1904,10 @@ describe("the closing report", () => {
     expect(shown).toContain(expected);
   });
 
-  it("says nothing about CI the repo does not have", async () => {
+  it("says so, loudly, when the repo's CI never ran on the branch", async () => {
     const shown = await reportFor({ ci: { prNumber: 1, state: "none", failing: [], total: 0 } as never });
 
-    expect(shown).not.toContain("CI:");
+    expect(shown).toContain("CI: NONE");
   });
 
   it.each([

@@ -308,15 +308,18 @@ describe("what the run says it produced", () => {
     );
     // A repo with no CI at all is a finding, not a quiet clause: nothing has
     // built the merged tree, and "1 pull request open for review" alone reads
-    // as the same success a green branch reports. It still spends the grace
-    // polls first, in case CI simply had not been queued yet.
+    // as the same success a green branch reports. It still spends a quarter of
+    // the check budget on grace polls first, in case CI simply had not been
+    // queued yet (run 407c2b0b: a fixed 4-poll grace gave up after 60s on a repo
+    // whose CI genuinely took longer than that to queue, so the run reported
+    // "no CI" over a branch that had CI coming).
     const none = fakeGitHub(() => ({ number: 7, url: "u" }), { state: "none", failing: [], total: 0 });
     const b = await build(none.adapter, true, undefined, "single", undefined, 1);
     expect(reason(b.store, b.runId)).toBe(
       "1 pull request open for review; NO CI — nothing checked the merged branch; intent check passed"
     );
     expect(b.logs.join("\n")).toMatch(/#7 has no checks: this repository has no CI/);
-  }, 20_000);
+  }, 30_000);
 
   it("says why no pull request exists when nothing was merged", async () => {
     // The reported symptom: billing-app and sendant each parked their one running
