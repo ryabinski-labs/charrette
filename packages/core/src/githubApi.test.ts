@@ -500,6 +500,21 @@ describe("what CI says about a commit", () => {
     });
   });
 
+  it("is pending, not failing, while a failure sits alongside checks that have not finished", async () => {
+    // web-app run 428d77f8: Frontend failed on this repo's slow, serialized
+    // self-hosted runner while Backend/E2E/Android hadn't started yet, and
+    // `settleChecks` stopped watching the instant this returned "failing" —
+    // reporting one red job to the operator when three more went on to fail
+    // too. The whole point of "settle" is not calling it until there is
+    // nothing left to settle.
+    const { adapter, api } = adapterWith();
+    api.rest.checks.listForRef.mockResolvedValue({
+      data: [run("frontend", "completed", "failure"), run("backend", "queued", null)],
+    });
+
+    await expect(adapter.checksForRef("sha")).resolves.toEqual({ state: "pending", failing: [], total: 2 });
+  });
+
   it.each(["failure", "timed_out", "cancelled", "action_required", "startup_failure"])(
     "counts a %s conclusion as a failure, not something to wait for",
     async (conclusion) => {
