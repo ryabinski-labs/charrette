@@ -464,7 +464,19 @@ export class GitHubAdapter {
       else if (s.state === "failure" || s.state === "error") failing.push(s.context);
     }
     if (!total) return { state: "none", failing: [], total: 0 };
-    if (failing.length) return { state: "failing", failing, total };
+    // A failure with other checks still pending is not yet the whole answer —
+    // only report "failing" once nothing is left running. web-app run 428d77f8
+    // reported "CI is red: Frontend" the moment that one job failed, while
+    // Backend/E2E/Android hadn't even started on the repo's single, serialized
+    // self-hosted runner; they went on to fail too, minutes later, and the
+    // operator only learned that by checking GitHub directly. `settleChecks`
+    // (runController.ts) stops polling as soon as this returns anything but
+    // "pending", so reporting "failing" here while checks remain in flight
+    // silently truncates the operator's picture to whichever check happened to
+    // finish first — exactly the false confidence `awaitChecks`'s "a timeout is
+    // reported as pending, never as a pass" rule exists to prevent, just from
+    // the other direction.
+    if (failing.length && !pending) return { state: "failing", failing, total };
     return { state: pending ? "pending" : "passing", failing: [], total };
   }
 
