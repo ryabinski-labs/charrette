@@ -1269,11 +1269,18 @@ export class RunController {
     const pollMs = Math.min(15_000, Math.max(250, Math.floor(budgetMs / 40)));
     // CI has usually not been queued yet on a commit that is seconds old, so an
     // immediate "none" is indistinguishable from a repo that has no CI at all.
-    let graceLeft = 4;
+    // Run 407c2b0b is why this is a fraction of the whole budget rather than a
+    // fixed handful of polls: a fixed 4 polls at the 15s cap gives up after 60s
+    // regardless of `timeoutMinutes`, which is well inside how long a busy or
+    // self-hosted runner queue can leave a workflow un-started. A quarter of the
+    // configured budget still lets a genuinely CI-less repo resolve quickly on
+    // a short timeout, while giving a slow-to-queue real CI room to appear.
+    const graceDeadline = Date.now() + Math.min(budgetMs, Math.max(pollMs, Math.floor(budgetMs / 4)));
     let checks = await read(ref).catch(() => null);
     while (checks && Date.now() < deadline) {
-      if (checks.state === "none" && graceLeft > 0) graceLeft--;
-      else if (checks.state !== "pending") break;
+      if (checks.state === "none") {
+        if (Date.now() >= graceDeadline) break;
+      } else if (checks.state !== "pending") break;
       await new Promise((r) => setTimeout(r, pollMs));
       const next = await read(ref).catch(() => null);
       if (!next) break;

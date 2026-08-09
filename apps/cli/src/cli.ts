@@ -212,14 +212,16 @@ async function reportOutcome(
   // What the repo and the world said, in the order they said it. A green CI over
   // a red deploy, or a green deploy over a production that disagrees, are the two
   // shapes of "merged but not actually done" — both belong above the artifacts.
-  if (out.ci && out.ci.state !== "none") {
+  if (out.ci) {
     lines.push(
       "",
       out.ci.state === "passing"
         ? `  CI: green on ${link("pull", out.ci.prNumber)}`
         : out.ci.state === "failing"
           ? `  CI: RED on ${link("pull", out.ci.prNumber)} — ${out.ci.failing.join(", ")}`
-          : `  CI: still running on ${link("pull", out.ci.prNumber)} (${out.ci.total} check(s))`
+          : out.ci.state === "none"
+            ? `  CI: NONE — nothing checked ${link("pull", out.ci.prNumber)}. Every green result in this run came from a per-task worktree, never this branch.`
+            : `  CI: still running on ${link("pull", out.ci.prNumber)} (${out.ci.total} check(s))`
     );
   }
   if (out.deploy && out.deploy.state !== "none") {
