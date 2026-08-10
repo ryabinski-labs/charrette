@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { RunConfig } from "@harness/shared";
 import type { HarnessEvent } from "@harness/shared";
 import { Bus } from "./bus.js";
@@ -156,7 +156,7 @@ const QUESTION = "why is there no login page?";
  * inside the first worker — the only honest way to make the request arrive
  * mid-run rather than before one.
  */
-async function summonedRun() {
+async function summonedRun(pmAnswer: string = PM_ANSWER) {
   const dir = repo();
   const holder: { controller?: RunController; store?: Store; runId?: string; asked?: string } = {};
   const { pool, specs } = rolePool({
@@ -177,7 +177,7 @@ async function summonedRun() {
     validator: () => INTENT_PASS,
     demo: demoOk,
     reviewer: () => REVIEW_OK,
-    pm: () => PM_ANSWER,
+    pm: () => pmAnswer,
   });
   const built = build(dir, pool);
   holder.controller = built.controller;
@@ -238,6 +238,21 @@ describe("asking for a pit stop", () => {
     expect(store.listTasks(runId).filter((t) => t.state === "MERGED").length).toBe(2);
   });
 
+  /**
+   * The PM is allowed to have nothing to say. A stop the operator paid for still
+   * has to read as a report — an answer of "stop, blocked on direction" with no
+   * reasoning behind it must say so in words rather than leaving a blank where
+   * the answer goes.
+   */
+  it("still reads as a report when the PM answers with nothing but a verdict", async () => {
+    const { stops } = await summonedRun('```json\n{"action":"stop","blockedOn":"direction","feedback":"","why":""}\n```');
+
+    expect(stops[0]!.markdown).toContain("(no answer given)");
+    expect(stops[0]!.markdown).toContain("It would stop");
+    expect(stops[0]!.markdown).toContain("blocked on direction");
+    expect(stops[0]!.markdown).not.toContain("What it would tell the run");
+  });
+
   it("consumes the request, so one click buys one stop", async () => {
     const { store, runId, asked } = await summonedRun();
 
@@ -292,6 +307,36 @@ describe("the guards on asking", () => {
 
   it("refuses a run it has never heard of", () => {
     expect(bare().controller.requestPitStop("nope", "hello")).toBe("no run nope");
+  });
+
+  /**
+   * A run started without a pit stop gate — `harness run --no-dashboard` — has
+   * nowhere to show the stop. Saying so is better than opening one into a void.
+   */
+  it("refuses when there is nowhere to show the stop", () => {
+    const store = new Store(":memory:");
+    const bus = new Bus(store);
+    const { pool } = rolePool({});
+    const controller = new RunController(
+      store,
+      bus,
+      pool,
+      new GitHubAdapter(undefined, undefined),
+      {
+        async resolvePlanGate() {
+          return { approved: true, feedback: "" };
+        },
+        async resolveBudgetGate() {
+          return null;
+        },
+      },
+      repo()
+    );
+    store.createRun({
+      id: "r1", repoPath: "/repo", assignment: "a", state: "EXECUTING",
+      prdPath: null, planHash: null, integrationBranch: "harness/r1", config: RunConfig.parse({}),
+    });
+    expect(controller.requestPitStop("r1", "why is there no login page?")).toBe("this run has nobody to show a pit stop to");
   });
 
   it("replaces the waiting question instead of queueing a second stop", () => {
@@ -360,6 +405,12 @@ describe("re-routing a role while the run is going", () => {
     expect(controller.rerouteModel("r1", "worker", "claude-sonnet-5")).toBe("worker is already on claude-sonnet-5");
   });
 
+  it("refuses a run it has never heard of, and a blank model name", () => {
+    const { controller } = withRun();
+    expect(controller.rerouteModel("nope", "worker", "claude-opus-5")).toBe("no run nope");
+    expect(controller.rerouteModel("r1", "worker", "   ")).toBe("name a model to route it to");
+  });
+
   /**
    * A live session keeps the model it was spawned on — the harness re-routes by
    * spawning fresh, never by switching under a conversation whose prompt cache
@@ -376,5 +427,38 @@ describe("re-routing a role while the run is going", () => {
     expect(controller.rerouteModel("r1", "worker", "claude-haiku-4-5-20251001")).toContain(
       "1 worker session already running stays on claude-sonnet-5 until it finishes."
     );
+  });
+
+  it("counts more than one running session in the plural", () => {
+    const { controller, store } = withRun();
+    const insert = store.db.prepare(
+      "INSERT INTO sessions (id, runId, taskId, role, model, state, startedAt) VALUES (?,?,?,?,?,?,?)"
+    );
+    insert.run("sess-1", "r1", "task-a", "worker", "claude-sonnet-5", "running", Date.now());
+    insert.run("sess-2", "r1", "task-b", "worker", "claude-sonnet-5", "running", Date.now());
+    expect(controller.rerouteModel("r1", "worker", "claude-haiku-4-5-20251001")).toContain(
+      "2 worker sessions already running stay on claude-sonnet-5 until they finish."
+    );
+  });
+
+  /**
+   * The key check runs *before* the config is touched, because a role routed to
+   * a vendor whose key is not exported fails at the first spawn — minutes later,
+   * in a log, a long way from the click that caused it.
+   */
+  it("refuses a vendor whose key is not exported, and leaves the routing alone", () => {
+    vi.stubEnv("OPENAI_API_KEY", "");
+    const { controller, store } = withRun();
+    expect(controller.rerouteModel("r1", "worker", "gpt-5.6-terra")).toContain("OPENAI_API_KEY is not set");
+    expect(store.getRun("r1")!.config.models.worker).toBe("claude-sonnet-5");
+    vi.unstubAllEnvs();
+  });
+
+  it("reports a non-validation failure to write the config rather than throwing at the operator", () => {
+    const { controller, store } = withRun();
+    store.patchRunConfig = () => {
+      throw new Error("database is locked");
+    };
+    expect(controller.rerouteModel("r1", "worker", "claude-haiku-4-5-20251001")).toContain("database is locked");
   });
 });

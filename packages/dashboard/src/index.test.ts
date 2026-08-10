@@ -910,6 +910,22 @@ describe("summoning a pit stop", () => {
     expect((await post({ cancel: true })).status).toBe(409);
   });
 
+  it("refuses a body with no question at all, the same as an empty one", async () => {
+    const { dash, post } = await withDash();
+    let calls = 0;
+    dash.attach({
+      ...otherSink,
+      sendFeedback: () => "live",
+      raiseBudget: () => "cap raised to $0.00",
+      requestPitStop: () => {
+        calls++;
+        return "pit stop requested";
+      },
+    });
+    expect((await post({})).status).toBe(400);
+    expect(calls).toBe(0);
+  });
+
   it("rejects an unauthenticated summon", async () => {
     const { url } = await withDash();
     const res = await fetch(new URL("/api/runs/r1/pitstop", url), {
@@ -918,6 +934,21 @@ describe("summoning a pit stop", () => {
       body: JSON.stringify({ question: "let me in" }),
     });
     expect(res.status).toBe(401);
+  });
+
+  it("rejects a cross-origin summon", async () => {
+    const { dash, url } = await withDash();
+    const res = await fetch(new URL("/api/runs/r1/pitstop", url), {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${dash.token}`,
+        "content-type": "application/json",
+        origin: "https://evil.example",
+        connection: "close",
+      },
+      body: JSON.stringify({ question: "spend his money" }),
+    });
+    expect(res.status).toBe(403);
   });
 });
 
@@ -937,7 +968,7 @@ describe("live model routing", () => {
         headers: { authorization: `Bearer ${dash.token}`, "content-type": "application/json", connection: "close" },
         body: JSON.stringify(body),
       });
-    return { dash, post };
+    return { dash, post, url };
   }
 
   const wire = (dash: Dashboard, reroute: (runId: string, role: string, model: string) => string) =>
@@ -976,6 +1007,41 @@ describe("live model routing", () => {
     });
     expect((await post({ model: "claude-opus-5" })).status).toBe(400);
     expect((await post({ role: "worker", model: "  " })).status).toBe(400);
+    expect((await post({ role: "worker" })).status).toBe(400);
     expect(calls).toBe(0);
+  });
+
+  it("refuses until the dashboard is wired to a controller", async () => {
+    const { post } = await withDash();
+    expect((await post({ role: "worker", model: "claude-opus-5" })).status).toBe(503);
+  });
+
+  it("rejects an unauthenticated re-route", async () => {
+    const { url } = await withDash();
+    const res = await fetch(new URL("/api/runs/r1/models", url), {
+      method: "POST",
+      headers: { "content-type": "application/json", connection: "close" },
+      body: JSON.stringify({ role: "worker", model: "claude-opus-5" }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  /**
+   * A stale tab on another origin is the last thing that should be able to move
+   * a role, since the roles it cannot reach are the ones that decide what merges.
+   */
+  it("rejects a cross-origin re-route", async () => {
+    const { dash, url } = await withDash();
+    const res = await fetch(new URL("/api/runs/r1/models", url), {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${dash.token}`,
+        "content-type": "application/json",
+        origin: "https://evil.example",
+        connection: "close",
+      },
+      body: JSON.stringify({ role: "worker", model: "claude-opus-5" }),
+    });
+    expect(res.status).toBe(403);
   });
 });
