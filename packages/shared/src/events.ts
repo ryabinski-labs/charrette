@@ -89,6 +89,31 @@ export const HarnessEvent = z.discriminatedUnion("type", [
     failing: z.array(z.string()).default([]),
     total: z.number().int().default(0),
   }),
+  // The operator asked for a pit stop instead of waiting for one. Like the
+  // trigger's own memory below, this is held in the event log rather than on the
+  // controller: a request made at 2am against a run that is restarted at 3am is
+  // still a request, and a request the process forgot is one the operator paid
+  // attention for and got nothing from.
+  //
+  // `question` is what they typed, and it is the whole reason this is not just a
+  // button. It reaches the demo, the reviewers and the decider, so the stop that
+  // opens is about the thing they were worried about rather than a generic look
+  // at the product.
+  //
+  // Pending means: this event with no later `run.pitstop_opened` and no later
+  // `run.pitstop_cancelled`. Cancelling is free and is the reason asking can be
+  // cheap — see `pendingPitStopRequest` in store.ts.
+  z.object({
+    ...base,
+    type: z.literal("run.pitstop_requested"),
+    question: z.string().default(""),
+  }),
+  z.object({
+    ...base,
+    type: z.literal("run.pitstop_cancelled"),
+    /** What the operator had asked, so the log says what was called off. */
+    question: z.string().default(""),
+  }),
   // A pit stop: the run stopped to show the operator what it has built so far.
   // `epicIds` are the epics this stop covers, and they are what stops a second
   // pit stop firing for the same finished epic — so this event is the whole of
@@ -104,6 +129,22 @@ export const HarnessEvent = z.discriminatedUnion("type", [
     /** Where the demo's screenshots, logs and report were written. */
     artifactsDir: z.string().default(""),
     demoStarted: z.boolean().default(false),
+    /**
+     * The operator asked for this one; no boundary was crossed.
+     *
+     * Read by everything that treats this event as the *cadence's* memory, and
+     * the reason those readers do not silently break when a person interrupts a
+     * run. A summoned stop must not advance the `{usd}`, `{minutes}` or
+     * `{tasks}` interval — asking a question at minute 40 would push the next
+     * automatic ninety-minute stop out to minute 130, and nothing would say so
+     * — and it must not stand in for the closing stop a FAIL verdict is owed,
+     * which is the one guarantee PITSTOP.md holds this feature to.
+     *
+     * It still counts: the ordinal, the artifact directory and the container
+     * sweep in `sweepRunResources` all enumerate stops, and a stop missing from
+     * that enumeration is a stack left holding ports.
+     */
+    summoned: z.boolean().default(false),
   }),
   z.object({
     ...base,

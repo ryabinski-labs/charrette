@@ -133,6 +133,38 @@ describe("infrastructure work", () => {
     // The trap this closes: "the bucket exists in staging" is unjudgeable here.
     expect(p).toMatch(/cannot be judged and will park the task/);
   });
+
+  /**
+   * The probe used to be reserved for sweeps, and the measurement said so: of
+   * 406 planned tasks across twelve runs, 305 carried no probe at all. A task
+   * without one cannot reach the light tier however small it is — `taskTier`
+   * refuses it outright — so the instruction, not the rule, was what kept the
+   * cheap worker at zero tasks in every run this harness has ever done.
+   */
+  it("asks for a completion probe on every small task, not only on sweeps", () => {
+    const p = plannerBreakdownSystemPrompt();
+    expect(p).toContain("Write one for every task you size `S`");
+    // The sweep case is still the one that cannot be written any other way.
+    expect(p).toMatch(/cannot be half-satisfied/);
+    // And the ordinary task now has an example, which is what makes the ask
+    // concrete rather than an instruction to be creative.
+    expect(p).toMatch(/npx tsc --noEmit/);
+  });
+
+  /**
+   * Widening what gets a probe widens what a bad probe can cost. Run f338b5c8
+   * spent nine rounds and about $80 on one task whose probe was a false
+   * positive — red for a reason the task was never asked to fix — so the rule
+   * that would have caught it is stated as a rule rather than left to taste.
+   */
+  it("refuses a probe that is red before the task starts, and prefers none to a wrong one", () => {
+    const p = plannerBreakdownSystemPrompt();
+    expect(p).toMatch(/a probe that is red before the task starts parks the task forever/);
+    expect(p).toMatch(/a wrong probe costs far more than a missing one/);
+    // Still read-only and still re-runnable: the harness runs it on every QA
+    // iteration against the tree the operator is about to review.
+    expect(p).toMatch(/never something that writes, deploys, installs or provisions/);
+  });
 });
 
 /**

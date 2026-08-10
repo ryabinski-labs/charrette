@@ -489,14 +489,56 @@ export class Store {
     let atMs = startedAtMs;
     for (const r of rows) {
       // Every field is present: the payload column holds the event exactly as
-      // the schema parsed it, and `epicIds` carries a default.
-      const p = JSON.parse(r.payload) as { epicIds: string[]; mergedCount: number; spentUsd: number; ts: number };
+      // the schema parsed it, and `epicIds` and `summoned` carry defaults.
+      const p = JSON.parse(r.payload) as { epicIds: string[]; mergedCount: number; spentUsd: number; ts: number; summoned: boolean };
+      // A stop the operator asked for is not a boundary the cadence crossed, so
+      // it moves none of the marks the cadence measures from. It is still
+      // counted — see `count` below, which numbers the stops and bounds the
+      // container sweep — but an operator who asks a question at minute 40 must
+      // not thereby push the next `{minutes: 90}` stop out to minute 130.
+      if (p.summoned) continue;
       demoedEpics.push(...p.epicIds);
       mergedAt = p.mergedCount;
       spentAt = p.spentUsd;
       atMs = p.ts;
     }
     return { count: rows.length, demoedEpics, mergedAt, spentAt, atMs };
+  }
+
+  /**
+   * The operator's outstanding request for a pit stop, or null.
+   *
+   * Derived from the event log for the same reason `pitStopHistory` is: the gap
+   * between asking and the stop actually opening is however long the in-flight
+   * tasks take to settle, and that gap is exactly where a process restart, a
+   * `harness resume` or a crash lands. A request held on the controller would be
+   * lost in precisely the window it has to survive.
+   *
+   * Three event types, one pass, last-one-wins: a request is pending until
+   * either a stop opens (it consumed the request) or the operator cancels it.
+   * Asking twice is therefore idempotent — the second request replaces the
+   * first's question rather than queueing a second stop — which is the behaviour
+   * an operator who clicks again because nothing visibly happened expects.
+   */
+  pendingPitStopRequest(runId: string): { question: string; ts: number } | null {
+    const rows = this.db
+      .prepare(
+        "SELECT type, payload FROM events WHERE runId = ? AND type IN " +
+          "('run.pitstop_requested','run.pitstop_cancelled','run.pitstop_opened') ORDER BY seq"
+      )
+      .all(runId) as { type: string; payload: string }[];
+    let pending: { question: string; ts: number } | null = null;
+    for (const r of rows) {
+      if (r.type !== "run.pitstop_requested") {
+        pending = null;
+        continue;
+      }
+      // Every field is present: the payload column holds the event exactly as
+      // the schema parsed it, and `question` carries a default.
+      const p = JSON.parse(r.payload) as { question: string; ts: number };
+      pending = { question: p.question, ts: p.ts };
+    }
+    return pending;
   }
 
   /**
@@ -592,6 +634,28 @@ export class Store {
   lastEventSeq(runId: string, type: string): number {
     const row = this.db.prepare("SELECT MAX(seq) s FROM events WHERE runId = ? AND type = ?").get(runId, type) as { s: number | null };
     return row.s ?? 0;
+  }
+
+  /**
+   * When this run last stopped for a reason that was not the operator asking.
+   *
+   * `closingPitStop` uses it to tell "the operator has already been shown this
+   * FAIL verdict" from "the operator asked an unrelated question after it".
+   * Only the first of those is a reason to skip the closing stop, and
+   * `lastEventSeq(runId, "run.pitstop_opened")` cannot tell them apart —
+   * a summoned stop would suppress the one pit stop PITSTOP.md promises
+   * unconditionally.
+   */
+  lastUnsummonedPitStopSeq(runId: string): number {
+    const rows = this.db
+      .prepare("SELECT seq, payload FROM events WHERE runId = ? AND type = 'run.pitstop_opened' ORDER BY seq DESC")
+      .all(runId) as { seq: number; payload: string }[];
+    for (const r of rows) {
+      // `summoned` carries a default, so a stop recorded before the field
+      // existed reads as false — which is what it was.
+      if (!(JSON.parse(r.payload) as { summoned: boolean }).summoned) return r.seq;
+    }
+    return 0;
   }
 
   /**

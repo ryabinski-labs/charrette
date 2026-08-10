@@ -6,6 +6,18 @@ import { Dashboard } from "./index.js";
 import { PAGE_HTML } from "./page.js";
 
 /**
+ * The three sink methods these tests do not exercise, so a fake can name only
+ * the one it is about. Spread, not optional in the interface: a controller that
+ * stopped implementing one of these should break the build, not the dashboard.
+ */
+const otherSink = {
+  requestPitStop: () => "pit stop requested",
+  cancelPitStop: () => "pit stop cancelled",
+  rerouteModel: () => "worker: a \u2192 b",
+};
+
+
+/**
  * The parts of the dashboard the browser reaches over the wire: the page
  * itself, the event stream, the plan gate, and the checks that stand between a
  * page on another origin and a running harness.
@@ -250,7 +262,7 @@ describe("guards that should never fire", () => {
 
   it("refuses feedback with no message, however it is left out", async () => {
     const { dash, url } = await serving();
-    dash.attach({ sendFeedback: () => "live", raiseBudget: () => "cap raised to $0.00" });
+    dash.attach({ ...otherSink, sendFeedback: () => "live", raiseBudget: () => "cap raised to $0.00" });
 
     for (const body of [{ runId: "r1", taskId: "t1" }, { runId: "r1", taskId: "t1", text: "   " }]) {
       const res = await fetch(new URL("/api/feedback", url), {
@@ -265,6 +277,7 @@ describe("guards that should never fire", () => {
   it("relays a refusal that was not thrown as an Error", async () => {
     const { dash, url } = await serving();
     dash.attach({
+      ...otherSink,
       sendFeedback: () => {
         throw "task t1 has already finished";
       },

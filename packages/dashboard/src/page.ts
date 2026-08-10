@@ -11,6 +11,27 @@
  * Rendering rule: every dynamic string reaches the DOM through textContent, never
  * innerHTML — agent output and repository contents are untrusted input here.
  */
+import { PINNED_ROLES } from "@harness/shared";
+
+/**
+ * What the model dropdowns offer.
+ *
+ * The priced tiers from `budget.ts` — a model absent from that table is billed
+ * at the top tier, so offering one here would be offering the operator a saving
+ * the ledger cannot see. Anthropic first because the pinned roles can take
+ * nothing else, and because a run with no `OPENAI_API_KEY` exported is refused
+ * the others by `missingKeys` before the config is touched.
+ */
+const MODEL_CHOICES = [
+  "claude-opus-5",
+  "claude-sonnet-5",
+  "claude-haiku-4-5-20251001",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+  "gemini-3.5-flash-lite",
+];
+
 export const PAGE_HTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -251,6 +272,47 @@ export const PAGE_HTML = `<!doctype html>
   #fb textarea { margin:.4rem 0 .3rem; font-size:.85rem; }
   #fb button { font-size:.82rem; padding:.32rem .8rem; }
   #fb small { color:var(--dim); font-size:.75rem; }
+
+  /* The summon control. Deliberately NOT the green submit next to it: green in
+     this page means approve/commit/cheap, and this one spends a demo and every
+     reviewer lens. The loud button here is the free one. */
+  #summon { margin-top:.55rem; border-top:1px solid var(--line); padding-top:.5rem; }
+  #summon .lead { color:var(--dim); font-size:.75rem; display:block; margin-bottom:.35rem; }
+  #summon .why { color:var(--mute); font-size:.75rem; display:block; margin-bottom:.4rem; line-height:1.45; }
+  #summon .price { color:var(--faint); font-size:.72rem; display:block; margin-top:.3rem;
+                   font-family:var(--mono); }
+  #summon .row { display:flex; gap:.4rem; flex-wrap:wrap; }
+  #summon button { font-size:.8rem; }
+  #summon .go { border-color:var(--amber); color:var(--amber); }
+  #summon .go:hover { border-color:var(--amber); color:var(--fg); background:color-mix(in srgb, var(--amber) 12%, transparent); }
+  #summon .err { color:var(--red); }
+  /* A pit stop the operator asked for that has not opened yet: pinned above the
+     live agents, hollow and still, because nothing is running for it yet. */
+  .queued { display:flex; gap:.5rem; align-items:baseline; padding:.3rem 0; border-bottom:1px solid var(--line); }
+  .queued .dot { color:var(--amber); font-size:.7rem; }
+  .queued .what { flex:1; min-width:0; }
+  .queued .what b { color:var(--amber); font-weight:600; font-size:.82rem; }
+  .queued .what small { display:block; color:var(--dim); font-size:.74rem; line-height:1.4; }
+  .queued .q { display:block; color:var(--mute); font-size:.76rem; margin-top:.15rem;
+               overflow-wrap:anywhere; font-style:italic; }
+
+  /* Live model routing, in the Run panel next to the other frozen-config facts. */
+  #models summary { cursor:pointer; color:var(--dim); font-size:.76rem; }
+  #models .note { color:var(--faint); font-size:.72rem; display:block; margin:.2rem 0 .35rem; }
+  #models .row { display:flex; gap:.5rem; align-items:baseline; padding:.12rem 0; font-size:.76rem;
+                 font-family:var(--mono); }
+  #models .row .role { color:var(--dim); min-width:6.6rem; }
+  #models .row .val { color:var(--fg); }
+  #models .row .val.editable { border-bottom:1px dotted var(--dim); cursor:pointer; }
+  #models .row .val.editable:hover { color:var(--blue); border-bottom-color:var(--blue); }
+  #models .row .lock { color:var(--faint); margin-left:auto; font-size:.7rem; }
+  #models .row select { background:var(--sunken); color:var(--fg); border:1px solid var(--line);
+                        border-radius:4px; padding:.1rem .2rem; font:inherit; font-size:.74rem; }
+  #models .said { display:block; color:var(--dim); font-size:.72rem; margin:.1rem 0 .25rem 7.1rem; }
+  #models .said.bad { color:var(--red); }
+  #models .locked { border-top:1px solid var(--line); margin-top:.35rem; padding-top:.3rem; }
+  #models .locked .why { color:var(--faint); font-size:.72rem; display:block; margin-top:.25rem;
+                         line-height:1.45; }
   /* .15rem of padding takes the row from 20px to the 24px WCAG 2.2 asks of a
      pointer target, which matters most on the phone layout where these are the
      only things on the panel worth tapping. */
@@ -335,6 +397,20 @@ export const PAGE_HTML = `<!doctype html>
         <button type="submit">Send feedback</button>
         <small id="fb-note"></small>
       </form>
+      <div id="summon" style="display:none" aria-live="polite">
+        <small class="lead">Not sure it&rsquo;s building the right thing?</small>
+        <div id="summon-armed" style="display:none">
+          <small class="why">The demo agent starts the half-built product and drives what you asked
+            about, every reviewer lens reads it, then the PM answers you and recommends what to do
+            next. You still make the call.</small>
+        </div>
+        <div class="row">
+          <button type="button" class="ghost" id="summon-ask">Ask the PM&hellip;</button>
+          <button type="button" class="ghost go" id="summon-go" style="display:none">Spend it &mdash; start the pit stop</button>
+        </div>
+        <small class="price" id="summon-price"></small>
+        <small class="price err" id="summon-note"></small>
+      </div>
     </div>
     <div class="panel">
       <h2>Tasks <span class="count" id="taskcount"></span></h2>
@@ -365,6 +441,15 @@ export const PAGE_HTML = `<!doctype html>
 <script>
 const token = location.hash.slice(1);
 const headers = { authorization: "Bearer " + token };
+/* The roles the server refuses to move off a strong model, inlined from
+   PINNED_ROLES at build time so the page and the config cannot drift. Their rows
+   are rendered without any control at all — preventing the edit is better than
+   validating it, and the server refuses it either way. */
+const LOCKED_ROLES = ${JSON.stringify(Object.keys(PINNED_ROLES))};
+/* Models the operator may route a role to. Not free text: a model id is not
+   typeable from memory, and a typo surfaces as a spawn failure minutes later,
+   in the log, a long way from the cause. */
+const MODEL_CHOICES = ${JSON.stringify(MODEL_CHOICES)};
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => {
   const n = document.createElement(tag);
@@ -504,6 +589,26 @@ function describe(ev) {
         (ev.why ? "   (" + clip(ev.why, 120) + ")" : "")];
     case "intake.brief_ready":
       return ["state", "intake", "brief agreed (" + ev.decisions + " decisions): " + clip(ev.goal, 120)];
+    // The operator's own actions, said back to them in the feed. Without these
+    // the log shows a bare run.pitstop_requested — which is the default case
+    // below, and reads as a harness internal rather than as the thing they just
+    // clicked and are now waiting on.
+    case "run.pitstop_requested":
+      return ["state", "pitstop", "you asked for a pit stop: " + clip(ev.question, 160) +
+        "   (it opens when the running tasks settle; nothing new is dispatched until it does)"];
+    case "run.pitstop_cancelled":
+      return ["state", "pitstop", "you called off the pit stop you asked for \\u2014 nothing was spent" +
+        (ev.question ? "   (" + clip(ev.question, 120) + ")" : "")];
+    // Neither of these had a case either, so the two most consequential lines in
+    // a run's history — it stopped to show you something, and here is what was
+    // decided on it — rendered as their own event names.
+    case "run.pitstop_opened":
+      return ["state", "pitstop", "pit stop " + ev.stop + (ev.summoned ? " (you asked for it)" : "") + " \\u2014 " + ev.reason +
+        (ev.demoStarted ? "; the product started" : "; the product did not start")];
+    case "run.pitstop_resolved":
+      return [ev.action === "continue" ? "state" : "bad", "pitstop",
+        "pit stop " + ev.stop + ": " + ev.action + " (" + ev.decidedBy + ")" +
+        (ev.blockedOn ? ", blocked on " + ev.blockedOn : "") + (ev.why ? " \\u2014 " + clip(ev.why, 160) : "")];
     case "git.worktree_created":
       return ["git", ev.taskId, "worktree on " + ev.branch];
     case "task.deps_seeded":
@@ -627,6 +732,32 @@ function renderHeader() {
 /** When the last running session stopped being reported; 0 while one is. */
 let idleSince = 0;
 
+/**
+ * The row for a pit stop that has been asked for and has not opened yet.
+ *
+ * It carries the cancel, and the cancel is not a courtesy: it is the cheapest
+ * undo in the product — a request that has not opened has spent nothing — and
+ * it is what makes asking a low-stakes click rather than a commitment.
+ */
+function queuedPitStopRow(run) {
+  const working = run.tasks.filter((t) => groupOf[t.state] === "live").map((t) => t.id);
+  const row = el("div", "queued");
+  row.append(el("span", "dot", "\\u25c7"));
+  const what = el("div", "what");
+  what.append(el("b", null, "pit stop \\u00b7 requested"));
+  what.append(el("small", null, working.length
+    ? "Starts when " + working.join(", ") + " settle" + (working.length === 1 ? "s" : "") +
+      ". No new task starts until it is done."
+    : "Starting now. No new task starts until it is done."));
+  what.append(el("span", "q", "\\u201c" + run.pitStopRequest.question + "\\u201d"));
+  row.append(what);
+  const cancel = el("button", "ghost", "Cancel");
+  cancel.type = "button";
+  cancel.addEventListener("click", () => postPitStop({ cancel: true }));
+  row.append(cancel);
+  return row;
+}
+
 function renderNow() {
   const box = $("now");
   box.textContent = "";
@@ -638,6 +769,10 @@ function renderNow() {
   }
   const live = [];
   for (const run of runs) for (const s of run.sessions) if (s.state === "running") live.push(s);
+  // Pinned above the live agents, and above the idle copy too: a run that stops
+  // dispatching because a pit stop is queued would otherwise read as "between
+  // agents — nothing is waiting on you", which is the opposite of true.
+  for (const run of runs) if (run.pitStopRequest) box.append(queuedPitStopRow(run));
   if (!live.length) {
     /*
      * No session is running, which is not the same thing as nothing happening.
@@ -774,6 +909,215 @@ async function sendFeedback(e) {
   } else {
     note.textContent = body.error || "could not send feedback";
   }
+}
+
+/* ---------- summoning a pit stop ---------- */
+
+/* Armed means the operator has clicked once and the second, spending click is
+   showing. Held here rather than read off the DOM so that a poll rebuilding the
+   sidebar cannot silently disarm — or, far worse, silently re-arm — the control. */
+let summonArmed = false;
+
+/* Which run the summon control acts on. There is one composer for the sidebar
+   and runs are effectively one at a time, so this is the first open run — the
+   same run every other control in this panel acts on. */
+function summonRun() {
+  return runs.length ? runs[0] : null;
+}
+
+/**
+ * What a pit stop costs this run, from this run's own history rather than a
+ * guess.
+ *
+ * A figure the operator can check beats a range they have to trust, and the
+ * only honest source is what the last stop actually cost. Before there has been
+ * one, the range is stated as a range and said to be an estimate — this page
+ * does not know how many lenses this operator configured or how long their
+ * product takes to start.
+ */
+function summonPrice(run) {
+  const lenses = ((run.config.pitStop || {}).reviewers || []).length;
+  return "a demo + " + lenses + " reviewer lens" + (lenses === 1 ? "" : "es") + " + the PM" +
+    " \\u00b7 a few minutes \\u00b7 no new task starts until it is done";
+}
+
+function disarmSummon() {
+  summonArmed = false;
+  $("summon-armed").style.display = "none";
+  $("summon-go").style.display = "none";
+  $("summon-ask").textContent = "Ask the PM\\u2026";
+}
+
+/**
+ * The summon control's three states: idle, armed, and a request already waiting.
+ *
+ * Rebuilt from the poll like everything else in this panel, and it must not
+ * stamp on the operator mid-interaction — so the armed state is only ever
+ * cleared here when the thing it would have bought already exists.
+ */
+function renderSummon() {
+  const run = summonRun();
+  const box = $("summon");
+  if (!run || (run.state !== "EXECUTING" && run.state !== "INTEGRATING")) {
+    box.style.display = "none";
+    disarmSummon();
+    return;
+  }
+  box.style.display = "block";
+  const price = $("summon-price");
+  const ask = $("summon-ask");
+  if (run.pitStopRequest) {
+    // Already waiting. Arming again would offer to buy a second one, and the
+    // controller would only replace the question — so the button says what the
+    // free action is instead, and the queued row above carries the cancel.
+    disarmSummon();
+    ask.disabled = true;
+    ask.textContent = "Ask the PM\\u2026";
+    price.textContent = "A pit stop is already queued \\u2014 cancel it above to change the question.";
+    return;
+  }
+  ask.disabled = false;
+  price.textContent = summonArmed ? summonPrice(run) : "";
+}
+
+/** First click: arm. Second click on the same button: stand down. */
+function armSummon() {
+  if (summonArmed) { disarmSummon(); $("summon-price").textContent = ""; return; }
+  const note = $("summon-note");
+  note.textContent = "";
+  // Requiring the question before arming, not after: a pit stop asking "is this
+  // fine?" is the single most likely way to waste one, and the cheapest moment
+  // to stop it is before the spending button has ever been shown.
+  if (!$("fb-text").value.trim()) {
+    note.textContent = "write the question the PM should answer first";
+    $("fb-text").focus();
+    return;
+  }
+  summonArmed = true;
+  $("summon-armed").style.display = "block";
+  $("summon-go").style.display = "inline-block";
+  // Cancel takes the slot the first click was at, so a double-click lands on
+  // standing down rather than on spending.
+  $("summon-ask").textContent = "Cancel";
+  $("summon-price").textContent = summonPrice(summonRun());
+  $("summon-go").focus();
+}
+
+async function postPitStop(payload) {
+  const run = summonRun();
+  if (!run) return;
+  const note = $("summon-note");
+  const res = await fetch("/api/runs/" + encodeURIComponent(run.id) + "/pitstop", {
+    method: "POST",
+    headers: Object.assign({ "content-type": "application/json" }, headers),
+    body: JSON.stringify(payload),
+  });
+  const body = await res.json().catch(() => ({}));
+  note.className = "price" + (res.ok ? "" : " err");
+  note.textContent = res.ok ? body.message || "" : body.error || "could not reach the run";
+  if (res.ok && !payload.cancel) $("fb-text").value = "";
+  disarmSummon();
+  refresh();
+}
+
+/* ---------- live model routing ---------- */
+
+/* The role whose row is currently an open <select>, so a rebuild can leave it
+   alone. Same problem the feedback target has, and the same shape of answer. */
+let editingRole = "";
+/* What the server said about the last edit, keyed by role, so the sentence sits
+   under the row that produced it rather than in a shared status line. */
+const modelSaid = {};
+
+async function saveModel(run, role, model) {
+  const res = await fetch("/api/runs/" + encodeURIComponent(run.id) + "/models", {
+    method: "POST",
+    headers: Object.assign({ "content-type": "application/json" }, headers),
+    body: JSON.stringify({ role: role, model: model }),
+  });
+  const body = await res.json().catch(() => ({}));
+  // The server is the authority on what the next agent will actually run, so a
+  // refusal reverts the row rather than leaving the operator's choice showing.
+  modelSaid[role] = { text: res.ok ? body.message : body.error || "could not re-route", ok: res.ok };
+  editingRole = "";
+  modelSig = "";
+  refresh();
+}
+
+let modelSig = "";
+
+/**
+ * The run's model-per-role table, editable for the rest of the run.
+ *
+ * The four pinned roles are rendered as text with no control at all. Refusing
+ * the edit at the server and never offering it are both correct; doing both is
+ * what stops a stale tab from being the only thing between a cheap model and
+ * the agent that decides whether work is shippable.
+ */
+function renderModels(run, box) {
+  const models = run.config.models;
+  // A run whose stored config predates the routing table has nothing to show
+  // and nothing to edit. Rendering an empty disclosure would be worse than
+  // rendering none — it would read as "this run uses no models".
+  if (!models) return;
+  const roles = Object.keys(models);
+  if (!roles.length) return;
+  const open = roles.filter((r) => LOCKED_ROLES.indexOf(r) === -1);
+  const changed = open.filter((r) => modelSaid[r] && modelSaid[r].ok).length;
+
+  const d = el("details");
+  d.id = "models";
+  d.open = openModels.has(run.id);
+  d.addEventListener("toggle", () => {
+    if (d.open) openModels.add(run.id);
+    else openModels.delete(run.id);
+  });
+  d.append(el("summary", null, "Models \\u00b7 " + roles.length + " roles" + (changed ? " \\u00b7 " + changed + " changed" : "")));
+  d.append(el("small", "note", "affects agents started from now on"));
+
+  const row = (role, locked) => {
+    const r = el("div", "row");
+    r.append(el("span", "role", role));
+    if (locked) {
+      r.append(el("span", "val", models[role]));
+      r.append(el("span", "lock", "locked"));
+      return r;
+    }
+    if (editingRole === role) {
+      const sel = el("select");
+      sel.setAttribute("aria-label", "Model for the " + role + " role");
+      const choices = MODEL_CHOICES.indexOf(models[role]) === -1 ? [models[role]].concat(MODEL_CHOICES) : MODEL_CHOICES;
+      for (const m of choices) {
+        const o = el("option", null, m);
+        o.value = m;
+        sel.append(o);
+      }
+      sel.value = models[role];
+      sel.addEventListener("change", () => { if (sel.value !== models[role]) saveModel(run, role, sel.value); });
+      sel.addEventListener("keydown", (e) => { if (e.key === "Escape") { editingRole = ""; modelSig = ""; renderRunInfo(); } });
+      r.append(sel);
+      return r;
+    }
+    const val = el("span", "val editable", models[role]);
+    val.tabIndex = 0;
+    val.setAttribute("role", "button");
+    val.setAttribute("aria-label", "Model for the " + role + " role: " + models[role] + ". Change it.");
+    const edit = () => { editingRole = role; modelSig = ""; renderRunInfo(); };
+    val.addEventListener("click", edit);
+    val.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); edit(); } });
+    r.append(val);
+    return r;
+  };
+
+  for (const role of open) {
+    d.append(row(role, false));
+    if (modelSaid[role]) d.append(el("small", "said" + (modelSaid[role].ok ? "" : " bad"), modelSaid[role].text));
+  }
+  const locked = el("div", "locked");
+  for (const role of roles) if (LOCKED_ROLES.indexOf(role) !== -1) locked.append(row(role, true));
+  locked.append(el("small", "why", "These decide whether work is correct or shippable. A cheap model here is how bad work merges."));
+  d.append(locked);
+  box.append(d);
 }
 
 /**
@@ -1039,6 +1383,9 @@ let runAges = [];
 /** Assignments the operator opened. Survives the rare rebuild, for the same
  *  reason openTasks does on the board. */
 const openAssignments = new Set();
+/** Same, for the model table — it is the disclosure an operator watching spend
+ *  leaves open, and snapping it shut every 5s would make it unusable. */
+const openModels = new Set();
 
 function tickRunAges() {
   for (const a of runAges) a.node.textContent = dur(Date.now() - a.createdAt) + " ago";
@@ -1051,6 +1398,11 @@ function renderRunInfo() {
     run.id, run.repoPath, run.integrationBranch, run.createdAt, run.assignment,
     run.config.deterministicChecks.join(","), run.config.qaIterationCap,
     run.config.budget.runCapUsd,
+    // The model table lives in this panel, so its values — and the two bits of
+    // local state that decide how a row is drawn — belong in the signature.
+    // Without them a re-route saves and the row still shows the old model until
+    // some unrelated fact happens to change.
+    JSON.stringify(run.config.models), editingRole, modelSig,
   ].join("\\u0000")).join("\\u0001");
   if (sig === runInfoSig) { tickRunAges(); return; }
   runInfoSig = sig;
@@ -1095,6 +1447,7 @@ function renderRunInfo() {
     pre.setAttribute("aria-label", "Assignment the planner received");
     d.append(pre);
     box.append(d);
+    renderModels(run, box);
     const cfg = el("div", "empty", "checks: " + (run.config.deterministicChecks.join(" \\u00b7 ") || "none") +
       "  \\u00b7  QA cap " + run.config.qaIterationCap);
     cfg.style.fontSize = ".76rem";
@@ -1392,7 +1745,7 @@ async function refresh() {
       "The run cap of $" + bg.capUsd.toFixed(2) + " was reached: $" + bg.spentUsd.toFixed(2) + " spent. " +
       "The agent is paused, not cancelled — raise the cap in the header above to continue.";
   }
-  renderHeader(); renderNow(); renderFeedback(); renderBoard(); renderPrs(); renderRunInfo();
+  renderHeader(); renderNow(); renderFeedback(); renderSummon(); renderBoard(); renderPrs(); renderRunInfo();
   for (const run of runs) stream(run.id);
 }
 
@@ -1504,6 +1857,15 @@ $("fb").addEventListener("submit", sendFeedback);
 $("fb-task").addEventListener("change", () => {
   fbChosen = $("fb-task").value;
   if (fbChosen) { $("fb-note").style.color = ""; $("fb-note").textContent = ""; }
+});
+$("summon-ask").addEventListener("click", armSummon);
+$("summon-go").addEventListener("click", () => postPitStop({ question: $("fb-text").value.trim() }));
+/* Editing the question after arming disarms: the armed button was offered for
+   the sentence that was in the box when it was clicked, and a control that keeps
+   its authorisation across a rewrite is authorising something nobody read. */
+$("fb-text").addEventListener("input", () => { if (summonArmed) { disarmSummon(); $("summon-price").textContent = ""; } });
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && summonArmed) { disarmSummon(); $("summon-price").textContent = ""; }
 });
 refresh();
 setInterval(refresh, 5000);
