@@ -99,6 +99,55 @@ and demo something that was never meant to stand alone.
 Whatever the trigger, a pit stop never fires while a task is mid-QA: it waits for
 the in-flight tasks to reach a terminal state, so the operator sees a settled tree.
 
+### The other one that is not a trigger: the operator asking
+
+Every trigger in the table above is a boundary the *plan* crossed. None of them
+fires because the product started looking wrong on screen, which is the moment
+an operator watching the log actually has something to say. So they can ask:
+
+> **Ask the PM…** — in the dashboard's Now panel, under the feedback box.
+
+They type the question first — the control refuses to arm without one — and then
+confirm. The question is what makes this stop worth more than the one that was
+already coming: it reaches the demo agent, which drives what they asked about
+*first* so that a demo running out of turns has done their part rather than
+somebody else's, and it reaches the PM, which must answer it before it
+recommends anything.
+
+Four things make it different from the automatic stops:
+
+- **It overrides the cadence, including `"never"`.** `{"every": "never"}` is an
+  answer to "stop me at every epic boundary". It was never an answer to "I want
+  to look at this now", and a run that ignored the button because of a config
+  set last week would be useless exactly when it mattered.
+- **It buys every reviewer lens.** The staged review skips the second pass when
+  the first agrees the run is on track. That bet is only good when nothing
+  outside the report suggested otherwise — and here something did: a person
+  watched this run and stopped it. That signal arrived before the first lens was
+  bought and is stronger than anything `worthMoreLenses` can read.
+- **The decision comes back to the operator**, whatever `pitStop.decidedBy`
+  names — the same rule as the resume stop below, for the same reason. The PM
+  still answers, and its answer and its recommended action are appended to
+  `REPORT.md` before the operator is asked. What they lose is nothing; what they
+  keep is the checkpoint they just paid for.
+- **It moves none of the cadence's marks.** A summoned stop is recorded with
+  `summoned: true` and is skipped by everything that treats
+  `run.pitstop_opened` as the *interval's* memory. Without that, asking a
+  question at minute 40 would push the next `{"minutes": 90}` stop out to minute
+  130 with nothing saying so, and a stop summoned after a FAIL intent verdict
+  would suppress the closing stop that S6 promises unconditionally.
+
+Nothing is interrupted. The request stops the scheduler dispatching new tasks and
+the stop opens once the in-flight ones settle — the same rule the automatic stops
+follow, because a tree with three workers half-way through their tasks is not a
+product to show anybody. A worker forty turns in finishes; killing it would throw
+away a warm worktree and change nothing about the demo, which reads the
+integration branch and never a worker's tree.
+
+Until it opens, the request costs nothing and **Cancel** is free. That is what
+lets asking be a low-stakes click rather than a commitment. Asking twice replaces
+the question rather than queueing a second stop.
+
 ### The one that is not a trigger: `harness resume`
 
 A run parked at a pit stop opens one more when it is resumed, before it dispatches

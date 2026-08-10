@@ -23,17 +23,21 @@ function store(): Store {
   return s;
 }
 
-const opened = (s: Store, over: Partial<{ stop: number; epicIds: string[]; mergedCount: number; spentUsd: number; ts: number }>) =>
+const opened = (
+  s: Store,
+  over: Partial<{ stop: number; epicIds: string[]; mergedCount: number; spentUsd: number; ts: number; summoned: boolean }>
+) =>
   s.appendEvent({
     type: "run.pitstop_opened",
     runId: "run1",
     stop: over.stop ?? 1,
-    reason: "an epic finished",
+    reason: over.summoned ? "you asked for a look at the product" : "an epic finished",
     epicIds: over.epicIds ?? [],
     mergedCount: over.mergedCount ?? 0,
     spentUsd: over.spentUsd ?? 0,
     artifactsDir: "/repo/.harness/run1/pitstops/1",
     demoStarted: true,
+    summoned: over.summoned ?? false,
     ts: over.ts ?? 5_000,
   });
 
@@ -90,5 +94,112 @@ describe("pitStopHistory", () => {
       spentAt: 55,
       atMs: 9_000,
     });
+  });
+
+  /**
+   * The bug this guards is silent and only shows up an hour later: an operator
+   * asks a question at minute 40 of a `{minutes: 90}` run, and the automatic pit
+   * stop they configured slides to minute 130 with nothing anywhere saying so.
+   */
+  it("does not let a stop the operator asked for move the cadence's marks", () => {
+    const s = store();
+    opened(s, { stop: 1, epicIds: ["epic-a"], mergedCount: 3, spentUsd: 20, ts: 5_000 });
+    opened(s, { stop: 2, mergedCount: 9, spentUsd: 90, ts: 9_000, summoned: true });
+
+    const h = s.pitStopHistory("run1", 1_234);
+    // Every mark the interval triggers measure from still reads the automatic
+    // stop…
+    expect(h).toMatchObject({ demoedEpics: ["epic-a"], mergedAt: 3, spentAt: 20, atMs: 5_000 });
+    // …but the summoned one is still a stop that happened: the count numbers the
+    // artifact directories and bounds the container sweep, and one missing from
+    // it is a compose stack left holding ports.
+    expect(h.count).toBe(2);
+  });
+});
+
+describe("pendingPitStopRequest", () => {
+  const asked = (s: Store, question: string) => s.appendEvent({ type: "run.pitstop_requested", runId: "run1", question, ts: 1 });
+
+  it("is null until somebody asks", () => {
+    expect(store().pendingPitStopRequest("run1")).toBeNull();
+  });
+
+  it("returns what the operator typed", () => {
+    const s = store();
+    asked(s, "is the checkout still broken?");
+    expect(s.pendingPitStopRequest("run1")).toMatchObject({ question: "is the checkout still broken?" });
+  });
+
+  /**
+   * Asking twice must not buy two demos. An operator who clicks again because
+   * nothing visibly happened is correcting their question, not queueing a
+   * second stop, and the bill has to agree with them.
+   */
+  it("keeps only the latest question when asked twice", () => {
+    const s = store();
+    asked(s, "first");
+    asked(s, "second");
+    expect(s.pendingPitStopRequest("run1")).toMatchObject({ question: "second" });
+  });
+
+  it("is cleared by the stop that answers it", () => {
+    const s = store();
+    asked(s, "why is there no login page?");
+    opened(s, { stop: 1, summoned: true });
+    expect(s.pendingPitStopRequest("run1")).toBeNull();
+  });
+
+  it("is cleared by the operator calling it off", () => {
+    const s = store();
+    asked(s, "never mind");
+    s.appendEvent({ type: "run.pitstop_cancelled", runId: "run1", question: "never mind", ts: 2 });
+    expect(s.pendingPitStopRequest("run1")).toBeNull();
+  });
+
+  it("comes back when they ask again after a stop", () => {
+    const s = store();
+    asked(s, "first");
+    opened(s, { stop: 1, summoned: true });
+    asked(s, "and another thing");
+    expect(s.pendingPitStopRequest("run1")).toMatchObject({ question: "and another thing" });
+  });
+});
+
+describe("lastUnsummonedPitStopSeq", () => {
+  it("is zero on a run that has never stopped", () => {
+    expect(store().lastUnsummonedPitStopSeq("run1")).toBe(0);
+  });
+
+  /**
+   * `closingPitStop` skips itself when a stop has already shown the operator the
+   * current intent verdict. A summoned stop shows them the answer to their own
+   * question, which is a different thing — and letting it count would suppress
+   * the one pit stop PITSTOP.md promises unconditionally (S6).
+   */
+  it("ignores stops the operator asked for", () => {
+    const s = store();
+    const auto = opened(s, { stop: 1, ts: 5_000 });
+    opened(s, { stop: 2, ts: 9_000, summoned: true });
+    expect(s.lastUnsummonedPitStopSeq("run1")).toBe(auto);
+  });
+
+  it("reads a stop recorded before the field existed as automatic", () => {
+    const s = store();
+    // Written the way the old code wrote it: no `summoned` key at all.
+    s.appendEvent({
+      type: "run.pitstop_opened",
+      runId: "run1",
+      stop: 1,
+      reason: "an epic finished",
+      epicIds: [],
+      mergedCount: 0,
+      spentUsd: 0,
+      artifactsDir: "",
+      demoStarted: true,
+      ts: 5_000,
+      // Through `unknown` on purpose: the field is required on the current type,
+      // and the whole point of this test is a row written before it existed.
+    } as unknown as Parameters<Store["appendEvent"]>[0]);
+    expect(s.lastUnsummonedPitStopSeq("run1")).toBeGreaterThan(0);
   });
 });

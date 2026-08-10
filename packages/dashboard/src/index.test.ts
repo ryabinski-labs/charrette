@@ -4,10 +4,22 @@ import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { RunConfig, RunState, TaskState } from "@harness/shared";
+import { PINNED_ROLES, RunConfig, RunState, TaskState } from "@harness/shared";
 import { Bus, Store } from "@harness/core";
 import { Dashboard } from "./index.js";
 import { PAGE_HTML } from "./page.js";
+
+/**
+ * The three sink methods these tests do not exercise, so a fake can name only
+ * the one it is about. Spread, not optional in the interface: a controller that
+ * stopped implementing one of these should break the build, not the dashboard.
+ */
+const otherSink = {
+  requestPitStop: () => "pit stop requested",
+  cancelPitStop: () => "pit stop cancelled",
+  rerouteModel: () => "worker: a \u2192 b",
+};
+
 
 /** Hold a port the way a second harness would. */
 function occupy(port: number): Promise<Server> {
@@ -511,6 +523,60 @@ describe("the page itself", () => {
     expect(groups.find((g) => g.key === "done")!.states).toEqual(["ACCEPTED", "MERGED"]);
   });
 
+  /**
+   * The summon control is deliberately NOT an option in the feedback `<select>`.
+   *
+   * Every option in that list today is cheap, instant and reversible, and
+   * `keepTarget` will fall back to `values[0]` when there is no prior choice —
+   * which is a routing quirk while every target is free and a billing bug the
+   * moment one of them buys a demo and four Opus lenses. So it is its own
+   * control, and it takes two clicks.
+   */
+  it("keeps the pit stop out of the feedback target list, and arms it before it can spend", () => {
+    expect(PAGE_HTML).toMatch(/id="summon"/);
+    expect(PAGE_HTML).toMatch(/id="summon-ask"/);
+    expect(PAGE_HTML).toMatch(/id="summon-go"/);
+    // The composer's <select> is built by renderFeedback, and nothing in it may
+    // name the pit stop.
+    const feedbackFn = /(function renderFeedback\(\)[\s\S]*?\n\})/.exec(PAGE_HTML)![1]!;
+    expect(feedbackFn).not.toMatch(/summon|pitstop|pit stop/i);
+
+    // Two clicks, and the first is refused without a question — a pit stop that
+    // asks nothing costs exactly as much as one that asks something.
+    expect(PAGE_HTML).toMatch(/function armSummon\(\)/);
+    expect(PAGE_HTML).toContain("write the question the PM should answer first");
+    // Cancel takes the slot the first click was at, so a double-click stands
+    // down rather than spending.
+    expect(PAGE_HTML).toMatch(/\$\("summon-ask"\)\.textContent = "Cancel"/);
+    // Rewriting the question after arming disarms: the authorisation was for
+    // the sentence that was in the box when the button was clicked.
+    expect(PAGE_HTML).toMatch(/\$\("fb-text"\)\.addEventListener\("input"[\s\S]*?disarmSummon\(\)/);
+    // And the price is stated before the spending click, not after it.
+    expect(PAGE_HTML).toMatch(/no new task starts until it is done/);
+  });
+
+  it("offers the free cancel while the stop is only queued", () => {
+    // The cheapest undo in the product: a request that has not opened has spent
+    // nothing, which is what lets the ask itself stay a low-stakes click.
+    expect(PAGE_HTML).toMatch(/function queuedPitStopRow\(run\)/);
+    expect(PAGE_HTML).toMatch(/postPitStop\(\{ cancel: true \}\)/);
+    expect(PAGE_HTML).toContain("No new task starts until it is done.");
+  });
+
+  /**
+   * The four pinned roles get no control at all rather than a control the
+   * server rejects. Preventing beats validating: a stale tab is otherwise the
+   * only thing between a cheap model and the agent that decides what merges.
+   */
+  it("renders the pinned roles as text and says once why", () => {
+    expect(PAGE_HTML).toMatch(/const LOCKED_ROLES = \[/);
+    for (const role of Object.keys(PINNED_ROLES)) expect(PAGE_HTML).toContain(`"${role}"`);
+    expect(PAGE_HTML).toContain("A cheap model here is how bad work merges.");
+    // The edit only reaches agents that have not started yet, and the panel
+    // says so while it is open rather than only after a save.
+    expect(PAGE_HTML).toContain("affects agents started from now on");
+  });
+
   it("renders task-escalation gates and preserves a half-typed answer across refreshes", () => {
     expect(PAGE_HTML).toMatch(/id="taskgates"/);
     expect(PAGE_HTML).toMatch(/function renderTaskGates/);
@@ -651,6 +717,7 @@ describe("live budget raises", () => {
     const { dash, post } = await withDash();
     let calls = 0;
     dash.attach({
+      ...otherSink,
       sendFeedback: () => "live",
       raiseBudget: () => {
         calls++;
@@ -664,7 +731,7 @@ describe("live budget raises", () => {
 
   it("returns the controller's refusal rather than claiming the cap changed", async () => {
     const { dash, post } = await withDash();
-    dash.attach({ sendFeedback: () => "live", raiseBudget: () => "cap must exceed $12.00 already spent" });
+    dash.attach({ ...otherSink, sendFeedback: () => "live", raiseBudget: () => "cap must exceed $12.00 already spent" });
 
     const res = await post({ capUsd: 10 });
     expect(res.status).toBe(400);
@@ -675,6 +742,7 @@ describe("live budget raises", () => {
     const { dash, post } = await withDash();
     const raised: Array<[string, number]> = [];
     dash.attach({
+      ...otherSink,
       sendFeedback: () => "live",
       raiseBudget: (runId, capUsd) => {
         raised.push([runId, capUsd]);
@@ -714,6 +782,7 @@ describe("mid-flight feedback", () => {
     const { dash, post } = await withDash();
     const relayed: string[] = [];
     dash.attach({
+      ...otherSink,
       sendFeedback(runId, taskId, text) {
         relayed.push(`${runId}/${taskId}: ${text}`);
         return "live";
@@ -729,6 +798,7 @@ describe("mid-flight feedback", () => {
   it("surfaces the controller's refusal instead of pretending it was sent", async () => {
     const { dash, post } = await withDash();
     dash.attach({
+      ...otherSink,
       sendFeedback() {
         throw new Error("task task-a is MERGED — no agent will read this");
       },
@@ -742,8 +812,236 @@ describe("mid-flight feedback", () => {
   it("rejects an empty message and an unwired dashboard", async () => {
     const { dash, post } = await withDash();
     expect((await post({ runId: "r1", taskId: "task-a", text: "hello" })).status).toBe(503);
-    dash.attach({ sendFeedback: () => "queued", raiseBudget: () => "cap raised to $0.00" });
+    dash.attach({ ...otherSink, sendFeedback: () => "queued", raiseBudget: () => "cap raised to $0.00" });
     expect((await post({ runId: "r1", taskId: "task-a", text: "  " })).status).toBe(400);
     expect((await post({ taskId: "task-a", text: "hi" })).status).toBe(400);
+  });
+});
+
+/**
+ * Summoning a pit stop, and re-routing a role, over HTTP.
+ *
+ * Both are the same shape as the live budget raise above: the dashboard
+ * validates only what it can see and relays the controller's own sentence for
+ * everything else. The refusals it owns are the ones that would otherwise spend
+ * money — an empty question buys a demo and every reviewer lens for a stop that
+ * asks nothing.
+ */
+describe("summoning a pit stop", () => {
+  const started: Dashboard[] = [];
+  afterEach(async () => {
+    for (const d of started.splice(0)) await d.stop();
+  });
+
+  async function withDash() {
+    const dash = dashboard();
+    started.push(dash);
+    const url = await dash.start();
+    const post = (body: unknown) =>
+      fetch(new URL("/api/runs/r1/pitstop", url), {
+        method: "POST",
+        headers: { authorization: `Bearer ${dash.token}`, "content-type": "application/json", connection: "close" },
+        body: JSON.stringify(body),
+      });
+    return { dash, post, url };
+  }
+
+  it("refuses until the dashboard is wired to a controller", async () => {
+    const { post } = await withDash();
+    expect((await post({ question: "is this on track?" })).status).toBe(503);
+  });
+
+  it("refuses an empty question before the controller is ever asked", async () => {
+    const { dash, post } = await withDash();
+    let calls = 0;
+    dash.attach({
+      ...otherSink,
+      sendFeedback: () => "live",
+      raiseBudget: () => "cap raised to $0.00",
+      requestPitStop: () => {
+        calls++;
+        return "pit stop requested";
+      },
+    });
+    expect((await post({ question: "   " })).status).toBe(400);
+    expect(calls).toBe(0);
+  });
+
+  it("relays the question and the controller's answer", async () => {
+    const { dash, post } = await withDash();
+    const asked: Array<[string, string]> = [];
+    dash.attach({
+      ...otherSink,
+      sendFeedback: () => "live",
+      raiseBudget: () => "cap raised to $0.00",
+      requestPitStop: (runId, question) => {
+        asked.push([runId, question]);
+        return "pit stop requested — it opens when the running tasks settle";
+      },
+    });
+    const res = await post({ question: "why is there no login page?" });
+    expect(res.status).toBe(200);
+    expect(asked).toEqual([["r1", "why is there no login page?"]]);
+  });
+
+  it("returns the controller's refusal rather than claiming a stop was queued", async () => {
+    const { dash, post } = await withDash();
+    dash.attach({
+      ...otherSink,
+      sendFeedback: () => "live",
+      raiseBudget: () => "cap raised to $0.00",
+      requestPitStop: () => "this run is PR_REVIEW — a pit stop needs a run that is still working",
+    });
+    const res = await post({ question: "how did it go?" });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toContain("PR_REVIEW");
+  });
+
+  it("cancels without needing a question, and reports nothing-to-cancel as a conflict", async () => {
+    const { dash, post } = await withDash();
+    let cancels = 0;
+    dash.attach({
+      ...otherSink,
+      sendFeedback: () => "live",
+      raiseBudget: () => "cap raised to $0.00",
+      cancelPitStop: () => (cancels++ === 0 ? "pit stop cancelled — nothing was spent" : "nothing to cancel — no pit stop is waiting to open"),
+    });
+    expect((await post({ cancel: true })).status).toBe(200);
+    expect((await post({ cancel: true })).status).toBe(409);
+  });
+
+  it("refuses a body with no question at all, the same as an empty one", async () => {
+    const { dash, post } = await withDash();
+    let calls = 0;
+    dash.attach({
+      ...otherSink,
+      sendFeedback: () => "live",
+      raiseBudget: () => "cap raised to $0.00",
+      requestPitStop: () => {
+        calls++;
+        return "pit stop requested";
+      },
+    });
+    expect((await post({})).status).toBe(400);
+    expect(calls).toBe(0);
+  });
+
+  it("rejects an unauthenticated summon", async () => {
+    const { url } = await withDash();
+    const res = await fetch(new URL("/api/runs/r1/pitstop", url), {
+      method: "POST",
+      headers: { "content-type": "application/json", connection: "close" },
+      body: JSON.stringify({ question: "let me in" }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects a cross-origin summon", async () => {
+    const { dash, url } = await withDash();
+    const res = await fetch(new URL("/api/runs/r1/pitstop", url), {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${dash.token}`,
+        "content-type": "application/json",
+        origin: "https://evil.example",
+        connection: "close",
+      },
+      body: JSON.stringify({ question: "spend his money" }),
+    });
+    expect(res.status).toBe(403);
+  });
+});
+
+describe("live model routing", () => {
+  const started: Dashboard[] = [];
+  afterEach(async () => {
+    for (const d of started.splice(0)) await d.stop();
+  });
+
+  async function withDash() {
+    const dash = dashboard();
+    started.push(dash);
+    const url = await dash.start();
+    const post = (body: unknown) =>
+      fetch(new URL("/api/runs/r1/models", url), {
+        method: "POST",
+        headers: { authorization: `Bearer ${dash.token}`, "content-type": "application/json", connection: "close" },
+        body: JSON.stringify(body),
+      });
+    return { dash, post, url };
+  }
+
+  const wire = (dash: Dashboard, reroute: (runId: string, role: string, model: string) => string) =>
+    dash.attach({ ...otherSink, sendFeedback: () => "live", raiseBudget: () => "cap raised to $0.00", rerouteModel: reroute });
+
+  it("relays a successful re-route", async () => {
+    const { dash, post } = await withDash();
+    const seen: Array<[string, string, string]> = [];
+    wire(dash, (runId, role, model) => {
+      seen.push([runId, role, model]);
+      return `${role} re-routed: claude-sonnet-5 → ${model}. The next one to start uses it.`;
+    });
+    expect((await post({ role: "worker", model: "claude-haiku-4-5-20251001" })).status).toBe(200);
+    expect(seen).toEqual([["r1", "worker", "claude-haiku-4-5-20251001"]]);
+  });
+
+  /**
+   * The pinned roles are the controller's to refuse — this endpoint does not
+   * know which they are and must not learn, or there would be two lists to keep
+   * in step and one of them would drift.
+   */
+  it("passes a pinned-role refusal back as a 400 with the controller's words", async () => {
+    const { dash, post } = await withDash();
+    wire(dash, () => "qa may not be routed below the judging floor");
+    const res = await post({ role: "qa", model: "claude-haiku-4-5-20251001" });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("judging floor");
+  });
+
+  it("rejects a request naming no role or no model", async () => {
+    const { dash, post } = await withDash();
+    let calls = 0;
+    wire(dash, () => {
+      calls++;
+      return "worker re-routed: a → b";
+    });
+    expect((await post({ model: "claude-opus-5" })).status).toBe(400);
+    expect((await post({ role: "worker", model: "  " })).status).toBe(400);
+    expect((await post({ role: "worker" })).status).toBe(400);
+    expect(calls).toBe(0);
+  });
+
+  it("refuses until the dashboard is wired to a controller", async () => {
+    const { post } = await withDash();
+    expect((await post({ role: "worker", model: "claude-opus-5" })).status).toBe(503);
+  });
+
+  it("rejects an unauthenticated re-route", async () => {
+    const { url } = await withDash();
+    const res = await fetch(new URL("/api/runs/r1/models", url), {
+      method: "POST",
+      headers: { "content-type": "application/json", connection: "close" },
+      body: JSON.stringify({ role: "worker", model: "claude-opus-5" }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  /**
+   * A stale tab on another origin is the last thing that should be able to move
+   * a role, since the roles it cannot reach are the ones that decide what merges.
+   */
+  it("rejects a cross-origin re-route", async () => {
+    const { dash, url } = await withDash();
+    const res = await fetch(new URL("/api/runs/r1/models", url), {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${dash.token}`,
+        "content-type": "application/json",
+        origin: "https://evil.example",
+        connection: "close",
+      },
+      body: JSON.stringify({ role: "worker", model: "claude-opus-5" }),
+    });
+    expect(res.status).toBe(403);
   });
 });

@@ -17,6 +17,7 @@ import { runIntake, type IntakeUi } from "./intake.js";
 import { composeDown, isolationBlock, isolationEnv, taskIsolation } from "./isolation.js";
 import { observeChecks } from "./memory.js";
 import { ceilingNote, grantedTokens, requestTokens, sdkCeiling } from "./outputCeiling.js";
+import { missingKeys } from "./providerClients.js";
 import { reapUnder } from "./reaper.js";
 import { AgentPool, type AgentResult, type AgentSpec } from "./pool.js";
 import {
@@ -1903,6 +1904,69 @@ export class RunController {
   }
 
   /**
+   * Ask for a pit stop instead of waiting for one.
+   *
+   * The operator watching the log has the one thing no gate in this harness can
+   * manufacture: a reason to look now. Everything else that opens a pit stop is
+   * a boundary the plan crossed — an epic finished, a figure passed — and none
+   * of those fire because the product started looking wrong on screen. Until
+   * this existed the answer to "is it still building the right thing?" was to
+   * wait for the next epic, or to type into the feedback box and get whatever a
+   * worker mid-task made of it.
+   *
+   * What it does *not* do is interrupt anything. The request stops the scheduler
+   * dispatching new tasks and the stop opens once the in-flight ones settle,
+   * which is the same rule the automatic stops follow and for the same reason: a
+   * tree with three workers half-way through their tasks is not a product to
+   * show anybody. A worker forty turns in finishes; killing it would throw away
+   * a warm worktree and change nothing about the demo, which reads the
+   * integration branch and never a worker's tree.
+   *
+   * The question is required. A pit stop costs a demo and every reviewer lens,
+   * and "have a look" spends that on the same generic pass the automatic stops
+   * already buy — the question is what makes this stop worth more than the one
+   * that was coming anyway.
+   */
+  requestPitStop(runId: string, question: string): string {
+    const run = this.store.getRun(runId);
+    if (!run) return `no run ${runId}`;
+    if (!this.gates.resolvePitStop) return "this run has nobody to show a pit stop to";
+    const trimmed = question.trim().slice(0, 4000);
+    if (!trimmed) return "write the question the pit stop should answer";
+    if (!["EXECUTING", "INTEGRATING"].includes(run.state)) {
+      return `this run is ${run.state} — a pit stop needs a run that is still working`;
+    }
+    // Asking twice replaces the question rather than queueing a second stop:
+    // `pendingPitStopRequest` is last-one-wins, and an operator who clicks again
+    // because nothing visibly happened must not be charged for two demos.
+    const already = this.store.pendingPitStopRequest(runId);
+    this.bus.publish({ type: "run.pitstop_requested", runId, question: trimmed, ts: Date.now() });
+    // The loop re-reads `pitStopReason` on every pass, but a run whose workers
+    // are all mid-turn is not passing — without this the stop waits on whatever
+    // unrelated thing happens to finish next.
+    this.wakeScheduler();
+    return already
+      ? "your question replaced the one already waiting — the pit stop opens when the running tasks settle"
+      : "pit stop requested — it opens when the running tasks settle, and no new task starts until it does";
+  }
+
+  /**
+   * Call off a requested pit stop that has not opened yet.
+   *
+   * The cheapest undo in the harness, and the reason asking can be cheap: a
+   * request that has not opened has spent nothing, so "never mind" costs
+   * nothing either. Once the demo has started there is no undo here — that
+   * money is spent, and the stop will open with whatever it found.
+   */
+  cancelPitStop(runId: string): string {
+    const asked = this.store.pendingPitStopRequest(runId);
+    if (!asked) return "nothing to cancel — no pit stop is waiting to open";
+    this.bus.publish({ type: "run.pitstop_cancelled", runId, question: asked.question, ts: Date.now() });
+    this.wakeScheduler();
+    return "pit stop cancelled — nothing was spent, and the run keeps going";
+  }
+
+  /**
    * Fold new comments on a task's GitHub issue into its feedback queue.
    *
    * An operator who reads "QA rejected this three times" on issue #52 answers
@@ -2495,7 +2559,20 @@ export class RunController {
    */
   private pitStopReason(runId: string): PitStopDue | null {
     const run = this.store.getRun(runId)!;
-    if (!this.gates.resolvePitStop || run.config.pitStop.every === "never") return null;
+    if (!this.gates.resolvePitStop) return null;
+    // The operator's own request outranks the cadence, and outranks switching
+    // the cadence off. `{"every":"never"}` is an answer to "stop me at every
+    // epic boundary" — it was never an answer to "I want to look at this now",
+    // and a run that ignored the button because of a config the operator set
+    // last week would be unusable exactly when they had reason to care.
+    const asked = this.store.pendingPitStopRequest(runId);
+    if (asked) {
+      // No `epicIds`: this stop covers no epic boundary, and claiming one would
+      // silently cancel the real pit stop that epic is owed — the same reason
+      // `resumePitStop` leaves it empty.
+      return { reason: "you asked for a look at the product", epicIds: [], question: asked.question };
+    }
+    if (run.config.pitStop.every === "never") return null;
     const merged = this.store.mergedTaskIds(runId);
     return pitStopDue(
       run.config.pitStop.every,
@@ -2520,6 +2597,11 @@ export class RunController {
     opts: { demo?: boolean } = {}
   ): Promise<PitStopDecision["action"]> {
     const withDemo = opts.demo !== false;
+    // A question means the operator stopped the run to ask it, and three things
+    // follow from that: the demo drives what they asked about first, every lens
+    // is bought rather than staged, and the decision comes back to them. See
+    // each of those call sites for why.
+    const question = (due.question ?? "").trim();
     const run = this.store.getRun(runId)!;
     const tasks = this.store.listTasks(runId);
     const history = this.store.pitStopHistory(runId, run.createdAt);
@@ -2546,9 +2628,16 @@ export class RunController {
     // A stop with no demo runs no agents at all, so it costs nothing and opens
     // instantly — which is the only reason it is safe to put one in front of
     // every `harness resume`, including the resume of a run already at its cap.
-    const demo = withDemo ? await this.runDemo(runId, run, number, dir, allMerged.join("\n") || "(nothing yet)", upcoming.join("\n")) : null;
+    const demo = withDemo ? await this.runDemo(runId, run, number, dir, allMerged.join("\n") || "(nothing yet)", upcoming.join("\n"), question) : null;
     const reviewed = demo
-      ? await this.runReviews(runId, run, demo, tasks, upcoming.join("\n"))
+      ? // Every lens, on a stop the operator asked for. The staging in
+        // `runReviews` bets that a first pass agreeing the run is on track has
+        // already given the answer, and that bet is only good when nothing
+        // outside the report suggested there was something to find. Here
+        // something did: a person watched this run and stopped it. That is a
+        // stronger signal than any of the conditions `worthMoreLenses` fires
+        // on, and it arrived before the first lens was bought.
+        await this.runReviews(runId, run, demo, tasks, upcoming.join("\n"), { allLenses: Boolean(question) })
       : { reviews: [], skipped: [] };
     // Measured rather than estimated, and shown: a checkpoint whose price is
     // invisible is one the operator cannot decide they do not want.
@@ -2590,10 +2679,17 @@ export class RunController {
       // means — the event carries `reason` for anyone who needs to tell the two
       // kinds of not-started apart.
       demoStarted: demo?.started ?? false,
+      // Publishing this is what consumes the operator's request: `pendingPitStopRequest`
+      // treats any `run.pitstop_opened` as the end of a pending one. It is
+      // deliberately published here, after the demo and the reviewers, rather
+      // than when the stop was picked up — a process that dies mid-demo has not
+      // answered the question, and the request should survive to be answered by
+      // whatever restarts the run.
+      summoned: Boolean(question),
       ts: Date.now(),
     });
 
-    const { decision, decidedBy, why } = await this.decidePitStop(runId, run, stop, askOperator);
+    const { decision, decidedBy, why } = await this.decidePitStop(runId, run, stop, askOperator, question);
     // The report is the artifact anyone reads afterwards, and until now it
     // stopped at the evidence. What was decided on it, by whom, and what that
     // cost belong in the same file — a decision recorded only as an event is
@@ -2698,7 +2794,14 @@ export class RunController {
     if (verdict?.verdict !== "FAIL") return "proceed";
     // Only for a verdict nobody has been shown: a resumed run re-entering
     // integration must not re-open the same pit stop it already answered.
-    if (this.store.lastEventSeq(runId, "run.pitstop_opened") > this.store.lastEventSeq(runId, "run.intent_verdict")) return "proceed";
+    //
+    // Summoned stops are excluded, and that exclusion is the whole reason this
+    // reads `lastUnsummonedPitStopSeq` rather than the event type. An operator
+    // who asks a question after a FAIL verdict has been shown *their* question's
+    // answer, not the verdict — and letting that suppress the closing stop would
+    // break the one guarantee this pit stop exists to keep (PITSTOP.md S6:
+    // "runs whose closing report is the first sight of a FAIL verdict → 0").
+    if (this.store.lastUnsummonedPitStopSeq(runId) > this.store.lastEventSeq(runId, "run.intent_verdict")) return "proceed";
     // This is the pit stop that repeats: "back to work" returns the run to the
     // same verdict on a tree it has already judged, and one verdict per pass
     // means the count of them is the count of goes it has had. A person
@@ -2777,7 +2880,9 @@ export class RunController {
     number: number,
     dir: string,
     mergedLines: string,
-    upcomingLines: string
+    upcomingLines: string,
+    /** The operator's question, when they are the reason this stop is happening. */
+    question = ""
   ): Promise<DemoReport> {
     let wtPath: string | null = null;
     let head = "";
@@ -2807,7 +2912,7 @@ export class RunController {
       };
       const result = await this.pool.run({
         ...common,
-        prompt: demoPrompt(run.assignment, mergedLines, upcomingLines),
+        prompt: demoPrompt(run.assignment, mergedLines, upcomingLines, question),
         maxTurns: run.config.pitStop.demoMaxTurns,
         // The product stays up between the two attempts below — re-capturing a
         // blank screenshot against a torn-down stack is not a retry, it is a
@@ -2972,7 +3077,13 @@ export class RunController {
     run: RunRow,
     demo: DemoReport,
     tasks: TaskRow[],
-    upcomingLines: string
+    upcomingLines: string,
+    /**
+     * Skip the staging and buy every lens. Set for a pit stop the operator
+     * asked for: a person interrupting a run is a stronger reason to look
+     * harder than anything `worthMoreLenses` can read off the first pass.
+     */
+    opts: { allLenses?: boolean } = {}
   ): Promise<{ reviews: ReviewReport[]; skipped: string[] }> {
     const lenses = run.config.pitStop.reviewers;
     if (!lenses.length) return { reviews: [], skipped: [] };
@@ -3018,7 +3129,7 @@ export class RunController {
       }
     };
 
-    const firstPass = run.config.pitStop.reviewFirstPass;
+    const firstPass = opts.allLenses ? 0 : run.config.pitStop.reviewFirstPass;
     // `0` disables staging, and so does a first pass that is not actually
     // smaller than the list — buying two of two and then "escalating" to the
     // remaining zero is just the old behaviour with extra bookkeeping.
@@ -3091,9 +3202,21 @@ export class RunController {
     runId: string,
     run: RunRow,
     stop: PitStop,
-    askOperator = false
+    askOperator = false,
+    /**
+     * The operator's question, when they are the reason this stop is happening.
+     *
+     * It changes both halves of this method. The decider is asked to answer it,
+     * and — whatever `decidedBy` says — the operator is asked to confirm the
+     * action rather than being told about it afterwards.
+     */
+    question = ""
   ): Promise<{ decision: PitStopDecision; decidedBy: string; why: string }> {
-    const ask = async () => ({ decision: await this.gates.resolvePitStop!(stop), decidedBy: "operator", why: "" });
+    const ask = async (why = "", by = "") => ({
+      decision: await this.gates.resolvePitStop!(stop),
+      decidedBy: by || "operator",
+      why,
+    });
     const skill = run.config.pitStop.decidedBy;
     if (skill === "operator" || askOperator) return await ask();
 
@@ -3114,7 +3237,8 @@ export class RunController {
           this.planPrd(runId),
           stop.markdown,
           `The run has spent $${stop.spentUsd.toFixed(2)} of its $${cap.toFixed(2)} cap and the whole plan projects to about $${stop.projectedUsd.toFixed(2)}.\n\n`,
-          priorDecisionsBlock(this.store.pitStopDecisions(runId))
+          priorDecisionsBlock(this.store.pitStopDecisions(runId)),
+          question
         ),
         cwd: await this.wt.ensureIntegrationWorktree(runId).catch(() => this.repoPath),
         disallowedTools: ["Write", "Edit", "NotebookEdit"],
@@ -3122,6 +3246,31 @@ export class RunController {
         budgetCheck: () => this.checkBudget(runId),
       });
       const parsed = PitStopDecisionJson.parse(extractJson(result.resultText));
+      // A stop the operator asked for ends with them, not with the skill.
+      //
+      // `decidedBy` exists because a run that stops at 2am must not wait for a
+      // human who is asleep. That argument does not survive the operator having
+      // clicked the button thirty seconds ago: they are provably at the
+      // keyboard, they interrupted a running plan to ask something, and the
+      // answer they paid a demo and four lenses for is a thing to read before
+      // the run acts on it. Deciding for them here would spend their money and
+      // take the checkpoint they bought with it.
+      //
+      // So the skill still answers — its answer is the value, and it is written
+      // into the report they are about to read — and the four actions stay
+      // theirs. This is the only pit stop where both happen.
+      if (question) {
+        appendFileSync(
+          path.join(stop.artifactsDir, "REPORT.md"),
+          `\n## What the ${skill} says\n\n> ${question.replace(/\n+/g, "\n> ")}\n\n${parsed.why || "(no answer given)"}\n\n` +
+            `**It would ${parsed.action}**${parsed.blockedOn ? `, blocked on ${parsed.blockedOn}` : ""}.` +
+            `${parsed.feedback.trim() ? ` What it would tell the run:\n\n${parsed.feedback.trim()}\n` : "\n"}` +
+            "\nThis is a recommendation. You asked for this stop, so the decision is yours.\n"
+        );
+        stop.markdown = readFileSync(path.join(stop.artifactsDir, "REPORT.md"), "utf8").trimEnd();
+        say(`${skill} answered you and recommends ${parsed.action}${parsed.why ? ` — ${parsed.why}` : ""}; the decision is yours`);
+        return await ask(parsed.why, `operator, advised by ${skill}`);
+      }
       say(`${skill} decided: ${parsed.action}${parsed.blockedOn ? ` (blocked on ${parsed.blockedOn})` : ""}${parsed.why ? ` — ${parsed.why}` : ""}`);
       return {
         decision: { action: parsed.action, feedback: parsed.feedback, blockedOn: parsed.blockedOn },
@@ -4350,6 +4499,66 @@ export class RunController {
     this.store.setRunBudget(runId, budget);
     this.bus.publish({ type: "run.budget_updated", runId, spentUsd: spent, capUsd, ts: Date.now() });
     return `cap raised to $${capUsd.toFixed(2)}`;
+  }
+
+  /**
+   * Point one role at a different model for the rest of the run.
+   *
+   * `harness resume -m worker=…` could already do this, and that is exactly the
+   * problem it leaves: re-routing meant stopping the run. The operator who
+   * wants it is watching spend climb against work that is not moving, and the
+   * remaining tasks — the ones that could still be made cheaper — are the ones
+   * a resume would make them wait for. So this is the same edit, applied while
+   * the run keeps going, next to the cap control that already works this way.
+   *
+   * Only agents spawned after it. A session already running keeps the model it
+   * was spawned on, because a model cannot be changed mid-conversation without
+   * throwing away the prompt cache that conversation is paying for — the harness
+   * re-routes by spawning fresh, never by switching under a live session.
+   *
+   * The pinned roles hold, and they hold *here* rather than at dispatch:
+   * `patchRunConfig` re-parses the whole config through `ModelRouting`, so a
+   * judge cannot be moved below the judging floor by this door any more than by
+   * the CLI's.
+   */
+  rerouteModel(runId: string, role: string, model: string): string {
+    const run = this.store.getRun(runId);
+    if (!run) return `no run ${runId}`;
+    const roles = Object.keys(run.config.models);
+    if (!roles.includes(role)) return `unknown role ${role} — the roles are ${roles.join(", ")}`;
+    const wanted = model.trim();
+    if (!wanted) return "name a model to route it to";
+    const was = run.config.models[role as keyof typeof run.config.models];
+    if (was === wanted) return `${role} is already on ${wanted}`;
+    const models = { ...run.config.models, [role]: wanted };
+    // Before the config is touched: a role routed to a vendor whose key is not
+    // exported fails at the first spawn, minutes later, in a log, a long way
+    // from the click that caused it.
+    const missing = missingKeys(models);
+    if (missing.length) return missing.join(" ");
+    try {
+      this.store.patchRunConfig(runId, { models });
+    } catch (e) {
+      // A ZodError from the pinned-role refinement, almost always. Its message
+      // is written for the operator — see `routingViolations` — so it is worth
+      // more than a generic failure line.
+      const message = e instanceof z.ZodError ? e.issues.map((i) => i.message).join(" ") : String(e);
+      return message.slice(0, 300);
+    }
+    this.bus.publish({
+      type: "agent.log",
+      runId,
+      sessionId: "integrator",
+      text: `${role} re-routed for the rest of the run: ${was} → ${wanted}`,
+      ts: Date.now(),
+    });
+    const live = this.store.listSessions(runId).filter((s) => s.state === "running" && s.role === role);
+    return (
+      `${role} re-routed: ${was} → ${wanted}` +
+      (live.length
+        ? `. ${live.length} ${role} session${live.length === 1 ? "" : "s"} already running stay${live.length === 1 ? "s" : ""} on ${was} until ${live.length === 1 ? "it finishes" : "they finish"}.`
+        : ". The next one to start uses it.")
+    );
   }
 
   /**

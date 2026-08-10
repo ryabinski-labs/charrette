@@ -225,7 +225,9 @@ Rules:
 - Acceptance criteria for a UI task must be settleable by looking at the rendered screen, because that is how they will be checked. "Uses the design system" cannot be judged; "the sign-in screen shows the product logo and wordmark, and its primary button uses the palette's primary colour from the design tokens" can. Name the screen, the state, and the viewport where it matters.
 - A task that integrates an external service must say, in its acceptance criteria, which side of the mock/live line it delivers — and the default is live. Write criteria that pin a real client against the vendor's sandbox or documented test mode, or contract tests against recorded fixtures of real responses. If live genuinely cannot be built (no account, no credentials, no sandbox, the operator scoped it out), say so IN THE SPEC in one sentence beginning "Live is out of scope because", and the interface-plus-fake becomes the honest deliverable. What must never happen is the third thing: a task called \`stripe-integration\` whose every criterion is satisfied by a deterministic fake, passing QA and shipping a \`throw notConfigured()\`. Criteria like "the suite makes no outbound HTTP call" or "each vendor category has a deterministic mock" describe the test strategy, not the deliverable — they belong alongside a criterion that pins the real path, never instead of one.
 - Acceptance criteria for an infrastructure task must be checkable WITHOUT provisioning anything, because nothing in this harness may apply to a real account. Write them against \`terraform validate\`/\`plan\`, \`cdk synth\`, \`helm template\`, \`kubectl --dry-run=server\`, a policy or scanning tool, or a property of the rendered output ("the plan creates exactly one bucket, with versioning and SSE-KMS enabled and no public access"). A criterion whose only proof is a deployed resource cannot be judged and will park the task.
-- If a task's definition of done is "everywhere", give it a \`completionProbe\`: ONE shell command, run in the task's worktree, that exits non-zero while the job is unfinished and zero when it is complete. Sweeps are the case — a claim removed from every surface that makes it, a helper gone from every call site, an option renamed across the codebase — because prose criteria cannot express them. "The unenforced claim is removed from the pricing surfaces" is satisfied, as written, by editing one page, and a reviewer sent to check it will read the page the task named rather than the twenty it did not. \`! rg -q "Multi-agent priority" frontend/src\` cannot be half-satisfied. Rules: it must be a read — searching, counting, listing, compiling, testing — and never something that writes, deploys or provisions; it must pass only because the work was done, so \`true\` and \`exit 0\` are worthless; and it must be runnable from the repository root with what the repository already has. Leave it \`""\` for the ordinary task whose criteria are settled by looking at one place. It does not replace acceptanceCriteria — write both.
+- A \`completionProbe\` is ONE shell command, run in the task's worktree, that exits non-zero while the job is unfinished and zero when it is complete. **Write one for every task you size \`S\`, and for any larger task where one command can settle whether the work landed.** A small task is small because its definition of done is narrow enough to state as a command, and stating it is what lets the harness check the task instead of asking an agent for an opinion about it.
+- The case that cannot be done any other way is the sweep — a claim removed from every surface that makes it, a helper gone from every call site, an option renamed across the codebase. "The unenforced claim is removed from the pricing surfaces" is satisfied, as written, by editing one page, and a reviewer sent to check it will read the page the task named rather than the twenty it did not. \`! rg -q "Multi-agent priority" frontend/src\` cannot be half-satisfied. But the ordinary task has one too: \`rg -q "export function formatCurrency" src/lib/money.ts\`, \`npx tsc --noEmit -p tsconfig.json\`, \`node --test test/money.test.js\`.
+- Probe rules, all of them binding. It must be a read — searching, counting, listing, compiling, type-checking, testing — and never something that writes, deploys, installs or provisions, because the harness re-runs it on every QA iteration against the tree the operator is about to review. It must pass only because THIS task's work was done: \`true\`, \`exit 0\` and a command that already passes on the untouched repository are all worthless, and so is one that fails for a reason this task was never asked to fix — a probe that is red before the task starts parks the task forever and no worker can make it green. It must be runnable from the repository root with what the repository already has, and it must not depend on a service, container or credential the worktree does not bring up itself. If you cannot write one that survives every line of this, leave it \`""\` — a wrong probe costs far more than a missing one. It never replaces acceptanceCriteria: write both.
 - Emit AT MOST ${perMessage} tasks in one message. If the plan needs more, emit the first ${perMessage}, set \`"more": true\`, and you will be asked to continue — the remaining tasks are not lost and nothing is repeated. Never merge tasks or drop scope to fit a message: the message is not the limit, and a DAG made coarser to fit one is a plan that gave up its parallelism for nothing.
 - Your FINAL message must be exactly one JSON object inside a \`\`\`json fence with the shape:
 { "epics": [{"id": kebab, "title": string, "summary": string}],
@@ -763,14 +765,25 @@ artifacts lists the files you wrote, relative to ${artifactsDir}, each with the 
 commands lists the commands whose RESULT you are offering as proof — the suite you ran, the type check, the request you made — each with what passing it settles. Write the command exactly as you ran it, from the repository root. The harness runs every one of them again before the operator reads your report, and prints only the ones that pass a second time; the rest are reported as claims nobody could confirm, with your command beside them. So do not list a command you did not run, do not tidy one up into something you did not type, and leave out anything whose second run would not mean the same thing — a request that writes, an install, a migration. "The tests pass" in your summary and nothing in this list is a claim the operator has no way to check, and it will read as one.`;
 }
 
-export function demoPrompt(assignment: string, mergedLines: string, upcomingLines: string): string {
+export function demoPrompt(assignment: string, mergedLines: string, upcomingLines: string, question = ""): string {
   return `What the operator asked for:
 ${assignment}
 
 What has merged so far — this is what you are demoing:
 ${mergedLines}
 
-${upcomingLines ? `Not built yet, so do not go looking for it:\n${upcomingLines}\n\n` : ""}Decide your plannedJourneys from the merged list above first. Then start the product, drive them, and report.`;
+${upcomingLines ? `Not built yet, so do not go looking for it:\n${upcomingLines}\n\n` : ""}${
+    question
+      ? // The operator stopped the run themselves to ask this, which makes it the
+        // most specific instruction about what to photograph that a demo agent
+        // has ever been given — a pit stop the operator called is one they
+        // called about something. It steers coverage without narrowing it: a
+        // demo that drove only the operator's worry and nothing else answers
+        // one question and leaves the reviewers reading a thinner product than
+        // the automatic stops give them.
+        `The operator stopped the run to ask this, and they are waiting on the answer:\n"""\n${question}\n"""\n\nPut the journeys that bear on their question in \`plannedJourneys\` FIRST, and drive them first, so that if you run out of turns the part they asked about is the part that got done. Then demo the rest of the merged list as you normally would. If the product cannot show what they asked about — it is not built yet, it needs an account you do not have, it does not start — say exactly that in \`couldNotReach\`, in their terms. "Nobody could check it" is an answer; a report that quietly does not mention their question is not.\n\n`
+      : ""
+  }Decide your plannedJourneys from the merged list above first. Then start the product, drive them, and report.`;
 }
 
 /**
@@ -981,7 +994,14 @@ export function priorDecisionsBlock(
   return lines.reverse().join("\n");
 }
 
-export function pitStopDeciderPrompt(assignment: string, prd: string, report: string, capLine: string, priorDecisions = ""): string {
+export function pitStopDeciderPrompt(
+  assignment: string,
+  prd: string,
+  report: string,
+  capLine: string,
+  priorDecisions = "",
+  question = ""
+): string {
   return `What the operator asked for:
 ${assignment}
 
@@ -993,7 +1013,23 @@ ${
   priorDecisions
     ? `What was decided at this run's earlier pit stops, oldest first:\n${priorDecisions}\n\nYou are not obliged to agree with any of it. But if you are about to say something you have already said, the thing to work out is why it did not take — repeating it is how a run spends its budget going round.\n\nThe most recent feedback above is not history. For a redirect or a re-plan it was attached to every task that had not started, so unless you replace it, it is the instruction those tasks are still carrying — including any of it that has since turned out to be wrong. If you are contradicting something you told the run earlier, say so in the feedback itself and say which instruction it replaces: the tasks read your feedback, not your reasoning, and an instruction you have quietly stopped believing is one they are still following.\n\n`
     : ""
-}${capLine}Decide.`;
+}${
+    question
+      ? // Placed last, immediately before "Decide", because it is the thing this
+        // stop was bought for. The operator did not wait for an epic boundary;
+        // they stopped a running plan and paid for a demo and four lenses to get
+        // this answered, and a decision that arrives without answering it has
+        // spent their money on the checkpoint they were not asking for.
+        //
+        // The instruction not to simply agree is the load-bearing half. An
+        // operator's question carries its own hypothesis — "is the checkout
+        // still broken" presumes it was — and the cheapest way to end this
+        // conversation is to confirm whatever they seem to think. That is the
+        // failure this prompt has to survive, because a decider that agrees with
+        // the operator is one the operator could have skipped buying.
+        `The operator stopped the run themselves to ask you this:\n"""\n${question}\n"""\n\nAnswer it in \`why\`, in their words, before anything else — plainly, whether or not the answer is what they were expecting. If the evidence in this report does not settle it, say that it does not and say what would; a confident answer the demo did not support is worse than "nobody has checked".\n\nTheir question is not a verdict. It carries whatever they were worried about when they typed it, and agreeing with it is the cheapest way to end this conversation — so if the report says they are wrong, say so and say what it says instead. Your action still follows from the whole report, not from their question alone: a run that is on track does not need redirecting because someone asked a worried question about it.\n\n`
+      : ""
+  }${capLine}Decide.`;
 }
 
 /**

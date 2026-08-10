@@ -42,6 +42,16 @@ export interface PitStopDue {
   reason: string;
   /** Epics this stop covers. Only the epic trigger fills it. */
   epicIds: string[];
+  /**
+   * What the operator asked, when they are the reason this stop is happening.
+   *
+   * Empty for every trigger in `pitStopDue` below — a stop nobody asked for has
+   * no question — and set only by `RunController.pitStopReason` from the
+   * request event. It reaches the demo agent and the decider, so the stop
+   * answers the thing that was worth interrupting a run for rather than taking
+   * the same generic look the automatic stops take.
+   */
+  question?: string;
 }
 
 /**

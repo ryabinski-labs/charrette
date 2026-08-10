@@ -674,15 +674,18 @@ Run configuration is a zod-validated `RunConfig`
 | `models.intake` | `claude-opus-5` | — | ✅ | this one talks to you; question quality is the whole value. **Anthropic only** — see [Using other providers](#using-other-providers) |
 | `models.planner` | `claude-opus-5` | — | ✅ | planning quality dominates run cost efficiency |
 | `models.worker` | `claude-sonnet-5` | — | ✅ | |
+| `models.workerLight` | `claude-haiku-4-5-20251001` | — | ✅ | the worker model for tasks the light-tier rule admits — sized `S`, at most two `touchedPaths`, carrying a `completionProbe`, and matching none of the risky domains (auth, money, migrations, concurrency, infrastructure). The rule is deterministic and lives in `modelTier.ts`; the planner does not nominate its own tier. A light session that dies of `error_max_turns` is re-dispatched on `models.worker` rather than retried here. Set it to the same value as `models.worker` to switch the experiment off while keeping the measurement — the rule still runs and still publishes `task.tier_decided`. |
 | `models.qa` | `claude-sonnet-5` | — | ✅ | **Anthropic only** — its verdict decides whether a task merges |
 | `models.integrator` | `claude-sonnet-5` | — | ✅ | **not currently used** — integration is deterministic git work, not an agent session. Setting it has no effect. |
 | `models.advisor` | `claude-sonnet-5` | — | ✅ | drafts your answer when a task escalates |
 | `models.prod` | `claude-opus-5` | — | ✅ | **Anthropic only** — the last word on whether the run delivered the assignment |
-| `models.demo` | `claude-sonnet-5` | — | ✅ | starts the half-built product at a pit stop and drives it — mostly tool work |
+| `models.demo` | `claude-haiku-4-5-20251001` | — | ✅ | starts the half-built product at a pit stop and drives it — mostly tool work, at an 80-turn ceiling. Cheap because the demo's thoroughness is checked in code rather than taken on trust: `plannedJourneys` is compared against what came back, and a demo that fell short of its own plan is published as INCONCLUSIVE rather than as thin evidence. |
+| `models.repair` | `claude-haiku-4-5-20251001` | — | ✅ | re-asks a finished QA session for the verdict JSON it produced but did not format. Two turns, against a resumed session, restating a conclusion reached on the judging model — there is no judgment left to degrade. Fires only when a QA agent ignores its output contract. |
 | `models.reviewer` | `claude-opus-5` | — | ✅ | judges the demo through one named lens; this is the judgment a pit stop exists to buy. **Anthropic only** |
 | `models.pm` | `claude-opus-5` | — | ✅ | every decision a skill makes instead of you: what the run does next at a pit stop, whether a failing plan goes back to the planner, and whether a cap that was reached is raised. The only agent whose output redirects the remaining work, re-plans it, or spends money on its own, so it is the last place to save money. |
 | `pitStop.every` | `"epic"` | — | ✅ | when the run stops to show you what it built: `"epic"`, `"never"`, `{"tasks":5}`, `{"usd":100}`, `{"minutes":90}` — see [PITSTOP.md](./PITSTOP.md) |
-| `pitStop.reviewers` | `product-manager`, `critical-challenger`, `qa-agent` | — | ✅ | one short session per lens, by skill name; max 4, `[]` for none. This is the pit stop's price. |
+| `pitStop.reviewers` | `product-manager`, `critical-challenger`, `qa-agent`, `ui-ux-cx-engineer` | — | ✅ | one short session per lens, by skill name; max 4, `[]` for none. This is the pit stop's price. |
+| `pitStop.reviewFirstPass` | `2` | — | ✅ | how many lenses read the demo before the harness decides whether the rest are worth buying. The remaining ones are bought only when the first pass suggests there is something to find — any lens not `on-track`, any disagreement, a lens that did not finish, or an INCONCLUSIVE demo. `0` runs them all every time. Which lenses were skipped, and why, is printed with the report. |
 | `pitStop.demoMaxTurns` | `80` | — | ✅ | the demo agent has to start a product it has never seen; too low and its report says only "I could not start it" |
 | `pitStop.decidedBy` | `"product-manager"` | — | ✅ | who decides what the run does next, by skill name — or `"operator"` to be asked, which is what this used to be. The named skill reads the same report you would, plus what earlier pit stops in the run already decided, and answers the same four ways (continue / redirect / re-plan / stop). One that fails, or answers with something that is not one of the four, falls back to asking you. |
 | `pitStop.backToWorkRounds` | `2` | — | ✅ | how many times the **closing** pit stop — the one a FAIL from the intent check opens — may send the run back to work before the next one comes to you whatever `decidedBy` says. It is the only pit stop that repeats over the same tree, and a loop a human ends by losing patience needs another way to end. |
@@ -940,8 +943,29 @@ else sits in a fixed sidebar.
   review, and hunting for it across thirty task cards is not that. When there are
   none it says so — and once the run is over, "none" is the answer, not a
   loading state.
+- **Ask the PM…** — under the feedback box, the one control that can open a pit
+  stop on your say-so rather than at a boundary the plan crossed. Type the
+  question first (it will not arm without one), then confirm: the demo agent
+  starts the half-built product and drives what you asked about first, every
+  reviewer lens reads it, and the PM answers you and recommends what to do next
+  — and then *you* decide, whatever `pitStop.decidedBy` names. It works even
+  with `{"pitStop": {"every": "never"}}`. Nothing in flight is interrupted; the
+  run stops dispatching new tasks and the stop opens once the running ones
+  settle, with a free **Cancel** in the Now panel until it does. Asking twice
+  replaces the question rather than buying a second demo. See
+  [PITSTOP.md](./PITSTOP.md).
 - **Run** — repo path, integration branch, elapsed, resolved checks and caps, and
   the full assignment the planner received (the intake brief, if you used one).
+  It also holds **Models**, the run's model-per-role table, editable for the rest
+  of the run: click a value, pick another model, and every agent started from
+  then on uses it — a session already running keeps the model it was spawned on,
+  because the harness re-routes by spawning fresh rather than switching under a
+  conversation whose prompt cache is what makes it affordable. This is the knob
+  to reach for when spend is climbing faster than the work, and it does not need
+  a `harness resume` to apply. The four judging roles (`intake`, `qa`,
+  `reviewer`, `prod`) are shown as text with no control at all: they decide
+  whether work is correct or shippable, and the server refuses to move them below
+  the judging floor whatever a stale tab asks for.
 - **Cost meter** — spend against the run cap, with a bar that turns amber past
   60% and red past 85%. It only moves when a session *ends*, because that is when
   usage is booked; the note under the meter says so rather than leaving you to
