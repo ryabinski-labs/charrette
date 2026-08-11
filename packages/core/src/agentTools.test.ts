@@ -1,8 +1,27 @@
-import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TOOLS, exitCode, globToRegExp, runBash, toolsFor, unsupportedTools, type ExecFn, type ToolContext } from "./agentTools.js";
+
+// The skip-on-error branches used to be exercised by chmod'ing files
+// unreadable — which is a no-op for root, and CI's self-hosted runners run as
+// root. Poisoning the one path here fails the same calls on any uid.
+// Per-operation, because Grep stats every file before reading it: poisoning
+// both calls for one path would drop the file during the walk and leave the
+// read-failure branch unexercised.
+const poison = vi.hoisted(() => ({ stat: null as string | null, read: null as string | null }));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const real = await importOriginal<typeof import("node:fs/promises")>();
+  const denied = () => Promise.reject(Object.assign(new Error("EACCES"), { code: "EACCES" }));
+  return {
+    ...real,
+    stat: (p: Parameters<typeof real.stat>[0], ...rest: unknown[]) =>
+      poison.stat !== null && String(p).endsWith(poison.stat) ? denied() : (real.stat as Function)(p, ...rest),
+    readFile: (p: Parameters<typeof real.readFile>[0], ...rest: unknown[]) =>
+      poison.read !== null && String(p).endsWith(poison.read) ? denied() : (real.readFile as Function)(p, ...rest),
+  };
+});
 
 const tool = (name: string) => TOOLS.find((t) => t.name === name)!;
 
@@ -268,17 +287,17 @@ describe("finding files", () => {
   });
 
   it("skips a file it is not allowed to stat instead of failing the whole search", async () => {
-    // Readable directory, no execute bit: readdir succeeds, stat does not.
-    // A worktree mid-build genuinely produces files that come and go.
+    // readdir lists it, stat refuses it — a worktree mid-build genuinely
+    // produces files that come and go between the two calls.
     mkdirSync(join(dir, "locked"));
     writeFileSync(join(dir, "locked", "hidden.ts"), "x");
-    chmodSync(join(dir, "locked"), 0o600);
+    poison.stat = join("locked", "hidden.ts");
     try {
       const out = await tool("Glob").run({ pattern: "**/*.ts" }, ctx);
       expect(out).toContain("src/index.ts");
       expect(out).not.toContain("hidden.ts");
     } finally {
-      chmodSync(join(dir, "locked"), 0o700);
+      poison.stat = null;
     }
   });
 });
@@ -320,13 +339,13 @@ describe("searching file contents", () => {
 
   it("skips a file it cannot read instead of failing the whole search", async () => {
     writeFileSync(join(dir, "src/secret.ts"), "hello secret");
-    chmodSync(join(dir, "src/secret.ts"), 0o000);
+    poison.read = join("src", "secret.ts");
     try {
       const out = await tool("Grep").run({ pattern: "hello" }, ctx);
       expect(out).toContain("src/a.ts");
       expect(out).not.toContain("secret.ts");
     } finally {
-      chmodSync(join(dir, "src/secret.ts"), 0o600);
+      poison.read = null;
     }
   });
 

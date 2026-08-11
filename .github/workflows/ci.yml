@@ -18,7 +18,10 @@ permissions:
 jobs:
   verify:
     name: build, test @ 100% coverage
-    runs-on: ubuntu-latest
+    # The org's self-hosted pool. Targeted by the `github-runner` label so the
+    # job never lands on the special-purpose runners (api-service-mx1, mobile)
+    # that share the `self-hosted, Linux, X64` labels.
+    runs-on: [self-hosted, Linux, X64, github-runner]
     timeout-minutes: 20
 
     steps:
