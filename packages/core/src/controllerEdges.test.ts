@@ -150,7 +150,11 @@ function build(opts: { repoPath: string; pool: AgentPool; github?: GitHubAdapter
 const worker = (spec: AgentSpec, nth: number) => (commitInWorktree(spec.cwd, `w-${path.basename(spec.cwd)}-${nth}.txt`), "did the work");
 const logs = (events: HarnessEvent[]) => events.filter((e): e is HarnessEvent & { text: string } => e.type === "agent.log").map((e) => e.text);
 
-const BASE = { deterministicChecks: [] as string[], waitForChecks: false };
+// The forge is off because the budget cases below are calibrated in sessions:
+// a skillsmith session for these skill-less tasks would move each breach off
+// the stage it is aimed at. The forge's own stage has the same rethrow test
+// in skillForgeRun.test.ts.
+const BASE = { deterministicChecks: [] as string[], waitForChecks: false, skillForge: { enabled: false } };
 
 describe("a budget stop reaching each stage that must let it through", () => {
   /**

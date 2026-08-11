@@ -54,6 +54,10 @@ export const AgentRole = z.enum([
   // so that a cheap two-turn re-ask cannot be mistaken for the judgment it is
   // transcribing — the ledger would otherwise show a Haiku row labelled `qa`.
   "repair",
+  // Writes a playbook for a task no existing skill covers (skillForge.ts). Its
+  // own role so the ledger shows what forging costs, and so its sessions can
+  // never be mistaken for the worker they were forging for.
+  "skillsmith",
 ]);
 export type AgentRole = z.infer<typeof AgentRole>;
 

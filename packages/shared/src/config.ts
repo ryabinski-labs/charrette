@@ -114,6 +114,16 @@ export const ModelRoutingShape = z.object({
    * money: Opus.
    */
   pm: z.string().default("claude-opus-5"),
+  /**
+   * Writes a playbook when a task matched nothing in the operator's skill
+   * collection (`skillForge`). Sonnet rather than Haiku, and the reason is the
+   * blast radius rather than the difficulty: a skill is injected into every
+   * later session it matches, so a wrong claim here is repeated by agents that
+   * have no way to know it is wrong — the one-to-many amplifier the PRD's
+   * trust boundary 6 warns about. Not Opus, because the skillsmith's output is
+   * advisory prose the worker can ignore, not a verdict that gates anything.
+   */
+  skillsmith: z.string().default("claude-sonnet-5"),
 });
 
 /**
@@ -528,6 +538,45 @@ export const RunConfig = z.object({
    */
   planIntentCheck: z.boolean().default(true),
   skillsDirs: z.array(z.string()).default([]),
+  /**
+   * Let the harness write a skill for itself when a task matches nothing.
+   *
+   * The trigger is precise: a task about to dispatch whose worker selection —
+   * routed, standing and scored together — came back empty. That is the case
+   * the whole skills system cannot help with today: the matcher's honest
+   * answer is "your collection has nothing for this", and the worker goes in
+   * cold. When it fires, a `skillsmith` session reads the repository, drafts a
+   * playbook for that class of task (or extends one it forged earlier, or
+   * declines), and the harness — not the agent — installs it under
+   * `<repo>/.harness/skills/`.
+   *
+   * Two lines the design does not cross. The skillsmith never writes files:
+   * it emits a draft and the harness validates and installs it, so the PRD's
+   * rule that no agent modifies the skills registry stays true — the
+   * operator's `skillsDirs` are never touched, and the forge directory is
+   * harness state, beside the run database. And forged skills carry the same
+   * provenance discipline as everything else: frontmatter naming the run and
+   * task that forged them, a `skills.forged` event with the birth hash, and
+   * the same hash-verify-at-injection as operator skills (SEC-14/15).
+   *
+   * Forged skills persist across runs of the same repository on purpose — the
+   * second run should not pay to relearn what the first one wrote down. That
+   * is a standing decision to reuse model-authored guidance, which memory.ts
+   * deliberately refuses for *facts*; a playbook is advisory and wrapped as
+   * such, but an operator who shares that caution sets `enabled: false`, and
+   * the files themselves are plain markdown in `.harness/skills/`, theirs to
+   * read, edit or delete.
+   *
+   * `maxPerRun` bounds what forging may spend: each forge is one bounded
+   * read-only session, and a run that needs more than a few is a run whose
+   * plan is telling the operator something about their skill collection.
+   */
+  skillForge: z
+    .object({
+      enabled: z.boolean().default(true),
+      maxPerRun: z.number().int().min(0).max(20).default(3),
+    })
+    .default({}),
   /**
    * Skills bound to a class of work, by name, ahead of any scoring.
    *

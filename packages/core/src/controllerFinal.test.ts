@@ -252,7 +252,10 @@ describe("following a deploy the repo cannot report on", () => {
     await expect(
       controller.startRun(
         "build a thing",
-        RunConfig.parse({ ...BASE, prodUrl: "https://app.example.com", deployTimeoutMinutes: 1, budget: { runCapUsd: 45 } })
+        // The forge is off because this test is calibrated in sessions: at $9 a
+        // session and a $45 cap, an extra skillsmith session moves the breach
+        // from the stage under test into the QA loop, which handles it itself.
+        RunConfig.parse({ ...BASE, prodUrl: "https://app.example.com", deployTimeoutMinutes: 1, budget: { runCapUsd: 45 }, skillForge: { enabled: false } })
       )
     ).rejects.toThrow(/budget exceeded/);
   });

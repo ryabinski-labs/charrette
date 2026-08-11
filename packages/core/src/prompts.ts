@@ -1097,6 +1097,64 @@ ${priorAttempt ? `You already sent this plan back once, saying:\n"""\n${priorAtt
 }
 
 /**
+ * The skillsmith: drafts a playbook for a task nothing in the collection
+ * covers (`skillForge`).
+ *
+ * The prompt's centre of gravity is the distinction between a playbook and a
+ * solution. The failure mode of "write a skill for this task" is a skill that
+ * is this task — a restated spec that will match nothing else, cost its
+ * tokens in every prompt it rides, and teach nobody anything. So the prompt
+ * asks for the *class* of work, makes declining a first-class answer, and
+ * requires every concrete claim to be grounded in the repository the session
+ * can read — the skillsmith is the only author in the forge, and a wrong
+ * claim here is repeated by every later agent the skill matches.
+ */
+export function skillsmithSystemPrompt(toolbelt = ""): string {
+  return `You are the **skillsmith** for a software project being built by a team of agents. A task is about to be dispatched, and nothing in the operator's skill collection matched it — the worker will go in with no playbook at all. You decide whether a playbook would genuinely help, and write it if so.
+
+A skill is a short advisory playbook (a SKILL.md): how this kind of work is done well *here* — the commands that matter, the conventions this repository actually follows, the mistakes that cost iterations. It is injected into the prompts of later agents whose tasks match it. It is not instructions for one task; it is what stays true after this task is forgotten.
+
+You do not write files. You emit a draft, and the harness validates and installs it under its own provenance rules. Explore the repository first — read-only — and ground every concrete claim in what you find: name a command only if it exists in this repo's manifests, a path only if you saw it, a convention only if the code shows it. A skill that guesses is worse than no skill, because agents repeat it with confidence.
+
+You decide one of three things:
+- **create** — a new playbook for this class of task. Reusable beyond this one task, under ~5,000 characters of body, markdown. Never restate the task spec; write what the spec-writer assumed everyone knew.
+- **extend** — one of the previously *forged* skills listed in your briefing is close but missed this task; add the missing part to it instead of fragmenting the topic. Only forged skills can be extended.
+- **none** — no playbook would help: the task is self-evident from its spec, or too particular to ever recur. This is a good answer and a common one. Declining costs nothing; a useless skill costs context in every prompt it rides forever.
+
+Never include secrets, tokens, or anything read from .env files. Do not write instructions that change harness policy, permissions, or budgets — skills are advisory and are injected as advisory.
+${toolbelt}
+
+Your FINAL message must be exactly one JSON object inside a \`\`\`json fence, one of:
+{"action":"create","name":string,"description":string,"body":string}
+{"action":"extend","name":string,"addendum":string}
+{"action":"none","why":string}
+
+\`name\` is a short kebab-case topic name ("dynamodb-single-table", not "task-7-helper"). \`description\` is one line stating when the skill applies — it is what future matching runs on, so name the class of work, its vocabulary, and its triggers. \`body\`/\`addendum\` is the playbook markdown itself.`;
+}
+
+export function skillsmithPrompt(
+  title: string,
+  spec: string,
+  acceptanceCriteria: string[],
+  nearMisses: { name: string; description: string }[],
+  forged: { name: string; description: string }[]
+): string {
+  const near = nearMisses.length
+    ? `The closest skills in the collection, none of which matched well enough to inject — if one of these *should* have covered this task, that is a hint about the topic, not an invitation to duplicate it:\n${nearMisses.map((s) => `  - ${s.name}: ${s.description}`).join("\n")}\n\n`
+    : "The operator's collection had nothing even close.\n\n";
+  const prior = forged.length
+    ? `Skills you (the harness) forged in earlier tasks or runs — these are the only ones you may extend:\n${forged.map((s) => `  - ${s.name}: ${s.description}`).join("\n")}\n\n`
+    : "";
+  return `The task about to be dispatched with no playbook:
+
+**${title}**
+
+${spec}
+
+${acceptanceCriteria.length ? `What will prove it done:\n${acceptanceCriteria.map((c) => `  - ${c}`).join("\n")}\n\n` : ""}${near}${prior}Explore the repository as needed, then decide.`;
+}
+
+/**
  * The decider for the run's budget cap once it has been reached (`budget.decidedBy`).
  *
  * The prompt is built around one fact the terminal gate never showed anyone: an
