@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { indexSkills, type IndexedSkill } from "@harness/skills-mcp";
@@ -71,6 +71,24 @@ export interface ForgedDraft {
 }
 
 /**
+ * The one composition of a forged file, shared by the validator and the
+ * writer so the cap is measured on exactly the bytes that reach disk.
+ */
+const composeFile = (draft: ForgedDraft, prov: { runId: string; taskId: string }) =>
+  `---\nname: ${draft.slug}\ndescription: ${draft.description}\n${provenanceLine(prov)}\n---\n${draft.body}\n`;
+
+/**
+ * True when `p` resolves outside the forge directory. Everything under the
+ * forge is fair game for the harness to write; a symlink planted inside it —
+ * a slug directory or a SKILL.md pointing at an operator's file — must not
+ * become a pen the harness writes through. Both arguments exist when this is
+ * called, so realpath resolves every link before the comparison.
+ */
+function escapesForge(dir: string, p: string): boolean {
+  return !realpathSync(p).startsWith(realpathSync(dir) + path.sep);
+}
+
+/**
  * Check a `create` draft against the rules an agent cannot be trusted to keep,
  * and normalize what can be normalized rather than rejecting over it.
  *
@@ -79,7 +97,10 @@ export interface ForgedDraft {
  * flattened to single lines so a crafted value cannot close the frontmatter
  * early and smuggle content above the advisory wrapper. The size cap is a
  * hard reject rather than a truncation: a playbook cut mid-sentence is worse
- * than none, and the skillsmith was told the budget.
+ * than none, and the skillsmith was told the budget. It is measured on the
+ * whole composed file — frontmatter, provenance and all — because the
+ * indexer's `tokensApprox` is, and that number is what decides full-text
+ * injection; `prov` is taken here for exactly that composition.
  *
  * `taken` is every skill name the run can currently see, the operator's
  * included. A forged skill may never shadow an operator's: `skillRouting`
@@ -88,7 +109,8 @@ export interface ForgedDraft {
  */
 export function validateDraft(
   draft: { name: string; description: string; body: string },
-  taken: Set<string>
+  taken: Set<string>,
+  prov: { runId: string; taskId: string }
 ): ForgedDraft | { error: string } {
   const slug = draft.name
     .toLowerCase()
@@ -105,8 +127,9 @@ export function validateDraft(
   if (!description || !body) {
     return { error: "a forged skill needs both a description and a body" };
   }
-  if (TOKENS(body) > FORGED_TOKEN_CAP) {
-    return { error: `the draft is ~${TOKENS(body)} tokens against a cap of ${FORGED_TOKEN_CAP} — a playbook that long should be the operator's decision, not the forge's` };
+  const fileTokens = TOKENS(composeFile({ slug, description, body }, prov));
+  if (fileTokens > FORGED_TOKEN_CAP) {
+    return { error: `the drafted file is ~${fileTokens} tokens against a cap of ${FORGED_TOKEN_CAP} — a playbook that long should be the operator's decision, not the forge's` };
   }
   return { slug, description, body };
 }
@@ -133,10 +156,14 @@ export function installForged(dir: string, draft: ForgedDraft, prov: { runId: st
   const skillPath = path.join(dir, draft.slug, "SKILL.md");
   if (!existsSync(skillPath)) {
     mkdirSync(path.dirname(skillPath), { recursive: true });
-    writeFileSync(
-      skillPath,
-      `---\nname: ${draft.slug}\ndescription: ${draft.description}\n${provenanceLine(prov)}\n---\n${draft.body}\n`
-    );
+    if (escapesForge(dir, path.dirname(skillPath))) {
+      throw new Error(`"${draft.slug}" resolves outside the forge — refusing to write through it`);
+    }
+    writeFileSync(skillPath, composeFile(draft, prov));
+  } else if (escapesForge(dir, skillPath)) {
+    // The adopt branch reads rather than writes, but adopting a symlinked
+    // file would inject whatever it points at as though the forge wrote it.
+    throw new Error(`"${draft.slug}" resolves outside the forge — refusing to adopt it`);
   }
   return indexed(dir, draft.slug);
 }
@@ -164,6 +191,9 @@ export function extendForged(
   const skillPath = path.join(dir, name, "SKILL.md");
   if (!existsSync(skillPath)) {
     return { error: `no forged skill named "${name}" — only skills in the forge can be extended` };
+  }
+  if (escapesForge(dir, skillPath)) {
+    return { error: `"${name}" resolves outside the forge — refusing to grow it` };
   }
   const grown = addendum.trim();
   if (!grown) return { error: "an empty addendum extends nothing" };

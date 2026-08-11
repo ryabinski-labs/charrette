@@ -3613,7 +3613,7 @@ export class RunController {
       }
       let skill: IndexedSkill;
       if (decision.action === "create") {
-        const draft = validateDraft(decision, new Set(skills.map((s) => s.name)));
+        const draft = validateDraft(decision, new Set(skills.map((s) => s.name)), { runId, taskId });
         if ("error" in draft) {
           say(`rejected the drafted skill: ${draft.error}`);
           return null;

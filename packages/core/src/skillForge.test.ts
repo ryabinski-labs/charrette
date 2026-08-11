@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, symlinkSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -12,36 +12,64 @@ describe("validateDraft", () => {
   it("normalizes a display name into a slug and flattens the description", () => {
     const draft = validateDraft(
       { name: "  DynamoDB Single-Table!! Design ", description: "one\ntwo   three", body: "the playbook" },
-      new Set()
+      new Set(),
+      prov
     );
     expect(draft).toEqual({ slug: "dynamodb-single-table-design", description: "one two three", body: "the playbook" });
   });
 
   it("rejects a name that reduces to nothing usable, in either direction", () => {
-    expect(validateDraft({ name: "a!", description: "d", body: "b" }, new Set())).toHaveProperty("error");
-    expect(validateDraft({ name: "x".repeat(80), description: "d", body: "b" }, new Set())).toHaveProperty("error");
+    expect(validateDraft({ name: "a!", description: "d", body: "b" }, new Set(), prov)).toHaveProperty("error");
+    expect(validateDraft({ name: "x".repeat(80), description: "d", body: "b" }, new Set(), prov)).toHaveProperty("error");
   });
 
   it("refuses to shadow a name the run can already see — routing addresses skills by name", () => {
-    const out = validateDraft({ name: "QA Playbook", description: "d", body: "b" }, new Set(["qa-playbook"]));
+    const out = validateDraft({ name: "QA Playbook", description: "d", body: "b" }, new Set(["qa-playbook"]), prov);
     expect(out).toHaveProperty("error");
     expect((out as { error: string }).error).toContain("qa-playbook");
   });
 
   it("needs both a description and a body", () => {
-    expect(validateDraft({ name: "log-rotation", description: "   ", body: "b" }, new Set())).toHaveProperty("error");
-    expect(validateDraft({ name: "log-rotation", description: "d", body: "  \n " }, new Set())).toHaveProperty("error");
+    expect(validateDraft({ name: "log-rotation", description: "   ", body: "b" }, new Set(), prov)).toHaveProperty("error");
+    expect(validateDraft({ name: "log-rotation", description: "d", body: "  \n " }, new Set(), prov)).toHaveProperty("error");
   });
 
   it("hard-rejects a body over the cap rather than truncating a playbook mid-sentence", () => {
-    const out = validateDraft({ name: "log-rotation", description: "d", body: "word ".repeat(FORGED_TOKEN_CAP) }, new Set());
+    const out = validateDraft({ name: "log-rotation", description: "d", body: "word ".repeat(FORGED_TOKEN_CAP) }, new Set(), prov);
     expect(out).toHaveProperty("error");
     expect((out as { error: string }).error).toContain(String(FORGED_TOKEN_CAP));
   });
 
   it("caps a runaway description at 300 characters", () => {
-    const out = validateDraft({ name: "log-rotation", description: "d".repeat(500), body: "b" }, new Set()) as { description: string };
+    const out = validateDraft({ name: "log-rotation", description: "d".repeat(500), body: "b" }, new Set(), prov) as { description: string };
     expect(out.description).toHaveLength(300);
+  });
+
+  // Regression: the cap used to measure the body alone, so a body just under
+  // the cap plus a maximal description and provenance installed as a file over
+  // runController's 1500-token full-text limit — and a forged skill that big
+  // silently fell to reference mode, pointing at a path outside the worker's
+  // worktree. The cap is on the file the indexer will measure, or it is not
+  // a cap at all.
+  it("caps the composed file, not the body — frontmatter and provenance count", () => {
+    const longProv = { runId: "0f3c7a1e-9b2d-4e8f-a1c6-7d5e3b9a0f12", taskId: "task-sanctions-screening-adapter" };
+    const draft = {
+      name: "a".repeat(64),
+      description: "d".repeat(300),
+      body: "x".repeat(FORGED_TOKEN_CAP * 4), // the body alone sits exactly at the cap
+    };
+    const out = validateDraft(draft, new Set(), longProv);
+    expect(out).toHaveProperty("error");
+    expect((out as { error: string }).error).toContain(String(FORGED_TOKEN_CAP));
+  });
+
+  it("what it accepts, the indexer measures at or under the cap", () => {
+    const d = dir();
+    const body = "x".repeat((FORGED_TOKEN_CAP - 40) * 4); // leaves exactly the frontmatter's worth of room
+    const out = validateDraft({ name: "big-but-legal", description: "tight fit", body }, new Set(), prov);
+    expect(out).not.toHaveProperty("error");
+    const skill = installForged(d, out as { slug: string; description: string; body: string }, prov);
+    expect(skill.tokensApprox).toBeLessThanOrEqual(FORGED_TOKEN_CAP);
   });
 });
 
@@ -104,6 +132,45 @@ describe("extendForged", () => {
     expect(skill.body).toContain("base body");
     expect(skill.body).toContain("## Learned in run r2 (task t9)");
     expect(skill.body).toContain("What t9 taught us.");
+  });
+});
+
+// Regression: both writers used to follow a symlink planted inside the forge
+// straight out of it — extendForged appended a provenance-stamped section to
+// whatever file the link named, and installForged wrote a fresh SKILL.md into
+// whatever directory a planted slug resolved to. The forge writes inside the
+// forge, or not at all.
+describe("a symlink planted inside the forge", () => {
+  it("does not let extend grow a file outside it", () => {
+    const d = dir();
+    const operator = dir();
+    const operatorFile = path.join(operator, "SKILL.md");
+    writeFileSync(operatorFile, "---\nname: operator-skill\ndescription: theirs\n---\nprecious\n");
+    mkdirSync(path.join(d, "sneaky"));
+    symlinkSync(operatorFile, path.join(d, "sneaky", "SKILL.md"));
+    const before = readFileSync(operatorFile, "utf8");
+    const out = extendForged(d, "sneaky", "harvested", prov);
+    expect(out).toHaveProperty("error");
+    expect((out as { error: string }).error).toContain("outside the forge");
+    expect(readFileSync(operatorFile, "utf8")).toBe(before);
+  });
+
+  it("does not let install write through a planted slug directory", () => {
+    const d = dir();
+    const elsewhere = dir();
+    symlinkSync(elsewhere, path.join(d, "planted"));
+    expect(() => installForged(d, { slug: "planted", description: "x", body: "y" }, prov)).toThrow(/outside the forge/);
+    expect(existsSync(path.join(elsewhere, "SKILL.md"))).toBe(false);
+  });
+
+  it("does not let install adopt a symlinked file as though the forge wrote it", () => {
+    const d = dir();
+    const operator = dir();
+    const operatorFile = path.join(operator, "SKILL.md");
+    writeFileSync(operatorFile, "---\nname: operator-skill\ndescription: theirs\n---\nprecious\n");
+    mkdirSync(path.join(d, "adopt-me"));
+    symlinkSync(operatorFile, path.join(d, "adopt-me", "SKILL.md"));
+    expect(() => installForged(d, { slug: "adopt-me", description: "x", body: "y" }, prov)).toThrow(/outside the forge/);
   });
 });
 
