@@ -180,8 +180,10 @@ describe("budget hold", () => {
       },
       repo
     );
-    // $0.60 a call: planning spends $1.20, so the worker's check is the first over.
-    const config = RunConfig.parse({ budget: { runCapUsd: 1.1 }, deterministicChecks: [] });
+    // $0.60 a call: planning spends $1.20, so the worker's check is the first
+    // over. The forge is off so no skillsmith session lands in between and
+    // takes the breach that is aimed at the worker.
+    const config = RunConfig.parse({ budget: { runCapUsd: 1.1 }, deterministicChecks: [], skillForge: { enabled: false } });
     await expect(controller.startRun("do a thing", config)).rejects.toThrow(/budget exceeded/);
 
     const runId = (store.db.prepare("SELECT id FROM runs").get() as { id: string }).id;
@@ -230,6 +232,9 @@ describe("budget hold", () => {
       deterministicChecks: [],
       maxParallelWorkers: 2,
       planIntentCheck: false,
+      // Same calibration as above: the two workers must be the sessions over
+      // the cap, not a skillsmith dispatched ahead of them.
+      skillForge: { enabled: false },
     });
 
     await expect(controller.startRun("do a thing", config)).rejects.toThrow(/budget exceeded/);

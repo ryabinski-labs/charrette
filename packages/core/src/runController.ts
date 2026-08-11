@@ -75,6 +75,8 @@ import {
   qaSystemPrompt,
   qaTaskPrompt,
   skillsBlock,
+  skillsmithPrompt,
+  skillsmithSystemPrompt,
   prodValidatorPrompt,
   prodValidatorSystemPrompt,
   validatorPrompt,
@@ -93,6 +95,7 @@ import { renderIntegrations, scanIntegrations } from "./integrationScan.js";
 import { renderCi, scanCi } from "./ciScan.js";
 import { renderProduction, scanProduction } from "./productionScan.js";
 import { detectToolbelt, toolbeltBlock } from "./toolbelt.js";
+import { extendForged, forgeDir, installForged, SkillForgeDecision, validateDraft } from "./skillForge.js";
 import { workerModelFor } from "./modelTier.js";
 import { Store, TaskRow, type RunRow } from "./store.js";
 
@@ -2415,7 +2418,11 @@ export class RunController {
   private async execute(runId: string): Promise<"complete" | "paused"> {
     const run = this.store.getRun(runId)!;
     await this.wt.ensureIntegrationBranch(runId);
-    const skills = indexSkills(run.config.skillsDirs);
+    // The forge dir rides alongside the operator's dirs for task-level roles:
+    // skills earlier runs forged for this repository are already paid for.
+    // Deduped by realpath inside indexSkills, so an operator who added the
+    // forge to `skillsDirs` themselves indexes it once.
+    const skills = indexSkills([...run.config.skillsDirs, forgeDir(this.repoPath)]);
 
     // A task still marked in-flight here belongs to a harness process that died
     // mid-task: this controller is the only runner, so nothing can actually be
@@ -3517,19 +3524,22 @@ export class RunController {
    * worker/QA, the operator's assignment for the roles that run before any task
    * exists.
    */
-  private selectSkills(skills: IndexedSkill[], role: keyof typeof ROLE_SKILL_LENS, text: string, config: RunConfig) {
+  private selectSkills(skills: IndexedSkill[], role: keyof typeof ROLE_SKILL_LENS, text: string, config: RunConfig, forced: IndexedSkill[] = []) {
     // Every role that calls this has a lens; the fallback is for one added
     // later without one.
     /* v8 ignore next */
     const query = `${text}\n${ROLE_SKILL_LENS[role] ?? ""}`;
     // Routed skills are the operator's declared intent and come first; scoring
     // only fills whatever room is left, and no skill at all is a valid outcome.
+    // `forced` outranks even those: it is a skill forged for exactly this task
+    // moments ago (skillForge.ts), and forcing it is what spares it a lexical
+    // re-match it was only written because the lexicon lost.
     const routed = this.routedSkills(skills, config, text, role);
     const scored = matchSkills(skills, query, MAX_SKILLS_PER_ROLE)
       .filter((m) => m.score >= SKILL_SCORE_FLOOR && verifyHash(m.skill))
       .map((m) => m.skill);
     const chosen: IndexedSkill[] = [];
-    for (const skill of [...routed, ...scored]) {
+    for (const skill of [...forced, ...routed, ...scored]) {
       if (chosen.length >= MAX_SKILLS_PER_ROLE) break;
       if (!chosen.some((c) => c.name === skill.name)) chosen.push(skill);
     }
@@ -3539,6 +3549,99 @@ export class RunController {
       if (full) fullCount++;
       return { name: skill.name, path: skill.path, sha256: skill.sha256, content: full ? skill.body : undefined };
     });
+  }
+
+  /**
+   * Forge a playbook for a task the collection has nothing for, or return null
+   * for every reason not to — and there are more reasons not to than to.
+   *
+   * The trigger is the worker selection coming back empty: routed, standing
+   * and scored skills all absent. That is the matcher saying "nothing here
+   * covers this", which until now dispatched the worker cold and unteachable.
+   * When it fires, a read-only skillsmith session drafts a skill (or extends
+   * a previously forged one, or declines), and skillForge.ts — code, not the
+   * agent — validates and installs it under `.harness/skills/`, keeping the
+   * PRD's rule that no agent writes the skills registry.
+   *
+   * The forged skill is pushed into the run's shared index in place, so a
+   * parallel task in the same domain matches it instead of forging a twin,
+   * and `execute()` re-indexes the forge dir at the start of every later run.
+   * The per-run cap is counted from `skills.forged` events rather than a
+   * field, so it holds across resume the way every other cap here does.
+   *
+   * Every failure inside the forge is a log line and a cold worker — the
+   * state before this feature existed — never a failed task. Only a budget
+   * stop propagates, because that one is about the run, not the forge.
+   */
+  private async forgeSkillIfNeeded(
+    runId: string,
+    taskId: string,
+    task: TaskRow,
+    skills: IndexedSkill[],
+    taskText: string
+  ): Promise<IndexedSkill | null> {
+    const run = this.store.getRun(runId)!;
+    const config = run.config.skillForge;
+    if (!config.enabled) return null;
+    if (this.selectSkills(skills, "worker", taskText, run.config).length) return null;
+    if (this.store.eventCount(runId, "skills.forged") >= config.maxPerRun) return null;
+    const say = (text: string) => this.bus.publish({ type: "agent.log", runId, taskId, sessionId: "skillsmith", text, ts: Date.now() });
+    try {
+      const dir = forgeDir(this.repoPath);
+      // Below-floor matches are the skillsmith's briefing, not its competition:
+      // what the collection almost had is the strongest hint about the topic.
+      const near = matchSkills(skills, taskText, 3).map((m) => ({ name: m.skill.name, description: m.skill.description }));
+      const prior = skills.filter((s) => s.path.startsWith(dir + path.sep)).map((s) => ({ name: s.name, description: s.description }));
+      const result = await this.pool.run({
+        runId,
+        taskId,
+        role: "skillsmith",
+        model: run.config.models.skillsmith,
+        systemPrompt: skillsmithSystemPrompt(toolbeltBlock(detectToolbelt(run.config.externalTools))),
+        prompt: skillsmithPrompt(task.title, task.spec, task.acceptanceCriteria, near, prior),
+        cwd: this.repoPath,
+        // It reads the repository to ground its claims; the draft comes back
+        // as JSON and the harness does the writing.
+        disallowedTools: ["Write", "Edit", "NotebookEdit"],
+        maxTurns: 25,
+        budgetCheck: () => this.checkBudget(runId),
+      });
+      const decision = SkillForgeDecision.parse(extractJson(result.resultText));
+      if (decision.action === "none") {
+        say(`declined to forge a skill${decision.why ? `: ${decision.why}` : ""}`);
+        return null;
+      }
+      let skill: IndexedSkill;
+      if (decision.action === "create") {
+        const draft = validateDraft(decision, new Set(skills.map((s) => s.name)));
+        if ("error" in draft) {
+          say(`rejected the drafted skill: ${draft.error}`);
+          return null;
+        }
+        skill = installForged(dir, draft, { runId, taskId });
+      } else {
+        const grown = extendForged(dir, decision.name, decision.addendum, { runId, taskId });
+        if ("error" in grown) {
+          say(`rejected the extension: ${grown.error}`);
+          return null;
+        }
+        skill = grown.skill;
+      }
+      // The shared index is this run's view of the world: replace a stale
+      // entry (an extended skill's old hash would fail verify) or add the new
+      // one, so every later selection this run makes can see it.
+      const at = skills.findIndex((s) => s.name === skill.name);
+      if (at >= 0) skills[at] = skill;
+      else skills.push(skill);
+      const action = decision.action === "create" ? ("created" as const) : ("extended" as const);
+      this.bus.publish({ type: "skills.forged", runId, taskId, name: skill.name, sha256: skill.sha256, path: skill.path, action, tokensApprox: skill.tokensApprox, ts: Date.now() });
+      say(`${action} skill "${skill.name}" (~${skill.tokensApprox} tokens) — it rides with this task's worker and stays in ${dir} for the next one`);
+      return skill;
+    } catch (e) {
+      if (e instanceof BudgetExceeded) throw e;
+      say(`skill forge did not complete: ${String(e).slice(0, 300)} — the task proceeds without one`);
+      return null;
+    }
   }
 
   private async runTask(runId: string, taskId: string, skills: IndexedSkill[]): Promise<void> {
@@ -3559,7 +3662,16 @@ export class RunController {
     // per role: workers match on the task text alone, QA matches with a
     // verification lens on top (ROLE_SKILL_LENS).
     const taskText = `${task.title}\n${task.spec}`;
-    const workerSkills = this.selectSkills(skills, "worker", taskText, run.config);
+    // WORKING before the forge rather than after it: the skillsmith is an
+    // agent spawned for this task, spending this task's budget, and a budget
+    // stop inside it must find the task in the state an operator would call
+    // it — started — not READY as if nothing had been paid for yet.
+    this.store.transitionTask(runId, taskId, "WORKING");
+    // A task nothing matched gets one chance at a forged playbook before the
+    // worker goes in cold. The forged skill lands in the shared index too, so
+    // later tasks — and later runs — can match it the ordinary way.
+    const forged = await this.forgeSkillIfNeeded(runId, taskId, task, skills, taskText);
+    const workerSkills = this.selectSkills(skills, "worker", taskText, run.config, forged ? [forged] : []);
     const qaSkills = this.selectSkills(skills, "qa", taskText, run.config);
     const meta = (s: { name: string; sha256: string; content?: string }) => ({ name: s.name, sha256: s.sha256, mode: s.content ? ("full" as const) : ("reference" as const) });
     this.store.updateTask(runId, taskId, {
@@ -3587,7 +3699,6 @@ export class RunController {
     let qaFeedback: string | undefined = this.revivalGuidance.get(`${runId}/${taskId}`);
     this.revivalGuidance.delete(`${runId}/${taskId}`);
 
-    this.store.transitionTask(runId, taskId, "WORKING");
     // The SDK session of the last clean worker iteration. A re-dispatch after a
     // QA rejection resumes it — the repo exploration is already in its context —
     // instead of cold-starting. Cleared on crashes: a session that died

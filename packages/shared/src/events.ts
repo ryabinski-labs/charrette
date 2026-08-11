@@ -211,6 +211,11 @@ export const HarnessEvent = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("github.issue_created"), taskId: z.string().optional(), epicId: z.string().optional(), issueNumber: z.number().int(), url: z.string() }),
   z.object({ ...base, type: z.literal("github.pr_opened"), taskId: z.string(), prNumber: z.number().int(), url: z.string() }),
   z.object({ ...base, type: z.literal("skills.injected"), taskId: z.string(), role: z.enum(["worker", "qa"]).optional(), skills: z.array(z.object({ name: z.string(), sha256: z.string(), mode: z.enum(["full", "reference"]) })) }),
+  // A skill the harness wrote for itself because nothing in the operator's
+  // collection matched a task (skillForge.ts). The event is the provenance
+  // trail SEC-14 asks for: the file on disk says what the skill claims, this
+  // says which run and task put it there and what it hashed to at birth.
+  z.object({ ...base, type: z.literal("skills.forged"), taskId: z.string(), name: z.string(), sha256: z.string(), path: z.string(), action: z.enum(["created", "extended"]), tokensApprox: z.number().int() }),
 ]);
 export type HarnessEvent = z.infer<typeof HarnessEvent>;
 export type HarnessEventType = HarnessEvent["type"];
