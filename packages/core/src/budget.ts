@@ -20,10 +20,15 @@ export const PRICES: Record<string, { in: number; out: number }> = {
   "gpt-5.6-sol": { in: 5, out: 30 },
   "gpt-5.6-terra": { in: 2, out: 12 },
   "gpt-5.6-luna": { in: 0.2, out: 1.2 },
-  // Google Gemini 3.5. Only the model whose price was verified is listed —
-  // a guessed row would under-charge silently, where an absent one is caught
-  // by the top-tier fallback below and merely stops the run early.
+  // Google Gemini. Only models whose price was verified are listed — a guessed
+  // row would under-charge silently, where an absent one is caught by the
+  // top-tier fallback below and merely stops the run early.
   "gemini-3.5-flash-lite": { in: 0.3, out: 2.5 },
+  // `models.reviewer` runs here. Flat, unlike the Pro tiers: Google prices Pro
+  // in two bands by prompt size and this table holds one rate per model, so a
+  // Pro row would have to carry the >200k band to stay on the over-charging
+  // side. Flash has no such band.
+  "gemini-3.6-flash": { in: 1.5, out: 7.5 },
 };
 
 const CACHE_READ_MULT = 0.1;

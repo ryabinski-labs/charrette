@@ -78,6 +78,35 @@ describe("recognising a usage limit", () => {
     expect(limit!.resetAt).toBeNull();
   });
 
+  /**
+   * The same wall arriving over the harness's own transport.
+   *
+   * Until `models.reviewer` was pinned to Google, nothing a default run did
+   * reached this: every role ran on the Anthropic SDK, which says it in English.
+   * Now every pit stop asks Google, and a reviewer whose session dies is not
+   * reported as dead — `runLens` degrades it to `verdict: "on-track"`. An
+   * unrecognised quota wall therefore does not fail loudly; it hands back the
+   * pass that pinning the reviewer to a second vendor existed to avoid.
+   */
+  it("reads a 429 from the vendor transport, which speaks HTTP rather than English", () => {
+    const gemini = usageLimitOf(
+      'the session ended in an error: google API 429 Too Many Requests: {"error":{"code":429,"message":"You exceeded your current quota","status":"RESOURCE_EXHAUSTED"}}',
+      NOW
+    );
+    expect(gemini).not.toBeNull();
+    expect(usageLimitOf("openai API 429 Too Many Requests: {}", NOW)).not.toBeNull();
+  });
+
+  it("waits as long as the vendor asked, not the flat probe it would guess", () => {
+    // Google states RetryInfo in its 429; a per-minute quota is back in well
+    // under the minute the backoff would otherwise spend.
+    const limit = usageLimitOf('google API 429 Too Many Requests: {"details":[{"retryDelay":"38s"}]}', NOW);
+    expect(limit!.resetAt).toBe(NOW + 38_000);
+    expect(usageLimitOf('google API 429 …: {"retryDelay":"1.5s"}', NOW)!.resetAt).toBe(NOW + 1_000);
+    expect(usageLimitOf("openai API 429 …: retry-after: 30", NOW)!.resetAt).toBe(NOW + 30_000);
+    expect(usageLimitOf("openai API 429 …: retry_after 250ms", NOW)!.resetAt).toBe(NOW + 250);
+  });
+
   it("does not read a clock out of something that is not one", () => {
     expect(usageLimitOf("usage limit reached; the connection was reset 3 times", NOW)!.resetAt).toBeNull();
     expect(usageLimitOf("usage limit reached, resets 25:30 (UTC)", NOW)!.resetAt).toBeNull();
@@ -97,6 +126,15 @@ describe("the walls that are not usage limits", () => {
     ["a crashed subprocess", "Claude Code process exited with code 1"],
     // A worker whose task is *about* rate limiting says the words all day.
     ["work that mentions limits", "the session ended in an error: implemented the rate limit middleware; the limit resets per window"],
+    // Which is exactly why the transport case above matches the envelope the
+    // harness itself writes, and not the vendor's prose inside it: an agent
+    // quoting Google's wording is not Google refusing.
+    ["an agent quoting a vendor's quota copy", "the session ended in an error: the docs say You exceeded your current quota, RESOURCE_EXHAUSTED"],
+    // A transient 5xx is the transport's own business — `post` retries it
+    // twice in seconds. Parking the session for a minute would be worse.
+    ["the vendor being briefly unwell", "google API 503 Service Unavailable: The model is overloaded. Please try again later."],
+    // Not a wall at all: a bad tool schema fails identically after any wait.
+    ["a request the vendor will always refuse", "google API 400 Bad Request: invalid function declaration"],
   ])("is not one: %s", (_name, detail) => {
     expect(usageLimitOf(detail, NOW)).toBeNull();
   });

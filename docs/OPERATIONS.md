@@ -748,7 +748,10 @@ that role — `demo` first runs at a pit stop, after the whole epic has been pai
 for. Spell the provider out as `openai/<model>` if you ever need a model whose
 name does not announce its family.
 
-**The default is all-Anthropic.** Nothing routes anywhere else unless you say so.
+**The default is all-Anthropic except one role.** `reviewer` is pinned to
+`gemini-3.6-flash`, so `GEMINI_API_KEY` is required for every run — see the
+pinned-role table below for why. Nothing else routes off Anthropic unless you
+say so.
 
 #### Changing it mid-run
 
@@ -771,26 +774,56 @@ the key check both still apply, so `resume` refuses the same things `run` does.
 Completed tasks are never re-executed, so re-routing only ever affects work that
 has not happened yet.
 
-**Four roles may not leave Anthropic**, and the run refuses to start if you move
-them:
+**Four roles are not yours to route**, and the run refuses to start if you move
+them. Three are pinned to Anthropic and one to Google:
 
-| Role | Why |
-|---|---|
-| `qa` | its verdict decides whether a task merges |
-| `reviewer` | its judgment is the thing a pit stop exists to buy |
-| `prod` | it is the last word on whether the run delivered the assignment |
-| `intake` | it asks you questions through an in-process tool only the Anthropic transport can expose |
+| Role | Pinned to | Why |
+|---|---|---|
+| `qa` | Anthropic | its verdict decides whether a task merges |
+| `reviewer` | **Google** | its judgment is the thing a pit stop exists to buy, and it is held off the family that wrote the code |
+| `prod` | Anthropic | it is the last word on whether the run delivered the assignment |
+| `intake` | Anthropic | it asks you questions through an in-process tool only the Anthropic transport can expose |
 
-The first three are policy. A cheaper judge does not report that it judged worse
-— it reports PASS, and you find out at the pull request. The fourth is a
-capability: an intake agent that cannot ask would invent your answers instead.
+`qa` and `prod` are policy in the ordinary direction. A cheaper judge does not
+report that it judged worse — it reports PASS, and you find out at the pull
+request, so they stay on the models their thresholds were calibrated against.
+
+`reviewer` is policy in the other direction, and the reason is independence
+rather than price. Every line it reads was written by an Anthropic worker and
+has already passed an Anthropic QA; a reviewer from the same family is fluent in
+exactly the reasoning that produced the work, so the objection it is least
+likely to raise is the one the pit stop exists to buy. A second vendor costs one
+API key and returns an opinion whose errors are uncorrelated with the ones
+already in the diff. It does not drag `qa` and `prod` with it because their
+verdicts are mechanical — criteria against a diff — where the reviewer's is
+open-ended, which is both why independence helps it most and why nothing
+downstream parses its wording.
+
+`intake` is a capability: an intake agent that cannot ask would invent your
+answers instead.
+
+Each pinned role also has a floor within its own vendor, so the pin cannot be
+satisfied by the cheapest model that happens to carry the right brand:
+`claude-haiku-*` is refused for the Anthropic three, and `gemini-*-lite` for
+`reviewer`. Flash is above the floor, and is what `reviewer` defaults to.
+
+**Runs created before the pin are rewritten at open.** They recorded
+`reviewer: "claude-opus-5"`, which the config now refuses, and the stored config
+is re-parsed on every read — so without the rewrite those runs would not merely
+refuse to resume, they would be unreadable: no ledger, no postmortem, no
+dashboard row. Resuming one reviews on Gemini from that point on.
 
 **What is different off Anthropic.** Those sessions do not run inside the Claude
 Agent SDK; the harness runs the tool loop itself and gives the agent Bash, Read,
-Write, Edit, Glob and Grep. Everything the run is accounted for by is unchanged
+Write, Edit, Glob and Grep. This is no longer only a thing that happens when you
+ask for it: pinning `reviewer` to Google put the default routing on this
+transport at every pit stop. Everything the run is accounted for by is unchanged
 — the ledger, the budget gate, the stall watchdog, the turn ceiling, the
 worktree sweep, and mid-flight feedback from the dashboard all behave the same.
-Three things do differ:
+A vendor that is briefly unable rather than refusing — Gemini's "the model is
+overloaded" 503 — is retried twice, seconds apart, the way the SDK retries its
+own; a rate limit is not, because the pool waits that one out properly instead,
+keeping the session and saying so on the bus. Three things do differ:
 
 - **The infrastructure guard still applies.** It is the same
   [`infraMutation`](../packages/core/src/infraGuard.ts) check on the same
@@ -813,9 +846,18 @@ under-charging would let a cap silently stop binding.
 | `CLAUDE_CODE_OAUTH_TOKEN` | one of these | Claude Pro/Max subscription credential |
 | `ANTHROPIC_API_KEY` | one of these | Anthropic API credential; **wins if both are set** |
 | `OPENAI_API_KEY` | only if a role is routed to OpenAI | see [Using other providers](#using-other-providers) |
-| `GEMINI_API_KEY` | only if a role is routed to Google | `GOOGLE_API_KEY` also accepted |
+| `GEMINI_API_KEY` | **always** | `reviewer` is pinned to Google; `GOOGLE_API_KEY` also accepted |
 | `GITHUB_TOKEN` | no | enables issues + PRs; falls back to `gh auth token` |
 | `HARNESS_GITHUB_REPO` | no | `owner/repo`; falls back to `gh repo view` |
+
+Any of these may be written to a `.env` file instead of exported. It is read
+from **the directory you run `harness` from**, which is deliberately not the
+repository given by `--repo`: that repository is the thing being built, a task
+spec can write to it, and reading credentials out of it would let one run choose
+which keys the next one uses. A variable already exported wins over the file, so
+`GEMINI_API_KEY=… harness run` stays a working one-off override, and a missing
+or unparseable `.env` is not an error — the key check a moment later names the
+variable and the role that needed it.
 
 The harness also *sets* variables in every task agent's environment. They are not
 yours to configure — they are how a task is told what part of the machine it owns:

@@ -174,3 +174,146 @@ describe("a run created today", () => {
     cleanup();
   });
 });
+
+/**
+ * The other half of the same problem, and the more dangerous half.
+ *
+ * `workerLight` was a key that did not exist yet, so an old config was merely
+ * *incomplete*. Pinning `reviewer` to Google made every old config *invalid*:
+ * they all hold `reviewer: "claude-opus-5"`, which `ModelRouting` now refuses,
+ * and `getRun` re-parses on every read. Without the migration the failure is not
+ * "this run will not resume" but "this run cannot be read at all" — no ledger,
+ * no postmortem, no dashboard row, for every run ever recorded.
+ */
+const OPUS = "claude-opus-5";
+const GEMINI = "gemini-3.6-flash";
+
+/** Writes a run whose stored config names a reviewer today's schema refuses. */
+function runFromBeforeTheReviewerPin(dbPath: string, reviewer: string | null = OPUS): string {
+  const store = new Store(dbPath);
+  store.createRun({
+    id: "run-pre-pin",
+    repoPath: "/tmp/x",
+    assignment: "a",
+    state: "PLANNING",
+    prdPath: null,
+    planHash: null,
+    integrationBranch: "harness/run-pre-pin",
+    config: RunConfig.parse({}),
+  });
+  // Written behind the schema's back, because the schema is what now refuses it
+  // — which is the whole point: only rows already on disk can be in this state.
+  const row = store.db.prepare("SELECT config FROM runs WHERE id = ?").get("run-pre-pin") as { config: string };
+  const stored = JSON.parse(row.config) as { models: Record<string, string> };
+  if (reviewer === null) delete stored.models.reviewer;
+  else stored.models.reviewer = reviewer;
+  store.db.prepare("UPDATE runs SET config = ? WHERE id = ?").run(JSON.stringify(stored), "run-pre-pin");
+  store.db.close();
+  return "run-pre-pin";
+}
+
+describe("a run created before the reviewer was pinned to Google", () => {
+  it("stays readable, which is the thing the migration is actually protecting", () => {
+    const { dbPath, cleanup } = onDisk();
+    const runId = runFromBeforeTheReviewerPin(dbPath);
+
+    // The resume. Before `freezeReviewer` this threw a ZodError.
+    const store = new Store(dbPath);
+
+    expect(() => store.getRun(runId)).not.toThrow();
+    expect(store.getRun(runId)!.config.models.reviewer).toBe(GEMINI);
+    cleanup();
+  });
+
+  it("keeps every other role exactly where that run had it", () => {
+    // The migration moves one role. A run that had deliberately been put on a
+    // cheap worker must not come back on the default one.
+    const { dbPath, cleanup } = onDisk();
+    const store0 = new Store(dbPath);
+    store0.createRun({
+      id: "run-pre-pin",
+      repoPath: "/tmp/x",
+      assignment: "a",
+      state: "PLANNING",
+      prdPath: null,
+      planHash: null,
+      integrationBranch: "harness/run-pre-pin",
+      config: RunConfig.parse({ models: { worker: "gpt-5.6-terra", demo: HAIKU } }),
+    });
+    const row = store0.db.prepare("SELECT config FROM runs WHERE id = ?").get("run-pre-pin") as { config: string };
+    const stored = JSON.parse(row.config) as { models: Record<string, string> };
+    stored.models.reviewer = OPUS;
+    store0.db.prepare("UPDATE runs SET config = ? WHERE id = ?").run(JSON.stringify(stored), "run-pre-pin");
+    store0.db.close();
+
+    const models = new Store(dbPath).getRun("run-pre-pin")!.config.models;
+    expect(models.reviewer).toBe(GEMINI);
+    expect(models.worker).toBe("gpt-5.6-terra");
+    expect(models.demo).toBe(HAIKU);
+    cleanup();
+  });
+
+  it("stamps a config too old to name a reviewer at all", () => {
+    // Absent reads as today's default anyway; writing it down keeps the stored
+    // config saying what the run is doing, which is `freezeLightTier`'s rule.
+    const { dbPath, cleanup } = onDisk();
+    const runId = runFromBeforeTheReviewerPin(dbPath, null);
+    const store = new Store(dbPath);
+
+    expect(store.getRun(runId)!.config.models.reviewer).toBe(GEMINI);
+    const raw = JSON.parse((store.db.prepare("SELECT config FROM runs WHERE id = ?").get(runId) as { config: string }).config) as {
+      models: Record<string, string>;
+    };
+    expect(raw.models.reviewer).toBe(GEMINI);
+    cleanup();
+  });
+
+  it("leaves a row it cannot parse alone rather than taking the database down with it", () => {
+    // This runs in the constructor. One corrupt row must not cost every other
+    // run in the file, which is the rule `freezeLightTier` already follows.
+    const { dbPath, cleanup } = onDisk();
+    const runId = runFromBeforeTheReviewerPin(dbPath);
+    const store0 = new Store(dbPath);
+    store0.createRun({
+      id: "run-corrupt",
+      repoPath: "/tmp/x",
+      assignment: "a",
+      state: "PLANNING",
+      prdPath: null,
+      planHash: null,
+      integrationBranch: "harness/run-corrupt",
+      config: RunConfig.parse({}),
+    });
+    store0.db.prepare("UPDATE runs SET config = ? WHERE id = ?").run("{not json", "run-corrupt");
+    store0.db.close();
+
+    expect(() => new Store(dbPath)).not.toThrow();
+    expect(new Store(dbPath).getRun(runId)!.config.models.reviewer).toBe(GEMINI);
+    cleanup();
+  });
+
+  it("is idempotent, so reopening the store does not keep rewriting rows", () => {
+    const { dbPath, cleanup } = onDisk();
+    const runId = runFromBeforeTheReviewerPin(dbPath);
+    new Store(dbPath).db.close();
+
+    const store = new Store(dbPath);
+    const after = (store.db.prepare("SELECT config FROM runs WHERE id = ?").get(runId) as { config: string }).config;
+    new Store(dbPath).db.close();
+    const again = (new Store(dbPath).db.prepare("SELECT config FROM runs WHERE id = ?").get(runId) as { config: string }).config;
+
+    expect(again).toBe(after);
+    cleanup();
+  });
+
+  it("accepts any Google reviewer a run already had, rather than forcing the default id", () => {
+    // The pin is about the vendor. A run recorded on another Gemini model is
+    // already compliant, and rewriting it would be the silent model swap this
+    // whole file exists to prevent.
+    const { dbPath, cleanup } = onDisk();
+    const runId = runFromBeforeTheReviewerPin(dbPath, "gemini-3.1-pro-preview");
+
+    expect(new Store(dbPath).getRun(runId)!.config.models.reviewer).toBe("gemini-3.1-pro-preview");
+    cleanup();
+  });
+});

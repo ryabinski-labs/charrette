@@ -33,8 +33,14 @@
  */
 import { buildProgram } from "./cli.js";
 import { installCrashLog, recordFatal } from "./crashlog.js";
+import { loadDotEnv } from "./env.js";
 
 installCrashLog();
+
+// Before the command tree runs, because `harness run` checks the vendor keys
+// while it is resolving the config — see `missingKeys` in cli.ts — and a key
+// loaded after that check is a key that was not there when it mattered.
+loadDotEnv();
 
 buildProgram()
   .parseAsync()

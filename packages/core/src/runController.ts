@@ -4645,7 +4645,14 @@ export class RunController {
     // Before the config is touched: a role routed to a vendor whose key is not
     // exported fails at the first spawn, minutes later, in a log, a long way
     // from the click that caused it.
-    const missing = missingKeys(models);
+    //
+    // Only the role being moved. Checking the whole table looks more thorough
+    // and is worse: the rest of it was validated at `harness run` and has not
+    // changed, so the only thing a full check can add here is a complaint about
+    // a role the operator did not just touch — which is what it did the day
+    // `reviewer` was pinned to Google, answering "move the worker to Haiku"
+    // with a sentence about GEMINI_API_KEY.
+    const missing = missingKeys({ [role]: wanted });
     if (missing.length) return missing.join(" ");
     try {
       this.store.patchRunConfig(runId, { models });

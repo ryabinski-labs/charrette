@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ModelRouting, ModelRoutingShape } from "./config.js";
+import { ModelRouting } from "./config.js";
 import { PINNED_ROLES, modelId, providerFor, routingViolations, splitModel } from "./providers.js";
 
 describe("which vendor answers for a model name", () => {
@@ -30,7 +30,7 @@ describe("which vendor answers for a model name", () => {
   });
 });
 
-describe("the roles that may not leave Anthropic", () => {
+describe("the roles whose vendor is not the operator's to choose", () => {
   it("passes an all-Anthropic routing table", () => {
     expect(routingViolations({ worker: "claude-sonnet-5", qa: "claude-sonnet-5" })).toEqual([]);
   });
@@ -109,7 +109,40 @@ describe("the roles that may not leave Anthropic", () => {
   it("pins intake for a capability reason, not a policy one", () => {
     // If this ever stops being true the tool loop grew an ask-the-operator
     // tool, and the pin should be reconsidered rather than quietly kept.
-    expect(PINNED_ROLES.intake).toContain("in-process tool");
+    expect(PINNED_ROLES.intake?.why).toContain("in-process tool");
+    expect(PINNED_ROLES.intake?.provider).toBe("anthropic");
+  });
+
+  it("pins the reviewer to Google, and says so when it is pointed back at Anthropic", () => {
+    // The direction that matters. Every other pin refuses a move *away* from
+    // Anthropic; this one refuses a move *back*, and the failure it prevents is
+    // silent — an Opus reviewer works perfectly, it just shares the blind spots
+    // of the Opus-family worker whose diff it is reviewing.
+    expect(PINNED_ROLES.reviewer?.provider).toBe("google");
+    const [message, ...rest] = routingViolations({ reviewer: "claude-opus-5" });
+    expect(rest).toEqual([]);
+    expect(message).toContain("models.reviewer");
+    expect(message).toContain("pinned to Google");
+    expect(message).toContain("anthropic");
+    expect(message).toContain("uncorrelated");
+  });
+
+  it("applies the capability floor on the Gemini side too", () => {
+    // The hole this closes is the exact one Haiku opened on the Anthropic side:
+    // flash-lite is a Google model, so the vendor check alone waves through the
+    // weak judge the pin exists to prevent.
+    const [message, ...rest] = routingViolations({ reviewer: "gemini-3.5-flash-lite" });
+    expect(rest).toEqual([]);
+    expect(message).toContain("below the capability floor");
+    expect(message).toContain("Flash or Pro");
+  });
+
+  it("does not mistake the reviewer's own Flash tier for the small tier", () => {
+    // `lite` and not `flash`: Flash is where Gemini ships the judging-capable
+    // model this role is pointed at, so a floor written as /flash/ would refuse
+    // the default and stop every run.
+    expect(routingViolations({ reviewer: "gemini-3.6-flash" })).toEqual([]);
+    expect(routingViolations({ reviewer: "google/gemini-3.6-flash" })).toEqual([]);
   });
 });
 
@@ -134,10 +167,14 @@ describe("the run config refuses a routing it cannot honour", () => {
     expect(result.error?.issues[0]?.message).toContain("below the capability floor");
   });
 
-  it("still applies the defaults, so an empty table is the all-Anthropic one", () => {
+  it("still applies the defaults, so an empty table is the working one", () => {
     const parsed = ModelRouting.parse({});
     expect(providerFor(parsed.worker)).toBe("anthropic");
-    expect(Object.keys(ModelRoutingShape.shape)).toContain("reviewer");
+    // Not all-Anthropic any more, and the default has to satisfy its own pin:
+    // an empty table is what every run without a `models` block gets, so a
+    // default that violated `routingViolations` would refuse every such run.
+    expect(providerFor(parsed.reviewer)).toBe("google");
+    expect(routingViolations(parsed)).toEqual([]);
   });
 
   it("ships the cheap tier on exactly the roles that were argued for it", () => {
@@ -152,9 +189,12 @@ describe("the run config refuses a routing it cannot honour", () => {
       workerLight: "claude-haiku-4-5-20251001",
     });
     // And the judges are not among them — which the floor now also enforces.
+    // `reviewer` is the one judge off Anthropic, and it is pinned there rather
+    // than defaulted: see PINNED_ROLES for why a same-family reviewer is the
+    // failure mode, and budget.ts for the row that prices this id.
     expect({ qa: d.qa, reviewer: d.reviewer, prod: d.prod, pm: d.pm, advisor: d.advisor }).toEqual({
       qa: "claude-sonnet-5",
-      reviewer: "claude-opus-5",
+      reviewer: "gemini-3.6-flash",
       prod: "claude-opus-5",
       pm: "claude-opus-5",
       advisor: "claude-sonnet-5",

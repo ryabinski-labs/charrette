@@ -52,20 +52,39 @@ export function modelId(model: string): string {
   return splitModel(model).id;
 }
 
+/** The vendor's own name, for a message an operator reads. */
+const VENDOR_NAME: Record<Provider, string> = {
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+  google: "Google",
+};
+
 /**
- * Roles that must run on Anthropic — and, per `BELOW_JUDGING_FLOOR` below, not
- * on its small tier either. One list, because both restrictions exist for the
- * same reason and have the same consequence: the run will not start.
+ * Roles whose vendor is not the operator's to choose — and, per `JUDGING_FLOOR`
+ * below, not that vendor's small tier either. One list, because every entry has
+ * the same consequence for the operator: the run will not start.
  *
- * Two different kinds of reason, deliberately kept in one list because they
- * have the same consequence for the operator — the run will not start:
+ * Three kinds of reason, deliberately kept together:
  *
- *   - Policy. `qa`, `reviewer` and `prod` are the roles whose verdicts gate a
- *     merge or end a run. A model that judges its own tier of work is the one
- *     place where saving money buys a quieter failure rather than a cheaper
- *     one: a weaker judge does not report that it judged worse, it reports
- *     PASS. The operator's decision was that the judges stay on the model
- *     their thresholds were calibrated against.
+ *   - Policy, pinned to Anthropic. `qa` and `prod` are the roles whose verdicts
+ *     gate a merge or end a run. A model that judges its own tier of work is
+ *     the one place where saving money buys a quieter failure rather than a
+ *     cheaper one: a weaker judge does not report that it judged worse, it
+ *     reports PASS. These stay on the model their thresholds were calibrated
+ *     against.
+ *   - Policy, pinned to Google. `reviewer` reads the built product through one
+ *     named lens and says whether the run is still building the right thing.
+ *     Every line it is judging was written by an Anthropic worker, and a judge
+ *     drawn from the same family as the author shares the author's blind spots
+ *     — it is fluent in exactly the reasoning that produced the work, so the
+ *     failure it is least likely to name is the one the whole pit stop exists
+ *     to catch. A second vendor is the cheapest independence available: it
+ *     costs one API key and buys an opinion whose errors are uncorrelated with
+ *     the ones already in the diff. `qa` and `prod` do not move with it because
+ *     their thresholds are calibrated and their verdicts are mechanical
+ *     (criteria against a diff); the reviewer's judgment is the open-ended one,
+ *     which is both why independence helps it most and why nothing downstream
+ *     depends on its wording.
  *   - Capability. `intake` asks the operator questions through an in-process
  *     MCP tool (see intake.ts). That tool exists only on the SDK transport, so
  *     an intake session on another vendor could not ask anything — it would
@@ -76,36 +95,56 @@ export function modelId(model: string): string {
  * none: a flag that switches a control off is a flag a task spec can talk
  * somebody into setting.
  */
-export const PINNED_ROLES: Record<string, string> = {
-  qa: "its verdict decides whether a task merges, and a weaker judge reports PASS rather than reporting that it judged worse",
-  reviewer: "it is the judgment a pit stop exists to buy — whether the run is still building the right thing",
-  prod: "it is the last word on whether the run delivered the assignment",
-  intake: "it asks the operator questions through an in-process tool that only the Anthropic transport can expose",
+export const PINNED_ROLES: Record<string, { provider: Provider; why: string }> = {
+  qa: {
+    provider: "anthropic",
+    why: "its verdict decides whether a task merges, and a weaker judge reports PASS rather than reporting that it judged worse",
+  },
+  reviewer: {
+    provider: "google",
+    why: "it is the judgment a pit stop exists to buy — whether the run is still building the right thing — and it is held off the family that wrote the code so its errors are uncorrelated with the ones already in the diff",
+  },
+  prod: {
+    provider: "anthropic",
+    why: "it is the last word on whether the run delivered the assignment",
+  },
+  intake: {
+    provider: "anthropic",
+    why: "it asks the operator questions through an in-process tool that only the Anthropic transport can expose",
+  },
 };
 
 /**
- * The small tier, refused for the roles above.
+ * The small tier of each pinned vendor, refused for the roles above.
  *
- * `PINNED_ROLES` was written to stop a judging role leaving Anthropic, and for
+ * `PINNED_ROLES` was written to stop a judging role changing *company*, and for
  * most of its life that was the same thing as stopping it getting weaker —
  * every Anthropic model the harness routed to was Sonnet or Opus. Pointing
  * `demo` and `repair` at Haiku ended that: `models.qa = "claude-haiku-4-5-…"`
  * is an Anthropic model, so the vendor check waved it through, and the guard
  * whose entire stated reason is "a weaker judge reports PASS rather than
- * reporting that it judged worse" permitted exactly that.
+ * reporting that it judged worse" permitted exactly that. Pinning `reviewer` to
+ * Google reopens the same hole on the other side — `gemini-3.5-flash-lite` is a
+ * Google model — so the floor is per vendor rather than a single regex.
  *
- * Matched on the family name rather than on a list of ids, so a future
- * `claude-haiku-5` is refused the day it exists rather than the day somebody
- * remembers to add it. Only reached for models that already passed the vendor
- * check, which is what makes a bare family name enough to go on: within
- * Anthropic, "haiku" names the small tier and has since the first one.
+ * Matched on the family word rather than on a list of ids, so a future
+ * `claude-haiku-5` or `gemini-4-flash-lite` is refused the day it exists rather
+ * than the day somebody remembers to add it. Only reached for models that
+ * already passed the vendor check, which is what makes a bare family word
+ * enough to go on: within Anthropic "haiku" names the small tier and has since
+ * the first one, and within Gemini "lite" does the same. Note that this is why
+ * the floor is `lite` and not `flash` — Flash is the mid tier Gemini actually
+ * ships a judging-capable model in, and `models.reviewer` points at one.
  *
  * The cost of being wrong here is asymmetric in the same direction as
  * modelTier.ts: a refusal the operator disagrees with is a one-line config
  * error at `harness run`, and a permission it should not have granted is a
  * merge nobody caught.
  */
-const BELOW_JUDGING_FLOOR = /haiku/i;
+const JUDGING_FLOOR: Partial<Record<Provider, { below: RegExp; instead: string }>> = {
+  anthropic: { below: /haiku/i, instead: "Point it at a Sonnet or Opus model." },
+  google: { below: /lite/i, instead: "Point it at a Flash or Pro model." },
+};
 
 /**
  * Which role→model assignments a run config may not have. Returns one sentence
@@ -118,18 +157,18 @@ const BELOW_JUDGING_FLOOR = /haiku/i;
  */
 export function routingViolations(models: Record<string, string>): string[] {
   const out: string[] = [];
-  for (const [role, why] of Object.entries(PINNED_ROLES)) {
+  for (const [role, pin] of Object.entries(PINNED_ROLES)) {
     const model = models[role];
     if (model === undefined) continue;
     const provider = providerFor(model);
-    if (provider !== "anthropic") {
-      out.push(`models.${role} is pinned to Anthropic but is set to "${model}" (${provider}): ${why}.`);
+    if (provider !== pin.provider) {
+      out.push(`models.${role} is pinned to ${VENDOR_NAME[pin.provider]} but is set to "${model}" (${provider}): ${pin.why}.`);
       continue;
     }
-    if (BELOW_JUDGING_FLOOR.test(modelId(model))) {
+    const floor = JUDGING_FLOOR[provider];
+    if (floor && floor.below.test(modelId(model))) {
       out.push(
-        `models.${role} is set to "${model}", which is below the capability floor for a judging role: ${why}. ` +
-          `Point it at a Sonnet or Opus model.`
+        `models.${role} is set to "${model}", which is below the capability floor for a judging role: ${pin.why}. ` + floor.instead
       );
     }
   }

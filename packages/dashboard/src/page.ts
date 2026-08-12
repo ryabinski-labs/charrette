@@ -18,9 +18,11 @@ import { PINNED_ROLES } from "@harness/shared";
  *
  * The priced tiers from `budget.ts` — a model absent from that table is billed
  * at the top tier, so offering one here would be offering the operator a saving
- * the ledger cannot see. Anthropic first because the pinned roles can take
- * nothing else, and because a run with no `OPENAI_API_KEY` exported is refused
- * the others by `missingKeys` before the config is touched.
+ * the ledger cannot see. Anthropic first because it is where the roles this
+ * dropdown can actually move still live: the pinned roles are rendered without
+ * a control at all (see `LOCKED_ROLES`), so nothing here is offered for
+ * `reviewer` even though it now runs on Gemini. A run whose key for a vendor is
+ * not exported is refused by `missingKeys` before the config is touched.
  */
 const MODEL_CHOICES = [
   "claude-opus-5",
@@ -30,6 +32,7 @@ const MODEL_CHOICES = [
   "gpt-5.6-terra",
   "gpt-5.6-luna",
   "gemini-3.5-flash-lite",
+  "gemini-3.6-flash",
 ];
 
 export const PAGE_HTML = `<!doctype html>
