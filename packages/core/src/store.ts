@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { HarnessEvent, RunConfig, RunState, TaskState, RUN_TRANSITIONS, TASK_TRANSITIONS } from "@harness/shared";
+import { HarnessEvent, RunConfig, RunState, TaskState, RUN_TRANSITIONS, TASK_TRANSITIONS, providerFor } from "@harness/shared";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS runs (
@@ -210,6 +210,7 @@ export class Store {
       }
     }
     this.freezeLightTier();
+    this.freezeReviewer();
   }
 
   /**
@@ -246,6 +247,56 @@ export class Store {
       // That run's own worker, not the schema default: a run pointed at another
       // vendor would otherwise have its light tier moved to Anthropic too.
       models.workerLight = typeof models.worker === "string" ? models.worker : fallback;
+      patch.run(JSON.stringify(config), row.id);
+    }
+  }
+
+  /**
+   * Move every recorded run's `reviewer` onto the vendor the role is now pinned
+   * to, so runs created before the pin stay readable.
+   *
+   * This is not the same problem `freezeLightTier` solves, and the difference is
+   * worth stating because the two look alike. That one exists because an
+   * *absent* key silently takes today's default; this one exists because a
+   * *present* one — `reviewer: "claude-opus-5"`, which every run before the pin
+   * recorded — is now a value `RunConfig` refuses. `getRun` re-parses the stored
+   * config on every read, so without this those runs would not merely refuse to
+   * resume, they would throw on every read: no ledger, no postmortem, no
+   * dashboard row. A migration that stops old data being *readable* is worse
+   * than the policy it enforces.
+   *
+   * The rewrite is deliberate rather than reluctant. A parked run picked up
+   * after the switch reviews on a different model than its earlier pit stops
+   * did, which is a real discontinuity — but the reviewer's output is advisory
+   * prose read at a checkpoint, not a threshold anything downstream compares
+   * against, so the discontinuity costs a differently-worded review and nothing
+   * else. Contrast `workerLight`, where the equivalent silent swap would change
+   * which model writes the code.
+   *
+   * Idempotent by construction: it only touches rows whose reviewer is not
+   * already on the pinned vendor, and it puts one there.
+   */
+  private freezeReviewer(): void {
+    const pinned = RunConfig.parse({}).models.reviewer;
+    const rows = this.db.prepare("SELECT id, config FROM runs").all() as { id: string; config: string }[];
+    const patch = this.db.prepare("UPDATE runs SET config = ? WHERE id = ?");
+    for (const row of rows) {
+      let config: { models?: Record<string, unknown> };
+      // As above: one unreadable row is one row, and throwing here happens in
+      // the constructor, which would take every other run in the database.
+      try {
+        config = JSON.parse(row.config) as { models?: Record<string, unknown> };
+      } catch {
+        continue;
+      }
+      const models = config?.models;
+      if (!models || typeof models !== "object") continue;
+      const current = models.reviewer;
+      // Absent counts too. A config old enough to predate the role would
+      // otherwise read as the new default without saying so, which is the
+      // failure `freezeLightTier` documents.
+      if (typeof current === "string" && providerFor(current) === providerFor(pinned)) continue;
+      models.reviewer = pinned;
       patch.run(JSON.stringify(config), row.id);
     }
   }

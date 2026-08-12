@@ -301,13 +301,17 @@ describe("harness run — resolving what the run will actually do", () => {
     expect(banner).toContain("tools      none detected on PATH");
   });
 
-  it("says nothing about models when every role is on the Anthropic default", async () => {
-    // A line that never changes is a line nobody reads.
+  it("says nothing about models when every role is on its default", async () => {
+    // A line that never changes is a line nobody reads. This is also what
+    // stopped holding when `reviewer` was pinned to Google: the banner used to
+    // list every role that was not Anthropic, which from that day forward meant
+    // every single run printed a models line naming a role the operator neither
+    // chose nor can change.
     await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard");
     expect(printed()).not.toContain("models     ");
   });
 
-  it("names each role that was moved to another vendor", async () => {
+  it("names each role the operator moved, and only those", async () => {
     h.loadFileConfigMock.mockReturnValue({
       config: { models: { worker: "gpt-5.6-terra", demo: "gemini-3.5-flash-lite" } },
       path: "/repo/harness.config.json",
@@ -317,7 +321,10 @@ describe("harness run — resolving what the run will actually do", () => {
     const banner = printed();
     expect(banner).toContain("worker→gpt-5.6-terra");
     expect(banner).toContain("demo→gemini-3.5-flash-lite");
-    expect(banner).toContain("judging roles stay on Anthropic");
+    expect(banner).toContain("pinned roles are not movable");
+    // The pinned Gemini reviewer is a default, not a move, so it stays out of a
+    // line whose entire job is to show what the operator changed.
+    expect(banner).not.toContain("reviewer→");
   });
 
   it("refuses the run when a routed provider has no key, before anything is spent", async () => {
@@ -1126,6 +1133,25 @@ describe("harness resume", () => {
 
     expect(printed()).toContain("Resuming run run-open [EXECUTING] — the open one");
     expect(h.controllerMethods.resume).toHaveBeenCalledWith("run-open", undefined);
+  });
+
+  it("refuses when the resumed table needs a key, even though this command line moved nothing", async () => {
+    // A run planned when everything was Anthropic is rewritten to the pinned
+    // Gemini reviewer by `freezeReviewer` at open, so it acquires a Google
+    // dependency between one command and the next without being asked. The
+    // key check used to run only when `--model` changed something, which left
+    // that run resuming into a pit stop it could not pay for — and a reviewer
+    // that cannot start is not reported as a failure, it is degraded to
+    // `verdict: "on-track"`. The epic gets bought and rubber-stamped.
+    h.storeMethods.getRun.mockReturnValue({
+      id: "run-old",
+      state: "EXECUTING",
+      config: { models: { reviewer: "gemini-3.6-flash" }, deterministicChecks: [] },
+    });
+    h.missingKeysMock.mockReturnValue(["GEMINI_API_KEY is not set, but reviewer (gemini-3.6-flash) is routed to google."]);
+
+    await expect(cli("resume", "run-old", "--repo", "/repo", "--no-dashboard")).rejects.toThrow(/GEMINI_API_KEY is not set/);
+    expect(h.controllerMethods.resume).not.toHaveBeenCalled();
   });
 
   it("says so plainly when there is nothing to resume", async () => {

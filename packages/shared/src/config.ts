@@ -104,9 +104,23 @@ export const ModelRoutingShape = z.object({
   /**
    * Reads the demo through one named lens and says whether the run is still
    * building the right thing. This is the judgment the whole pit stop exists to
-   * buy, and it is judgment rather than tool work, so: Opus.
+   * buy, and it is judgment rather than tool work.
+   *
+   * Gemini rather than Opus, and the reason is independence rather than price.
+   * Every line this role is judging was written by an Anthropic worker and
+   * already passed an Anthropic QA; a reviewer from the same family is fluent
+   * in exactly the reasoning that produced the work, which makes the objection
+   * it is least likely to raise the one the pit stop exists to buy. Pinned, not
+   * merely defaulted — see `PINNED_ROLES` in providers.ts.
+   *
+   * Flash rather than Pro because the reviewer's expensive input is already
+   * paid for: it reads a demo report and a PRD that other roles produced, at a
+   * 30-turn ceiling, and emits a short verdict-and-findings JSON. The judgment
+   * is what is being bought here, not long-horizon tool work, and Flash is the
+   * tier where a second opinion is cheap enough to run on every lens rather
+   * than on the one lens somebody picked.
    */
-  reviewer: z.string().default("claude-opus-5"),
+  reviewer: z.string().default("gemini-3.6-flash"),
   /**
    * Decides what the run does next at a pit stop, having read the demo and
    * every reviewer. It is the only agent in the harness whose output redirects
@@ -133,9 +147,17 @@ export const ModelRoutingShape = z.object({
  * Enforced here, where the config is parsed, rather than where the role is
  * dispatched. A run whose `prod` validator is misrouted would otherwise be
  * discovered by the validator itself, after every worker had been paid for;
- * this refuses at `harness run`, before the first agent spawns. The stored
- * config of an existing run cannot trip it — nothing that violates this could
- * ever have been written.
+ * this refuses at `harness run`, before the first agent spawns.
+ *
+ * This used to say that the stored config of an existing run could not trip it,
+ * because nothing violating it could ever have been written. Pinning `reviewer`
+ * to Google ended that: every run recorded before the switch holds
+ * `reviewer: "claude-opus-5"`, which this now refuses — and `getRun` re-parses
+ * the frozen config on every read, so those runs would have become unreadable
+ * rather than merely unstartable. `freezeReviewer` in store.ts rewrites them at
+ * open. Any future pin that moves a role which already had a default needs the
+ * same treatment; the check to make is whether an existing row could hold a
+ * value the new rule refuses.
  */
 export const ModelRouting = ModelRoutingShape.superRefine((models, ctx) => {
   for (const message of routingViolations(models)) {

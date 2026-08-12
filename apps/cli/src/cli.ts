@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { createInterface } from "node:readline/promises";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { ModelRoutingShape, RunConfig, providerFor } from "@harness/shared";
+import { ModelRoutingShape, RunConfig } from "@harness/shared";
 import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, checkMemoryBanner, detectToolbelt, ensureIgnored, harnessBuild, missingKeys, originSlug, postmortem, renderPostmortem, repoUnusable } from "@harness/core";
 import { Dashboard } from "@harness/dashboard";
 import { promptForNewCap, watchBudgetCommands } from "./budget.js";
@@ -458,14 +458,22 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
   // discovering there that OPENAI_API_KEY was never exported wastes the epic.
   const missing = missingKeys(config.models);
   if (missing.length) {
-    throw new Error(`${missing.join(" ")} Export the key, or point that role back at an Anthropic model.`);
+    // Not "point that role back at an Anthropic model" any more: `reviewer` is
+    // pinned to Google, so for that one there is no back to point it at, and
+    // advice the operator cannot take reads as a bug in the tool.
+    throw new Error(`${missing.join(" ")} Export the key, or — for a role that is not pinned — route it to a vendor you have one for.`);
   }
 
-  // Say who answers for what, but only when it is not the all-Anthropic default:
-  // a line that never changes is a line nobody reads.
-  const offAnthropic = Object.entries(config.models).filter(([, model]) => providerFor(model) !== "anthropic");
-  if (offAnthropic.length) {
-    banner.push(`models     ${offAnthropic.map(([role, model]) => `${role}→${model}`).join(" · ")}   (judging roles stay on Anthropic)`);
+  // Say who answers for what, but only where the operator actually moved
+  // something: a line that never changes is a line nobody reads. Compared
+  // against the default table rather than against "is it Anthropic", which
+  // stopped meaning the same thing when `reviewer` was pinned to Google — that
+  // predicate now fires on every run, for a role nobody chose and nobody can
+  // change, which is precisely the unread line this condition exists to avoid.
+  const defaults = ModelRoutingShape.parse({});
+  const moved = Object.entries(config.models).filter(([role, model]) => model !== defaults[role as keyof typeof defaults]);
+  if (moved.length) {
+    banner.push(`models     ${moved.map(([role, model]) => `${role}→${model}`).join(" · ")}   (pinned roles are not movable)`);
   }
 
   if (filePath) banner.push(`config     ${CONFIG_FILENAME}`);
@@ -720,6 +728,31 @@ export function buildProgram(): Command {
         store.patchRunConfig(runId, { prodUrl: file.prodUrl });
         process.stdout.write(`Production URL updated from ${CONFIG_FILENAME}: ${file.prodUrl || "(none)"}\n`);
       }
+      // Every vendor the *resumed* table needs a key for, not only the roles
+      // this command line moved.
+      //
+      // The check above fires only when `--model` changed something, which was
+      // right while a run's routing could not change any other way: a resume
+      // that touched nothing inherited a table `harness run` had already
+      // cleared. Pinning `reviewer` to Google ended that. `freezeReviewer`
+      // rewrites every pre-pin run at open, so a run planned and half-executed
+      // when everything was Anthropic acquires a Google dependency between one
+      // command and the next, having been asked nothing — and a plain `harness
+      // resume` would carry on without ever looking for the key.
+      //
+      // What that costs is the thing `missingKeys` exists to prevent, twice
+      // over: `reviewer` first runs at a pit stop, so the epic is already paid
+      // for, and a reviewer session that cannot start is not reported as a
+      // failure — `runLens` degrades it to `verdict: "on-track"`. The operator
+      // would buy the workers and get a rubber stamp.
+      const resumed = store.getRun(runId);
+      if (resumed) {
+        const missingNow = missingKeys(resumed.config.models);
+        if (missingNow.length) {
+          throw new Error(`${missingNow.join(" ")} Export the key, or — for a role that is not pinned — route it to a vendor you have one for.`);
+        }
+      }
+
       // Read after the patches above, so a resume that corrected its checks is
       // told about the corrected ones rather than the ones it is abandoning.
       const remembered = checkMemoryBanner(store, store.getRun(runId)?.config.deterministicChecks ?? []);

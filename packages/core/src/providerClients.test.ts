@@ -172,6 +172,21 @@ describe("talking to Google", () => {
     expect(turn.usage).toEqual({ inputTokens: 60, outputTokens: 10, cacheReadTokens: 30, cacheWriteTokens: 0 });
   });
 
+  it("bills thinking tokens, which Gemini reports outside the candidate count", async () => {
+    // The numbers are a real gemini-3.6-flash reply: candidates and thoughts are
+    // siblings summing into totalTokenCount, and Google charges both at the
+    // output rate. Counting candidates alone books a reasoning model at under a
+    // third of its cost — and since `models.reviewer` is pinned to Gemini, that
+    // undercount would apply to every pit stop of every run, against the budget
+    // cap that is supposed to be the thing that stops a runaway.
+    const { impl } = stubFetch({
+      candidates: [{ content: { parts: [{ text: "ok" }] } }],
+      usageMetadata: { promptTokenCount: 67, candidatesTokenCount: 20, thoughtsTokenCount: 43, totalTokenCount: 130 },
+    });
+    const turn = await googleClient("k", impl)({ model: "gemini-3.6-flash", system: "s", messages: [], tools: [], signal });
+    expect(turn.usage).toEqual({ inputTokens: 67, outputTokens: 63, cacheReadTokens: 0, cacheWriteTokens: 0 });
+  });
+
   it("copes with an empty candidate and an argument-less call", async () => {
     const { impl } = stubFetch({ candidates: [{ content: { parts: [{ functionCall: { name: "Glob" } }] } }] });
     const turn = await googleClient("k", impl)({ model: "gemini-3.5-flash-lite", system: "s", messages: [], tools: [], signal });
@@ -194,6 +209,128 @@ describe("talking to Google", () => {
   it("reports a failed request with its status", async () => {
     const { impl } = stubFetch({}, { ok: false, status: 429, text: "quota" });
     await expect(googleClient("k", impl)({ model: "gemini-3.5-flash-lite", system: "s", messages: [], tools: [], signal })).rejects.toThrow(/google API 429/);
+  });
+});
+
+/** A fetch that answers differently per call, for paths that need two attempts. */
+function stubSequence(replies: { status?: number; text?: string; body?: unknown }[]) {
+  let n = 0;
+  const impl = (async () => {
+    const reply = replies[Math.min(n++, replies.length - 1)]!;
+    const status = reply.status ?? 200;
+    return { ok: status < 400, status, statusText: "", json: async () => reply.body ?? {}, text: async () => reply.text ?? "" };
+  }) as unknown as Fetch;
+  return { impl, calls: () => n };
+}
+
+/**
+ * Retrying the vendor being briefly unwell.
+ *
+ * This is the resilience the Anthropic transport got for free from the Agent
+ * SDK and this one never had. It went from harmless to load-bearing when
+ * `models.reviewer` was pinned to Google: a pit stop fires every lens at the
+ * same endpoint at the same moment, and `runLens` turns a reviewer that died
+ * into `verdict: "on-track"` — so one overloaded minute used to buy a silent
+ * pass on the judgment the pit stop is there to make.
+ */
+describe("a vendor that is briefly unable rather than refusing", () => {
+  const ok = { candidates: [{ content: { parts: [{ text: "fine" }] } }] };
+  const req = { model: "gemini-3.6-flash", system: "s", messages: [], tools: [], signal };
+
+  it("tries again when the model is overloaded, and answers", async () => {
+    const slept: number[] = [];
+    const { impl, calls } = stubSequence([{ status: 503, text: "The model is overloaded." }, { body: ok }]);
+
+    const turn = await googleClient("k", impl, undefined, async (ms) => void slept.push(ms))(req);
+
+    expect(turn.text).toBe("fine");
+    expect(calls()).toBe(2);
+    expect(slept).toEqual([1_000]);
+  });
+
+  it("gives up after two retries rather than hiding an outage in a long pause", async () => {
+    const slept: number[] = [];
+    const { impl, calls } = stubSequence([{ status: 503, text: "overloaded" }]);
+
+    await expect(googleClient("k", impl, undefined, async (ms) => void slept.push(ms))(req)).rejects.toThrow(/google API 503/);
+    expect(calls()).toBe(3);
+    expect(slept).toEqual([1_000, 4_000]);
+  });
+
+  it("retries on the OpenAI transport too, which shares the request path", async () => {
+    const slept: number[] = [];
+    const { impl, calls } = stubSequence([{ status: 502 }, { body: { choices: [{ message: { content: "fine" } }] } }]);
+
+    const turn = await openaiClient("sk", impl, undefined, async (ms) => void slept.push(ms))({ ...req, model: "gpt-5.6-terra" });
+
+    expect(turn.text).toBe("fine");
+    expect(calls()).toBe(2);
+  });
+
+  it("does not retry a 429, because the pool waits that one out properly", async () => {
+    // Two more requests against the wall that just refused one, and three
+    // seconds later the pool would do the right thing anyway — sleep until the
+    // quota window reopens, keeping the session. See usageLimit.ts.
+    const slept: number[] = [];
+    const { impl, calls } = stubSequence([{ status: 429, text: "quota" }]);
+
+    await expect(googleClient("k", impl, undefined, async (ms) => void slept.push(ms))(req)).rejects.toThrow(/google API 429/);
+    expect(calls()).toBe(1);
+    expect(slept).toEqual([]);
+  });
+
+  it("waits on a real clock when nothing injects one", async () => {
+    // Every case above hands in its own sleep, which would leave the only
+    // thing that actually pauses production untested — and a backoff that
+    // never sleeps is a retry storm, not a retry.
+    vi.useFakeTimers();
+    try {
+      const { impl, calls } = stubSequence([{ status: 503 }, { body: ok }]);
+      const pending = googleClient("k", impl)(req);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect((await pending).text).toBe("fine");
+      expect(calls()).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not retry a request the vendor will refuse identically forever", async () => {
+    const { impl, calls } = stubSequence([{ status: 400, text: "bad tool schema" }]);
+    await expect(googleClient("k", impl)(req)).rejects.toThrow(/google API 400/);
+    expect(calls()).toBe(1);
+  });
+
+  it("keeps enough of the body for the vendor's own retry hint to survive", async () => {
+    // Google states `RetryInfo` *after* a `QuotaFailure` block that is itself
+    // several hundred characters. Truncating the body at 500 dropped the one
+    // field in the reply that says when to come back, so every Gemini quota
+    // wall fell back to a flat one-minute probe.
+    const body = JSON.stringify({
+      error: {
+        code: 429,
+        message: "You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://ai.google.dev/gemini-api/docs/rate-limits.",
+        status: "RESOURCE_EXHAUSTED",
+        details: [
+          {
+            "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+            violations: [
+              {
+                quotaMetric: "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+                quotaId: "GenerateRequestsPerMinutePerProjectPerModel-FreeTier",
+                quotaDimensions: { model: "gemini-3.6-flash", location: "global" },
+                quotaValue: "10",
+              },
+            ],
+          },
+          { "@type": "type.googleapis.com/google.rpc.RetryInfo", retryDelay: "38s" },
+        ],
+      },
+    });
+    expect(body.length).toBeGreaterThan(500);
+    const { impl } = stubSequence([{ status: 429, text: body }]);
+
+    await expect(googleClient("k", impl)(req)).rejects.toThrow(/retryDelay/);
   });
 });
 

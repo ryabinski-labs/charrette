@@ -94,15 +94,63 @@ export function missingKeys(models: Record<string, string>, env: NodeJS.ProcessE
   return [...affected].map(([provider, roles]) => `${keyVarFor(provider)} is not set, but ${roles.join(" and ")} ${roles.length === 1 ? "is" : "are"} routed to ${provider}.`);
 }
 
-async function post(fetchImpl: Fetch, url: string, init: RequestInit, provider: Provider): Promise<unknown> {
-  const res = await fetchImpl(url, init);
-  if (!res.ok) {
+/** Waits between attempts. Injected in tests, `setTimeout` in production. */
+export type Sleep = (ms: number) => Promise<void>;
+
+const sleepMs: Sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The vendor is briefly unable, rather than refusing.
+ *
+ * 429 is deliberately absent. A rate limit is not transient in seconds — it is
+ * a quota window, and the harness already has a mechanism for one that is
+ * better than anything this loop could do: `usageLimitOf` recognises it and
+ * `AgentPool.run` sleeps until it lifts, keeping the session, its ledger row
+ * and its handle for operator feedback, and saying so on the bus. Retrying a
+ * 429 here would spend two more requests against the wall that just refused
+ * one, and delay reaching the code that handles it properly.
+ */
+const TRANSIENT = new Set([500, 502, 503, 504]);
+
+/**
+ * How long to wait before trying a transient failure again. Two retries, both
+ * quick: this is for the seconds-long blip ("The model is overloaded, please
+ * try again later" — Gemini's 503, which it serves under ordinary load), not
+ * for an outage, which the stall watchdog and the caller's own retries own.
+ */
+const TRANSIENT_BACKOFF_MS = [1_000, 4_000];
+
+/**
+ * One request, retried while the vendor is merely unwell.
+ *
+ * The Anthropic transport never needed this: the Agent SDK retries a 5xx
+ * internally, so every role in the harness had that resilience without anyone
+ * writing it. Roles on this transport had none — which cost nothing while it
+ * carried only what an operator had deliberately moved, and started costing on
+ * the day `models.reviewer` was pinned to Google. A pit stop's reviewers all
+ * fire at once against the same endpoint, so one overloaded minute took all
+ * three lenses, and `runLens` degrades a dead reviewer to `verdict: "on-track"`
+ * — a transient 503 bought a quiet pass on the judgment the pit stop exists for.
+ */
+async function post(fetchImpl: Fetch, url: string, init: RequestInit, provider: Provider, sleep: Sleep = sleepMs): Promise<unknown> {
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetchImpl(url, init);
+    if (res.ok) return (await res.json()) as unknown;
     const body = await res.text().catch(() => "");
+    if (TRANSIENT.has(res.status) && attempt < TRANSIENT_BACKOFF_MS.length) {
+      await sleep(TRANSIENT_BACKOFF_MS[attempt]!);
+      continue;
+    }
     // The status is the diagnosable part — 401 is a key, 429 is a cap, 400 is
     // usually a tool schema — so it goes in the message rather than the log.
-    throw new Error(`${provider} API ${res.status} ${res.statusText}: ${body.slice(0, 500)}`);
+    //
+    // The body is kept long enough to carry the vendor's own retry hint:
+    // Google's 429 states its `RetryInfo` after a `QuotaFailure` block that is
+    // itself several hundred characters, and `usageLimitOf` reads that hint to
+    // decide how long to wait. Truncating at 500 dropped the one field in the
+    // reply that says when to come back.
+    throw new Error(`${provider} API ${res.status} ${res.statusText}: ${body.slice(0, 1500)}`);
   }
-  return (await res.json()) as unknown;
 }
 
 function toNumber(value: unknown): number {
@@ -110,7 +158,7 @@ function toNumber(value: unknown): number {
 }
 
 /** OpenAI Chat Completions. */
-export function openaiClient(apiKey: string, fetchImpl: Fetch = globalThis.fetch, baseUrl = "https://api.openai.com/v1"): ProviderClient {
+export function openaiClient(apiKey: string, fetchImpl: Fetch = globalThis.fetch, baseUrl = "https://api.openai.com/v1", sleep: Sleep = sleepMs): ProviderClient {
   return async (req) => {
     const messages: Record<string, unknown>[] = [{ role: "system", content: req.system }];
     for (const m of req.messages) {
@@ -142,7 +190,8 @@ export function openaiClient(apiKey: string, fetchImpl: Fetch = globalThis.fetch
           ...(req.maxOutputTokens ? { max_completion_tokens: req.maxOutputTokens } : {}),
         }),
       },
-      "openai"
+      "openai",
+      sleep
     );
 
     const choice = (body as { choices?: { message?: Record<string, unknown> }[] }).choices?.[0]?.message ?? {};
@@ -190,7 +239,8 @@ function parseArgs(raw: unknown): Record<string, unknown> {
 export function googleClient(
   apiKey: string,
   fetchImpl: Fetch = globalThis.fetch,
-  baseUrl = "https://generativelanguage.googleapis.com/v1beta"
+  baseUrl = "https://generativelanguage.googleapis.com/v1beta",
+  sleep: Sleep = sleepMs
 ): ProviderClient {
   return async (req) => {
     const contents: Record<string, unknown>[] = [];
@@ -223,7 +273,8 @@ export function googleClient(
           ...(req.maxOutputTokens ? { generationConfig: { maxOutputTokens: req.maxOutputTokens } } : {}),
         }),
       },
-      "google"
+      "google",
+      sleep
     );
 
     const parts = ((body as { candidates?: { content?: { parts?: unknown } }[] }).candidates?.[0]?.content?.parts ?? []) as Record<string, unknown>[];
@@ -248,7 +299,16 @@ export function googleClient(
       toolCalls,
       usage: {
         inputTokens: Math.max(0, toNumber(meta.promptTokenCount) - cached),
-        outputTokens: toNumber(meta.candidatesTokenCount),
+        // `thoughtsTokenCount` is *not* inside `candidatesTokenCount` — the two
+        // are siblings that sum into `totalTokenCount` — and Google bills
+        // thinking at the output rate. Reading candidates alone is the whole
+        // spend of a reasoning model minus its reasoning: a live 3.6-flash call
+        // answered 20 candidate tokens against 43 thought tokens, so the ledger
+        // would have booked under a third of what the call cost. Gemini 3.x
+        // thinks by default, and `models.reviewer` runs here on every pit stop,
+        // so this is every run. (OpenAI needs no such addition: its
+        // `completion_tokens` already contains `reasoning_tokens`.)
+        outputTokens: toNumber(meta.candidatesTokenCount) + toNumber(meta.thoughtsTokenCount),
         cacheReadTokens: cached,
         cacheWriteTokens: 0,
       },

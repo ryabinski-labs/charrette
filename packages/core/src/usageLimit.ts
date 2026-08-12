@@ -45,6 +45,29 @@ const LIMIT_PHRASES = [
   /\b(?:usage|session|weekly|hourly|rate|account)[- ]limit\s+(?:reached|exceeded)\b/i,
   // "Your limit will reset at 3pm (America/New_York)"
   /\blimit will reset\b/i,
+  /**
+   * The same wall on the harness's own transport, which speaks HTTP rather than
+   * English. `post` in providerClients.ts formats every non-OK vendor reply as
+   * "<provider> API <status> <statusText>: <body>", so a 429 is matchable on
+   * the envelope the harness itself wrote.
+   *
+   * The envelope, and not the body, is deliberate. Google's 429 body says "You
+   * exceeded your current quota" and OpenAI's says "Rate limit reached", and
+   * neither phrasing is stable — but more to the point, both are sentences an
+   * agent working on rate-limiting code writes all day, which is the exact
+   * false positive the last case in "the walls that are not usage limits"
+   * pins. Only a real refusal from a real vendor produces this prefix.
+   *
+   * This became load-bearing when `models.reviewer` was pinned to Google.
+   * Until then every role in the default routing ran on the Anthropic SDK
+   * transport, so nothing a default run did could reach this line; now every
+   * pit stop does, and a reviewer session that dies is not reported as a dead
+   * session — `runLens` in runController.ts degrades it to `verdict:
+   * "on-track"`, because there is no honest verdict to carry. So an
+   * unrecognised quota wall does not merely fail loudly, it hands back the
+   * pass that pinning the reviewer to a second vendor existed to avoid.
+   */
+  /\b(?:openai|google) API 429\b/i,
 ];
 
 /** Clock time in a message: "resets 8:20pm (America/New_York)", "reset at 10:00 (UTC)". */
@@ -55,6 +78,15 @@ const EPOCH = /\|\s*(\d{10})\b/;
 
 /** "try again in 12 minutes" — a retry-after in prose. */
 const IN_A_WHILE = /\b(?:try again|retry|available again|back)\s+in\s+(\d{1,4})\s*(second|minute|hour)s?\b/i;
+
+/**
+ * The machine-readable form: Google's `RetryInfo` detail (`"retryDelay": "38s"`)
+ * and the `retry-after` some vendors send in seconds. Read in preference to the
+ * backoff, because the backoff's first probe is a flat minute and this is the
+ * vendor saying how long it actually wants — which for a per-minute quota is
+ * usually much less, and for a daily one is much more.
+ */
+const RETRY_AFTER = /\bretry[-_]?(?:delay|after)\b\D{0,4}(\d{1,6})(?:\.\d+)?\s*(ms|s)?\b/i;
 
 /**
  * Read a session's dying words as a usage limit, or null if they are not one.
@@ -111,6 +143,8 @@ function resetAt(text: string, now: number): number | null {
     // could plausibly be; anything else in that shape is a coincidence.
     if (at > now - 24 * 3600_000 && at < now + 30 * 24 * 3600_000) return at;
   }
+  const after = RETRY_AFTER.exec(text);
+  if (after) return now + Number(after[1]) * (after[2]?.toLowerCase() === "ms" ? 1 : 1000);
   const soon = IN_A_WHILE.exec(text);
   if (soon) {
     const unit = { second: 1000, minute: 60_000, hour: 3600_000 }[soon[2]!.toLowerCase() as "second" | "minute" | "hour"];

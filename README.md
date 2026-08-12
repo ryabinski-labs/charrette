@@ -40,12 +40,18 @@ your own attention, against the repo rather than against the task count.
   `CLAUDE_CODE_OAUTH_TOKEN` (Claude Pro/Max — run `claude setup-token`) or
   `ANTHROPIC_API_KEY`
 - Optional: `GITHUB_TOKEN` (fine-grained, single repo: contents/issues/PRs write) + `HARNESS_GITHUB_REPO=owner/repo`
-- Optional: `OPENAI_API_KEY` / `GEMINI_API_KEY`, if you point a role at another
-  vendor. Everything is Anthropic by default; `harness run --model
-  worker=gpt-5.6-terra` changes one role, and the same flag on `harness resume`
-  changes it for the rest of a run already in flight. The judging roles (`qa`,
-  `reviewer`, `prod`) and `intake` stay on Anthropic; see
-  [Using other providers](docs/OPERATIONS.md#using-other-providers)
+- `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) — **required**, not optional. The pit
+  stop's `reviewer` is pinned to Gemini so that the agent judging the work is
+  not from the family that wrote it; a run refuses to start without the key
+  rather than discovering it at the first pit stop, after the epic is paid for
+- Optional: `OPENAI_API_KEY`, if you point a role at OpenAI. Every other role is
+  Anthropic by default; `harness run --model worker=gpt-5.6-terra` changes one,
+  and the same flag on `harness resume` changes it for the rest of a run already
+  in flight. `qa`, `prod` and `intake` stay on Anthropic and `reviewer` stays on
+  Google; see [Using other providers](docs/OPERATIONS.md#using-other-providers)
+- Any of these may go in a `.env` file in the directory you run `harness` from
+  (not the repository being built — a task spec can write to that one). An
+  exported variable wins over the file
 
 ## Usage
 
