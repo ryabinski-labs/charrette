@@ -871,3 +871,194 @@ describe("the prompt stream", () => {
     expect(stream.push("still accepted")).toBe(true);
   });
 });
+
+describe("checkpoints", () => {
+  /** A session that runs `turns` assistant turns and then settles. */
+  const session = (turns: number, seen: string[], text?: string) => {
+    queryMock.mockImplementation((args: { prompt: AsyncGenerator<{ message: { content: string } }> }) => (async function* () {
+      void (async () => {
+        for await (const m of args.prompt) seen.push(m.message.content);
+      })();
+      for (let i = 0; i < turns; i++) yield assistant(text ? { text } : {});
+      // Let anything queued reach the stream before the result settles it.
+      await new Promise((r) => setImmediate(r));
+      yield result();
+    })());
+  };
+
+  it("interrupts a long session on the cadence", async () => {
+    const seen: string[] = [];
+    pool.configureCheckpoints({ every: 5 });
+    session(12, seen);
+
+    await pool.run(spec({ maxTurns: 100 }));
+
+    const pushed = seen.filter((s) => s.includes("[HARNESS] Checkpoint"));
+    expect(pushed).toHaveLength(2);
+    expect(pushed[0]).toContain("turn 5");
+    expect(pushed[1]).toContain("turn 10");
+    expect(typed("agent.log").some((e) => (e as { text: string }).text === "checkpoint at turn 5/100 — asked for a state digest and any open questions")).toBe(true);
+  });
+
+  it("reaches an SDK session and a harness-run one alike", async () => {
+    // The push sits above the transport split on purpose: the Anthropic
+    // transport is the one that cannot fold, and it is still the one where most
+    // agent-hours are spent, so it must still get the questions.
+    const seen: string[] = [];
+    pool.configureCheckpoints({ every: 5 });
+    session(6, seen);
+
+    await pool.run(spec({ model: "claude-opus-5", maxTurns: 100 }));
+
+    expect(seen.some((s) => s.includes("[HARNESS] Checkpoint"))).toBe(true);
+  });
+
+  it("never fires on a session too short to reach one", async () => {
+    const seen: string[] = [];
+    session(3, seen);
+
+    await pool.run(spec({ maxTurns: 4 }));
+
+    expect(seen.some((s) => s.includes("[HARNESS] Checkpoint"))).toBe(false);
+  });
+
+  it("is off when the run configured it off", async () => {
+    const seen: string[] = [];
+    pool.configureCheckpoints({ every: 0 });
+    session(30, seen);
+
+    await pool.run(spec({ maxTurns: 100 }));
+
+    expect(seen.some((s) => s.includes("[HARNESS] Checkpoint"))).toBe(false);
+  });
+
+  it("keeps its own default when a run frozen before checkpoints existed has no cadence", async () => {
+    // A run's config is fixed at creation, so an older run genuinely arrives
+    // here with the field missing. It must not crash and must not go quiet.
+    const seen: string[] = [];
+    pool.configureCheckpoints(undefined);
+    session(25, seen);
+
+    await pool.run(spec({ maxTurns: 100 }));
+
+    expect(seen.some((s) => s.includes("[HARNESS] Checkpoint"))).toBe(true);
+  });
+
+  it("changes only what the run actually set", async () => {
+    const seen: string[] = [];
+    pool.configureCheckpoints({ fold: false });
+    session(30, seen);
+
+    await pool.run(spec({ maxTurns: 100 }));
+
+    // `every` was left alone, so the default cadence still fires.
+    expect(seen.filter((s) => s.includes("[HARNESS] Checkpoint"))).toHaveLength(1);
+  });
+
+  it("keeps the task's answer when the agent finished on a checkpoint turn", async () => {
+    // The 1-in-`every` case: the agent's final answer lands on the same turn a
+    // checkpoint is queued, so the session settles twice and the digest is the
+    // last thing said. Whatever the controller parses for evidence, PR numbers
+    // and verdicts must still be the answer, not the digest.
+    const seen: string[] = [];
+    pool.configureCheckpoints({ every: 4 });
+    const digest = ["<harness-checkpoint>", "STATE: rewrote the retry helper", "</harness-checkpoint>"].join("\n");
+    queryMock.mockImplementation((args: { prompt: AsyncGenerator<{ message: { content: string } }> }) => (async function* () {
+      void (async () => {
+        for await (const m of args.prompt) seen.push(m.message.content);
+      })();
+      for (let i = 0; i < 4; i++) yield assistant({ tool: "Bash" });
+      await new Promise((r) => setImmediate(r));
+      yield result({ result: "DONE: opened PR #12" });
+      yield assistant({ text: digest });
+      yield result({ result: digest });
+    })());
+
+    const res = await pool.run(spec({ maxTurns: 100 }));
+
+    expect(seen.some((s) => s.includes("[HARNESS] Checkpoint"))).toBe(true);
+    expect(res.resultText).toBe("DONE: opened PR #12");
+  });
+
+  it("lets a single session override the run's cadence", async () => {
+    const seen: string[] = [];
+    pool.configureCheckpoints({ every: 5 });
+    session(12, seen);
+
+    await pool.run(spec({ maxTurns: 100, checkpointEvery: 0 }));
+
+    expect(seen.some((s) => s.includes("[HARNESS] Checkpoint"))).toBe(false);
+  });
+
+  it("publishes the digest and the questions the agent came back with", async () => {
+    const seen: string[] = [];
+    pool.configureCheckpoints({ every: 5 });
+    session(
+      6,
+      seen,
+      [
+        "<harness-checkpoint>",
+        "STATE: the retry helper already exists in src/util/retry.ts",
+        "QUESTION: reuse it or add one?",
+        "OPTIONS: reuse | add",
+        "RECOMMENDED: reuse",
+        "</harness-checkpoint>",
+      ].join("\n")
+    );
+
+    await pool.run(spec({ maxTurns: 100 }));
+
+    const checkpoints = typed("agent.checkpoint");
+    expect(checkpoints.length).toBeGreaterThan(0);
+    expect(checkpoints[0]).toMatchObject({
+      taskId: "task1",
+      digest: "the retry helper already exists in src/util/retry.ts",
+      questions: [{ question: "reuse it or add one?", options: ["reuse", "add"], recommended: "reuse" }],
+    });
+  });
+
+  it("puts the questions in the run log, where a terminal can see them", async () => {
+    // The dashboard reads `agent.checkpoint`; the CLI reads `agent.log` and
+    // prints its first line only. An operator watching a terminal must get the
+    // question itself, not the "<harness-checkpoint>" line that opens the block.
+    const seen: string[] = [];
+    pool.configureCheckpoints({ every: 5 });
+    session(
+      6,
+      seen,
+      ["<harness-checkpoint>", "STATE: found it", "QUESTION: reuse it or add one?", "OPTIONS: reuse | add", "RECOMMENDED: reuse", "</harness-checkpoint>"].join("\n")
+    );
+
+    await pool.run(spec({ maxTurns: 100 }));
+
+    const asked = typed("agent.log").filter((e) => (e as { text: string }).text.startsWith("checkpoint question: "));
+    expect(asked.length).toBeGreaterThan(0);
+    expect((asked[0] as { text: string }).text).toBe("checkpoint question: reuse it or add one?  [reuse | add]  → proceeding with: reuse");
+    // One line per question: the CLI never prints a second one.
+    expect((asked[0] as { text: string }).text.includes("\n")).toBe(false);
+  });
+
+  it("publishes nothing when the agent ignored the ask", async () => {
+    const seen: string[] = [];
+    pool.configureCheckpoints({ every: 5 });
+    session(6, seen, "still working on it");
+
+    await pool.run(spec({ maxTurns: 100 }));
+
+    expect(typed("agent.checkpoint")).toHaveLength(0);
+  });
+
+  it("keeps clear of the wrap-up turn, which has a better use for the exchange", async () => {
+    // Cap 25 → wrap up at 20, which is also where the default cadence would
+    // land. The wrap-up wins; a checkpoint there would spend the session's last
+    // exchange describing the work instead of reporting it.
+    const seen: string[] = [];
+    pool.configureCheckpoints({ every: 20 });
+    session(21, seen);
+
+    await pool.run(spec({ maxTurns: 25 }));
+
+    expect(seen.some((s) => s.includes("[HARNESS] Checkpoint"))).toBe(false);
+    expect(seen.some((s) => s.includes("near this session's turn limit"))).toBe(true);
+  });
+});

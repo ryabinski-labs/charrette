@@ -144,6 +144,23 @@ describe("counting merged work", () => {
   });
 });
 
+describe("handing the pool this run's checkpoint cadence", () => {
+  it("sets it once from the run's frozen config rather than at every dispatch", async () => {
+    // Seventeen call sites reach pool.run; a cadence threaded through all of
+    // them would be wrong at whichever was added last. This is the one wire.
+    const dir = repo();
+    const { pool } = rolePool({ planner: planner(["task-a"]), worker, qa: () => QA_PASS });
+    const cadences: unknown[] = [];
+    (pool as unknown as { configureCheckpoints: (p: unknown) => void }).configureCheckpoints = (p) => void cadences.push(p);
+    const { controller } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a thing", RunConfig.parse({ ...BASE, checkpoint: { every: 7, fold: false } }));
+
+    expect(cadences.length).toBeGreaterThan(0);
+    expect(cadences[0]).toEqual({ every: 7, fold: false });
+  });
+});
+
 describe("a session that ends badly and says nothing about why", () => {
   it("gives the worker crash a name of its own", async () => {
     const dir = repo();

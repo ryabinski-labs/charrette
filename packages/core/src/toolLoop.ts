@@ -1,6 +1,7 @@
 import { providerFor } from "@harness/shared";
 import { toolsFor, unsupportedTools, type LocalTool, type ToolContext } from "./agentTools.js";
-import { budgetFor, compact } from "./compact.js";
+import { parseCheckpoint } from "./checkpoint.js";
+import { budgetFor, compact, fold } from "./compact.js";
 import { clientFor, type Fetch, type LoopMessage, type ProviderClient, type Usage } from "./providerClients.js";
 import { rtkCommandRewriter } from "./rtk.js";
 
@@ -54,6 +55,12 @@ export interface ToolLoopOptions {
   execOverride?: ToolContext["exec"];
   /** Characters of transcript to allow before compacting. Defaults per provider. */
   contextBudget?: number;
+  /**
+   * Fold the transcript into the agent's own checkpoint digest when it writes
+   * one (checkpoint.ts). Off leaves the digest in the record as ordinary
+   * narration, which is all the Anthropic transport can do with it anyway.
+   */
+  foldOnCheckpoint?: boolean;
 }
 
 /**
@@ -177,6 +184,27 @@ export async function* toolLoop(opts: ToolLoopOptions): AsyncGenerator<Record<st
       yield { type: "assistant", session_id: sessionId, message: { content, usage: sdkUsage(turn.usage) } };
 
       messages.push({ role: "assistant", text: turn.text, toolCalls: turn.toolCalls });
+
+      // The agent just wrote an account of its own work, so the material that
+      // account was derived from can go. This is the only place the harness
+      // gets to compact by understanding rather than by deletion — see
+      // `fold` in compact.ts — and it happens after the assistant message is
+      // appended so that the digest itself sits in the protected tail and is
+      // not folded away by the call that is folding on its behalf.
+      if (opts.foldOnCheckpoint) {
+        const checkpoint = parseCheckpoint(turn.text);
+        if (checkpoint?.digest) {
+          const folded = fold(messages, checkpoint.digest);
+          if (folded.saved > 0) {
+            messages.splice(0, messages.length, ...folded.messages);
+            yield {
+              type: "harness_note",
+              session_id: sessionId,
+              text: `folded ${folded.saved} characters of earlier narration and tool output into the agent's own checkpoint digest`,
+            };
+          }
+        }
+      }
 
       // No tool calls means the model has answered. Same terminal condition the
       // SDK uses, and the point where the operator's next message is awaited.

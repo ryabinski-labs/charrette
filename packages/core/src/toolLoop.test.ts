@@ -341,3 +341,88 @@ describe("building the client from the environment", () => {
     expect(seen[0]!.tools.map((t) => t.name)).toEqual(["Read", "Glob"]);
   });
 });
+
+describe("folding the transcript into the agent's own checkpoint digest", () => {
+  const bigTool = (chars: number): LocalTool[] => [
+    {
+      name: "Bash",
+      description: "run a command",
+      parameters: { type: "object", properties: {} },
+      run: async () => "x".repeat(chars),
+    } as unknown as LocalTool,
+  ];
+
+  const digestTurn = (state: string): ProviderTurn => ({
+    text: `<harness-checkpoint>\nSTATE: ${state}\n</harness-checkpoint>`,
+    toolCalls: [{ id: "next", name: "Bash", input: {} }],
+    usage,
+  });
+
+  /** Eight rounds of 20k tool output, a checkpoint answer, then more work. */
+  const script = (): ProviderTurn[] => [
+    ...Array.from({ length: 8 }, (_, i) => call("Bash", {}, `c${i}`)),
+    digestTurn("read eight files; the retry helper already exists in src/util/retry.ts"),
+    say("done"),
+  ];
+
+  const charsOf = (messages: { text?: string }[]): number =>
+    messages.reduce((n, m) => n + (typeof m.text === "string" ? m.text.length : 0), 0);
+
+  it("replaces the older transcript with the digest when the agent writes one", async () => {
+    // Measured against the same session with folding off, because that is the
+    // only number that says what folding bought: the three most recent
+    // exchanges are protected either way, so the saving is what is behind them.
+    const run = async (foldOnCheckpoint: boolean) => {
+      const { client, seen } = scriptedClient(script());
+      await collect(
+        toolLoop({ spec, prompts: prompts("go"), signal, client, toolsOverride: bigTool(20_000), contextBudget: 1_000_000, foldOnCheckpoint })
+      );
+      return seen[seen.length - 1]!.messages;
+    };
+
+    const folded = await run(true);
+    const unfolded = await run(false);
+    expect(charsOf(folded)).toBeLessThan(charsOf(unfolded) / 2);
+    expect(folded.some((m) => "text" in m && m.text.includes("Checkpoint digest"))).toBe(true);
+    expect(folded.some((m) => "text" in m && m.text.includes("src/util/retry.ts"))).toBe(true);
+  });
+
+  it("keeps the assignment the digest was derived from", async () => {
+    const { client, seen } = scriptedClient(script());
+    await collect(
+      toolLoop({ spec, prompts: prompts("go"), signal, client, toolsOverride: bigTool(20_000), contextBudget: 1_000_000, foldOnCheckpoint: true })
+    );
+
+    const users = seen[seen.length - 1]!.messages.filter((m) => m.role === "user").map((m) => m.text);
+    expect(users).toContain("go");
+  });
+
+  it("reports the fold, because the agent is now working from its own summary", async () => {
+    const { client } = scriptedClient(script());
+    const messages = await collect(
+      toolLoop({ spec, prompts: prompts("go"), signal, client, toolsOverride: bigTool(20_000), contextBudget: 1_000_000, foldOnCheckpoint: true })
+    );
+    const notes = messages.filter((m) => m.type === "harness_note");
+    expect(notes.some((n) => /folded \d+ characters .* checkpoint digest/.test(String(n.text)))).toBe(true);
+  });
+
+  it("leaves the transcript alone when folding is off", async () => {
+    const { client, seen } = scriptedClient(script());
+    await collect(
+      toolLoop({ spec, prompts: prompts("go"), signal, client, toolsOverride: bigTool(20_000), contextBudget: 1_000_000 })
+    );
+    expect(charsOf(seen[seen.length - 1]!.messages)).toBeGreaterThan(120_000);
+  });
+
+  it("does nothing on an ordinary turn that mentions no checkpoint", async () => {
+    const { client, seen } = scriptedClient([
+      ...Array.from({ length: 8 }, (_, i) => call("Bash", {}, `c${i}`)),
+      { text: "still reading things", toolCalls: [{ id: "n", name: "Bash", input: {} }], usage },
+      say("done"),
+    ]);
+    await collect(
+      toolLoop({ spec, prompts: prompts("go"), signal, client, toolsOverride: bigTool(20_000), contextBudget: 1_000_000, foldOnCheckpoint: true })
+    );
+    expect(charsOf(seen[seen.length - 1]!.messages)).toBeGreaterThan(120_000);
+  });
+});
