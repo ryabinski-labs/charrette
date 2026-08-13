@@ -150,3 +150,58 @@ export function compact(messages: LoopMessage[], budget: number, keepRecent = KE
 export function budgetFor(model: string, override?: number): number {
   return override ?? BUDGETS[providerFor(model)];
 }
+
+/**
+ * Replace the older half of the transcript with the agent's own account of it.
+ *
+ * This is the other kind of compaction — the one the operator gets from
+ * `/compact`, and the reason checkpoint.ts asks for a digest at all. Everything
+ * above says elision is preferable to summarisation *on the pressure path*,
+ * because a model call there adds a bill and a way to fail to the one routine
+ * whose entire job is not to die. None of that applies here: the summary has
+ * already been written, by the agent itself, on a turn that was going to happen
+ * anyway. There is nothing left to pay for and nothing left to throw.
+ *
+ * What it buys over elision is the difference between a six-hundred-character
+ * stub of a file the agent read and a sentence saying what the file turned out
+ * to contain. Elision keeps the shape of the work; this keeps its conclusions.
+ *
+ * The source-of-truth rule is unchanged and is why this is not simply a splice:
+ * `user` messages survive in their original order, digest or no digest. They are
+ * the assignment and the operator's mid-flight corrections — the two things in
+ * the transcript that cannot be reconstructed from an agent's summary of its own
+ * behaviour, and precisely the things an agent paraphrases into the opposite of
+ * what they said. Only assistant narration and tool output are folded away, and
+ * only from before the protected tail, which is where the agent is still
+ * thinking.
+ *
+ * The digest goes in last, immediately before that tail, so the conversation
+ * reads in the order it happened: the assignment, anything the operator said
+ * since, then "here is where I have got to", then live work.
+ */
+export function fold(messages: LoopMessage[], digest: string, keepRecent = KEEP_RECENT): CompactResult {
+  const before = transcriptChars(messages);
+  const limit = protectedFrom(messages, keepRecent);
+  // Nothing old enough to be safe to fold. Common on a short session, and the
+  // caller must be able to tell that from a fold that did something.
+  if (limit === 0) return { messages, saved: 0, exhausted: false };
+
+  const kept: LoopMessage[] = [];
+  for (let i = 0; i < limit; i++) {
+    const m = messages[i]!;
+    if (m.role === "user") kept.push(m);
+  }
+  kept.push({
+    role: "assistant",
+    text: `[Checkpoint digest — the work up to this point, in place of ${limit - kept.length} earlier messages of narration and tool output]\n\n${digest}`,
+    toolCalls: [],
+  });
+
+  const out = [...kept, ...messages.slice(limit)];
+  const total = transcriptChars(out);
+  // A digest longer than what it replaced is not a saving, and swapping detail
+  // for a longer paraphrase of it is a straight loss. Rare, but a chatty agent
+  // on a short tail will do it.
+  if (total >= before) return { messages, saved: 0, exhausted: false };
+  return { messages: out, saved: before - total, exhausted: false };
+}

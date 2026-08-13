@@ -197,6 +197,31 @@ export const HarnessEvent = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("agent.spawned"), sessionId: z.string(), taskId: z.string().optional(), role: AgentRole, model: z.string() }),
   z.object({ ...base, type: z.literal("agent.log"), sessionId: z.string(), taskId: z.string().optional(), text: z.string() }),
   z.object({ ...base, type: z.literal("agent.tool_use"), sessionId: z.string(), taskId: z.string().optional(), tool: z.string(), summary: z.string() }),
+  // A running agent stopped on the turn cadence to say where it had got to and
+  // what it would like decided (checkpoint.ts). Two things live here that exist
+  // nowhere else in the log: what a long session actually believed halfway
+  // through — every other record of that is either the tool calls it made or
+  // the answer it gave at the end — and the questions it was prepared to guess
+  // at. `recommended` is what it guessed, and it is on the record whether or
+  // not anyone answered, because a run that drifted is diagnosed from the
+  // assumption it drifted on.
+  z.object({
+    ...base,
+    type: z.literal("agent.checkpoint"),
+    sessionId: z.string(),
+    taskId: z.string().optional(),
+    turn: z.number().int(),
+    digest: z.string().default(""),
+    questions: z
+      .array(
+        z.object({
+          question: z.string(),
+          options: z.array(z.string()).default([]),
+          recommended: z.string().default(""),
+        })
+      )
+      .default([]),
+  }),
   z.object({ ...base, type: z.literal("agent.usage"), sessionId: z.string(), taskId: z.string().optional(), model: z.string(), inputTokens: z.number().int(), outputTokens: z.number().int(), cacheReadTokens: z.number().int(), cacheWriteTokens: z.number().int(), costUsd: z.number() }),
   z.object({ ...base, type: z.literal("agent.ended"), sessionId: z.string(), taskId: z.string().optional(), outcome: z.enum(["done", "interrupted", "killed", "error"]), detail: z.string().default("") }),
   z.object({ ...base, type: z.literal("git.worktree_created"), taskId: z.string(), path: z.string(), branch: z.string() }),

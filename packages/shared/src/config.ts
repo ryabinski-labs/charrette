@@ -268,6 +268,38 @@ export const PitStopConfig = z.object({
 });
 export type PitStopConfig = z.infer<typeof PitStopConfig>;
 
+export const CheckpointConfig = z.object({
+  /**
+   * Turns between checkpoints. `0` turns them off entirely.
+   *
+   * A checkpoint costs one turn and one exchange's tokens. At twenty, a worker
+   * on the default 120-turn ceiling pays four of them — under 4% of its budget
+   * — and a session that ends before its wrap-up point never pays anything,
+   * because the cadence is compared against that point rather than against the
+   * cap. Lower it to steer harder on a run you are watching; the floor is a
+   * checkpoint every five turns, below which the session spends more time
+   * describing the work than doing it.
+   */
+  every: z.number().int().min(0).max(200).default(20),
+  /**
+   * Replace the older transcript with the agent's own digest, rather than only
+   * recording it.
+   *
+   * Only the harness-run tool loop can honour this — OpenAI and Google sell the
+   * turn and nothing else, so the harness holds those transcripts and can swap
+   * material out of them. Anthropic sessions run inside the SDK, which compacts
+   * its own; there a checkpoint still buys the record and the questions, and
+   * this flag is simply not reachable.
+   *
+   * On, because it is the half that pays for itself: the digest was written on
+   * a turn that was going to happen anyway, and folding it in is the difference
+   * between a session carrying six-hundred-character stubs of everything it
+   * ever read and one carrying what those files turned out to say.
+   */
+  fold: z.boolean().default(true),
+});
+export type CheckpointConfig = z.infer<typeof CheckpointConfig>;
+
 export const Budget = z.object({
   runCapUsd: z.number().positive().default(30),
   /**
@@ -516,6 +548,17 @@ export const RunConfig = z.object({
    * diff". `{"pitStop":{"every":"never"}}` restores that.
    */
   pitStop: PitStopConfig.default({}),
+  /**
+   * How often a running agent stops to say where it is and what it would like
+   * decided. See docs/CHECKPOINT.md.
+   *
+   * The pit stop above is the run's checkpoint and fires on epic boundaries,
+   * spend and wall clock. This is the session's, and it fires on turns — which
+   * is what an agent losing the plot is actually measured in, and tens of
+   * thousands of tokens finer-grained than any pit stop can be.
+   * `{"checkpoint":{"every":0}}` restores the old behaviour of never asking.
+   */
+  checkpoint: CheckpointConfig.default({}),
   /**
    * Who answers a task that hit its cap, and how many times they may answer the
    * same one. `{"taskGate":{"decidedBy":"operator"}}` always asks you.

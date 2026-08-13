@@ -561,6 +561,22 @@ function describe(ev) {
       return ["state", ev.role, "started on " + ev.model];
     case "agent.log":
       return ["say", role || "agent", clip(ev.text, 400)];
+    // The one row in this feed that is asking rather than reporting. Questions
+    // lead, because the digest is context and the questions are the thing the
+    // operator can still act on — through the same feedback box they already
+    // use, while the session is live. Nothing here blocks: the agent has
+    // already carried on with what it recommended.
+    case "agent.checkpoint": {
+      const qs = (ev.questions || []).map(function (q) {
+        return "Q: " + clip(q.question, 160) +
+          (q.options && q.options.length ? "   [" + q.options.join(" | ") + "]" : "") +
+          (q.recommended ? "   \\u2192 going with: " + clip(q.recommended, 80) : "");
+      });
+      const head = "checkpoint at turn " + ev.turn +
+        (qs.length ? " \\u2014 " + qs.length + " open question" + (qs.length === 1 ? "" : "s") : " \\u2014 nothing open");
+      return [qs.length ? "you" : "state", role || "agent",
+        [head].concat(qs).concat(ev.digest ? ["state: " + clip(ev.digest, 300)] : []).join("\\n")];
+    }
     case "agent.tool_use": {
       const line = toolLine(ev);
       lastAction[ev.sessionId] = line;

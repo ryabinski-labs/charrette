@@ -479,9 +479,27 @@ export class RunController {
       // work was actually based on. Persisted with the run, so resume agrees.
       config: { ...config, baseBranch: config.baseBranch || (await this.currentBranch()) },
     });
+    // Intake runs before `drive`, so its own sessions would otherwise checkpoint
+    // on the pool's default rather than on the cadence this run was configured
+    // with. `drive` sets it again from the frozen config, which is what a
+    // resumed run reads.
+    this.applyCheckpointCadence(runId);
     if (intake) await this.intake(runId, assignment, intake);
     await this.drive(runId);
     return runId;
+  }
+
+  /**
+   * Hand the pool this run's checkpoint cadence (checkpoint.ts).
+   *
+   * A frozen config from before checkpoints existed has no such field, and a
+   * run's config is fixed at creation — so the pool takes `undefined` and keeps
+   * its own default rather than this asking twice. The optional call is for the
+   * pool doubles the controller's own tests stand up, which implement the one
+   * method under test and nothing else.
+   */
+  private applyCheckpointCadence(runId: string): void {
+    this.pool.configureCheckpoints?.(this.store.getRun(runId)!.config.checkpoint);
   }
 
   /** Gate 0: turn the seed into an agreed brief, on the run's ledger and budget. */
@@ -670,6 +688,11 @@ export class RunController {
   private async drive(runId: string, intake?: IntakeUi): Promise<void> {
     let run = this.store.getRun(runId);
     if (!run) throw new Error(`unknown run ${runId}`);
+    // The checkpoint cadence, set once for every session this run will ever
+    // dispatch. Here rather than at the seventeen `pool.run` call sites, and
+    // here rather than in the constructor, because it is the run's frozen
+    // config that decides it and a resumed run must pick up its own.
+    this.applyCheckpointCadence(runId);
     await this.sweepOrphans(runId);
     if (run.state === "CREATED") {
       this.store.transitionRun(runId, "PLANNING");

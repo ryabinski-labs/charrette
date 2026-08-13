@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { query, type HookInput, type HookJSONOutput, type Options, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { AgentRole, providerFor } from "@harness/shared";
+import { checkpointDue, checkpointPrompt, describeQuestions, isCheckpointOnly, parseCheckpoint, DEFAULT_EVERY } from "./checkpoint.js";
 import { toolLoop, unsupportedSpec, type PromptSource } from "./toolLoop.js";
 import { Bus } from "./bus.js";
 import { Store } from "./store.js";
@@ -136,6 +137,11 @@ export interface AgentSpec {
    * provider; set it when a model's window is smaller than its family's.
    */
   contextBudget?: number;
+  /**
+   * Turns between checkpoints for this session, overriding the run's cadence.
+   * `0` gives this session none. See checkpoint.ts.
+   */
+  checkpointEvery?: number;
   /**
    * SDK session id to resume (AgentResult.sdkSessionId of an earlier session).
    * A worker re-dispatched after a QA rejection re-attaches to its own
@@ -377,6 +383,33 @@ export class AgentPool {
   constructor(private store: Store, private bus: Bus, private sleep: (ms: number) => Promise<unknown> = delay) {}
 
   /**
+   * The checkpoint cadence, set once per run rather than per dispatch.
+   *
+   * Seventeen call sites reach `run()`, and a knob threaded through all of them
+   * would be a knob that is wrong at whichever one was added last. What a
+   * checkpoint costs and what it is worth are properties of the run, not of the
+   * call site, so the run controller sets this when it freezes its config and
+   * every session dispatched afterwards inherits it. `spec.checkpointEvery`
+   * still overrides per session, which is what tests and any future role with
+   * an unusual shape use.
+   */
+  private checkpoints: { every: number; fold: boolean } = { every: DEFAULT_EVERY, fold: true };
+
+  /**
+   * Set the run's checkpoint cadence. `every: 0` turns checkpoints off.
+   *
+   * Undefined is a real argument, not a caller's mistake: a run created before
+   * checkpoints existed has a frozen config without the field, and its config
+   * is fixed at creation. Such a run keeps the default, which is the answer a
+   * fresh one would have reached anyway.
+   */
+  configureCheckpoints(policy: { every?: number; fold?: boolean } | undefined): void {
+    if (!policy) return;
+    if (policy.every !== undefined) this.checkpoints.every = policy.every;
+    if (policy.fold !== undefined) this.checkpoints.fold = policy.fold;
+  }
+
+  /**
    * Live sessions accepting mid-flight operator feedback. Task agents key as
    * `runId/taskId`; run-level agents (intake, planner, validator, …) have no
    * task and key as `runId/@role`.
@@ -562,6 +595,10 @@ export class AgentPool {
     // capped at 60 read 66 here), so a fraction of the cap is the honest
     // trigger — it is reached no later than the SDK's ceiling, never after.
     const wrapUpAt = Math.max(1, Math.floor(turnCap * WRAP_UP_AT));
+    // A session too short to reach its first checkpoint before the wrap-up gets
+    // none, which is how the two-turn repair role and the four-turn probes stay
+    // out of this without being named anywhere. See checkpoint.ts.
+    const checkpointEvery = spec.checkpointEvery ?? this.checkpoints.every;
     const options: Options = {
       model: spec.model,
       cwd: spec.cwd,
@@ -663,7 +700,16 @@ export class AgentPool {
     const source =
       providerFor(spec.model) === "anthropic"
         ? query({ prompt: stream.stream(), options })
-        : toolLoop({ spec, prompts: stream.asSource(), signal: abort.signal, contextBudget: spec.contextBudget });
+        : toolLoop({
+            spec,
+            prompts: stream.asSource(),
+            signal: abort.signal,
+            contextBudget: spec.contextBudget,
+            // Only this transport can act on a digest. The SDK owns its own
+            // transcript, so on Anthropic a checkpoint buys the record and the
+            // questions but not the reclaimed context.
+            foldOnCheckpoint: this.checkpoints.fold && checkpointEvery > 0,
+          });
 
     try {
       for await (const message of source as AsyncIterable<{ type?: string } & Record<string, unknown>>) {
@@ -757,6 +803,28 @@ export class AgentPool {
           // the stream when nothing is waiting, so the agent gets one more
           // exchange to say what it found. A session that finishes early never
           // reaches this and is untouched.
+          // Stop, say where you are, and ask before going further.
+          //
+          // Pushed here rather than inside either transport because this is the
+          // one place above the split that sees a turn go by: the same message
+          // reaches an SDK session and a harness-run tool loop, and only the
+          // second can do anything with the answer beyond recording it.
+          //
+          // Guarded on `truncated` for the same reason the wrap-up nudge is —
+          // appending to a turn cut off at the output ceiling is a 400 that
+          // kills the session — and `checkpointDue` keeps it clear of the
+          // wrap-up turn itself, which has a better use for the exchange.
+          if (checkpointDue(turns, checkpointEvery, wrapUpAt) && !truncated) {
+            stream.push(checkpointPrompt(turns, checkpointEvery));
+            this.bus.publish({
+              type: "agent.log",
+              runId: spec.runId,
+              taskId: spec.taskId,
+              sessionId,
+              text: `checkpoint at turn ${turns}/${turnCap} — asked for a state digest and any open questions`,
+              ts: Date.now(),
+            });
+          }
           if (turns === wrapUpAt && !truncated) {
             stream.push(
               `[HARNESS] You are near this session's turn limit and will be cut off shortly. Stop investigating now and give your final answer immediately, in exactly the output format you were asked for. Report what you have actually established so far and say plainly what you did not get to — a partial answer in the right format is usable, and being cut off mid-investigation is not. If you have already given your final answer, ignore this message.`
@@ -774,6 +842,35 @@ export class AgentPool {
           if (Array.isArray(content)) {
             for (const block of content) {
               if (block?.type === "text" && typeof block.text === "string") {
+                // An answer to a checkpoint, if this turn was one. Published as
+                // its own event rather than left in the log: the digest is the
+                // only place a long session says what it believes, and the
+                // questions are the whole reason the operator is being shown
+                // anything mid-task. Parsed on every text block because an
+                // agent may write the block a turn or two after being asked.
+                const checkpoint = parseCheckpoint(block.text);
+                if (checkpoint) {
+                  this.bus.publish({
+                    type: "agent.checkpoint",
+                    runId: spec.runId,
+                    taskId: spec.taskId,
+                    sessionId,
+                    turn: turns,
+                    digest: checkpoint.digest.slice(0, 4000),
+                    questions: checkpoint.questions.slice(0, 6),
+                    ts: Date.now(),
+                  });
+                  // The event above is the dashboard's. The CLI is where most
+                  // runs are actually watched and it renders `agent.log` and
+                  // little else, so the questions go out as log lines too —
+                  // one apiece, because the CLI prints a log's first line and
+                  // nothing more. Without this an operator at a terminal sees
+                  // "<harness-checkpoint>" scroll past and never learns what
+                  // was asked, which is the one thing a checkpoint is for.
+                  for (const line of describeQuestions(checkpoint.questions)) {
+                    this.bus.publish({ type: "agent.log", runId: spec.runId, taskId: spec.taskId, sessionId, text: `checkpoint question: ${line}`, ts: Date.now() });
+                  }
+                }
                 this.bus.publish({ type: "agent.log", runId: spec.runId, taskId: spec.taskId, sessionId, text: block.text.slice(0, 2000), ts: Date.now() });
               } else if (block?.type === "tool_use") {
                 this.bus.publish({ type: "agent.tool_use", runId: spec.runId, taskId: spec.taskId, sessionId, tool: String(block.name ?? "?"), summary: JSON.stringify(block.input ?? {}).slice(0, 300), ts: Date.now() });
@@ -790,7 +887,13 @@ export class AgentPool {
             total_cost_usd?: number;
             usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
           };
-          resultText = m.result ?? "";
+          // A checkpoint pushed on the turn the agent finished lands after the
+          // answer, so the session settles a second time with the digest as its
+          // last word. Everything downstream reads this field as the task's
+          // answer, so a result that is nothing but a checkpoint block does not
+          // displace one that has already been given. See isCheckpointOnly.
+          const answer = m.result ?? "";
+          if (!(resultText && isCheckpointOnly(answer))) resultText = answer;
           settled = true;
           // `error_max_turns` and friends still yield a result message; without this
           // a truncated session is indistinguishable from a clean one.
