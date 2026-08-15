@@ -21,6 +21,37 @@ export const HarnessEvent = z.discriminatedUnion("type", [
     decidedBy: z.string().default("operator"),
   }),
   z.object({ ...base, type: z.literal("run.budget_updated"), spentUsd: z.number(), capUsd: z.number() }),
+  // How much of the account's plan is gone, as the plan itself reports it —
+  // recorded on every reading, not only the ones that open a gate. A run that
+  // stopped at 95% is diagnosed from the climb that got it there: whether the
+  // window was already half spent when the run started is the difference between
+  // "this run is expensive" and "this run was unlucky".
+  //
+  // `percent` is 0-100 whatever the source said. The two sources disagree — the
+  // streamed event reports 0.82 and the control channel reports 82 for the same
+  // window at the same moment — so normalising at the edge is the only way the
+  // number on the dashboard and the number in the log can be the same number.
+  z.object({
+    ...base,
+    type: z.literal("run.subscription_reading"),
+    window: z.string(),
+    percent: z.number(),
+    /** Epoch ms the window reopens, or null when the reading named no time. */
+    resetsAt: z.number().int().nullable(),
+    /** The named account this reading is about; empty is the ambient login. */
+    account: z.string().default(""),
+  }),
+  // The run was pointed at a different subscription. `from`/`to` are account
+  // names, never credentials — nothing in this log is ever a secret.
+  z.object({
+    ...base,
+    type: z.literal("run.subscription_switched"),
+    from: z.string().default(""),
+    to: z.string(),
+    /** What was true when the switch was made, for the postmortem. */
+    window: z.string().default(""),
+    percent: z.number().default(0),
+  }),
   z.object({ ...base, type: z.literal("run.plan_attempt_failed"), attempt: z.number().int(), reason: z.string(), rawPath: z.string() }),
   z.object({ ...base, type: z.literal("intake.question"), sessionId: z.string(), question: z.string(), options: z.array(z.string()).default([]) }),
   z.object({ ...base, type: z.literal("intake.answered"), sessionId: z.string(), question: z.string(), answer: z.string() }),

@@ -8,6 +8,7 @@ import { Bus } from "./bus.js";
 import { Store } from "./store.js";
 import { BudgetExceeded, costUsd } from "./budget.js";
 import { humanWait, limitWaitMs, usageLimitOf, type UsageLimit } from "./usageLimit.js";
+import { describeReading, keepsTranscript, readRateLimitEvent, readUsageSnapshot, type SubscriptionReading } from "./subscription.js";
 import { harnessBuild } from "./build.js";
 import { infraGuardHook } from "./infraGuard.js";
 import { reapUnder } from "./reaper.js";
@@ -189,6 +190,53 @@ export interface AgentSpec {
   onLimitWait?: (ms: number) => void;
 }
 
+/**
+ * Which Claude subscription the run spends, and what happens as it runs out.
+ *
+ * `env` is applied to every session spawned afterwards — a token from `claude
+ * setup-token` on another account, or a `CLAUDE_CONFIG_DIR` that account is
+ * logged into. It is a credential: it goes into a spawned environment and
+ * nowhere else, never onto the bus, the ledger or the event log.
+ */
+export interface SubscriptionPolicy {
+  /** The account's name, for the log. Empty is the operator's ambient login. */
+  name?: string;
+  env?: Record<string, string>;
+  /**
+   * Called with every utilization reading a session reports. Returns the
+   * account to continue under, or null to carry on unchanged.
+   *
+   * It may block for as long as the operator takes: that is the whole design —
+   * the session holding this reading stays open and unbilled while the gate is
+   * answered, exactly as the budget gate holds one at the cap. Throwing from
+   * here stops the session, which is how "park the run" is expressed.
+   *
+   * `spawnedAs` is the account this particular session started under, which is
+   * not always the one the run is on now: a session dispatched before a switch
+   * keeps its credentials until it ends, and is exactly the session that needs
+   * telling. Answering with the account it already has means "carry on".
+   */
+  watch?: (
+    runId: string,
+    reading: SubscriptionReading,
+    spawnedAs: string
+  ) => Promise<{ name: string; env: Record<string, string> } | null>;
+}
+
+/**
+ * Thrown inside a session the operator has just moved to another subscription.
+ *
+ * The session cannot change the credentials it was spawned with, so continuing
+ * on the new account means starting the attempt again — the same shape the
+ * usage-limit wait already uses, and for the same reason: same session row, same
+ * ledger, and where the transport allows it, the same conversation.
+ */
+class AccountSwitched extends Error {
+  constructor(readonly account: string, readonly resumeFrom: string | undefined) {
+    super(`moved to subscription account ${account}`);
+  }
+}
+
 export interface AgentResult {
   sessionId: string;
   /** The SDK's own session id — the handle a later spec.resume re-attaches to. */
@@ -222,6 +270,13 @@ const STALL_ABORT_MS = BASH_TIMEOUT_MS + STALL_GRACE_MS;
 const DEFAULT_MAX_TURNS = 100;
 
 /**
+ * How long the pre-run subscription check may take before the run starts
+ * without it. Generous enough for a cold CLI subprocess on a slow machine,
+ * short enough that nobody waits on it wondering whether `harness run` hung.
+ */
+const PREFLIGHT_TIMEOUT_MS = 20_000;
+
+/**
  * What a session is told when it comes back from a usage-limit wait.
  *
  * It is the same conversation — everything it had read, run and decided is
@@ -239,6 +294,21 @@ const DEFAULT_MAX_TURNS = 100;
 const LIMIT_CONTINUE_PROMPT =
   "[HARNESS] Your session was cut off part-way through because the account hit its usage limit. The limit has reset and this is the same conversation, continued — everything you had already established still stands. Before doing anything, check what you had already finished (git log and git status in your working directory, the files you were editing); the last thing you were doing may already be done. One thing did not survive the pause: anything you had left running in the background — dev server, watcher, database, containers — was stopped when the session was cut off, so start what you need again rather than assuming it is still up. Then carry on from exactly there and finish the task you were given, ending in the output format you were originally asked for.";
 
+
+/**
+ * What a session is told when it comes back on a different subscription.
+ *
+ * Deliberately not the usage-limit sentence above: nothing has reset and the
+ * account did not run out. Said as what it was — an interruption for a reason
+ * that has nothing to do with the work — because an agent told "your limit has
+ * reset" will reasonably assume hours passed, and go back over ground it
+ * covered a second ago to check whether the world moved under it.
+ *
+ * The background-process warning is the same, and for the same reason: the
+ * interrupted attempt's sweep killed whatever it had running.
+ */
+const SWITCH_CONTINUE_PROMPT =
+  "[HARNESS] Your session was interrupted part-way through because the operator moved this run onto a different Claude subscription. Nothing about your work was wrong and no time has passed to speak of: this is the same conversation, continued, and everything you had already established still stands. One thing did not survive the interruption — anything you had left running in the background (dev server, watcher, database, containers) was stopped, so start what you need again rather than assuming it is still up. Then carry on from exactly where you were and finish the task you were given, ending in the output format you were originally asked for.";
 
 /**
  * Why the model stopped talking, when it says. Absent on the tool-loop
@@ -410,6 +480,83 @@ export class AgentPool {
   }
 
   /**
+   * Which subscription every session spawns under, and what to do as its plan
+   * runs out.
+   *
+   * Set per run for the same reason the checkpoint cadence is: quota is a
+   * property of the account, not of the seventeen call sites that reach `run()`,
+   * and a credential threaded through all of them is a credential missing from
+   * whichever one is added next. It is also the only honest place for it —
+   * every session in flight meets the same wall at the same moment, so there is
+   * one answer to give and one place to hold it.
+   */
+  private subscription: Required<Pick<SubscriptionPolicy, "name" | "env">> & Pick<SubscriptionPolicy, "watch"> = { name: "", env: {} };
+
+  configureSubscription(policy: SubscriptionPolicy | undefined): void {
+    if (!policy) return;
+    // Filled in here so everything downstream reads a name and an overlay that
+    // exist: a policy that names only a watch is a run with no account switch
+    // configured, which is most of them.
+    this.subscription = { name: policy.name ?? "", env: policy.env ?? {}, watch: policy.watch };
+  }
+
+  /**
+   * Ask the account where it stands, without running an agent.
+   *
+   * Everything else here learns the utilization from a session that is already
+   * spending — which is one dispatch too late for the run that starts at 97% of
+   * its weekly window. This opens a session, asks the control channel the
+   * question `/usage` answers, and closes it again: no prompt is ever sent, so
+   * it costs a subprocess and no model tokens.
+   *
+   * Returns nothing rather than throwing on every failure it can have — an SDK
+   * without the control request, an account whose plan does not meter (API key,
+   * Bedrock, Vertex), a subprocess that will not start. A run must not fail to
+   * begin because the thing watching its quota could not.
+   */
+  async readSubscription(model: string): Promise<SubscriptionReading[]> {
+    const abort = new AbortController();
+    // Held open and silent: the session has to exist for the control channel to
+    // answer, and it must never be given anything to do. Closed by hand on the
+    // way out rather than by listening for the abort, because a listener
+    // registered after the abort has already fired never runs — and this
+    // generator is iterated by the SDK on its own schedule.
+    let closeIdle!: () => void;
+    const idleClosed = new Promise<void>((resolve) => (closeIdle = resolve));
+    const idle = async function* (): AsyncGenerator<SDKUserMessage> {
+      await idleClosed;
+    };
+    const probe = query({
+      prompt: idle(),
+      options: {
+        model,
+        maxTurns: 1,
+        abortController: abort,
+        settingSources: [],
+        env: { ...process.env, ...this.subscription.env },
+      },
+    });
+    // Every failure lands on the same answer — nothing — so the question is
+    // only ever "did it answer in time", and the cleanup below runs either way.
+    const usage = await Promise.race([
+      probe.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET(),
+      this.sleep(PREFLIGHT_TIMEOUT_MS).then(() => {
+        throw new Error(`the subscription check did not answer within ${PREFLIGHT_TIMEOUT_MS / 1000}s`);
+      }),
+    ]).catch(() => null);
+    closeIdle();
+    abort.abort();
+    // A probe that answered and then would not shut down cleanly has still
+    // answered, and its answer is what the run is waiting on.
+    try {
+      await probe.return(undefined);
+    } catch {
+      // The subprocess was already gone. Nothing here is worth a run.
+    }
+    return usage === null ? [] : readUsageSnapshot(usage);
+  }
+
+  /**
    * Live sessions accepting mid-flight operator feedback. Task agents key as
    * `runId/taskId`; run-level agents (intake, planner, validator, …) have no
    * task and key as `runId/@role`.
@@ -448,23 +595,33 @@ export class AgentPool {
     const sessionId = spec.sessionId ?? randomUUID();
     let budget = this.limitWaitBudgetMs(spec.runId);
     let waits = 0;
-    /** The last attempt's result, when there is a conversation to resume. */
-    let carry: AgentResult | undefined;
+    /** The conversation the next attempt re-attaches to, when there is one. */
+    let resumeFrom: string | undefined;
+    /** What that attempt is told about the gap it just sat through. */
+    let resumeWhy = LIMIT_CONTINUE_PROMPT;
     for (let attempt = 0; ; attempt++) {
       let result: AgentResult;
       try {
-        result = await this.session(this.attemptSpec(spec, sessionId, carry), sessionId, attempt);
+        result = await this.session(this.attemptSpec(spec, sessionId, resumeFrom, resumeWhy), sessionId, attempt);
       } catch (e) {
         // A limit can also arrive as a throw — the session dies without ever
         // producing a result. There is no handle to resume from that, so the
         // retry starts the session over rather than continuing it.
         if (e instanceof BudgetExceeded) throw e;
+        // The operator moved the run to another subscription while this session
+        // was mid-turn. Not a failure and not a wait: the same attempt again,
+        // immediately, under credentials the pool has already swapped.
+        if (e instanceof AccountSwitched) {
+          resumeFrom = e.resumeFrom;
+          resumeWhy = SWITCH_CONTINUE_PROMPT;
+          continue;
+        }
         const limit = usageLimitOf(String(e));
         if (!limit) throw e;
         const slept = await this.waitOutLimit(spec, sessionId, limit, waits++, budget);
         if (slept === null) throw e;
         budget -= slept;
-        carry = undefined;
+        resumeFrom = undefined;
         continue;
       }
       const limit = result.outcome === "error" ? usageLimitOf(result.errorDetail) : null;
@@ -473,7 +630,8 @@ export class AgentPool {
       // Out of patience: hand back the error the caller would have seen anyway.
       if (slept === null) return result;
       budget -= slept;
-      carry = result;
+      resumeFrom = result.sdkSessionId;
+      resumeWhy = LIMIT_CONTINUE_PROMPT;
       // Every way out of this loop is a return or a throw above: a wait that is
       // refused ends it, and the budget only shrinks.
       /* v8 ignore next */
@@ -486,10 +644,10 @@ export class AgentPool {
    * transport keeps one — the OpenAI and Gemini loops are stateless, so those
    * start the session over with the original prompt, as they do everywhere else.
    */
-  private attemptSpec(spec: AgentSpec, sessionId: string, carry: AgentResult | undefined): AgentSpec {
-    const resumable = carry?.sdkSessionId && providerFor(spec.model) === "anthropic";
+  private attemptSpec(spec: AgentSpec, sessionId: string, resumeFrom: string | undefined, why: string): AgentSpec {
+    const resumable = resumeFrom && providerFor(spec.model) === "anthropic";
     if (!resumable) return { ...spec, sessionId };
-    return { ...spec, sessionId, resume: carry!.sdkSessionId, prompt: LIMIT_CONTINUE_PROMPT };
+    return { ...spec, sessionId, resume: resumeFrom, prompt: why };
   }
 
   /**
@@ -630,6 +788,14 @@ export class AgentPool {
         // so the harness's own settings below stay non-negotiable and a spec
         // cannot hand an agent back the two-minute Bash timeout.
         ...spec.env,
+        // Which subscription pays for this session. Above the inherited
+        // environment on purpose: the operator's own `CLAUDE_CODE_OAUTH_TOKEN`
+        // or `CLAUDE_CONFIG_DIR` is exactly what a switch is getting away from,
+        // and an overlay that lost to the shell it was spawned from would keep
+        // spending the exhausted account while the log said otherwise. Empty
+        // for every run that never names an account, which is the old behaviour
+        // of using whatever the operator is logged into.
+        ...this.subscription.env,
         // The CLI backgrounds any command that outruns its timeout, and a
         // backgrounded command kills this session when it exits — see
         // backgroundShellHook. The stock 120s default reaches that outcome on an
@@ -658,6 +824,15 @@ export class AgentPool {
     /** The session delivered its result, whatever it did afterwards. */
     let settled = false;
     let killedByBudget = false;
+    /**
+     * The subscription watch ended this attempt on purpose — moved to another
+     * account, or stopped by an operator who declined to carry on. Either way
+     * the session row is already closed with the reason, and the throw that
+     * follows must reach the caller unwrapped.
+     */
+    let deliberateExit = false;
+    /** The account this session was spawned under; a switch is measured against it. */
+    const spawnedAs = this.subscription.name;
     let abnormal = "";
     // Tokens seen on assistant messages since the last `result` booked the bill.
     //
@@ -725,7 +900,56 @@ export class AgentPool {
           this.endSession(spec, sessionId, priorTurns + turns, cost, "killed", String(e));
           throw e;
         }
-        if (message.type === "harness_note") {
+        const reading = this.subscription.watch ? readRateLimitEvent(message) : null;
+        if (reading) {
+          // The account saying how much of its plan is left, mid-session. The
+          // watch may block here for as long as the operator takes to answer:
+          // this session is idle and unbilled while it does, which is the whole
+          // reason the question is asked here rather than after the wall.
+          //
+          // A throw is the operator declining to carry on at all. It ends the
+          // session the way the budget cap does — deliberately, with the reason
+          // on the row — and reaches the caller, which parks the run.
+          let next: { name: string; env: Record<string, string> } | null;
+          try {
+            next = await this.subscription.watch!(spec.runId, reading, spawnedAs);
+          } catch (e) {
+            abort.abort();
+            deliberateExit = true;
+            bookUnbooked();
+            this.endSession(spec, sessionId, priorTurns + turns, cost, "killed", String(e));
+            throw e;
+          }
+          if (next && next.name !== spawnedAs) {
+            const carriesOver = keepsTranscript(this.subscription.env, next.env);
+            this.subscription = { ...this.subscription, name: next.name, env: next.env };
+            this.bus.publish({
+              type: "agent.log",
+              runId: spec.runId,
+              taskId: spec.taskId,
+              sessionId,
+              text:
+                `${describeReading(reading)} — continuing on subscription "${next.name}". ` +
+                (settled
+                  ? "This session had already answered, so it keeps its answer and the change applies to the next one."
+                  : carriesOver
+                    ? "Restarting this session on the new account, resuming the same conversation."
+                    : "Restarting this session on the new account; it is a different login, so the conversation cannot be resumed and the task starts over."),
+              ts: Date.now(),
+            });
+            // A session that has already delivered its answer has nothing to
+            // restart: killing it here would throw away work that is paid for
+            // and finished, and the switch reaches every session after it
+            // anyway. Only a session still mid-turn is worth interrupting.
+            if (!settled) {
+              deliberateExit = true;
+              abort.abort();
+              bookUnbooked();
+              this.endSession(spec, sessionId, priorTurns + turns, cost, "interrupted", `moved to subscription account ${next.name}`);
+              throw new AccountSwitched(next.name, carriesOver ? sdkSessionId : undefined);
+            }
+          }
+        } else if (message.type === "harness_note") {
           // The tool loop reporting something it did to the transcript itself.
           // Not a model turn: no usage, and it must not count toward the cap.
           this.bus.publish({
@@ -963,7 +1187,11 @@ export class AgentPool {
       // wrap-up message exists to prevent. The result is already recorded,
       // `abnormal` already says which wall it hit, so return it and let the
       // caller decide.
-      if (settled && !killedByBudget) {
+      // A switch throws with `settled` false by construction (a session that has
+      // answered is never interrupted), so this reads as the guard it is: the
+      // two deliberate throws below own their own exits and must not be turned
+      // into "ended abnormally but had already answered".
+      if (settled && !killedByBudget && !deliberateExit) {
         this.bus.publish({
           type: "agent.log",
           runId: spec.runId,
@@ -972,7 +1200,10 @@ export class AgentPool {
           text: `the session ended abnormally but had already answered — keeping what it produced (${String(e).slice(0, 200)})`,
           ts: Date.now(),
         });
-      } else if (killedByBudget) {
+      } else if (killedByBudget || deliberateExit) {
+        // Both already ended the session row with the reason that ended it;
+        // wrapping either in the generic crash path would file a subscription
+        // switch as a session that died.
         throw e;
       } else {
         const stallNote = stalledMinutes ? `session watchdog: no output for ${stalledMinutes} minutes, aborted as hung. ` : "";

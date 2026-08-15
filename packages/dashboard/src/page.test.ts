@@ -519,3 +519,102 @@ describe("the pull request list", () => {
     expect($("#prs")!.textContent).toContain("see what is parked above");
   });
 });
+
+describe("the subscription banner", () => {
+  const gate = (over: Partial<Record<string, Any>> = {}): Any => ({
+    window: "seven_day", percent: 96, resetsAt: NOW + 3 * 86_400_000, pauseAtPercent: 95,
+    summary: "96% of the weekly limit · resets Aug 18 at 10pm (Australia/Melbourne)",
+    untilReset: "3d 4h", account: "personal", alternatives: ["work", "spare"], ...over,
+  });
+
+  it("stays out of the way until the account is nearly spent", async () => {
+    const page = mount(state());
+    await page.refresh();
+    expect(($("#sub") as HTMLElement).style.display).toBe("none");
+  });
+
+  it("says what was crossed, when it reopens, and what is being spent", async () => {
+    const page = mount(state({ subscriptionGate: gate() }));
+    await page.refresh();
+
+    expect(($("#sub") as HTMLElement).style.display).toBe("block");
+    const said = $("#sub-detail")!.textContent!;
+    expect(said).toContain("96% of the weekly limit");
+    expect(said).toContain("past the 95% line");
+    expect(said).toContain("reopens in 3d 4h");
+    expect(said).toContain('spending "personal"');
+  });
+
+  it("offers one button per subscription this run could move to", async () => {
+    const page = mount(state({ subscriptionGate: gate() }));
+    await page.refresh();
+
+    expect(all("#sub-accounts button").map((b) => b.textContent)).toEqual(["Continue on work", "Continue on spare"]);
+  });
+
+  it("does not rebuild the buttons under the operator's cursor", async () => {
+    // refresh() runs on a timer and on every streamed event; a rebuilt button
+    // is a click that lands on nothing.
+    const page = mount(state({ subscriptionGate: gate() }));
+    await page.refresh();
+    const button = $("#sub-accounts button")!;
+
+    page.serve(state({ subscriptionGate: gate(), runs: [run({ spentUsd: 42 })] }));
+    await page.refresh();
+
+    expect($("#sub-accounts button")).toBe(button);
+  });
+
+  it("tells an operator with nothing to switch to how to get something to switch to", async () => {
+    const page = mount(state({ subscriptionGate: gate({ alternatives: [], account: "" }) }));
+    await page.refresh();
+
+    expect(all("#sub-accounts button")).toHaveLength(0);
+    expect($("#sub-accounts")!.textContent).toContain("subscription.accounts");
+    expect($("#sub-detail")!.textContent).not.toContain('spending ""');
+  });
+
+  it("draws the gate that is actually open, even when it reads the same as the last one", async () => {
+    // Regression: the guard keyed on the summary, and two gates in a row read
+    // identically — which is the *normal* case, because the gate after a switch
+    // asks about the account the switch just moved to. The page kept the first
+    // gate's buttons, so clicking "Continue on work" on a gate that no longer
+    // offered it came back "unknown subscription account". Found by driving the
+    // real dashboard in a browser, not by any unit test.
+    const page = mount(state({ subscriptionGate: gate() }));
+    await page.refresh();
+    expect(all("#sub-accounts button").map((b) => b.textContent)).toEqual(["Continue on work", "Continue on spare"]);
+
+    // Same summary, different account and different offer.
+    page.serve(state({ subscriptionGate: gate({ account: "work", alternatives: ["spare"] }) }));
+    await page.refresh();
+
+    expect(all("#sub-accounts button").map((b) => b.textContent)).toEqual(["Continue on spare"]);
+    expect($("#sub-detail")!.textContent).toContain('spending "work"');
+  });
+
+  it("says the run is on quota rather than at a pit stop", async () => {
+    // Regression: `notify` hardcoded the pit-stop label, so the tab read
+    // "harness · pit stop" while the run was parked on a spent subscription —
+    // the one thing an operator glancing at a tab strip would act on
+    // differently.
+    const page = mount(state({ subscriptionGate: gate() }));
+    await page.refresh();
+
+    expect(document.title).toContain("subscription");
+    expect(document.title).not.toContain("pit stop");
+  });
+
+  it("draws the next gate rather than the one that was answered", async () => {
+    const page = mount(state({ subscriptionGate: gate() }));
+    await page.refresh();
+
+    page.serve(state({ subscriptionGate: null }));
+    await page.refresh();
+    expect(($("#sub") as HTMLElement).style.display).toBe("none");
+
+    page.serve(state({ subscriptionGate: gate({ summary: "97% of the weekly opus limit", alternatives: ["work"] }) }));
+    await page.refresh();
+    expect($("#sub-detail")!.textContent).toContain("97% of the weekly opus limit");
+  });
+});

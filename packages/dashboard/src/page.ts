@@ -114,7 +114,7 @@ export const PAGE_HTML = `<!doctype html>
           white-space:nowrap; font-family:var(--mono); }
   .s-MERGED,.s-ACCEPTED,.s-PR_REVIEW,.s-DONE { color:var(--green); }
   .s-WORKING,.s-QA,.s-EXECUTING,.s-INTEGRATING,.s-PLANNING,.s-INTAKE,.s-VERIFYING { color:var(--amber); }
-  .s-NEEDS_HUMAN,.s-QA_FAILED,.s-FAILED,.s-BUDGET_HOLD { color:var(--red); }
+  .s-NEEDS_HUMAN,.s-QA_FAILED,.s-FAILED,.s-BUDGET_HOLD,.s-LIMIT_HOLD { color:var(--red); }
   .s-PLAN_REVIEW { color:var(--blue); }
   .s-PENDING,.s-READY,.s-CREATED,.s-CANCELLED,.s-PAUSED,.s-ABORTED { color:var(--dim); }
 
@@ -225,10 +225,10 @@ export const PAGE_HTML = `<!doctype html>
   .hide-tool .k-tool, .hide-say .k-say, .hide-state .k-state,
   .hide-cost .k-cost, .hide-git .k-git { display:none; }
 
-  #gate, #budget, #taskgates, #pitstop { display:none; flex:none; border-bottom:1px solid var(--amber);
+  #gate, #budget, #sub, #taskgates, #pitstop { display:none; flex:none; border-bottom:1px solid var(--amber);
     background:linear-gradient(180deg, #191307, #140f06); border-left:3px solid var(--amber);
     padding:.9rem 1.25rem; }
-  #gate h2, #budget h2, #taskgates h2, #pitstop h2 { color:var(--amber); }
+  #gate h2, #budget h2, #sub h2, #taskgates h2, #pitstop h2 { color:var(--amber); }
   #taskgates .tg { border:1px solid var(--line); border-radius:6px; background:var(--sunken); padding:.6rem .8rem; margin:.5rem 0; }
   #taskgates .tg b { font-size:.9rem; }
   #taskgates .tg .why { color:var(--mute); font-size:.82rem; white-space:pre-wrap; margin:.3rem 0;
@@ -236,7 +236,8 @@ export const PAGE_HTML = `<!doctype html>
   #taskgates .tg small { color:var(--dim); display:block; margin-bottom:.2rem; }
   #taskgates .tg .rec { font-size:.82rem; border-left:2px solid var(--amber); padding:.15rem 0 .15rem .5rem;
     margin:.3rem 0; white-space:pre-wrap; }
-  #budget p { margin:.35rem 0 .6rem; font-size:.88rem; }
+  #budget p, #sub p { margin:.35rem 0 .6rem; font-size:.88rem; }
+  #sub-accounts { display:flex; flex-wrap:wrap; gap:.4rem; margin:.1rem 0 .6rem; }
   /* The pit stop is the one gate whose payload is worth reading in full, so it
      gets the height a report needs rather than the height a notice needs. */
   #pitstop .report { max-height:52vh; overflow:auto; background:var(--sunken); border-radius:6px;
@@ -386,6 +387,20 @@ export const PAGE_HTML = `<!doctype html>
   <p id="budget-detail"></p>
   <button class="reject" onclick="resolveBudget(true)">Stop &amp; park the run</button>
   <p id="budget-error" style="color:var(--red)" role="alert"></p>
+</section>
+
+<!--
+  The other ceiling: the Claude plan behind the run rather than its dollar cap.
+  The buttons for other subscriptions are rendered rather than written, because
+  only the run's own config knows what they are called.
+-->
+<section id="sub" aria-labelledby="sub-h">
+  <h2 id="sub-h">Subscription nearly spent</h2>
+  <p id="sub-detail"></p>
+  <div id="sub-accounts"></div>
+  <button onclick="resolveSubscription('continue')">Carry on with this one</button>
+  <button class="reject" onclick="resolveSubscription('park')">Stop &amp; park the run</button>
+  <p id="sub-error" style="color:var(--red)" role="alert"></p>
 </section>
 
 <div class="shell">
@@ -1495,6 +1510,10 @@ const NOTIFY = {
   ABORTED:     ["aborted", "The run was cancelled."],
   PAUSED:      ["paused", "The run is parked and will not continue on its own."],
   BUDGET_HOLD: ["waiting", "The budget cap was reached. Raise it or stop the run."],
+  // Parked on quota rather than on money, and the difference matters to whoever
+  // reads this: no number they can type un-parks it — another subscription, or
+  // a date on the calendar, does.
+  LIMIT_HOLD:  ["waiting", "The Claude subscription is nearly spent. Resume on another account, or after the window resets."],
   PLAN_REVIEW: ["waiting", "The plan is ready and needs your approval before any work starts."],
 };
 
@@ -1553,6 +1572,8 @@ const openedAt = Date.now();
 let taskGateSig = "";
 /** The last pit stop rendered, so the 5s refresh does not redraw it under you. */
 let pitStopShown = 0;
+/** The subscription gate already on screen, so it is drawn (and notified) once. */
+let subShown = null;
 const notifiedGates = new Set();
 
 function renderTaskGates(gates) {
@@ -1673,10 +1694,18 @@ async function resolvePitStop(action) {
   refresh();
 }
 
-/** The one interruption that is not about something going wrong. */
-function notify(title, body) {
+/**
+ * An interruption that is not a run-state change — a pit stop opening, or the
+ * account behind the run running out.
+ *
+ * The label is what the tab says, and it is a parameter rather than the constant
+ * it used to be because a second caller arrived: a tab reading "pit stop" while
+ * the run is actually parked on quota tells the operator the one thing they
+ * would act on differently.
+ */
+function notify(title, body, label) {
   const where = repoName() || "harness";
-  titleOverride = where + " \\u00b7 pit stop";
+  titleOverride = where + " \\u00b7 " + label;
   document.title = titleOverride;
   if (!notifyOn || Notification.permission !== "granted") return;
   try {
@@ -1757,7 +1786,7 @@ async function refresh() {
   if (ps && ps.number !== pitStopShown) {
     pitStopShown = ps.number;
     renderReport($("pitstop-report"), ps.markdown);
-    notify("Pit stop " + ps.number, ps.reason + " \\u2014 come and look");
+    notify("Pit stop " + ps.number, ps.reason + " \\u2014 come and look", "pit stop");
   }
   const bg = data.budgetGate;
   $("budget").style.display = bg ? "block" : "none";
@@ -1766,6 +1795,26 @@ async function refresh() {
       "The run cap of $" + bg.capUsd.toFixed(2) + " was reached: $" + bg.spentUsd.toFixed(2) + " spent. " +
       "The agent is paused, not cancelled — raise the cap in the header above to continue.";
   }
+  const sg = data.subscriptionGate;
+  $("sub").style.display = sg ? "block" : "none";
+  // Rendered once per gate rather than on every poll: refresh() runs on a timer
+  // and on every streamed event, and rebuilding the buttons under the operator's
+  // cursor is how a click lands on nothing.
+  //
+  // Keyed on the whole payload, not on its summary. Two gates in a row can read
+  // identically and offer completely different accounts — which is not an exotic
+  // case but the *normal* one, because the gate that follows a switch is asking
+  // about the account the switch just moved to. Keyed on the summary, the second
+  // gate kept the first one's buttons: the operator clicked "Continue on work"
+  // on a gate that no longer offered it and got "unknown subscription account".
+  // A payload does not change while its gate is open, so this still redraws once.
+  const sgKey = sg ? JSON.stringify(sg) : null;
+  if (sg && sgKey !== subShown) {
+    subShown = sgKey;
+    renderSubscription(sg);
+    notify("Subscription nearly spent", sg.summary + " — the run is paused and waiting for you", "subscription");
+  }
+  if (!sg) subShown = null;
   renderHeader(); renderNow(); renderFeedback(); renderSummon(); renderBoard(); renderPrs(); renderRunInfo();
   for (const run of runs) stream(run.id);
 }
@@ -1805,6 +1854,41 @@ async function resolveGate(approved) {
     headers: Object.assign({ "content-type": "application/json" }, headers),
     body: JSON.stringify({ approved: approved, feedback: $("gate-feedback").value }),
   });
+  refresh();
+}
+
+/**
+ * The subscription gate's body and its one-button-per-account row.
+ *
+ * The account buttons come first and are the plain (not "reject") style: they
+ * are the answer that keeps the run moving, and the operator who configured a
+ * second subscription configured it for exactly this moment. A run with none
+ * configured is told so, because "carry on or park" with no third option looks
+ * like a missing feature rather than a missing config.
+ */
+function renderSubscription(sg) {
+  $("sub-detail").textContent =
+    sg.summary + ". That is past the " + sg.pauseAtPercent + "% line, and the window reopens in " + sg.untilReset + ". " +
+    "The agents are paused, not cancelled" + (sg.account ? ' — this run is spending "' + sg.account + '".' : ".");
+  const row = $("sub-accounts");
+  row.textContent = "";
+  for (const name of sg.alternatives) {
+    const b = el("button", null, "Continue on " + name);
+    b.onclick = () => resolveSubscription("switch", name);
+    row.append(b);
+  }
+  if (!sg.alternatives.length) {
+    row.append(el("small", "lead", "No other subscriptions are configured — add one under subscription.accounts to be able to switch here."));
+  }
+}
+
+async function resolveSubscription(action, account) {
+  const res = await fetch("/api/gates/subscription", {
+    method: "POST",
+    headers: Object.assign({ "content-type": "application/json" }, headers),
+    body: JSON.stringify({ action: action, account: account }),
+  });
+  $("sub-error").textContent = res.ok ? "" : ((await res.json().catch(() => ({}))).error || "could not resolve the gate");
   refresh();
 }
 

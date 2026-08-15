@@ -247,10 +247,18 @@ tokens", not "$30 will leave your account". It is still the right runaway guard;
 just don't read the dashboard cost meter as money.
 
 **Rate limits become the binding constraint.** A run fans planner, worker, and QA
-agents against your 5-hour and weekly limits. Hitting a limit kills the agent
-mid-task. This is recoverable — `harness resume <runId>` continues from the last
-completed task, and nothing already finished is re-executed or re-paid — but
-expect it on large runs and plan to resume.
+agents against your 5-hour and weekly limits. Two different mechanisms cover the
+two windows, and both are on by default:
+
+- **The 5-hour window is slept through.** A session that hits it waits for the
+  reset and continues the same conversation (`usageLimitWaitMinutes`, default six
+  hours). Nothing is retried against the wall and nothing is lost.
+- **The weekly window is stopped for.** At 95% the run pauses, alerts you, and
+  asks — because a run that walks into the weekly wall on a Tuesday is parked
+  until Friday. See [§12.1](#121-subscription-limits).
+
+Either way `harness resume <runId>` continues from where the run stopped, and
+nothing already finished is re-executed or re-paid.
 
 ### GitHub (recommended)
 
@@ -443,6 +451,7 @@ pass it and the harness takes it as final.
 | `--dashboard` / `--no-dashboard` | **on** | serve the monitor on `127.0.0.1` and resolve Gate 1 there, or fall back to the terminal |
 | `--port <n>` | first free port from `4777` | pin the dashboard port; a pinned port that is busy is an error rather than a silent move |
 | `--chat` / `--no-chat` | on when no assignment is given | interview you with an intake agent before planning |
+| `--account <name>` | the account you are logged into | spend a named Claude subscription from `subscription.accounts` ([§12.1](#121-subscription-limits)) |
 
 Exit leaves the run in a resumable state whatever happens.
 
@@ -503,7 +512,9 @@ harness resume 3f9a2c11   # a specific one
 Prunes stale worktrees, reloads state from SQLite, and drives the run forward from
 exactly where it stopped. Tasks already `MERGED` are skipped, and nothing already
 paid for is paid for again. Takes the same `--dashboard` / `--no-dashboard` flags
-as `run`.
+as `run`, plus `--account <name>` to continue on a different Claude subscription
+([§12.1](#121-subscription-limits)) — the reason a run parked in `LIMIT_HOLD`
+usually gets resumed at all.
 
 A *finished* run still resumes when it has recoverable work. Each `NEEDS_HUMAN`
 task opens its escalation gate now — the same gate, so `taskGate.decidedBy`
@@ -696,6 +707,11 @@ Run configuration is a zod-validated `RunConfig`
 | `budget.decidedBy` | `"product-manager"` | — | ✅ | who answers the cap once it is reached, by skill name — or `"operator"` to be asked, which is what this used to be. The skill is shown what is still in flight, what is queued behind it and what is still unbuilt before it names a figure. It may also decline, which parks the run exactly as your own `s` did. |
 | `budget.ceilingUsd` | *(unset)* | — | ✅ | how far a skill may raise the cap. Unset means the gate is always yours — the run cap is the agreement, and an agent that can raise its own ceiling has none. `{"budget":{"runCapUsd":100,"ceilingUsd":600}}` reads as "go to 600 without me if the work is worth it". A figure above the ceiling is held at it. |
 | `budget.autoRaiseRounds` | `3` | — | ✅ | how many times a skill may raise the cap before the next one comes to you whatever `decidedBy` says. A cap reached three times is not an estimate that was slightly off. `0` asks every time. |
+| `subscription.pauseAtPercent` | `95` | — | ✅ | how much of the account's **plan** may be spent before the run stops and asks ([§12.1](#121-subscription-limits)). Not the run's dollar cap: this is quota the account burns across every machine you use, and it is what a subscription run actually runs out of. `100` restores the old behaviour of noticing only at the wall. |
+| `subscription.windows` | `["seven_day"]` | — | ✅ | which limit windows that applies to, matched as name prefixes — `seven_day` covers the plan-wide weekly window and the per-model ones beside it. Add `"five_hour"` to be asked about the short window too; by default it is slept through instead (`usageLimitWaitMinutes`), because it reopens on its own. |
+| `subscription.accounts` | `[]` | — | ✅ | the Claude subscriptions a run may be pointed at: `{"name":"work","env":{"CLAUDE_CONFIG_DIR":"…"}}` or `{"name":"personal","env":{"CLAUDE_CODE_OAUTH_TOKEN":"$TOKEN_VAR"}}`. A `$VAR` value is read from your shell when a session is spawned, never from this file. |
+| `subscription.active` | `""` | `--account` | ✅ | which of them the run is spending; empty is the account you are logged into. **Not frozen at creation** — `harness resume --account <name>` changes it, which is the point. |
+| `subscription.preflight` | `true` | — | ✅ | read the account's utilization once before the run spends anything, instead of waiting for a live session to report it. Costs no model tokens; returns nothing (and changes nothing) for accounts whose plan does not meter. |
 | `planGate.decidedBy` | `"product-manager"` | — | ✅ | who weighs the plan-intent check's gaps before you approve past them, by skill name — or `"operator"` to be shown the list and asked, which is what this used to be. It has two actions and **approve is not one of them**: it either sends the plan back to the planner on its own authority, or accepts the gaps in writing, with its reasoning printed underneath the gap list you then approve or reject. Runs only when the check FAILs; a decider that fails leaves you the gate you always had. |
 | `planGate.replanRounds` | `1` | — | ✅ | how many times the adjudicator may send a plan back over the intent check's gaps before the gate is yours however it answers. Each round is a planner session and another check, and a gap the planner cannot close twice is a question about the assignment rather than about the plan. `0` turns the veto off and leaves its reasoning as a note on the gate. |
 | `intentFixRounds` | `1` | — | ✅ | how many times a FAIL from the intent validator may queue work to close its own gaps; `0` reports the verdict and stops there |
@@ -1041,11 +1057,14 @@ one alone is reliable:
   run that already succeeded. This channel always fires, including over SSH (the
   bell) and after the dashboard has already shut down.
 - **The dashboard.** Press **Notify me** in the header to grant permission, and
-  the page raises a browser notification on the six states worth interrupting you
-  for: `PR_REVIEW` (done), `FAILED`, `ABORTED`, `PAUSED`, `BUDGET_HOLD` and
-  `PLAN_REVIEW`. The last three are the ones that pay for themselves — the run has
-  stopped and will not move again until you act. Permission is requested from your
-  click, never on page load, and the choice is remembered.
+  the page raises a browser notification on the states worth interrupting you
+  for: `PR_REVIEW` (done), `FAILED`, `ABORTED`, `PAUSED`, `BUDGET_HOLD`,
+  `LIMIT_HOLD` and `PLAN_REVIEW`. The last four are the ones that pay for
+  themselves — the run has stopped and will not move again until you act. The
+  subscription gate raises one of its own the moment it opens, before the run is
+  parked, because that one is worth nothing unless it is answered while the
+  window is still open. Permission is requested from your click, never on page
+  load, and the choice is remembered.
 
   The tab title changes too (`billing-app · done`, `billing-app · waiting`), so a
   background tab is readable without notifications at all. Only transitions that
@@ -1376,6 +1395,108 @@ own first runs before trusting them**:
 Start `--run-cap` at roughly what you are willing to lose, not at what you expect
 to spend.
 
+### 12.1. Subscription limits
+
+The budget cap above is *your* ceiling, in dollars, on this run. A Claude plan
+has a second ceiling that the cap cannot see: a weekly window, metered by the
+account across every machine and every session you use, which a run can walk
+into while sitting well under its cap.
+
+The harness watches that window and stops before it is gone:
+
+```
+===== SUBSCRIPTION =====
+96% of the weekly limit · resets Aug 18 at 10pm (Australia/Melbourne)
+That is past the 95% line, and the window reopens in 3d 4h.
+The agents are paused, not cancelled — this run is spending "personal".
+Other subscriptions configured: work
+What now?
+  <name>   continue on that subscription (work)
+  c        carry on spending this one and take the limit when it comes
+  enter    park the run; `harness resume` picks it up where it stopped
+```
+
+The same choice appears on the dashboard as an amber panel with one button per
+configured subscription, and a desktop notification fires the moment it opens —
+the whole value of stopping at 95% rather than at 100% is that somebody can still
+choose.
+
+**Why the weekly window and not the 5-hour one.** The short window reopens while
+you are at lunch, and the pool already sleeps through it without asking anybody
+anything. The weekly one does not: every session in flight dies at once, and the
+run is parked for days holding worktrees, containers and a half-merged
+integration branch. Add `"five_hour"` to `subscription.windows` if you want to be
+asked about the short one too — sensible for a run you are watching, poor for one
+you left going overnight.
+
+**Where the numbers come from.** The account's own metering, not the harness's
+ledger: the same figures `/usage` shows you. Live sessions report them as they
+go, and one check runs before the run spends anything, so a run started at 97% is
+stopped before it pays for a planner. That pre-run check costs no model tokens
+and is skipped for accounts whose plan does not meter (API key, Bedrock, Vertex).
+
+#### Handing a run a different subscription
+
+Name the subscriptions in `harness.config.json`. The credentials do not belong in
+that file — it is committable — so write them as `$VAR` and they are read from
+your shell when a session is spawned:
+
+```json
+{
+  "subscription": {
+    "pauseAtPercent": 95,
+    "accounts": [
+      { "name": "personal", "env": { "CLAUDE_CODE_OAUTH_TOKEN": "$PERSONAL_CLAUDE_TOKEN" } },
+      { "name": "work", "env": { "CLAUDE_CONFIG_DIR": "/Users/me/.claude-work" } }
+    ]
+  }
+}
+```
+
+Two ways to point a session at another account, both of which the harness simply
+puts in the session's environment:
+
+- **A long-lived token** from `claude setup-token` run while logged into that
+  account. The transcript stays where it is, so a session interrupted by the
+  switch resumes the same conversation.
+- **A second config directory** that account is logged into (`CLAUDE_CONFIG_DIR`).
+  A different login cannot see the first one's transcripts, so an interrupted
+  session starts its task again rather than resuming — the harness says so in the
+  log when it happens.
+
+An `ANTHROPIC_API_KEY` in the same place is legal and means "stop spending a
+plan, start spending money".
+
+Then:
+
+```bash
+harness run "…" --account work          # start on it
+harness resume <runId> --account work   # move a parked run onto it
+harness resume <runId> --account ""     # hand it back to the login you are sitting at
+```
+
+Unlike the repo path, the account is deliberately **not** frozen at run creation:
+a subscription is a thing a run can run out of. Accounts are re-read from the
+file on every resume too, so a subscription you set up *after* the run parked is
+one the run can use.
+
+If a named account's `$VAR` is not exported, the harness refuses rather than
+spawning a session with a blank credential — an unresolved token would fall back
+to the login you were trying to get away from, and the run would carry on
+spending the exhausted account while the log said it had switched.
+
+#### What it costs you when nobody answers
+
+A harness with no gate handler at all (embedded, headless with no terminal) logs
+the alert and keeps going: parking a run nobody can un-park turns a warning into
+an outage. Declining at the gate parks the run in `LIMIT_HOLD`, which is its own
+state rather than `BUDGET_HOLD` — the two are un-parked by completely different
+things, and `harness status` should be able to tell you which one you are looking
+at.
+
+`{"subscription":{"pauseAtPercent":100}}` restores the old behaviour of noticing
+only once the wall is hit.
+
 ---
 
 ## 13. Interruption, resume, and failure recovery
@@ -1399,6 +1520,8 @@ harness resume <runId>
 | Run `FAILED` at planning, reason `cut off mid-JSON` | the plan was longer than one message allows, 3× | the assignment covers too much — split it, or name a narrower scope |
 | Run in `BUDGET_HOLD` | a cap was reached and you declined to raise it | `harness resume <runId>` re-opens the gate; raise it there |
 | `BudgetExceeded` | cap reached and declined | raise the cap, `resume` |
+| Run in `LIMIT_HOLD` | the account's plan is nearly spent and you declined to carry on ([§12.1](#121-subscription-limits)) | `harness resume <runId> --account <name>` to continue on another subscription, or resume after the window resets |
+| `paused on subscription usage` naming a variable | the account you switched to reads its token from a `$VAR` that is not exported | export it (`claude setup-token` on that account) and `resume --account` again |
 
 Rejecting at Gate 1 is not a failure: your feedback text goes straight back into
 the planner's next attempt, and it replans. Rejecting is much cheaper than

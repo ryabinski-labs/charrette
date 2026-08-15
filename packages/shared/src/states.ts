@@ -15,6 +15,12 @@ export const RunState = z.enum([
   "DONE",
   "PAUSED",
   "BUDGET_HOLD",
+  // The account's plan is nearly spent and the operator declined to point the
+  // run at another subscription. Its own state rather than BUDGET_HOLD's: the
+  // two are parked on different things — money the operator controls, and quota
+  // that comes back on a date nobody controls — and `resume` has to be able to
+  // tell an operator which of the two they are looking at.
+  "LIMIT_HOLD",
   "FAILED",
   "ABORTED",
 ]);
@@ -64,7 +70,7 @@ export type AgentRole = z.infer<typeof AgentRole>;
 export const SessionState = z.enum(["running", "done", "interrupted", "killed"]);
 export type SessionState = z.infer<typeof SessionState>;
 
-export const GateKind = z.enum(["plan", "integration-conflict", "budget", "task-escalation", "pit-stop"]);
+export const GateKind = z.enum(["plan", "integration-conflict", "budget", "task-escalation", "pit-stop", "subscription"]);
 export type GateKind = z.infer<typeof GateKind>;
 
 export const GateState = z.enum(["open", "approved", "rejected"]);
@@ -76,12 +82,12 @@ export const RUN_TRANSITIONS: Record<RunState, RunState[]> = {
   INTAKE: ["PLANNING", "FAILED", "PAUSED", "ABORTED"],
   PLANNING: ["PLAN_REVIEW", "FAILED", "PAUSED", "ABORTED"],
   PLAN_REVIEW: ["EXECUTING", "PLANNING", "ABORTED"],
-  EXECUTING: ["INTEGRATING", "PAUSED", "BUDGET_HOLD", "FAILED", "ABORTED"],
+  EXECUTING: ["INTEGRATING", "PAUSED", "BUDGET_HOLD", "LIMIT_HOLD", "FAILED", "ABORTED"],
   // INTEGRATING -> EXECUTING: the pit stop the validator's FAIL opens sits here,
   // between the verdict and the first pull request. An operator who reads that
   // verdict and asks for the gap to be fixed has to be able to send the run back
   // to work — the alternative is closing it and starting another.
-  INTEGRATING: ["PR_REVIEW", "EXECUTING", "PAUSED", "BUDGET_HOLD", "FAILED", "ABORTED"],
+  INTEGRATING: ["PR_REVIEW", "EXECUTING", "PAUSED", "BUDGET_HOLD", "LIMIT_HOLD", "FAILED", "ABORTED"],
   // A finished run is not a dead run: `resume` reopens it when tasks parked
   // (back to EXECUTING via the escalation gate) or merged work never got its
   // pull requests (back to INTEGRATING to retry them).
@@ -94,6 +100,11 @@ export const RUN_TRANSITIONS: Record<RunState, RunState[]> = {
   DONE: [],
   PAUSED: ["INTAKE", "PLANNING", "EXECUTING", "INTEGRATING", "ABORTED"],
   BUDGET_HOLD: ["EXECUTING", "INTEGRATING", "ABORTED"],
+  // Same doors as BUDGET_HOLD, and for the same reason: what parked the run was
+  // a ceiling, not a fault, so resuming puts it back exactly where it stopped.
+  // The difference is what makes resuming worth anything — a raised cap there, a
+  // different subscription (or a reset window) here.
+  LIMIT_HOLD: ["EXECUTING", "INTEGRATING", "ABORTED"],
   // FAILED -> PLANNING: a run that died before it produced a single task can be
   // planned again. Everything it has is still worth something — the intake
   // conversation the operator sat through, the brief it became — and the

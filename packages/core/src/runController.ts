@@ -87,6 +87,15 @@ import {
   workerSystemPrompt,
   workerTaskPrompt,
 } from "./prompts.js";
+import {
+  accountEnv,
+  alternatives,
+  describeReading,
+  SubscriptionPaused,
+  tripped,
+  untilReset,
+  type SubscriptionReading,
+} from "./subscription.js";
 import { usableProbe } from "./completionProbe.js";
 import { hasDrift, pathDrift, renderDrift } from "./pathDrift.js";
 import { confirmFailures, runDeterministicChecks, splitInheritedFailures, type CheckResult } from "./qa.js";
@@ -279,11 +288,67 @@ function shellQuote(s: string): string {
   return `'${s.replaceAll("'", `'\\''`)}'`;
 }
 
+/**
+ * A failure that is about the run rather than about the task that met it.
+ *
+ * Everywhere a task's crash is caught, parked and driven past, this is the
+ * exception: both ceilings are reached by whichever session happened to be
+ * running when they were reached, and neither is that session's fault or that
+ * session's to survive. Parking one task and dispatching the next would spend
+ * the same exhausted budget — or the same exhausted plan — on the same wall.
+ *
+ * Named rather than repeated as fifteen `instanceof` checks because that is
+ * exactly how the second one gets forgotten: the subscription gate was the
+ * second, and until this existed a park at 96% of the weekly window quietly
+ * became one parked task and a run that carried on into the wall.
+ */
+function stopsTheRun(e: unknown): boolean {
+  return e instanceof BudgetExceeded || e instanceof SubscriptionPaused;
+}
+
 /** What the operator is told when the run's budget cap is reached. Never carries secrets. */
 export interface BudgetGate {
   spentUsd: number;
   capUsd: number;
 }
+
+/**
+ * What the operator is told when the account's plan is nearly spent.
+ *
+ * Account *names* only. The credentials that make a switch work never leave
+ * `subscription.ts`, and this payload goes to a dashboard, an event log and a
+ * terminal — three places a subscription token must never appear.
+ */
+export interface SubscriptionGate {
+  /** The plan's name for the window: `seven_day`, `seven_day_opus`, … */
+  window: string;
+  /** How much of it is spent, 0-100. */
+  percent: number;
+  /** Epoch ms it reopens, or null when the plan named no time. */
+  resetsAt: number | null;
+  /** The line that was crossed, so the UI can say why this opened. */
+  pauseAtPercent: number;
+  /** "82% of the weekly limit · resets Aug 18 at 10pm (Australia/Melbourne)". */
+  summary: string;
+  /** How long until it reopens, as an operator reads it: "3d 4h". */
+  untilReset: string;
+  /** The account being spent; empty is the operator's ambient login. */
+  account: string;
+  /** The other configured accounts, by name — what a switch can choose from. */
+  alternatives: string[];
+}
+
+/**
+ * What the operator decided at a subscription gate.
+ *
+ * `continue` is not "ignore": it is the operator saying the remaining few
+ * percent is enough to finish, and the run carries on knowing the wall is
+ * there — where `usageLimitWaitMinutes` takes over if it arrives.
+ */
+export type SubscriptionChoice =
+  | { action: "continue" }
+  | { action: "switch"; account: string }
+  | { action: "park" };
 
 /**
  * A task that hit a cap, presented to the operator before it is parked. The
@@ -318,6 +383,17 @@ export interface GateHandler {
    * next check, so it is treated as a decline.
    */
   resolveBudgetGate(gate: BudgetGate): Promise<number | null>;
+  /**
+   * The account's plan is nearly spent (`subscription.pauseAtPercent`). Answer
+   * with another subscription to move the run onto, `continue` to spend the
+   * rest of the window, or `park` to stop here and resume later.
+   *
+   * Optional: a handler without it keeps going and leaves the alert on the
+   * event log, which is the right default for a harness nobody is watching —
+   * parking a run that has no operator to un-park it turns a warning into an
+   * outage.
+   */
+  resolveSubscriptionGate?(gate: SubscriptionGate): Promise<SubscriptionChoice>;
   /**
    * A task hit its cap. Return the operator's guidance to hand the worker a
    * fresh set of iterations, or null to park the task. Optional: a handler
@@ -500,6 +576,52 @@ export class RunController {
    */
   private applyCheckpointCadence(runId: string): void {
     this.pool.configureCheckpoints?.(this.store.getRun(runId)!.config.checkpoint);
+  }
+
+  /**
+   * Hand the pool the subscription this run spends and the watch that guards it
+   * (subscription.ts).
+   *
+   * Optional-called like the cadence above, for the pool doubles the
+   * controller's tests stand up. A run whose config predates this feature parses
+   * with the schema's defaults — no accounts, so nothing to switch to, and the
+   * gate can still stop a run before it walks into the weekly wall.
+   */
+  private applySubscription(runId: string): void {
+    const config = this.store.getRun(runId)!.config.subscription;
+    this.pool.configureSubscription?.({
+      name: config.active,
+      // Resolved here, once, so a `$TOKEN` that is not exported fails at the top
+      // of the run — where the operator is watching — rather than on the first
+      // session, which would read as an agent that could not authenticate.
+      env: accountEnv(config, config.active),
+      watch: (id, reading, spawnedAs) => this.watchSubscription(id, reading, spawnedAs),
+    });
+  }
+
+  /**
+   * Read the account's plan before the run spends anything, and open the gate
+   * now if it is already past the line.
+   *
+   * Deliberately tolerant: `readSubscription` returns nothing rather than
+   * throwing for an account whose plan does not meter (an API key, Bedrock,
+   * Vertex) or an SDK without the control request, and nothing is exactly what
+   * "carry on as before" looks like here.
+   */
+  private async preflightSubscription(runId: string): Promise<void> {
+    const config = this.store.getRun(runId)!.config.subscription;
+    if (!config.preflight || config.pauseAtPercent >= 100) return;
+    const readings = (await this.pool.readSubscription?.(this.store.getRun(runId)!.config.models.worker)) ?? [];
+    for (const reading of readings) this.publishReading(runId, reading);
+    const over = tripped(readings, config);
+    if (!over) return;
+    // Asked as the account the run is currently on, which is what makes a
+    // switch here visible: the answer differs from what was asked with.
+    const next = await this.watchSubscription(runId, over, config.active);
+    // A switch decided here has no session to restart — nothing has been
+    // dispatched yet — so it is applied straight to the pool and the run starts
+    // on the account the operator chose.
+    if (next) this.applySubscription(runId);
   }
 
   /** Gate 0: turn the seed into an agreed brief, on the run's ledger and budget. */
@@ -693,7 +815,15 @@ export class RunController {
     // here rather than in the constructor, because it is the run's frozen
     // config that decides it and a resumed run must pick up its own.
     this.applyCheckpointCadence(runId);
+    // Which subscription this run spends, and the watch that stops it before
+    // the plan runs out. Set beside the checkpoint cadence and for the same
+    // reason — it belongs to the run, not to the call sites.
+    this.applySubscription(runId);
     await this.sweepOrphans(runId);
+    // Where the account stands before this run spends anything. A run started
+    // at 97% of its weekly window would otherwise learn it from the first
+    // session it paid for.
+    await this.preflightSubscription(runId);
     if (run.state === "CREATED") {
       this.store.transitionRun(runId, "PLANNING");
       run = this.store.getRun(runId)!;
@@ -744,6 +874,16 @@ export class RunController {
       // The cap that parked it is still in force: execution re-opens the budget
       // gate on the first check, giving the operator another chance to raise it.
       this.store.transitionRun(runId, "EXECUTING", "resumed from budget hold");
+      run = this.store.getRun(runId)!;
+    } else if (run.state === "LIMIT_HOLD") {
+      // Resumed from a subscription hold. Whether anything changed is not this
+      // code's to judge: the operator either pointed it at another account
+      // (`resume --account`, already patched into the config by the time this
+      // runs) or waited for the window to reopen, and the preflight check above
+      // has just read the account to find out which. If the plan is still spent
+      // the gate opens again immediately, which is the honest outcome — nothing
+      // was lost by trying.
+      this.store.transitionRun(runId, "EXECUTING", "resumed from subscription hold");
       run = this.store.getRun(runId)!;
     }
     let planFeedback = "";
@@ -923,7 +1063,7 @@ export class RunController {
         ].join("\n"),
       };
     } catch (e) {
-      if (e instanceof BudgetExceeded) throw e;
+      if (stopsTheRun(e)) throw e;
       // A plan that could not be checked is still a plan the operator may
       // approve. Say the check did not happen rather than implying it passed.
       this.bus.publish({ type: "agent.log", runId, sessionId: "validator", text: `the plan-intent check did not complete: ${String(e).slice(0, 300)}`, ts: Date.now() });
@@ -1005,7 +1145,7 @@ export class RunController {
         skill
       );
     } catch (e) {
-      if (e instanceof BudgetExceeded) throw e;
+      if (stopsTheRun(e)) throw e;
       say(`${skill} did not weigh the plan-intent gaps (${String(e).slice(0, 200)}) — they go to you as they are`);
       return accept("\n\nNothing weighed these gaps: the adjudicator did not return a decision.\n");
     }
@@ -1045,7 +1185,7 @@ export class RunController {
       const verdict = IntentVerdict.parse(extractJson(result.resultText));
       this.bus.publish({ type: "run.intent_verdict", runId, verdict: verdict.verdict, gaps: verdict.gaps, summary: verdict.summary, ts: Date.now() });
     } catch (e) {
-      if (e instanceof BudgetExceeded) throw e;
+      if (stopsTheRun(e)) throw e;
       // An unvalidated run is reportable; an unfinished one is not. Say so and move on.
       this.bus.publish({ type: "agent.log", runId, sessionId: "validator", text: `intent validation did not complete: ${String(e).slice(0, 300)}`, ts: Date.now() });
     }
@@ -1257,7 +1397,7 @@ export class RunController {
       this.bus.publish({ type: "run.prod_verdict", runId, url, verdict: verdict.verdict, findings: verdict.findings, summary: verdict.summary, ts: Date.now() });
       return verdict.verdict === "PASS";
     } catch (e) {
-      if (e instanceof BudgetExceeded) throw e;
+      if (stopsTheRun(e)) throw e;
       // An unverified deploy is reportable; a run that claims to have verified
       // one it never reached is not. Say which happened.
       this.bus.publish({
@@ -2065,7 +2205,7 @@ export class RunController {
       });
       return QaVerdict.parse(extractJson(retry.resultText));
     } catch (e) {
-      if (e instanceof BudgetExceeded) throw e;
+      if (stopsTheRun(e)) throw e;
       return null;
     }
   }
@@ -2319,7 +2459,7 @@ export class RunController {
     try {
       return await this.pool.run(spec);
     } catch (e) {
-      if (e instanceof BudgetExceeded) throw e;
+      if (stopsTheRun(e)) throw e;
       return { died: `the planner session died before it answered: ${(e instanceof Error ? e.message : String(e)).slice(0, 300)}` };
     }
   }
@@ -2482,7 +2622,7 @@ export class RunController {
       text: coChangeNote(nearby),
       ts: Date.now(),
     });
-    let budgetStop: BudgetExceeded | null = null;
+    let runStop: BudgetExceeded | SubscriptionPaused | null = null;
     /**
      * Slots in use. A task waiting at a gate is in flight but is not running an
      * agent, so it does not count.
@@ -2508,7 +2648,7 @@ export class RunController {
       // the operator is being shown a product, and a tree with three workers
       // half-way through their tasks is not one. Nothing is cancelled — the
       // in-flight tasks finish, and the stop happens on the next pass.
-      const due = budgetStop ? null : this.pitStopReason(runId);
+      const due = runStop ? null : this.pitStopReason(runId);
       if (due && !inFlight.size) {
         await this.issueSync;
         if ((await this.pitStop(runId, due)) === "stop") return "paused";
@@ -2517,7 +2657,7 @@ export class RunController {
       // Fill capacity. Re-listed per dispatch: a task that just merged may have
       // unblocked its dependents. Which runnable task goes next is `nextDispatch`
       // — the order decides what a budget cap leaves unbuilt.
-      while (!budgetStop && !due && working() < cap) {
+      while (!runStop && !due && working() < cap) {
         const tasks = this.store.listTasks(runId);
         const ready = nextDispatch(tasks, new Set(inFlight.keys()), nearby.widen);
         if (!ready) break;
@@ -2526,11 +2666,13 @@ export class RunController {
         const flight = this.runTask(runId, id, skills)
           .catch((e) => {
             // One task's unexpected crash must not abandon the rest of the run:
-            // park it for the operator and keep driving. A budget stop is
+            // park it for the operator and keep driving. A ceiling reached is
             // run-wide — remember it, stop dispatching, and let the other
-            // in-flight tasks drain (their own budget checks stop them fast).
-            if (e instanceof BudgetExceeded) {
-              budgetStop = budgetStop ?? e;
+            // in-flight tasks drain (their own checks stop them fast). Either
+            // ceiling: the run's dollar cap, or the account's plan, which every
+            // task in flight is spending just as surely.
+            if (stopsTheRun(e)) {
+              runStop = runStop ?? (e as BudgetExceeded | SubscriptionPaused);
               return;
             }
             const t = this.store.getTask(runId, id)!;
@@ -2562,7 +2704,7 @@ export class RunController {
       // returns or throws, or a budget stop ends the process with the tracker
       // still claiming every task is untouched.
       await this.issueSync;
-      if (budgetStop) throw budgetStop;
+      if (runStop) throw runStop;
 
       const tasks = this.store.listTasks(runId);
       if (tasks.every((t) => terminal(t.state))) break;
@@ -2986,7 +3128,7 @@ export class RunController {
       // about is still running.
       commandChecks = await this.verifyDemoCommands(runId, wtPath, report);
     } catch (e) {
-      if (e instanceof BudgetExceeded) throw e;
+      if (stopsTheRun(e)) throw e;
       report = demoUnavailable(String(e).slice(0, 300));
       checks = [];
       commandChecks = [];
@@ -3144,7 +3286,7 @@ export class RunController {
         });
         return { report: { lens, ...ReviewJson.parse(extractJson(result.resultText)) }, finished: true };
       } catch (e) {
-        if (e instanceof BudgetExceeded) throw e;
+        if (stopsTheRun(e)) throw e;
         // A lens that failed is reported as a lens that failed. Dropping it
         // silently would show the operator two opinions and imply three.
         //
@@ -3308,7 +3450,7 @@ export class RunController {
         why: parsed.why,
       };
     } catch (e) {
-      if (e instanceof BudgetExceeded) throw e;
+      if (stopsTheRun(e)) throw e;
       say(`${skill} did not return a decision (${String(e).slice(0, 200)}) — asking you instead`);
       return await ask();
     }
@@ -3409,7 +3551,7 @@ export class RunController {
       this.wakeScheduler();
       return breakdown.tasks.map((t) => t.id);
     } catch (e) {
-      if (e instanceof BudgetExceeded) throw e;
+      if (stopsTheRun(e)) throw e;
       this.bus.publish({
         type: "agent.log",
         runId,
@@ -3661,7 +3803,7 @@ export class RunController {
       say(`${action} skill "${skill.name}" (~${skill.tokensApprox} tokens) — it rides with this task's worker and stays in ${dir} for the next one`);
       return skill;
     } catch (e) {
-      if (e instanceof BudgetExceeded) throw e;
+      if (stopsTheRun(e)) throw e;
       say(`skill forge did not complete: ${String(e).slice(0, 300)} — the task proceeds without one`);
       return null;
     }
@@ -3924,7 +4066,7 @@ export class RunController {
           throw new Error(worker.errorDetail ?? "worker session ended abnormally");
         }
       } catch (e) {
-        if (e instanceof BudgetExceeded) throw e;
+        if (stopsTheRun(e)) throw e;
         workerSession = undefined;
         // A session that died is not evidence about the model the way a turn
         // ceiling is — transports drop, quotas close, machines run out of disk,
@@ -4219,7 +4361,7 @@ export class RunController {
         // work, which is still committed in the worktree — same treatment as a
         // worker crash. Bounded by the same cap: a QA agent that cannot finish
         // must not loop the task forever.
-        if (e instanceof BudgetExceeded) throw e;
+        if (stopsTheRun(e)) throw e;
         // Set rather than incremented: a limit wait inside this session has
         // already moved the clock once, and that wait is part of the span being
         // given back. Adding would credit it twice.
@@ -4614,6 +4756,158 @@ export class RunController {
     if (held) this.store.transitionRun(runId, held, `cap raised to $${raised!.toFixed(2)}`);
   }
 
+  // ---- subscription (the account's plan, not this run's dollar cap) ----
+
+  /**
+   * Windows already answered "carry on", keyed by run, window and reset time.
+   *
+   * The plan re-reports its utilization on most turns once it is past a warning
+   * threshold, so without this the operator would be asked the same question
+   * every few seconds for the rest of the window. Keyed by the reset time as
+   * well as the window, so the next window asks again — that is a genuinely new
+   * question, about quota that did not exist when the last one was answered.
+   */
+  private acknowledgedWindows = new Set<string>();
+
+  /**
+   * One gate at a time, whoever gets there first — the same discipline the
+   * budget chain keeps, and needed more here: a weekly window trips every
+   * session in the pool within the same second, and each one arrives holding
+   * its own copy of the same question.
+   */
+  private subscriptionChain: Promise<void> = Promise.resolve();
+
+  private publishReading(runId: string, reading: SubscriptionReading): void {
+    this.bus.publish({
+      type: "run.subscription_reading",
+      runId,
+      window: reading.window,
+      percent: reading.percent,
+      resetsAt: reading.resetsAt,
+      account: this.store.getRun(runId)!.config.subscription.active,
+      ts: Date.now(),
+    });
+  }
+
+  /**
+   * What the pool calls with every utilization reading a session reports.
+   *
+   * Returns the account the caller should continue under, or null to carry on
+   * unchanged. Throws `SubscriptionPaused` when the operator declines to carry
+   * on at all, which stops the session and parks the run.
+   */
+  private async watchSubscription(runId: string, reading: SubscriptionReading, spawnedAs: string): Promise<{ name: string; env: Record<string, string> } | null> {
+    this.publishReading(runId, reading);
+    const config = () => this.store.getRun(runId)!.config.subscription;
+    if (!tripped([reading], config())) return null;
+    const prev = this.subscriptionChain;
+    let release!: () => void;
+    this.subscriptionChain = new Promise((r) => (release = r));
+    try {
+      await prev;
+      const key = `${runId}:${reading.window}:${reading.resetsAt ?? 0}`;
+      // Not "has this run answered", but "has anyone answered *this window*" —
+      // a session that queued behind the gate gets the answer that was already
+      // given rather than re-opening it.
+      if (!this.acknowledgedWindows.has(key)) await this.askSubscription(runId, reading, key);
+      const now = config();
+      // The session is told to move only when the run is on an account it is
+      // not. A session dispatched before an earlier switch is the case this
+      // exists for: nobody asked it anything, and it is still spending the
+      // account the run left behind.
+      return now.active === spawnedAs ? null : { name: now.active, env: accountEnv(now, now.active) };
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * The gate itself: the account is nearly out of plan, the sessions holding
+   * the reading are open and idle, and somebody has to say what happens next.
+   *
+   * Modelled on the budget gate, because it is the same shape of decision — a
+   * ceiling reached with paid-for work in flight — and deliberately not modelled
+   * on the usage-limit wait, which is what happens after this question goes
+   * unasked. The three answers are: move to another subscription, carry on and
+   * take the wall when it comes, or stop here and pick the run up later.
+   */
+  private async askSubscription(runId: string, reading: SubscriptionReading, key: string): Promise<void> {
+    const run = this.store.getRun(runId)!;
+    const config = run.config.subscription;
+    const gateId = randomUUID().slice(0, 8);
+    // Only EXECUTING and INTEGRATING have a held state to sit in; earlier the
+    // gate still opens and the run simply has nowhere to be parked, exactly as
+    // the budget gate behaves during intake and planning.
+    const held = run.state === "EXECUTING" || run.state === "INTEGRATING" ? run.state : null;
+    if (held) this.store.transitionRun(runId, "LIMIT_HOLD", `${describeReading(reading)} — waiting on the operator`);
+    const payload: SubscriptionGate = {
+      window: reading.window,
+      percent: reading.percent,
+      resetsAt: reading.resetsAt,
+      pauseAtPercent: config.pauseAtPercent,
+      summary: describeReading(reading),
+      untilReset: untilReset(reading, Date.now()),
+      account: config.active,
+      alternatives: alternatives(config),
+    };
+    this.bus.publish({ type: "run.gate_opened", runId, gateId, kind: "subscription", payload, ts: Date.now() });
+
+    // No handler is a harness embedded somewhere with nobody to ask. It keeps
+    // going — the alert is on the record, and parking a run that nobody can
+    // resume would turn a warning into an outage.
+    const choice = (await this.gates.resolveSubscriptionGate?.(payload)) ?? { action: "continue" as const };
+    const resolution = choice.action === "park" ? "rejected" : "approved";
+    const feedback =
+      choice.action === "switch"
+        ? `moved to subscription "${choice.account}"`
+        : choice.action === "park"
+          ? `parked at ${payload.summary}`
+          : `carrying on at ${payload.summary}`;
+    this.bus.publish({ type: "run.gate_resolved", runId, gateId, kind: "subscription", resolution, feedback, decidedBy: "operator", ts: Date.now() });
+
+    if (choice.action === "park") throw new SubscriptionPaused(payload.summary, runId);
+
+    if (choice.action === "switch") {
+      // Resolved before the config is patched: an account whose token is not
+      // exported must not become the run's account, or the run carries on
+      // authenticating as nobody.
+      //
+      // Re-thrown as a pause rather than as itself, because of where it lands.
+      // A plain error here is caught by the dispatcher as one task crashing,
+      // parked, and driven past — which is a run that carries on spending the
+      // exhausted subscription, having been told to stop, over a typo. As a
+      // pause it stops the run and says which variable to export, and
+      // `harness resume --account` is the fix.
+      let env: Record<string, string>;
+      try {
+        env = accountEnv(config, choice.account);
+      } catch (e) {
+        // The reason, not the exception: this becomes the sentence the operator
+        // reads in a terminal, and it has to name the variable to export.
+        throw new SubscriptionPaused(`${payload.summary} — ${String(e).replace(/^Error: /, "")}`, runId);
+      }
+      this.store.patchRunConfig(runId, { subscription: { ...config, active: choice.account } });
+      this.bus.publish({
+        type: "run.subscription_switched",
+        runId,
+        from: config.active,
+        to: choice.account,
+        window: reading.window,
+        percent: reading.percent,
+        ts: Date.now(),
+      });
+      // The pool spawns everything after this under the new account; the
+      // sessions already running are told one by one as they report a reading.
+      this.pool.configureSubscription?.({ name: choice.account, env, watch: (id, r, as) => this.watchSubscription(id, r, as) });
+      // A window answered by switching is *not* acknowledged: the new account
+      // has its own windows, and the next reading over the line is a question
+      // about a different subscription entirely.
+    } else {
+      this.acknowledgedWindows.add(key);
+    }
+    if (held) this.store.transitionRun(runId, held, feedback);
+  }
+
   /**
    * Move the run's budget cap before it is ever reached, instead of waiting
    * for `enforceNow` to open a gate and ask. This is the operator watching
@@ -4804,7 +5098,7 @@ export class RunController {
       );
       return { capUsd: capped, decidedBy: skill, why: parsed.why };
     } catch (e) {
-      if (e instanceof BudgetExceeded) throw e;
+      if (stopsTheRun(e)) throw e;
       say(`${skill} did not return a decision (${String(e).slice(0, 200)}) — asking you instead`);
       return ask;
     }
