@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import { SUBPROJECT_DIRS } from "@harness/core";
-import { PitStopConfig, PlanGateConfig, TaskGateConfig } from "@harness/shared";
+import { PitStopConfig, PlanGateConfig, SubscriptionConfig, TaskGateConfig } from "@harness/shared";
 
 export const CONFIG_FILENAME = "harness.config.json";
 
@@ -168,6 +168,25 @@ export const FileConfig = z
         autoRaiseRounds: z.number().int().min(0).max(10).optional(),
       })
       .optional(),
+    /**
+     * The Claude subscriptions this repo's runs may spend, and how close to the
+     * plan's weekly limit a run gets before it stops and asks you.
+     *
+     * The accounts belong in this file; the credentials do not. Write them as
+     * `"$VAR"` and they are read from your shell when a session is spawned:
+     *
+     *   "subscription": {
+     *     "accounts": [
+     *       { "name": "personal", "env": { "CLAUDE_CODE_OAUTH_TOKEN": "$PERSONAL_CLAUDE_TOKEN" } },
+     *       { "name": "work", "env": { "CLAUDE_CONFIG_DIR": "/Users/me/.claude-work" } }
+     *     ]
+     *   }
+     *
+     * Unlike everything else here, changes to this reach a run that has already
+     * started: `harness resume --account work` is the whole point of the
+     * feature, and a subscription frozen at run creation could not be swapped.
+     */
+    subscription: SubscriptionConfig.partial().optional(),
     /**
      * How often the run stops to demo what it has built and ask you whether it
      * is still what you wanted (docs/PITSTOP.md). Defaults to every epic.

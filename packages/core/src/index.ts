@@ -17,6 +17,7 @@ export * from "./postmortem.js";
 export * from "./prompts.js";
 export * from "./qa.js";
 export * from "./runController.js";
+export * from "./subscription.js";
 export * from "./toolbelt.js";
 export * from "./agentTools.js";
 export * from "./providerClients.js";

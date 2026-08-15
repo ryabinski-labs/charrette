@@ -341,6 +341,112 @@ export const Budget = z.object({
 });
 
 /**
+ * One Claude subscription the run may spend, named so the operator can hand the
+ * run a different one without editing anything but the name.
+ *
+ * `env` is the whole mechanism: it is merged into the environment of every agent
+ * session spawned afterwards, and the two things worth putting in it are the two
+ * ways a Claude Code session picks its account —
+ *
+ *   { "name": "personal", "env": { "CLAUDE_CODE_OAUTH_TOKEN": "$PERSONAL_TOKEN" } }
+ *   { "name": "work",     "env": { "CLAUDE_CONFIG_DIR": "/Users/me/.claude-work" } }
+ *
+ * — a long-lived token from `claude setup-token` run on the other account, or a
+ * second config directory that account is logged into. An `ANTHROPIC_API_KEY`
+ * here is legal too and means "stop spending the plan, start spending money".
+ *
+ * A value written as `$NAME` or `${NAME}` is read from the harness's own
+ * environment when the session is spawned, never from this file. That is not a
+ * convenience: this file lives in the repository, and a subscription token
+ * committed to it is a subscription token published. The harness refuses a
+ * reference it cannot resolve rather than spawning a session with an empty
+ * credential, which fails later and less clearly.
+ */
+export const SubscriptionAccount = z.object({
+  name: z.string().min(1),
+  env: z.record(z.string(), z.string()).default({}),
+  /** Free text shown beside the name when the operator is choosing. */
+  note: z.string().default(""),
+});
+export type SubscriptionAccount = z.infer<typeof SubscriptionAccount>;
+
+/**
+ * Watch how much of the account's plan the run has left, and stop before it is
+ * gone (`docs/OPERATIONS.md`, "Subscription limits").
+ *
+ * The harness already survives a limit it has *hit*: every session in flight
+ * dies at once, `usageLimit.ts` reads the dying words, and the pool sleeps until
+ * the window reopens. That is the right answer for the five-hour window, which
+ * reopens while the operator is at lunch. It is the wrong answer for the weekly
+ * one: a run that walks into the weekly wall on a Tuesday is parked until
+ * Friday, holding worktrees, containers and a half-merged integration branch,
+ * and the operator finds out by noticing nothing has happened.
+ *
+ * So the weekly window gets a gate instead of a wait. At `pauseAtPercent` the
+ * run stops with its sessions still open, says which window and when it resets,
+ * and asks — exactly as the budget cap does, and for the same reason: the work
+ * in flight has already been paid for.
+ *
+ * The readings come from the account's own plan metering, not from the harness's
+ * ledger. `budget.runCapUsd` counts what this run spent; this counts what the
+ * *account* has spent, on every machine and every session, which is the number
+ * the wall is actually made of.
+ */
+export const SubscriptionConfig = z.object({
+  /**
+   * The utilization, in percent, at which the run stops and asks.
+   *
+   * Not 100: a gate that opens at the wall is a gate that opens after every
+   * session in flight has already died against it, which is the failure this
+   * exists to prevent. Five percent of a weekly window is roughly the last few
+   * tasks — enough to finish what is running and choose deliberately.
+   */
+  pauseAtPercent: z.number().min(1).max(100).default(95),
+  /**
+   * Which windows this gate watches, matched as prefixes of the window name.
+   *
+   * `seven_day` covers every weekly window the plan meters — the plan-wide one
+   * and the per-model ones (`seven_day_opus`, `seven_day_sonnet`) — because they
+   * are the same kind of wall: days away, and nothing to do but wait it out.
+   * Adding `five_hour` extends the gate to the short window, which is a
+   * defensible choice for a run you are watching and a poor one for a run you
+   * left going: the short window reopens on its own, and `usageLimitWaitMinutes`
+   * already sleeps through it without asking anybody anything.
+   */
+  windows: z.array(z.string().min(1)).default(["seven_day"]),
+  /**
+   * The subscriptions this run may be pointed at. Empty — the default — leaves
+   * the gate able to pause and alert but with nothing to offer but "carry on" or
+   * "park", which is still strictly better than walking into the wall.
+   */
+  accounts: z.array(SubscriptionAccount).default([]),
+  /**
+   * Which of them the run is spending now. Empty means the ambient one: whatever
+   * account the operator's own `claude` is logged into, which is what every run
+   * before this feature used and what a run with no `accounts` keeps using.
+   *
+   * Set by the gate when the operator switches, and by `harness resume
+   * --account <name>`. Unlike the repo path, this is deliberately not frozen at
+   * creation: a subscription is a thing a run can run out of, so being able to
+   * change it mid-run is the entire point.
+   */
+  active: z.string().default(""),
+  /**
+   * Read the account's utilization once before the run spends anything, instead
+   * of waiting for a live session to report it.
+   *
+   * A session only reports what it sees, and it sees nothing until it has been
+   * spawned — so without this, a run started at 97% of its weekly window pays
+   * for a planner before anything notices. The check costs no model tokens: it
+   * opens a session, asks the control channel the same question `/usage`
+   * answers, and closes it. Off skips it and leaves the gate driven purely by
+   * what live sessions report.
+   */
+  preflight: z.boolean().default(true),
+});
+export type SubscriptionConfig = z.infer<typeof SubscriptionConfig>;
+
+/**
  * Who answers the plan gate when the intent check says this plan would not
  * deliver the assignment.
  *
@@ -537,6 +643,12 @@ export const RunConfig = z.object({
   usageLimitWaitMinutes: z.number().int().min(0).max(7 * 24 * 60).default(360),
   models: ModelRouting.default({}),
   budget: Budget.default({}),
+  /**
+   * What the run does as the *account's* plan runs out, rather than as this
+   * run's dollar cap does. `{"subscription":{"pauseAtPercent":100}}` restores
+   * the old behaviour of noticing only once the wall is hit.
+   */
+  subscription: SubscriptionConfig.default({}),
   /**
    * How often the run stops, demos what it has built, and asks the operator
    * whether it is still the thing they wanted. See docs/PITSTOP.md.

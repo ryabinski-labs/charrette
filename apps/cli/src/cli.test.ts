@@ -66,6 +66,7 @@ const h = vi.hoisted(() => {
     DashboardMock: vi.fn(),
     detectToolbeltMock: vi.fn(() => [] as { name: string }[]),
     missingKeysMock: vi.fn(() => [] as string[]),
+    accountEnvMock: vi.fn(() => ({}) as Record<string, string>),
     ensureIgnoredMock: vi.fn(() => false),
     repoUnusableMock: vi.fn(async () => null as string | null),
     checkMemoryBannerMock: vi.fn(() => [] as string[]),
@@ -118,6 +119,10 @@ vi.mock("@harness/core", () => ({
   // in core; here it exists so a test can prove `harness run` actually refuses
   // when a routed provider has no key.
   missingKeys: h.missingKeysMock,
+  // Resolving an account's credentials is unit-tested in core against real
+  // environments; what the CLI owes is refusing a `resume --account` naming
+  // one it cannot resolve, so this stands in to let a test drive that path.
+  accountEnv: h.accountEnvMock,
   originSlug: h.originSlugMock,
   postmortem: h.postmortemMock,
   renderPostmortem: h.renderPostmortemMock,
@@ -256,6 +261,7 @@ beforeEach(() => {
 
   h.detectToolbeltMock.mockReset().mockReturnValue([]);
   h.missingKeysMock.mockReset().mockReturnValue([]);
+  h.accountEnvMock.mockReset().mockReturnValue({});
   h.ensureIgnoredMock.mockReset().mockReturnValue(false);
   h.repoUnusableMock.mockReset().mockResolvedValue(null);
   h.checkMemoryBannerMock.mockReset().mockReturnValue([]);
@@ -434,6 +440,37 @@ describe("harness run — resolving what the run will actually do", () => {
     await cli("run", "x", "--repo", "/repo", "--no-dashboard");
 
     expect(printed()).toContain("checks     none (auto-detected from no test script)");
+  });
+
+  it("starts on the subscription named on the command line", async () => {
+    // The flag beats the file for the same reason `--model` does: it is what
+    // you reach for when *this* run needs to be spending something else.
+    const accounts = [{ name: "work", env: { CLAUDE_CONFIG_DIR: "/w" } }];
+    h.loadFileConfigMock.mockReturnValue({ config: { subscription: { accounts, active: "personal" } }, path: "/repo/harness.config.json" });
+
+    await cli("run", "x", "--repo", "/repo", "--no-dashboard", "--account", "work");
+
+    expect(h.controllerMethods.startRun).toHaveBeenCalledWith(
+      "x",
+      // Matched loosely on the account: the config is parsed on the way through,
+      // so each one comes back carrying the schema's defaults too.
+      expect.objectContaining({
+        subscription: expect.objectContaining({ active: "work", accounts: [expect.objectContaining({ name: "work", env: { CLAUDE_CONFIG_DIR: "/w" } })] }),
+      }),
+      undefined
+    );
+  });
+
+  it("spends the account it was configured with when the command line says nothing", async () => {
+    h.loadFileConfigMock.mockReturnValue({ config: { subscription: { active: "personal" } }, path: "/repo/harness.config.json" });
+
+    await cli("run", "x", "--repo", "/repo", "--no-dashboard");
+
+    expect(h.controllerMethods.startRun).toHaveBeenCalledWith(
+      "x",
+      expect.objectContaining({ subscription: expect.objectContaining({ active: "personal" }) }),
+      undefined
+    );
   });
 
   it("takes the budget cap from the flag when given", async () => {
@@ -979,6 +1016,25 @@ describe("the terminal gates", () => {
     await expect(gatesGiven().resolveBudgetGate({ spentUsd: 30, capUsd: 30 })).resolves.toBeNull();
   });
 
+  it("routes the subscription gate to the account prompt", async () => {
+    // The other ceiling, and the one an operator cannot raise by typing a
+    // bigger number: enter parks the run rather than spending the rest.
+    answerOnce("");
+
+    await expect(
+      gatesGiven().resolveSubscriptionGate!({
+        window: "seven_day",
+        percent: 96,
+        resetsAt: null,
+        pauseAtPercent: 95,
+        summary: "96% of the weekly limit",
+        untilReset: "3d 4h",
+        account: "personal",
+        alternatives: ["work"],
+      })
+    ).resolves.toEqual({ action: "park" });
+  });
+
   it("tells the operator where a stuck task's work is, and what is suggested", async () => {
     const { close, question } = answerOnce("y");
 
@@ -1446,6 +1502,77 @@ describe("harness resume — settings the operator changed since the run started
       config: { skillRouting: [{ when: "ui", skills: ["frontend-design"] }] },
       path: "/repo/harness.config.json",
     });
+
+    await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
+
+    expect(h.storeMethods.patchRunConfig).not.toHaveBeenCalled();
+  });
+
+  it("moves the rest of the run onto another Claude subscription", async () => {
+    // The reason this is a flag and not a config edit: a run parked at 96% of
+    // its weekly window is being resumed *because* the operator has another
+    // subscription, and typing JSON is not what they want to be doing.
+    existing({ subscription: { accounts: [{ name: "work", env: { CLAUDE_CONFIG_DIR: "/w" }, note: "" }], active: "", windows: ["seven_day"], pauseAtPercent: 95, preflight: true } });
+    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/harness.config.json" });
+
+    await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard", "--account", "work");
+
+    expect(h.storeMethods.patchRunConfig).toHaveBeenCalledWith("run-1", expect.objectContaining({ subscription: expect.objectContaining({ active: "work" }) }));
+    expect(printed()).toContain("Subscription for the rest of the run: work");
+  });
+
+  it("takes an account the operator has only just configured", async () => {
+    // The accounts come from the file rather than from the run: a subscription
+    // added after the run started is exactly the one it needs.
+    const accounts = [{ name: "work", env: { CLAUDE_CONFIG_DIR: "/w" }, note: "" }];
+    existing({ subscription: { accounts: [], active: "", windows: ["seven_day"], pauseAtPercent: 95, preflight: true } });
+    h.loadFileConfigMock.mockReturnValue({ config: { subscription: { accounts } }, path: "/repo/harness.config.json" });
+
+    await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard", "--account", "work");
+
+    expect(h.storeMethods.patchRunConfig).toHaveBeenCalledWith("run-1", expect.objectContaining({ subscription: expect.objectContaining({ accounts, active: "work" }) }));
+  });
+
+  it("refuses an account it cannot authenticate as, before the run starts spending", async () => {
+    // Resolved here so a missing `$TOKEN` is a sentence, rather than a run that
+    // starts, authenticates as the account it was told to leave, and says it
+    // switched.
+    existing({ subscription: { accounts: [], active: "", windows: ["seven_day"], pauseAtPercent: 95, preflight: true } });
+    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/harness.config.json" });
+    h.accountEnvMock.mockImplementation(() => {
+      throw new Error('No subscription account named "work" — known accounts: none configured');
+    });
+
+    await expect(cli("resume", "run-1", "--repo", "/repo", "--no-dashboard", "--account", "work")).rejects.toThrow(/No subscription account named "work"/);
+    expect(h.storeMethods.patchRunConfig).not.toHaveBeenCalled();
+  });
+
+  it("hands a run back to the login the operator is sitting at", async () => {
+    // `--account ""` is the way back: a run moved onto a work subscription for
+    // an afternoon should not need a config edit to come home.
+    existing({ subscription: { accounts: [{ name: "work", env: { CLAUDE_CONFIG_DIR: "/w" }, note: "" }], active: "work", windows: ["seven_day"], pauseAtPercent: 95, preflight: true } });
+    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/harness.config.json" });
+
+    await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard", "--account", "");
+
+    expect(printed()).toContain("Subscription for the rest of the run: (the account you are logged into)");
+  });
+
+  it("says nothing about a subscription nobody changed", async () => {
+    existing({ subscription: { accounts: [], active: "", windows: ["seven_day"], pauseAtPercent: 95, preflight: true } });
+    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/harness.config.json" });
+
+    await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
+
+    expect(h.storeMethods.patchRunConfig).not.toHaveBeenCalled();
+    expect(printed()).not.toContain("Subscription for the rest of the run");
+  });
+
+  it("gives a run frozen before subscriptions existed the defaults it has been behaving as", async () => {
+    // Its config JSON has no such key at all, and reading `.active` off it
+    // would throw on the resume of every run older than this feature.
+    existing({ deterministicChecks: [] });
+    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/harness.config.json" });
 
     await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
 

@@ -2,10 +2,11 @@ import { Command } from "commander";
 import { createInterface } from "node:readline/promises";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { ModelRoutingShape, RunConfig } from "@harness/shared";
-import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, checkMemoryBanner, detectToolbelt, ensureIgnored, harnessBuild, missingKeys, originSlug, postmortem, renderPostmortem, repoUnusable } from "@harness/core";
+import { ModelRoutingShape, RunConfig, SubscriptionConfig } from "@harness/shared";
+import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, accountEnv, checkMemoryBanner, detectToolbelt, ensureIgnored, harnessBuild, missingKeys, originSlug, postmortem, renderPostmortem, repoUnusable } from "@harness/core";
 import { Dashboard } from "@harness/dashboard";
 import { promptForNewCap, watchBudgetCommands } from "./budget.js";
+import { promptForAccount } from "./subscription.js";
 import {
   CONFIG_FILENAME,
   DEFAULT_SKILLS_DIRS,
@@ -123,6 +124,10 @@ function makeController(
       return { approved: false, feedback: answer || "rejected without feedback" };
     },
     resolveBudgetGate: (gate) => promptForNewCap(gate),
+    // Gate: subscription. The other ceiling — the account's plan rather than
+    // this run's dollars — and the one an operator cannot raise by typing a
+    // bigger number.
+    resolveSubscriptionGate: (gate) => promptForAccount(gate),
     // Gate: task-escalation. A task at its cap is one answer away from either a
     // fresh set of iterations or a parked branch — so ask, in the same terminal
     // that has been narrating the failures the operator is about to explain.
@@ -290,6 +295,8 @@ interface RunOpts {
   port?: string;
   chat?: boolean;
   model?: string[];
+  /** Which configured Claude subscription this run spends; `""` is the ambient login. */
+  account?: string;
 }
 
 interface Resolved {
@@ -437,6 +444,10 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
     // in front of you needs to get cheaper right now.
     models: { ...file.models, ...modelOverrides(opts.model) },
     budget: { runCapUsd },
+    // The subscriptions this run may spend, and which one it starts on. The
+    // flag wins over the file for the same reason `--model` does: it is what
+    // the operator reaches for when *this* run needs to go somewhere else.
+    subscription: { ...file.subscription, ...(opts.account === undefined ? {} : { active: opts.account }) },
     pitStop: file.pitStop,
     skillsDirs,
     skillRouting: file.skillRouting,
@@ -546,6 +557,7 @@ export function buildProgram(): Command {
     .option("--chat", "talk the assignment through with an intake agent first (default when no assignment is given)")
     .option("--no-chat", "skip the conversation; plan directly from the assignment")
     .option("-m, --model <role=model>", "route one role to a model, e.g. worker=gpt-5.6-terra; repeatable", collect, [])
+    .option("--account <name>", "spend a named Claude subscription from subscription.accounts (default: the account you are logged into)")
     .action(async (assignment: string | undefined, opts: RunOpts, cmd: Command) => {
       if (await repoBlocked(resolveRepoRoot(opts.repo))) return;
       const { repo, config, dashboard: wantDashboard, dashboardPort, chat: wantChat, banner } = resolveRun(cmd, opts, assignment);
@@ -606,7 +618,8 @@ export function buildProgram(): Command {
     .option("--no-dashboard", "run headless; resolve gates in this terminal")
     .option("--port <n>", "pin the dashboard port (default: the first free port from 4777)")
     .option("-m, --model <role=model>", "re-route one role for the rest of the run, e.g. worker=gpt-5.6-terra; repeatable", collect, [])
-    .action(async (runIdArg: string | undefined, opts: { repo: string; dashboard?: boolean; port?: string; model?: string[] }, cmd: Command) => {
+    .option("--account <name>", "continue on a different Claude subscription, by the name it has in subscription.accounts")
+    .action(async (runIdArg: string | undefined, opts: { repo: string; dashboard?: boolean; port?: string; model?: string[]; account?: string }, cmd: Command) => {
       const repo = resolveRepoRoot(opts.repo);
       if (await repoBlocked(repo)) return;
       const file = loadFileConfig(repo).config;
@@ -719,6 +732,31 @@ export function buildProgram(): Command {
           store.patchRunConfig(runId, { models });
           for (const [role, model] of changed) {
             process.stdout.write(`${role} re-routed for the rest of the run: ${existing.config.models[role as keyof typeof existing.config.models]} → ${model}\n`);
+          }
+        }
+      }
+      // Which subscription the rest of the run spends.
+      //
+      // The accounts come from the file and the choice from the command line,
+      // because a run parked at 95% of its weekly window is precisely the run
+      // whose operator has since gone and set up a second subscription — a
+      // config frozen at creation would never see it, and the run would resume
+      // straight back into the wall that stopped it.
+      if (existing) {
+        // Parsed rather than read: a run frozen before subscriptions existed has
+        // no such field, and the defaults are exactly what it has been behaving
+        // as all along.
+        const frozen = SubscriptionConfig.parse(existing.config.subscription ?? {});
+        const merged = { ...frozen, ...(file.subscription ?? {}) };
+        const subscription = { ...merged, active: opts.account ?? merged.active };
+        if (JSON.stringify(subscription) !== JSON.stringify(frozen)) {
+          // Resolved before it is stored, so a name that is not configured — or
+          // a `$TOKEN` that is not exported — is a sentence here rather than a
+          // run that starts and authenticates as nobody.
+          accountEnv(subscription, subscription.active);
+          store.patchRunConfig(runId, { subscription });
+          if (subscription.active !== frozen.active) {
+            process.stdout.write(`Subscription for the rest of the run: ${subscription.active || "(the account you are logged into)"}\n`);
           }
         }
       }

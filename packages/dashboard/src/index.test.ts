@@ -689,6 +689,116 @@ describe("budget gate", () => {
   });
 });
 
+describe("subscription gate", () => {
+  const started: Dashboard[] = [];
+  afterEach(async () => {
+    for (const d of started.splice(0)) await d.stop();
+  });
+
+  const GATE = {
+    window: "seven_day",
+    percent: 96,
+    resetsAt: Date.parse("2026-08-18T11:59:59Z"),
+    pauseAtPercent: 95,
+    summary: "96% of the weekly limit · resets Aug 18 at 10pm (Australia/Melbourne)",
+    untilReset: "3d 4h",
+    account: "personal",
+    alternatives: ["work"],
+  };
+
+  /** A dashboard with the account nearly spent, and the sessions waiting on it. */
+  async function withOpenGate() {
+    const dash = dashboard();
+    started.push(dash);
+    const url = await dash.start();
+    const pending = dash.resolveSubscriptionGate(GATE);
+    const post = (body: unknown) =>
+      fetch(new URL("/api/gates/subscription", url), {
+        method: "POST",
+        headers: { authorization: `Bearer ${dash.token}`, "content-type": "application/json", connection: "close" },
+        body: JSON.stringify(body),
+      });
+    return { dash, url, pending, post };
+  }
+
+  it("shows the reading, the reset and the subscriptions it could move to", async () => {
+    const { url, dash } = await withOpenGate();
+    const res = await fetch(new URL("/api/state", url), { headers: { authorization: `Bearer ${dash.token}`, connection: "close" } });
+    const body = (await res.json()) as { subscriptionGate: typeof GATE };
+    expect(body.subscriptionGate).toMatchObject({ percent: 96, untilReset: "3d 4h", alternatives: ["work"] });
+    // Names, never credentials: this payload reaches a browser, an event log
+    // and a terminal, and a subscription token belongs in none of them.
+    expect(JSON.stringify(body.subscriptionGate)).not.toMatch(/TOKEN|sk-|oat-/);
+  });
+
+  it("hands the waiting sessions the subscription to continue on", async () => {
+    const { pending, post } = await withOpenGate();
+    expect((await post({ action: "switch", account: "work" })).status).toBe(200);
+    await expect(pending).resolves.toEqual({ action: "switch", account: "work" });
+  });
+
+  it("carries on, or parks, when that is what was clicked", async () => {
+    const carry = await withOpenGate();
+    expect((await carry.post({ action: "continue" })).status).toBe(200);
+    await expect(carry.pending).resolves.toEqual({ action: "continue" });
+
+    const park = await withOpenGate();
+    expect((await park.post({ action: "park" })).status).toBe(200);
+    await expect(park.pending).resolves.toEqual({ action: "park" });
+  });
+
+  it("refuses an account this run was never told about, leaving the gate open", async () => {
+    // The credentials come from the run's own config, so a name from anywhere
+    // else resolves to nothing — and the run would carry on as the exhausted
+    // account believing it had switched.
+    const { post, pending } = await withOpenGate();
+    expect((await post({ action: "switch", account: "somebody-elses" })).status).toBe(400);
+    // Including a switch to nothing at all, which is what an empty picker sends.
+    const blank = await post({ action: "switch" });
+    expect(blank.status).toBe(400);
+    expect((await blank.json()).error).toBe('unknown subscription account ""');
+    expect((await post({ action: "park" })).status).toBe(200);
+    await expect(pending).resolves.toEqual({ action: "park" });
+  });
+
+  it("refuses an answer that is not one of the three", async () => {
+    const { post, pending } = await withOpenGate();
+    expect((await post({ action: "shrug" })).status).toBe(400);
+    expect((await post({})).status).toBe(400);
+    expect((await post({ action: "continue" })).status).toBe(200);
+    await expect(pending).resolves.toEqual({ action: "continue" });
+  });
+
+  it("has nothing to answer when no gate is open", async () => {
+    const dash = dashboard();
+    started.push(dash);
+    const url = await dash.start();
+    const res = await fetch(new URL("/api/gates/subscription", url), {
+      method: "POST",
+      headers: { authorization: `Bearer ${dash.token}`, "content-type": "application/json", connection: "close" },
+      body: JSON.stringify({ action: "park" }),
+    });
+    expect(res.status).toBe(409);
+  });
+
+  it("rejects an unauthenticated answer, and one from another origin", async () => {
+    const { url } = await withOpenGate();
+    const anonymous = await fetch(new URL("/api/gates/subscription", url), {
+      method: "POST",
+      headers: { "content-type": "application/json", connection: "close" },
+      body: JSON.stringify({ action: "park" }),
+    });
+    expect(anonymous.status).toBe(401);
+    const dash = started[started.length - 1]!;
+    const crossOrigin = await fetch(new URL("/api/gates/subscription", url), {
+      method: "POST",
+      headers: { authorization: `Bearer ${dash.token}`, "content-type": "application/json", origin: "https://evil.example", connection: "close" },
+      body: JSON.stringify({ action: "park" }),
+    });
+    expect(crossOrigin.status).toBe(403);
+  });
+});
+
 describe("live budget raises", () => {
   const started: Dashboard[] = [];
   afterEach(async () => {
