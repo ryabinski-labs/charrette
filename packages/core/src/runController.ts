@@ -302,8 +302,32 @@ function shellQuote(s: string): string {
  * second, and until this existed a park at 96% of the weekly window quietly
  * became one parked task and a run that carried on into the wall.
  */
-function stopsTheRun(e: unknown): boolean {
-  return e instanceof BudgetExceeded || e instanceof SubscriptionPaused;
+/** The three ways a run stops as a whole rather than one task failing. */
+type RunStop = BudgetExceeded | SubscriptionPaused | RunPaused;
+
+function stopsTheRun(e: unknown): e is RunStop {
+  return e instanceof BudgetExceeded || e instanceof SubscriptionPaused || e instanceof RunPaused;
+}
+
+/**
+ * Thrown into every live session when the operator asks for the run to stop.
+ *
+ * The third sibling of `BudgetExceeded` and `SubscriptionPaused`, and
+ * deliberately the same shape: all three mean "this run stops now, and nothing
+ * about it is broken". What differs is what starts it again — money, a
+ * subscription window, and here simply the operator coming back.
+ *
+ * It travels the path the other two already proved. `checkStops` is awaited on
+ * every streamed message of every session, so a throw there reaches a worker
+ * mid-turn, a QA agent mid-verdict and the planner alike, and each one ends
+ * through the same accounting the budget cap uses: usage booked, session row
+ * closed, worktree left with every commit it had made. Nothing is cancelled and
+ * nothing is lost that was not already only in the model's head.
+ */
+export class RunPaused extends Error {
+  constructor(public runId: string) {
+    super(`paused by the operator — pick it up with: harness resume ${runId}`);
+  }
 }
 
 /** What the operator is told when the run's budget cap is reached. Never carries secrets. */
@@ -635,7 +659,7 @@ export class RunController {
       repoPath: this.repoPath,
       config: run.config,
       ui,
-      budgetCheck: () => this.checkBudget(runId),
+      budgetCheck: () => this.checkStops(runId),
       // Matched on the seed — the only text that exists this early.
       skillsBlock: skillsBlock(this.selectSkills(indexSkills(run.config.skillsDirs), "intake", seed, run.config)),
       // The seed is very often "implement <issue link>". The harness holds a
@@ -808,6 +832,26 @@ export class RunController {
    * open questions are reported instead of asked.
    */
   private async drive(runId: string, intake?: IntakeUi): Promise<void> {
+    try {
+      await this.driveRun(runId, intake);
+    } catch (e) {
+      // A pause asked for while the run was *integrating* — validating the
+      // intent, opening pull requests, waiting on checks — has no scheduler loop
+      // to notice it, so it arrives here as a throw from whichever session was
+      // mid-message. It is still an operator stopping their own run, not a
+      // failure: park it exactly as the executing path does, and let the caller
+      // print an outcome rather than a stack trace.
+      if (!(e instanceof RunPaused)) throw e;
+      this.store.transitionRun(runId, "PAUSED", "the operator paused the run");
+    } finally {
+      // The request was about this attempt at this run. A `resume` in the same
+      // process — which is every test, and an operator who never left the
+      // dashboard — must not inherit a pause the last drive already honoured.
+      this.pauseAsked.delete(runId);
+    }
+  }
+
+  private async driveRun(runId: string, intake?: IntakeUi): Promise<void> {
     let run = this.store.getRun(runId);
     if (!run) throw new Error(`unknown run ${runId}`);
     // The checkpoint cadence, set once for every session this run will ever
@@ -960,8 +1004,13 @@ export class RunController {
     // event earlier.
     for (;;) {
       if (run.state === "EXECUTING") {
-        if ((await this.execute(runId)) === "paused") {
-          this.store.transitionRun(runId, "PAUSED", "the run was stopped at a pit stop");
+        const stopped = await this.execute(runId);
+        if (stopped !== "complete") {
+          this.store.transitionRun(
+            runId,
+            "PAUSED",
+            stopped === "operator" ? "the operator paused the run" : "the run was stopped at a pit stop"
+          );
           return;
         }
         this.store.transitionRun(runId, "INTEGRATING", "all tasks terminal");
@@ -1043,7 +1092,7 @@ export class RunController {
         tools: [],
         allowedTools: [],
         maxTurns: 12,
-        budgetCheck: () => this.checkBudget(runId),
+        budgetCheck: () => this.checkStops(runId),
       });
       const verdict = IntentVerdict.parse(extractJson(result.resultText));
       this.bus.publish({ type: "run.plan_intent_verdict", runId, verdict: verdict.verdict, gaps: verdict.gaps, summary: verdict.summary, ts: Date.now() });
@@ -1134,7 +1183,7 @@ export class RunController {
         // exists". Writing is not: nothing is built yet.
         disallowedTools: ["Write", "Edit", "NotebookEdit"],
         maxTurns: 20,
-        budgetCheck: () => this.checkBudget(runId),
+        budgetCheck: () => this.checkStops(runId),
       });
       const parsed = PlanGateDecisionJson.parse(extractJson(result.resultText));
       say(`${skill} on the plan-intent gaps: ${parsed.action}${parsed.why ? ` — ${parsed.why}` : ""}`);
@@ -1180,7 +1229,7 @@ export class RunController {
         cwd: wtPath,
         disallowedTools: ["WebSearch"],
         maxTurns: 60,
-        budgetCheck: () => this.checkBudget(runId),
+        budgetCheck: () => this.checkStops(runId),
       });
       const verdict = IntentVerdict.parse(extractJson(result.resultText));
       this.bus.publish({ type: "run.intent_verdict", runId, verdict: verdict.verdict, gaps: verdict.gaps, summary: verdict.summary, ts: Date.now() });
@@ -1391,7 +1440,7 @@ export class RunController {
         // into a local diff nobody asked for.
         allowedTools: ["Bash", "Read", "Glob", "Grep", "WebFetch"],
         maxTurns: 80,
-        budgetCheck: () => this.checkBudget(runId),
+        budgetCheck: () => this.checkStops(runId),
       });
       const verdict = ProdVerdict.parse(extractJson(result.resultText));
       this.bus.publish({ type: "run.prod_verdict", runId, url, verdict: verdict.verdict, findings: verdict.findings, summary: verdict.summary, ts: Date.now() });
@@ -2201,7 +2250,7 @@ export class RunController {
         cwd,
         resume: qa.sdkSessionId,
         maxTurns: 2,
-        budgetCheck: () => this.checkBudget(runId),
+        budgetCheck: () => this.checkStops(runId),
       });
       return QaVerdict.parse(extractJson(retry.resultText));
     } catch (e) {
@@ -2300,7 +2349,7 @@ export class RunController {
         allowedTools: ["Read", "Glob", "Grep"],
         maxTurns: 40,
         maxOutputTokens,
-        budgetCheck: () => this.checkBudget(runId),
+        budgetCheck: () => this.checkStops(runId),
       });
       if ("died" in result) {
         lastReason = this.failedAttempt(runId, attempt, result.died, lastPath, "error");
@@ -2387,7 +2436,7 @@ export class RunController {
           allowedTools: [],
           maxTurns: 4,
           maxOutputTokens,
-          budgetCheck: () => this.checkBudget(runId),
+          budgetCheck: () => this.checkStops(runId),
         });
         if ("died" in result) {
           reason = result.died;
@@ -2578,7 +2627,7 @@ export class RunController {
 
   // ---- execution ----
 
-  private async execute(runId: string): Promise<"complete" | "paused"> {
+  private async execute(runId: string): Promise<"complete" | "pitstop" | "operator"> {
     const run = this.store.getRun(runId)!;
     await this.wt.ensureIntegrationBranch(runId);
     // The forge dir rides alongside the operator's dirs for task-level roles:
@@ -2622,7 +2671,7 @@ export class RunController {
       text: coChangeNote(nearby),
       ts: Date.now(),
     });
-    let runStop: BudgetExceeded | SubscriptionPaused | null = null;
+    let runStop: RunStop | null = null;
     /**
      * Slots in use. A task waiting at a gate is in flight but is not running an
      * agent, so it does not count.
@@ -2648,10 +2697,18 @@ export class RunController {
       // the operator is being shown a product, and a tree with three workers
       // half-way through their tasks is not one. Nothing is cancelled — the
       // in-flight tasks finish, and the stop happens on the next pass.
+      // An operator pause is a run-wide stop like a reached cap, and is handled
+      // as one: stop dispatching, let the in-flight tasks fall out (their own
+      // `checkStops` is throwing at them already), and settle below. Setting it
+      // here rather than only in the catch is what makes a pause work when
+      // nothing is in flight at all — every task gated, or the loop idling
+      // between dispatches, which is exactly when an operator is most likely to
+      // decide they are done for the day.
+      if (this.pauseAsked.has(runId)) runStop = runStop ?? new RunPaused(runId);
       const due = runStop ? null : this.pitStopReason(runId);
       if (due && !inFlight.size) {
         await this.issueSync;
-        if ((await this.pitStop(runId, due)) === "stop") return "paused";
+        if ((await this.pitStop(runId, due)) === "stop") return "pitstop";
         continue;
       }
       // Fill capacity. Re-listed per dispatch: a task that just merged may have
@@ -2672,7 +2729,7 @@ export class RunController {
             // ceiling: the run's dollar cap, or the account's plan, which every
             // task in flight is spending just as surely.
             if (stopsTheRun(e)) {
-              runStop = runStop ?? (e as BudgetExceeded | SubscriptionPaused);
+              runStop = runStop ?? (e as RunStop);
               return;
             }
             const t = this.store.getTask(runId, id)!;
@@ -2704,6 +2761,10 @@ export class RunController {
       // returns or throws, or a budget stop ends the process with the tracker
       // still claiming every task is untouched.
       await this.issueSync;
+      // A pause is the one run-wide stop that is not a failure and asks the
+      // operator for nothing, so it returns rather than throws: there is no gate
+      // to open and no cap to raise, and the caller parks the run and stops.
+      if (runStop instanceof RunPaused) return "operator";
       if (runStop) throw runStop;
 
       const tasks = this.store.listTasks(runId);
@@ -3080,7 +3141,7 @@ export class RunController {
         // Its own port block and compose project, like a task worktree — a demo
         // must not collide with whatever the operator has running.
         env: isolationEnv(taskIsolation(runId, `pitstop-${number}`)),
-        budgetCheck: () => this.checkBudget(runId),
+        budgetCheck: () => this.checkStops(runId),
       };
       const result = await this.pool.run({
         ...common,
@@ -3282,7 +3343,7 @@ export class RunController {
           cwd: wtPath,
           disallowedTools: ["Write", "Edit", "NotebookEdit", "WebSearch"],
           maxTurns: 30,
-          budgetCheck: () => this.checkBudget(runId),
+          budgetCheck: () => this.checkStops(runId),
         });
         return { report: { lens, ...ReviewJson.parse(extractJson(result.resultText)) }, finished: true };
       } catch (e) {
@@ -3415,7 +3476,7 @@ export class RunController {
         cwd: await this.wt.ensureIntegrationWorktree(runId).catch(() => this.repoPath),
         disallowedTools: ["Write", "Edit", "NotebookEdit"],
         maxTurns: 30,
-        budgetCheck: () => this.checkBudget(runId),
+        budgetCheck: () => this.checkStops(runId),
       });
       const parsed = PitStopDecisionJson.parse(extractJson(result.resultText));
       // A stop the operator asked for ends with them, not with the skill.
@@ -3515,7 +3576,7 @@ export class RunController {
         tools: ["Read", "Glob", "Grep"],
         maxTurns: 40,
         maxOutputTokens: await this.plannerOutputTokens(runId),
-        budgetCheck: () => this.checkBudget(runId),
+        budgetCheck: () => this.checkStops(runId),
       });
       const breakdown = PlanBreakdown.parse(extractJson(result.resultText));
       const epicUnion = [
@@ -3769,7 +3830,7 @@ export class RunController {
         // as JSON and the harness does the writing.
         disallowedTools: ["Write", "Edit", "NotebookEdit"],
         maxTurns: 25,
-        budgetCheck: () => this.checkBudget(runId),
+        budgetCheck: () => this.checkStops(runId),
       });
       const decision = SkillForgeDecision.parse(extractJson(result.resultText));
       if (decision.action === "none") {
@@ -4041,7 +4102,7 @@ export class RunController {
           maxTurns: workerTurns,
           env: isolationEnv(iso),
           reapOnEnd: true,
-          budgetCheck: () => this.checkBudget(runId),
+          budgetCheck: () => this.checkStops(runId),
           onLimitWait: creditLimitWait,
         });
         workerSummary = worker.resultText;
@@ -4344,7 +4405,7 @@ export class RunController {
           maxTurns: qaTurns,
           env: isolationEnv(iso),
           reapOnEnd: true,
-          budgetCheck: () => this.checkBudget(runId),
+          budgetCheck: () => this.checkStops(runId),
           onLimitWait: creditLimitWait,
         });
         // A session cut off at its turn ceiling still returns a result message —
@@ -4667,8 +4728,56 @@ export class RunController {
 
   // ---- budget (PERF-7: checked before/while every agent turn) ----
 
-  private async checkBudget(runId: string): Promise<void> {
+  /**
+   * Everything that can stop a session mid-turn, asked on every streamed
+   * message of every session in the run.
+   *
+   * This is the only hook the pool calls that often, which is what makes it the
+   * right place for a pause: one check reaches a worker mid-edit, a QA agent
+   * mid-verdict and the planner, without a cancellation path of its own to get
+   * wrong. The pause is read before the cap because it is free — a set lookup
+   * against a spend query — and because an operator who has asked to stop
+   * should not first be asked to raise a budget.
+   */
+  private async checkStops(runId: string): Promise<void> {
+    if (this.pauseAsked.has(runId)) throw new RunPaused(runId);
     await this.enforce(runId);
+  }
+
+  /**
+   * Runs the operator has asked to stop. Held here rather than on the run row
+   * because it must be readable on every message without a database round trip,
+   * and because it is a request about *this process*: a pause does not outlive
+   * the harness that was asked for it, and a run picked up by `resume` is by
+   * definition no longer paused.
+   */
+  private readonly pauseAsked = new Set<string>();
+
+  /**
+   * Stop the run at the next message of every session, and leave it resumable.
+   *
+   * Reached from the dashboard's Pause button and `harness pause`, which is why
+   * it answers with a sentence rather than throwing: the caller is an operator
+   * waiting on a line of text, not a code path that can handle an exception.
+   *
+   * Asking twice is not an error. The agents take a moment to notice — they
+   * stop at their next message, not the instant the button is clicked — and an
+   * operator who clicks again because nothing has visibly happened is asking a
+   * reasonable question, so tell them it is already happening.
+   */
+  pauseRun(runId: string): string {
+    const run = this.store.getRun(runId);
+    if (!run) return `no run ${runId}`;
+    if (!["EXECUTING", "INTEGRATING"].includes(run.state)) {
+      return `this run is ${run.state} — only a run that is still working can be paused`;
+    }
+    if (this.pauseAsked.has(runId)) return "already pausing — the agents stop at their next message";
+    this.pauseAsked.add(runId);
+    this.bus.publish({ type: "run.pause_requested", runId, ts: Date.now() });
+    // The loop only re-reads its stop conditions when something wakes it, and a
+    // run whose workers are all mid-turn is not waking on its own.
+    this.wakeScheduler();
+    return "pausing — the agents stop at their next message, and the run keeps every commit they have made";
   }
 
   /**

@@ -10,14 +10,15 @@ import { Dashboard } from "./index.js";
 import { PAGE_HTML } from "./page.js";
 
 /**
- * The three sink methods these tests do not exercise, so a fake can name only
- * the one it is about. Spread, not optional in the interface: a controller that
- * stopped implementing one of these should break the build, not the dashboard.
+ * The sink methods these tests do not exercise, so a fake can name only the one
+ * it is about. Spread, not optional in the interface: a controller that stopped
+ * implementing one of these should break the build, not the dashboard.
  */
 const otherSink = {
   requestPitStop: () => "pit stop requested",
   cancelPitStop: () => "pit stop cancelled",
   rerouteModel: () => "worker: a \u2192 b",
+  pauseRun: () => "pausing",
 };
 
 
@@ -32,7 +33,7 @@ function occupy(port: number): Promise<Server> {
 
 const close = (s: { close: (cb?: () => void) => void }) => new Promise<void>((r) => s.close(() => r()));
 
-function dashboard(opts?: { port?: number }): Dashboard {
+function dashboard(opts?: { port?: number; preferPort?: number; token?: string }): Dashboard {
   const store = new Store(":memory:");
   return new Dashboard(store, new Bus(store), opts);
 }
@@ -544,7 +545,11 @@ describe("the page itself", () => {
     // Two clicks, and the first is refused without a question — a pit stop that
     // asks nothing costs exactly as much as one that asks something.
     expect(PAGE_HTML).toMatch(/function armSummon\(\)/);
-    expect(PAGE_HTML).toContain("write the question the PM should answer first");
+    expect(PAGE_HTML).toContain("write the question the PM should answer in the box above");
+    // And the one project-level control on the page says it is project-level:
+    // it reads the same textarea as the task composer, so without this line it
+    // reads as a third thing to do to the task named in the dropdown.
+    expect(PAGE_HTML).toContain("Asks about <b>the whole run</b>, not the task selected above.");
     // Cancel takes the slot the first click was at, so a double-click stands
     // down rather than spending.
     expect(PAGE_HTML).toMatch(/\$\("summon-ask"\)\.textContent = "Cancel"/);
@@ -1059,6 +1064,179 @@ describe("summoning a pit stop", () => {
       body: JSON.stringify({ question: "spend his money" }),
     });
     expect(res.status).toBe(403);
+  });
+});
+
+/**
+ * Pausing: the button for an operator who is closing the laptop. It carries no
+ * body — there is nothing to say about a pause, and a question standing between
+ * someone and the door is a question they will not answer.
+ */
+describe("pausing the run", () => {
+  const started: Dashboard[] = [];
+  afterEach(async () => {
+    for (const d of started.splice(0)) await d.stop();
+  });
+
+  async function withDash() {
+    const dash = dashboard();
+    started.push(dash);
+    const url = await dash.start();
+    const post = () =>
+      fetch(new URL("/api/runs/r1/pause", url), {
+        method: "POST",
+        headers: { authorization: `Bearer ${dash.token}`, connection: "close" },
+      });
+    return { dash, post, url };
+  }
+
+  it("refuses until the dashboard is wired to a controller", async () => {
+    const { post } = await withDash();
+    expect((await post()).status).toBe(503);
+  });
+
+  it("passes the run through to the controller and reports what it said", async () => {
+    const { dash, post } = await withDash();
+    const paused: string[] = [];
+    dash.attach({
+      ...otherSink,
+      sendFeedback: () => "live",
+      raiseBudget: () => "cap raised to $0.00",
+      pauseRun: (runId) => {
+        paused.push(runId);
+        return "pausing — the agents stop at their next message";
+      },
+    });
+    const res = await post();
+    expect(res.status).toBe(200);
+    expect(paused).toEqual(["r1"]);
+  });
+
+  /**
+   * Clicking twice is not an error. The agents stop at their next message
+   * rather than the instant the button is pressed, so an operator who clicks
+   * again because nothing has visibly happened is asking a fair question.
+   */
+  it("treats a second click as success rather than a conflict", async () => {
+    const { dash, post } = await withDash();
+    let calls = 0;
+    dash.attach({
+      ...otherSink,
+      sendFeedback: () => "live",
+      raiseBudget: () => "cap raised to $0.00",
+      pauseRun: () => (calls++ === 0 ? "pausing — the agents stop at their next message" : "already pausing — the agents stop at their next message"),
+    });
+    expect((await post()).status).toBe(200);
+    expect((await post()).status).toBe(200);
+  });
+
+  it("returns the controller's refusal rather than claiming the run stopped", async () => {
+    const { dash, post } = await withDash();
+    dash.attach({
+      ...otherSink,
+      sendFeedback: () => "live",
+      raiseBudget: () => "cap raised to $0.00",
+      pauseRun: () => "this run is PR_REVIEW — only a run that is still working can be paused",
+    });
+    const res = await post();
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toContain("PR_REVIEW");
+  });
+
+  it("answers a caller that declares JSON and sends none", async () => {
+    // How the Pause button and `harness pause` both actually call it: the
+    // content-type is copied from the posts that do carry a body. Fastify's own
+    // parser answers that with a 400 before the route runs, which shipped a
+    // button that did nothing — no console error, no event, no state change.
+    const { dash, url } = await withDash();
+    dash.attach({ ...otherSink, sendFeedback: () => "live", raiseBudget: () => "cap raised to $0.00" });
+    const res = await fetch(new URL("/api/runs/r1/pause", url), {
+      method: "POST",
+      headers: { authorization: `Bearer ${dash.token}`, "content-type": "application/json", connection: "close" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true });
+  });
+
+  it("still refuses a body that claims to be JSON and is not", async () => {
+    const { dash, url } = await withDash();
+    dash.attach({ ...otherSink, sendFeedback: () => "live", raiseBudget: () => "cap raised to $0.00" });
+    const res = await fetch(new URL("/api/runs/r1/pause", url), {
+      method: "POST",
+      headers: { authorization: `Bearer ${dash.token}`, "content-type": "application/json", connection: "close" },
+      body: "{not json",
+    });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects an unauthenticated pause", async () => {
+    const { url } = await withDash();
+    expect((await fetch(new URL("/api/runs/r1/pause", url), { method: "POST", headers: { connection: "close" } })).status).toBe(401);
+  });
+
+  it("rejects a cross-origin pause", async () => {
+    const { dash, url } = await withDash();
+    const res = await fetch(new URL("/api/runs/r1/pause", url), {
+      method: "POST",
+      headers: { authorization: `Bearer ${dash.token}`, origin: "https://evil.example", connection: "close" },
+    });
+    expect(res.status).toBe(403);
+  });
+});
+
+/**
+ * The token is the credential *and* half the URL, so minting a fresh one on
+ * resume does not relocate the operator's open tab — it 401s it. A run picked
+ * up after a pause has to come back on the one they already have.
+ */
+describe("serving on a token the operator already holds", () => {
+  const started: Dashboard[] = [];
+  afterEach(async () => {
+    for (const d of started.splice(0)) await d.stop();
+  });
+
+  it("reuses a supplied token, and still answers the old URL after a restart", async () => {
+    const first = dashboard();
+    const url = await first.start();
+    const token = first.token;
+    // The process the operator's tab was talking to goes away — a pause they
+    // took far enough to close the terminal, or a reboot.
+    await first.stop();
+
+    const again = dashboard({ preferPort: Number(new URL(url).port), token });
+    started.push(again);
+    const backAt = await again.start();
+
+    expect(again.token).toBe(token);
+    expect(backAt).toBe(url);
+    const res = await fetch(new URL("/api/state", backAt), { headers: { authorization: `Bearer ${token}`, connection: "close" } });
+    expect(res.status).toBe(200);
+    await res.arrayBuffer();
+  });
+
+  it("takes another port rather than refusing to come back at all", async () => {
+    // Something else is on the remembered port — a second harness, or the
+    // operator's own paused process still holding it. The tab has to be
+    // reopened either way; a run that will not resume is the worse outcome.
+    const squatter = dashboard();
+    started.push(squatter);
+    const taken = Number(new URL(await squatter.start()).port);
+
+    const again = dashboard({ preferPort: taken });
+    started.push(again);
+    const backAt = await again.start();
+
+    expect(Number(new URL(backAt).port)).not.toBe(taken);
+  });
+
+  it("mints a random one when nothing is handed back", async () => {
+    const a = dashboard();
+    const b = dashboard();
+    started.push(a, b);
+    expect(a.token).not.toBe(b.token);
+    expect(a.token).toMatch(/^[0-9a-f]{32}$/);
   });
 });
 

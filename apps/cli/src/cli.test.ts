@@ -58,6 +58,9 @@ const h = vi.hoisted(() => {
     liveDashboardUrlMock: vi.fn(async () => null as string | null),
     recordDashboardMock: vi.fn(),
     clearDashboardMock: vi.fn(),
+    // Null = no dashboard was recorded for this repo, which is every test that
+    // is not about resuming onto the operator's existing tab.
+    recordedDashboardMock: vi.fn((): { port: number; token: string } | null => null),
     StoreMock: vi.fn(() => storeMethods),
     BusMock: vi.fn(),
     AgentPoolMock: vi.fn(),
@@ -150,6 +153,7 @@ vi.mock("./dashboardLink.js", () => ({
   liveDashboardUrl: h.liveDashboardUrlMock,
   recordDashboard: h.recordDashboardMock,
   clearDashboard: h.clearDashboardMock,
+  recordedDashboard: h.recordedDashboardMock,
 }));
 
 import type { GateHandler } from "@harness/core";
@@ -278,6 +282,8 @@ beforeEach(() => {
   h.liveDashboardUrlMock.mockReset().mockResolvedValue(null);
   h.recordDashboardMock.mockReset();
   h.clearDashboardMock.mockReset();
+  h.recordedDashboardMock.mockReset();
+  h.recordedDashboardMock.mockReturnValue(null);
   h.armCrashLogMock.mockReset();
   h.promptSeedMock.mockReset().mockResolvedValue("seed from the conversation");
   h.chatCloseMock.mockReset();
@@ -712,6 +718,18 @@ describe("harness run — the dashboard", () => {
     await expect(cli("run", "x", "--repo", "/repo", "--port", value)).rejects.toThrow(
       `--port must be 1-65535, got "${value}"`
     );
+  });
+
+  it("never inherits the token a previous run served on", async () => {
+    // Only `resume` comes back to an operator's open tab. A new run is a new
+    // run: re-serving the last one's credential would hand whoever still has
+    // that URL a live door into work they were never shown.
+    h.recordedDashboardMock.mockReturnValue({ port: 4791, token: "0123456789abcdef0123456789abcdef" });
+
+    await cli("run", "x", "--repo", "/repo");
+
+    expect(h.recordedDashboardMock).not.toHaveBeenCalled();
+    expect(h.dashboardArgs[0]![2]).toEqual({ port: undefined, preferPort: undefined, token: undefined });
   });
 
   it("says the plan gate will be answered in the terminal when the dashboard is off", async () => {
@@ -1208,6 +1226,42 @@ describe("harness resume", () => {
 
     await expect(cli("resume", "run-old", "--repo", "/repo", "--no-dashboard")).rejects.toThrow(/GEMINI_API_KEY is not set/);
     expect(h.controllerMethods.resume).not.toHaveBeenCalled();
+  });
+
+  it("comes back on the port and token the paused run was serving", async () => {
+    // The whole point of a pause the operator planned to come back from: the
+    // tab they left open is still pointed at that URL, and the fragment in it
+    // is the only credential the dashboard accepts. A fresh token would not
+    // move them to a new page — it would 401 the one they are looking at.
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-paused", state: "PAUSED", assignment: "a" }]);
+    h.recordedDashboardMock.mockReturnValue({ port: 4791, token: "0123456789abcdef0123456789abcdef" });
+
+    await cli("resume", "--repo", "/repo");
+
+    expect(h.recordedDashboardMock).toHaveBeenCalledWith("/repo");
+    // A preference, not a pin: something else on 4791 must not stop the resume.
+    expect(h.dashboardArgs.at(-1)![2]).toEqual({
+      port: undefined,
+      preferPort: 4791,
+      token: "0123456789abcdef0123456789abcdef",
+    });
+  });
+
+  it("still takes the port the operator pinned, on the token they already hold", async () => {
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-paused", state: "PAUSED", assignment: "a" }]);
+    h.recordedDashboardMock.mockReturnValue({ port: 4791, token: "0123456789abcdef0123456789abcdef" });
+
+    await cli("resume", "--repo", "/repo", "--port", "5050");
+
+    expect(h.dashboardArgs.at(-1)![2]).toMatchObject({ port: 5050, token: "0123456789abcdef0123456789abcdef" });
+  });
+
+  it("takes a fresh port and token when nothing was recorded", async () => {
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-open", state: "EXECUTING", assignment: "a" }]);
+
+    await cli("resume", "--repo", "/repo");
+
+    expect(h.dashboardArgs.at(-1)![2]).toEqual({ port: undefined, preferPort: undefined, token: undefined });
   });
 
   it("says so plainly when there is nothing to resume", async () => {
@@ -1919,6 +1973,130 @@ describe("harness status", () => {
     await cli("status", "--repo", "/somewhere/else");
 
     expect(h.liveDashboardUrlMock).toHaveBeenCalledWith("/somewhere/else");
+  });
+});
+
+describe("harness pause", () => {
+  /**
+   * The run lives in another process, so pausing is a request sent to its
+   * dashboard. This is that dashboard: it answers `/api/state` with whatever the
+   * test says is running, and records the pause it was asked for.
+   */
+  function servingRun(runs: { id: string; state: string }[], pause: { ok?: boolean; body?: unknown } = {}) {
+    const calls: { url: string; method: string; auth: string | undefined; type: string | undefined }[] = [];
+    const fetchMock = vi.fn(async (url: string, init?: { method?: string; headers?: Record<string, string> }) => {
+      calls.push({
+        url,
+        method: init?.method ?? "GET",
+        auth: init?.headers?.authorization,
+        type: init?.headers?.["content-type"],
+      });
+      const json = url.endsWith("api/state") ? { runs } : (pause.body ?? { ok: true, message: "pausing — the agents stop at their next message" });
+      return { ok: url.endsWith("api/state") ? true : pause.ok !== false, json: async () => json };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    h.liveDashboardUrlMock.mockResolvedValue("http://127.0.0.1:4777/#tok");
+    return calls;
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("finds the running run itself, and says how to get it back", async () => {
+    const calls = servingRun([
+      { id: "run-done", state: "DONE" },
+      { id: "run-1", state: "EXECUTING" },
+    ]);
+
+    await cli("pause", "--repo", "/repo");
+
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      "GET http://127.0.0.1:4777/api/state",
+      "POST http://127.0.0.1:4777/api/runs/run-1/pause",
+    ]);
+    // The fragment is the credential; a request without it is a 401.
+    expect(calls.every((c) => c.auth === "Bearer tok")).toBe(true);
+    // Neither request carries a body, so neither may claim a content type: a
+    // JSON body parser answers that with a 400 before the route is reached.
+    expect(calls.every((c) => c.type === undefined)).toBe(true);
+    expect(printed()).toContain("pausing — the agents stop at their next message");
+    expect(printed()).toContain("harness resume run-1");
+    expect(printed()).toContain("It comes back on this same dashboard: http://127.0.0.1:4777/#tok");
+  });
+
+  it("pauses the run the operator named, without asking which is running", async () => {
+    const calls = servingRun([{ id: "run-1", state: "EXECUTING" }]);
+
+    await cli("pause", "run-7", "--repo", "/repo");
+
+    expect(calls.map((c) => c.url)).toEqual(["http://127.0.0.1:4777/api/runs/run-7/pause"]);
+  });
+
+  it("says there is nothing to pause when no dashboard is serving this repo", async () => {
+    h.liveDashboardUrlMock.mockResolvedValue(null);
+
+    await cli("pause", "--repo", "/repo");
+
+    expect(printed()).toContain("nothing to pause — no run is serving a dashboard for this repo.");
+  });
+
+  it("says there is nothing to pause when the dashboard's runs have all finished", async () => {
+    servingRun([{ id: "run-1", state: "PR_REVIEW" }]);
+
+    await cli("pause", "--repo", "/repo");
+
+    expect(printed()).toContain("nothing to pause — that dashboard has no run still working.");
+  });
+
+  it("treats a dashboard that stops answering as nothing to pause", async () => {
+    // It was alive a moment ago — `liveDashboardUrl` asked it — and died between
+    // the two requests. Nothing was paused, and saying so is the whole job.
+    h.liveDashboardUrlMock.mockResolvedValue("http://127.0.0.1:4777/#tok");
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new Error("ECONNREFUSED");
+    }));
+
+    await cli("pause", "--repo", "/repo");
+
+    expect(printed()).toContain("nothing to pause — that dashboard has no run still working.");
+  });
+
+  it("still says how to get the run back when the dashboard answers with nothing", async () => {
+    servingRun([{ id: "run-1", state: "EXECUTING" }], { body: {} });
+
+    await cli("pause", "--repo", "/repo");
+
+    expect(printed()).toContain("pausing\n");
+    expect(printed()).toContain("harness resume run-1");
+  });
+
+  it("reports the status code when a refusal says nothing", async () => {
+    h.liveDashboardUrlMock.mockResolvedValue("http://127.0.0.1:4777/#tok");
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => ({
+      ok: url.endsWith("api/state"),
+      status: url.endsWith("api/state") ? 200 : 500,
+      json: async () => {
+        if (url.endsWith("api/state")) return { runs: [{ id: "run-1", state: "EXECUTING" }] };
+        throw new Error("not json");
+      },
+    })));
+
+    await cli("pause", "--repo", "/repo");
+
+    expect(printed()).toContain("could not pause: 500");
+  });
+
+  it("passes on the controller's refusal rather than claiming it worked", async () => {
+    servingRun([{ id: "run-1", state: "EXECUTING" }], {
+      ok: false,
+      body: { error: "this run is PAUSED — only a run that is still working can be paused" },
+    });
+
+    await cli("pause", "--repo", "/repo");
+
+    expect(printed()).toContain("could not pause: this run is PAUSED");
+    expect(printed()).not.toContain("harness resume");
   });
 });
 

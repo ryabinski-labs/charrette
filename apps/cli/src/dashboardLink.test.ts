@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { clearDashboard, liveDashboardUrl, recordDashboard } from "./dashboardLink.js";
+import { clearDashboard, liveDashboardUrl, recordDashboard, recordedDashboard } from "./dashboardLink.js";
 
 const made: string[] = [];
 const servers: Server[] = [];
@@ -61,6 +61,40 @@ describe("recording where the dashboard is", () => {
     clearDashboard(dir);
     expect(existsSync(path.join(dir, ".harness", "dashboard.json"))).toBe(false);
     expect(() => clearDashboard(dir)).not.toThrow();
+  });
+});
+
+describe("coming back to the tab the operator already has open", () => {
+  it("gives back the port and the token together", () => {
+    const dir = repo();
+    recordDashboard(dir, "http://127.0.0.1:4791/#0123456789abcdef0123456789abcdef");
+    expect(recordedDashboard(dir)).toEqual({ port: 4791, token: "0123456789abcdef0123456789abcdef" });
+  });
+
+  it("has no opinion when there is nothing on file", () => {
+    expect(recordedDashboard(repo())).toBeNull();
+  });
+
+  it("has no opinion about a record it cannot read", () => {
+    // Half-written by a process that was killed mid-`resume`. A resume must
+    // still start; it just takes a fresh port and a fresh token.
+    const dir = repo();
+    writeFileSync(path.join(dir, ".harness", "dashboard.json"), "{not json");
+    expect(recordedDashboard(dir)).toBeNull();
+  });
+
+  it("has no opinion about a record with no url in it", () => {
+    const dir = repo();
+    writeFileSync(path.join(dir, ".harness", "dashboard.json"), "{}\n");
+    expect(recordedDashboard(dir)).toBeNull();
+  });
+
+  it("has no opinion about a url with no token in it", () => {
+    // Half a credential is not a credential: reusing the port alone would send
+    // the operator's tab back to a page that 401s.
+    const dir = repo();
+    recordDashboard(dir, "http://127.0.0.1:4791/");
+    expect(recordedDashboard(dir)).toBeNull();
   });
 });
 

@@ -18,24 +18,47 @@ import {
 } from "./defaults.js";
 import { TerminalChat } from "./chat.js";
 import { armCrashLog } from "./crashlog.js";
-import { clearDashboard, liveDashboardUrl, recordDashboard } from "./dashboardLink.js";
+import { clearDashboard, liveDashboardUrl, recordDashboard, recordedDashboard } from "./dashboardLink.js";
 import { notifyDone } from "./notify.js";
+
+/**
+ * The run a dashboard is currently working on, so `harness pause` does not make
+ * the operator look up an id to stop the only thing that is running.
+ *
+ * Deliberately narrow: only EXECUTING and INTEGRATING can be paused, so a page
+ * showing a finished run answers "nothing to pause" rather than sending a
+ * request the controller will refuse.
+ */
+async function runningRunId(base: string, headers: Record<string, string>): Promise<string | null> {
+  try {
+    const res = await fetch(`${base}api/state`, { headers });
+    const state = (await res.json()) as { runs?: { id: string; state: string }[] };
+    return state.runs?.find((r) => ["EXECUTING", "INTEGRATING"].includes(r.state))?.id ?? null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Start the dashboard for a run, or nothing when it is turned off. Kept in one
  * place so `run` and `resume` cannot drift apart on port handling.
  */
-function makeDashboardFactory(want: boolean, port: number | undefined, repoPath: string): {
+function makeDashboardFactory(want: boolean, port: number | undefined, repoPath: string, reuse = false): {
   gateOverride?: (bus: Bus, store: Store) => GateHandler;
   connect: (controller: RunController) => void;
   start: () => Promise<string | null>;
   stop: () => Promise<void>;
 } {
   if (!want) return { connect: () => undefined, start: async () => null, stop: async () => undefined };
+  // Only `resume` reuses: a run being picked up should come back at the URL the
+  // operator still has open, port and token both, rather than sending them to
+  // find a new one. An explicit --port still wins — they are naming a port
+  // precisely because they want that one.
+  const prior = reuse ? recordedDashboard(repoPath) : null;
   let dash: Dashboard | undefined;
   return {
     gateOverride: (bus, store) => {
-      dash = new Dashboard(store, bus, { port });
+      dash = new Dashboard(store, bus, { port, preferPort: prior?.port, token: prior?.token });
       return dash;
     },
     // The dashboard is born inside makeController, before the controller exists;
@@ -625,7 +648,7 @@ export function buildProgram(): Command {
       const file = loadFileConfig(repo).config;
       const fromCli = (name: string) => cmd.getOptionValueSource(name) === "cli";
       const wantDashboard = fromCli("dashboard") ? opts.dashboard === true : file.dashboard ?? true;
-      const dash = makeDashboardFactory(wantDashboard, fromCli("port") ? port(opts.port!) : file.dashboardPort, repo);
+      const dash = makeDashboardFactory(wantDashboard, fromCli("port") ? port(opts.port!) : file.dashboardPort, repo, true);
       const { controller, store } = makeController(repo, dash.gateOverride);
       dash.connect(controller);
       // Resumable = interrupted mid-run, or finished with parked tasks, cancelled
@@ -954,6 +977,42 @@ export function buildProgram(): Command {
         live
           ? `\ndashboard  ${live}   (the fragment is your auth token)\n`
           : `\ndashboard  none running — \`harness dashboard\` serves this repo's runs\n`
+      );
+    });
+
+  program
+    .command("pause")
+    .description("stop the running run at the next agent message, and leave it resumable")
+    .argument("[runId]", "run to pause (default: the one this repo is running)")
+    .option("-r, --repo <path>", "target repo (default: the git repo containing the cwd)", process.cwd())
+    .action(async (runIdArg: string | undefined, opts: { repo: string }) => {
+      const repo = resolveRepoRoot(opts.repo);
+      // The run lives in another process — the one holding the worktrees and the
+      // agent sessions — so pausing is a request sent to it, not something this
+      // command can do itself. Its dashboard is the door that is already open:
+      // 127.0.0.1, bearer-authenticated, and recorded in .harness/ by whoever
+      // started it. No dashboard means no reachable run.
+      const url = await liveDashboardUrl(repo);
+      if (!url) {
+        process.stdout.write("nothing to pause — no run is serving a dashboard for this repo.\n");
+        return;
+      }
+      const base = url.slice(0, url.indexOf("#"));
+      const token = url.slice(url.indexOf("#") + 1);
+      // No content-type: neither of these requests has a body, and declaring one
+      // is what a server with a JSON body parser answers 400 to.
+      const headers = { authorization: `Bearer ${token}` };
+      const runId = runIdArg ?? (await runningRunId(base, headers));
+      if (!runId) {
+        process.stdout.write("nothing to pause — that dashboard has no run still working.\n");
+        return;
+      }
+      const res = await fetch(`${base}api/runs/${runId}/pause`, { method: "POST", headers });
+      const body = (await res.json().catch(() => ({}))) as { message?: string; error?: string };
+      process.stdout.write(
+        res.ok
+          ? `${body.message ?? "pausing"}\n\nPick it up with: harness resume ${runId}\nIt comes back on this same dashboard: ${url}\n`
+          : `could not pause: ${body.error ?? res.status}\n`
       );
     });
 
