@@ -94,6 +94,13 @@ export const PAGE_HTML = `<!doctype html>
   .bar.warn i { background:var(--amber); box-shadow:0 0 8px color-mix(in srgb, var(--amber) 60%, transparent); }
   .bar.hot i { background:var(--red); box-shadow:0 0 8px color-mix(in srgb, var(--red) 60%, transparent); }
 
+  /* The landmark <main> sits between body's flex column and .shell, so it is
+     the flex item now — and a block box at flex:0 1 auto sizes to its content,
+     which makes .shell's flex:1 resolve against nothing. body is
+     overflow:hidden, so everything past the fold was clipped with no scrollbar
+     anywhere: 3,498px of board in a 900px viewport, unreachable. main has to
+     carry the chain it interrupted. */
+  main { flex:1; min-height:0; display:flex; flex-direction:column; }
   .shell { flex:1; min-height:0; display:grid; grid-template-columns:352px minmax(0,1fr);
            gap:1.1rem; padding:1rem 1.25rem; }
   .side { overflow-y:auto; min-height:0; scrollbar-width:thin; scrollbar-color:var(--line2) transparent; }
@@ -407,6 +414,7 @@ export const PAGE_HTML = `<!doctype html>
   @media (max-width:900px) {
     html, body { height:auto; }
     body { display:block; overflow:auto; }
+    main { display:block; }
     .shell { display:block; padding:1rem; }
     .side { overflow:visible; }
     .feed { margin-top:1rem; }
