@@ -532,7 +532,7 @@ Review the working tree you are in (it contains the worker's committed changes).
  * changes is that nothing waits for a click, and that an answer only a person
  * can give now has to be declared as one rather than merely phrased as one.
  */
-export function advisorSystemPrompt(toolbelt = "", decider = "", skills = "", probe = ""): string {
+export function advisorSystemPrompt(toolbelt = "", decider = "", skills = "", probe = "", repeats = 0): string {
   return `You are ${decider ? `the **${decider}** for a software project, standing in for the human operator` : "an advisor agent"}. A task in an automated multi-agent run hit its retry cap ${decider ? "and cannot continue without an answer. You are the one who gives it." : "and is about to interrupt the human operator with a question. Your job is to draft the answer they will probably give, so they can approve it in one click instead of investigating from scratch."}
 
 You are in the task's worktree, read-only. ${decider ? "Nobody is going to review what you write: your recommendation is sent to the worker as-is and becomes its entire brief for the next attempt." : "The operator usually accepts your draft verbatim, which means your recommendation becomes the worker's entire brief for its next attempt."} Anything you leave out does not get fixed.
@@ -570,7 +570,15 @@ It is checked before QA, it is the reason this escalation exists, and the worker
 
 Set it when the probe demands something the task was never scoped to do, or when a pattern in it matches something it did not mean to match — a generated file, a vendored directory, a word that means something else elsewhere in the tree. **Narrow it, do not delete it**: keep every clause that is doing real work and repair only the one that is not, and re-run your rewritten probe in the worktree before you answer — a replacement that still fails has bought nothing. An empty string drops the probe entirely and is for a probe with nothing worth keeping.
 
-\`null\` leaves it alone, and that is the right answer nearly every time. A probe that is merely hard to satisfy is the job. Rewriting one to pass is how a task declares itself finished without finishing, and it is on the permanent record with your name against it.`
+\`null\` leaves it alone, and that is the right answer nearly every time. A probe that is merely hard to satisfy is the job. Rewriting one to pass is how a task declares itself finished without finishing, and it is on the permanent record with your name against it.${
+          repeats >= 2
+            ? `
+
+This gate has already opened ${repeats} times on this task, and every previous answer left the probe where it is. That is the evidence "nearly every time" was hedging against: an answer of the same kind has now been tried ${repeats} times and the task is still here. Re-read the probe against what this task was actually scoped to deliver before you reach for \`null\` again — the question is not whether the work is unfinished, it is whether *this command* is a fair test of it. A probe that demands an artifact the run's own tooling forbids producing, or that reads a file no one was asked to write, cannot be satisfied by any instruction you give the worker, and repeating that instruction is what these ${repeats} rounds were.
+
+If after re-reading it the probe really is a fair test, say so in \`why\` and leave it \`null\` — but say it, so the next round knows this one considered it.`
+            : ""
+        }`
       : ""
   }${
     decider
@@ -595,7 +603,7 @@ Otherwise leave it false and answer. A task you send back to a person is a task 
  * one that reasons about it: in run 40da9337 the fact it needed was
  * `npx tsx scripts/testRun.ts <file>`, which nothing ever told it.
  */
-export function advisorPrompt(task: TaskRow, why: string, checks: string[] = []): string {
+export function advisorPrompt(task: TaskRow, why: string, checks: string[] = [], repeats = 0): string {
   return `The stuck task: ${task.title}
 
 Its spec:
@@ -606,7 +614,15 @@ ${task.acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n")}
 
 Why it is escalating:
 ${why.slice(0, 6000)}
-${checks.length ? `\nHow this repository checks a task — run these rather than guessing at a command, and narrow them to the failing case where the runner allows it:\n${checks.map((c) => `- ${c}`).join("\n")}\n` : ""}
+${
+  // The one fact the escalation itself cannot carry. Answering a gate resets the
+  // attempt count, so "3 attempts" is what the fourteenth question says as
+  // readily as the first — and an advisor that cannot see it is being asked, for
+  // the fourteenth time, to reason from scratch to the same place.
+  repeats
+    ? `\nThis is not the first time. This gate has opened ${repeats === 1 ? "once before" : `${repeats} times before`} on this task, and the run is still here — the attempt count above was reset by each answer and does not show it. Before you repeat advice that has already been given, find out what the previous rounds concluded: \`git log\` on this branch, and any notes or documents the worker has been adding. If the worker has spent those rounds documenting why it cannot proceed rather than proceeding, the thing that needs to change is not the worker's next instruction.\n`
+    : ""
+}${checks.length ? `\nHow this repository checks a task — run these rather than guessing at a command, and narrow them to the failing case where the runner allows it:\n${checks.map((c) => `- ${c}`).join("\n")}\n` : ""}
 Investigate the worktree you are in, then give your recommendation.`;
 }
 

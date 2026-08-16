@@ -393,6 +393,43 @@ describe("what the advisor is told about the repository", () => {
     expect(p).toMatch(/Narrow it, do not delete it/);
     expect(p).toMatch(/right answer nearly every time/);
   });
+
+  it("stops arguing for `null` once the gate it opens has opened repeatedly", () => {
+    // The default lean toward leaving a probe alone is right, and on run
+    // 1e7d3df3 it was right fourteen times in a row about a probe that demanded
+    // proof of an operation the run's own tooling forbids. A repeat is the
+    // evidence that hedge was hedging against, so past the second round the
+    // advisor is made to re-read the probe before reaching for `null` again.
+    const first = advisorSystemPrompt("", "product-manager", "", "test -f apply.log", 1);
+    expect(first).toMatch(/right answer nearly every time/);
+    expect(first).not.toContain("This gate has already opened");
+
+    const again = advisorSystemPrompt("", "product-manager", "", "test -f apply.log", 6);
+    expect(again).toContain("This gate has already opened 6 times on this task");
+    expect(again).toMatch(/an answer of the same kind has now been tried 6 times/);
+    expect(again).toMatch(/demands an artifact the run's own tooling forbids producing/);
+    // Not a licence to clear it: a probe that survives the re-read is still the
+    // right answer, it just has to be said out loud so the next round knows.
+    expect(again).toMatch(/say so in `why` and leave it `null`/);
+    // And it is still the probe gate's language only.
+    expect(advisorSystemPrompt("", "product-manager", "", "", 6)).not.toContain("This gate has already opened");
+  });
+
+  it("tells the advisor how many times this task has already stopped someone", () => {
+    const task = { title: "T", spec: "s", acceptanceCriteria: ["x"] } as Parameters<typeof advisorPrompt>[0];
+
+    expect(advisorPrompt(task, "the probe still fails", [])).not.toContain("This is not the first time");
+
+    const once = advisorPrompt(task, "the probe still fails", [], 1);
+    expect(once).toContain("This gate has opened once before on this task");
+
+    const many = advisorPrompt(task, "the probe still fails", [], 13);
+    expect(many).toContain("This gate has opened 13 times before on this task");
+    // The attempt count in the question is not evidence — every answer reset it.
+    expect(many).toMatch(/reset by each answer and does not show it/);
+    // And the specific shape the loop takes, so the advisor can recognise it.
+    expect(many).toMatch(/documenting why it cannot proceed rather than proceeding/);
+  });
 });
 
 /**

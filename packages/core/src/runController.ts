@@ -289,6 +289,40 @@ function shellQuote(s: string): string {
 }
 
 /**
+ * The sentence that tells whoever is reading this gate that they have read it
+ * before. Empty on the first opening, which is every gate in a healthy run.
+ *
+ * A gate carries no memory of its own history: answering one resets
+ * `qaIterations` to zero, so the next opening reports the same attempt count as
+ * the first and reads as a fresh problem. Run 1e7d3df3 asked its operator about
+ * one task fourteen times, eleven of them after its decider had run out of
+ * answer rounds, and nothing in any of the fourteen questions said so. An
+ * operator who cannot see that their last answer changed nothing has no reason
+ * to try a different kind of answer.
+ *
+ * The way out is named explicitly rather than implied. By the third round the
+ * useful move is usually not a better answer but a different bar, and `harness
+ * probe` is the command for that — logged until now only into `agent.log`,
+ * where nobody looking at a gate is looking.
+ */
+function repeatNote(repeats: number, taskId: string, runId: string, probe: string): string {
+  if (repeats < 1) return "";
+  const before = repeats === 1 ? "once before" : `${repeats} times before`;
+  const answered = repeats === 1 ? "That answer did not" : "Those answers did not";
+  return (
+    `\n\nThis task has stopped for the same gate ${before}. ${answered} settle it, and the attempt count above ` +
+    `restarted with each one, so it is not the whole story.` +
+    (probe
+      ? `\n\nIf another answer will not change the outcome, the bar itself may be what is wrong. This task is held to:\n` +
+        `  ${probe}\n` +
+        `To change it — a run in flight picks it up on the next iteration:\n` +
+        `  harness probe ${taskId} ${shellQuote(probe)} --run ${runId} --why '...'\n` +
+        `  harness probe ${taskId} --clear --run ${runId} --why '...'`
+      : "")
+  );
+}
+
+/**
  * A failure that is about the run rather than about the task that met it.
  *
  * Everywhere a task's crash is caught, parked and driven past, this is the
@@ -1823,12 +1857,23 @@ export class RunController {
     // the cheapest latency win in the system. With a decider named, that same
     // session *is* the answer — see adviseOperator.
     const probe = amendable ? task.completionProbe : "";
-    const advice = await this.adviseOperator(runId, taskId, why, decider, probe);
+    // How many times this same task has already stopped somebody. Every other
+    // number the advisor is given was reset by the last answer — `qaIterations`
+    // goes back to zero the moment a gate resolves, so a task on its fourteenth
+    // escalation presents exactly the "3 attempts" its first one did. Without
+    // this the advisor investigates each round from scratch and reaches the same
+    // conclusion it reached last round, which is precisely the loop.
+    const repeats = this.store.taskGateOpenings(runId, taskId);
+    const advice = await this.adviseOperator(runId, taskId, why, decider, probe, repeats);
     // Done before the gate is published, so the answer the operator reads
     // already says what the task is now being held to.
     const amended = probe && advice.probe !== null ? this.amendProbe(runId, taskId, probe, advice.probe, decider, advice.why) : "";
     const recommendation = amended ? `${amended}\n\n${advice.recommendation}` : advice.recommendation;
-    this.bus.publish({ type: "task.gate_opened", runId, taskId, why, recommendation, iterations: task.qaIterations, ts: Date.now() });
+    // The count goes on the question, not the answer. `recommendation` is sent
+    // to the worker verbatim when a decider answers, and the worker has no use
+    // for how many times a person was interrupted; the person does.
+    const asked = why + repeatNote(repeats, taskId, runId, task.completionProbe);
+    this.bus.publish({ type: "task.gate_opened", runId, taskId, why: asked, recommendation, iterations: task.qaIterations, ts: Date.now() });
     const because = advice.why ? ` — ${advice.why}` : "";
     if (decider && recommendation && !advice.needsOperator) {
       // Published as opened-then-resolved rather than never opened: the task
@@ -1864,7 +1909,7 @@ export class RunController {
         runId,
         taskId,
         title: task.title,
-        why,
+        why: asked,
         recommendation,
         iterations: task.qaIterations,
         branch: task.branch,
@@ -1900,20 +1945,31 @@ export class RunController {
    * Apply the advisor's rewritten probe, and return the line that tells the
    * worker its definition of done moved. Empty when nothing was applied.
    *
-   * Only a decider may rewrite a probe, and only `taskGate.probeAmendments`
-   * times: the advisor drafting for a human has no authority to change what the
+   * Only a run that named a decider may rewrite a probe, and only
+   * `taskGate.probeAmendments` times: the advisor drafting for a run whose
+   * operator kept the gate for themselves has no authority to change what the
    * task is judged by, and a skill that keeps rewriting the bar until it clears
    * it has stopped being a check on the work. When the amendment is not applied,
    * the proposed probe is not thrown away — it is logged as the command the
    * operator can run, which is the whole of what they were missing the nine
    * times run f338b5c8 asked them about a probe they had no way to change.
+   *
+   * The authority read here is `taskGate.decidedBy`, not the live decider from
+   * `taskGateDecider`: the two allowances bound different things and hanging one
+   * off the other switches the escape hatch off at exactly the wrong moment.
+   * `autoAnswerRounds` retires a skill from *answering* — the circuit breaker on
+   * an agent answering its own escalation in a circle. `probeAmendments` bounds
+   * something else, has its own counter, and is what the loop needs once the
+   * answers stop working. Gating it on the first meant that from the third
+   * escalation onward run 1e7d3df3 could no longer touch a probe no answer could
+   * ever satisfy, and asked the operator eleven more times instead.
    */
   private amendProbe(runId: string, taskId: string, from: string, to: string, decider: string, why: string): string {
     const next = to.trim().slice(0, 1000);
     if (next === from) return "";
-    const allowance = this.store.getRun(runId)!.config.taskGate.probeAmendments;
+    const gate = this.store.getRun(runId)!.config.taskGate;
     const spent = this.store.taskProbeAmendments(runId, taskId);
-    if (!decider || spent >= allowance) {
+    if (gate.decidedBy === "operator" || spent >= gate.probeAmendments) {
       this.bus.publish({
         type: "agent.log",
         runId,
@@ -1926,10 +1982,15 @@ export class RunController {
       });
       return "";
     }
-    this.store.amendProbe(runId, taskId, next, decider, why);
+    // `decider` is empty once the skill is out of answer rounds, but it is still
+    // the authority the amendment is made under — and the name on the permanent
+    // record has to be that authority rather than "", which would read back as
+    // the operator's own amendment and not count against the allowance.
+    const by = decider || gate.decidedBy;
+    this.store.amendProbe(runId, taskId, next, by, why);
     return next
-      ? `Your completion probe has been changed by the ${decider}, which looked at why it was failing. It is now:\n\n    ${next}\n\nThat is the bar; the old one is not. Do not edit it.`
-      : `Your completion probe has been withdrawn by the ${decider}, which looked at why it was failing and found it was asking for the wrong thing. QA's judgment is now the whole of your definition of done.`;
+      ? `Your completion probe has been changed by the ${by}, which looked at why it was failing. It is now:\n\n    ${next}\n\nThat is the bar; the old one is not. Do not edit it.`
+      : `Your completion probe has been withdrawn by the ${by}, which looked at why it was failing and found it was asking for the wrong thing. QA's judgment is now the whole of your definition of done.`;
   }
 
   /**
@@ -1949,7 +2010,8 @@ export class RunController {
     taskId: string,
     why: string,
     decider = "",
-    probe = ""
+    probe = "",
+    repeats = 0
   ): Promise<{ recommendation: string; needsOperator: boolean; why: string; probe: string | null }> {
     const run = this.store.getRun(runId)!;
     const task = this.store.getTask(runId, taskId)!;
@@ -1965,8 +2027,8 @@ export class RunController {
         taskId,
         role: "advisor",
         model: run.config.models.advisor,
-        systemPrompt: advisorSystemPrompt("", decider, skillsBlock(skills), probe),
-        prompt: advisorPrompt(task, why, run.config.deterministicChecks),
+        systemPrompt: advisorSystemPrompt("", decider, skillsBlock(skills), probe, repeats),
+        prompt: advisorPrompt(task, why, run.config.deterministicChecks, repeats),
         cwd: task.worktreePath ?? this.repoPath,
         disallowedTools: ["Write", "Edit", "NotebookEdit", "WebSearch"],
         maxTurns: 30,

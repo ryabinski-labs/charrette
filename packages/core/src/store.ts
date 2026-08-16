@@ -628,6 +628,24 @@ export class Store {
   }
 
   /**
+   * How many times this task's escalation gate has already been opened.
+   *
+   * Counts openings, not answers, and does not care who answered: the number
+   * this is here to expose is how many times the same task has interrupted
+   * someone, which is the one fact every other counter throws away. Answering a
+   * gate resets `qaIterations` to zero, so the next opening reports the same
+   * "3 attempts" the last one did — run 1e7d3df3 asked the operator about
+   * `pr1-production-apply` fourteen times and every question was, on the
+   * evidence carried with it, indistinguishable from the first.
+   */
+  taskGateOpenings(runId: string, taskId: string): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS n FROM events WHERE runId = ? AND taskId = ? AND type = 'task.gate_opened'")
+      .get(runId, taskId) as { n: number };
+    return row.n;
+  }
+
+  /**
    * How many times a skill — rather than a person — has raised this run's
    * budget cap. The bound on `budget.autoRaiseRounds` reads this. Gate id
    * pairs the *opened* event (which kind it was) with the *resolved* one
