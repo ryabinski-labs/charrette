@@ -609,22 +609,43 @@ export class Store {
   }
 
   /**
-   * How many times a skill — rather than a person — has answered this task's
-   * escalation gate.
+   * How many times in a row a skill — rather than a person — has answered this
+   * task's escalation gate.
    *
    * The bound on `taskGate.autoAnswerRounds` reads this. It counts answers, not
    * openings: an escalation the decider handed back to the operator is one the
    * decider did not spend, and a task whose gate a person answered is not any
    * closer to the round where the harness stops trusting an agent with it.
+   *
+   * *Consecutive*, and that is the whole point of the counter. What it exists to
+   * catch is an agent answering its own escalation in a circle, and a circle is
+   * a thing that can end. Counting over the task's whole life could not tell the
+   * difference between "answering in a circle" and "answered twice, long ago,
+   * about something else": two auto-answers retired the decider from that task
+   * permanently, so every later escalation — however unrelated — went to the
+   * operator for the rest of the run, and `taskGate.decidedBy` quietly became a
+   * no-op task by task with nothing announcing it.
+   *
+   * An operator-answered gate resets it, because that answer *is* the circle
+   * being broken: a person looked at this task and said what to do next. If the
+   * agent resumes circling from there it gets its rounds and is cut off again,
+   * which is the breaker working, not failing. A parked gate does not reset
+   * anything — nobody decided anything for the task to go on with.
    */
   taskGateAutoAnswers(runId: string, taskId: string): number {
     const rows = this.db
-      .prepare("SELECT payload FROM events WHERE runId = ? AND taskId = ? AND type = 'task.gate_resolved'")
+      .prepare("SELECT payload FROM events WHERE runId = ? AND taskId = ? AND type = 'task.gate_resolved' ORDER BY seq")
       .all(runId, taskId) as { payload: string }[];
-    return rows.filter((r) => {
+    let streak = 0;
+    for (const r of rows) {
       const p = JSON.parse(r.payload) as { decidedBy?: string; parked?: boolean };
-      return !p.parked && Boolean(p.decidedBy) && p.decidedBy !== "operator";
-    }).length;
+      if (p.parked) continue;
+      // `decidedBy` defaults to "operator" and is written as "" nowhere the
+      // skill path can reach; both spellings mean the same person.
+      if (!p.decidedBy || p.decidedBy === "operator") streak = 0;
+      else streak++;
+    }
+    return streak;
   }
 
   /**

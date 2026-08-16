@@ -293,7 +293,10 @@ describe("rewriting a task's definition of done", () => {
 
     expect(store.taskGateOpenings("run1", "a")).toBe(3);
     // Which is exactly what the auto-answer bound does not, and must not, count.
-    expect(store.taskGateAutoAnswers("run1", "a")).toBe(1);
+    // Zero here, not one: the skill's single answer was followed by two the
+    // operator gave, and the bound is on answers in a row — see
+    // taskGateStreak.test.ts for why it has to be.
+    expect(store.taskGateAutoAnswers("run1", "a")).toBe(0);
     // Scoped to the task that was asked about, not to the run.
     expect(store.taskGateOpenings("run1", "b")).toBe(0);
   });

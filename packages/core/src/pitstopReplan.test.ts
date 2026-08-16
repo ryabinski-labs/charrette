@@ -49,7 +49,7 @@ const INTENT_FAIL =
 const DEMO_OK = '```json\n{"started":true,"howStarted":"pnpm dev","summary":"","journeys":[],"couldNotReach":[],"artifacts":[]}\n```';
 const REVIEW_OK = '```json\n{"verdict":"drifting","findings":["nothing calls the new route"],"question":"is the map still in scope?"}\n```';
 
-const dag = (tasks: { id: string; epicId?: string; dependsOn?: string[] }[], epics = [{ id: "epic-one", title: "First", summary: "s" }]) =>
+const dag = (tasks: { id: string; epicId?: string; dependsOn?: string[]; spec?: string }[], epics = [{ id: "epic-one", title: "First", summary: "s" }]) =>
   "```json\n" +
   JSON.stringify({
     epics,
@@ -57,7 +57,7 @@ const dag = (tasks: { id: string; epicId?: string; dependsOn?: string[] }[], epi
       id: t.id,
       epicId: t.epicId ?? "epic-one",
       title: t.id,
-      spec: "s",
+      spec: t.spec ?? "s",
       acceptanceCriteria: ["x"],
       dependsOn: t.dependsOn ?? [],
       touchedPaths: [],
@@ -317,6 +317,41 @@ describe("re-planning what has not been built", () => {
 
     expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
     expect(events.some((e) => e.type === "agent.log" && /duplicate task id/.test(e.text))).toBe(true);
+  });
+
+  /**
+   * The first plan is checked for this and the re-plan has to be too: a pit stop
+   * is a planner writing tasks from the same brief, and it can reach for the
+   * same sibling repository run 7ef8fb4d's first plan did. There is no retry
+   * loop here to absorb it, so the re-plan is refused whole and the queued work
+   * stands — which is worse than a fixed plan and much better than tasks nothing
+   * in this run can build.
+   */
+  it("refuses a re-plan whose task is written against a repository the run does not own", async () => {
+    const dir = repo();
+    const sibling = path.join(path.dirname(dir), "other-repo");
+    let replanned = false;
+    const { pool } = rolePool({
+      planner: plannerSaying(dag([{ id: "task-a" }, { id: "task-b" }]), dag([{ id: "task-new", spec: `In ${sibling}/, add the table.` }])),
+      worker,
+      qa: () => QA_PASS,
+      validator: () => '```json\n{"verdict":"PASS","gaps":[],"summary":"ok"}\n```',
+      demo: () => DEMO_OK,
+      reviewer: () => REVIEW_OK,
+    });
+    const { controller, store, events } = build({
+      repoPath: dir,
+      pool,
+      decide: () => (replanned ? { action: "continue", feedback: "" } : ((replanned = true), { action: "replan", feedback: "change it" })),
+    });
+
+    const runId = await controller.startRun("build a thing", RunConfig.parse({ ...BASE, pitStop: { every: { tasks: 1 } } }));
+
+    expect(events.some((e) => e.type === "agent.log" && /reach outside this run's repository: task task-new is written against other-repo/.test(e.text))).toBe(true);
+    // The out-of-scope task was never created, and the plan that was already
+    // running is still the plan.
+    expect(store.getTask(runId, "task-new")).toBeUndefined();
+    expect(store.getTask(runId, "task-b")!.state).toBe("MERGED");
   });
 
   it("reads a redirect with nothing queued as the re-plan it can only be", async () => {
