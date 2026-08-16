@@ -1051,3 +1051,117 @@ describe("finding a task on a board too long to read", () => {
     expect(titles()).toEqual(["Delivery table"]);
   });
 });
+
+/**
+ * Switching whole groups off.
+ *
+ * Cancelled is the case that prompted it: dead weight on a long board that
+ * never becomes interesting again and sits between the operator and the groups
+ * that do change. Collapsing its disclosure is not the same thing — a
+ * collapsed group still counts, still takes a row, and reopens itself in the
+ * next reading.
+ */
+describe("hiding a group of tasks", () => {
+  const MIXED = [
+    task({ id: "t1", title: "Working one", state: "WORKING" }),
+    task({ id: "t2", title: "Merged one", state: "MERGED" }),
+    task({ id: "t3", title: "Dropped one", state: "CANCELLED" }),
+    task({ id: "t4", title: "Dropped two", state: "CANCELLED" }),
+  ];
+  const board = (tasks: Any[]) => state({ runs: [run({ tasks })] });
+  const chips = () => all("#gfilter button").map((n) => n.textContent);
+  const chip = (label: string) =>
+    all("#gfilter button").find((n) => n.textContent!.startsWith(label)) as HTMLButtonElement;
+
+  it("offers one chip per group that has tasks, carrying its size", async () => {
+    const page = mount(board(MIXED));
+    await page.refresh();
+
+    // Group order, and no chip for the two groups nobody is in. The count is a
+    // separate span, so textContent runs the two together.
+    expect(chips()).toEqual(["In progress1", "Done1", "Cancelled2"]);
+    expect(chip("Cancelled").getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("takes the group off the board when its chip is switched off", async () => {
+    const page = mount(board(MIXED));
+    await page.refresh();
+    expect(titles()).toHaveLength(4);
+
+    chip("Cancelled").dispatchEvent(new Event("click"));
+
+    expect(titles()).toEqual(["Working one", "Merged one"]);
+    expect(chip("Cancelled").getAttribute("aria-pressed")).toBe("false");
+    // The chip keeps the group's real size. "Cancelled 0" while hiding two
+    // would be the one thing on this bar that is not true.
+    expect(chip("Cancelled").textContent).toBe("Cancelled2");
+    expect($("#searchnote")!.textContent).toBe("2 tasks hidden by the group filter.");
+  });
+
+  it("leaves the run's progress counting every task", async () => {
+    const page = mount(board(MIXED));
+    await page.refresh();
+
+    chip("Cancelled").dispatchEvent(new Event("click"));
+
+    // Hiding is a reading posture, not a claim that the work went away.
+    expect($("#taskcount")!.textContent).toBe("1 of 4 done");
+  });
+
+  it("switches back on", async () => {
+    const page = mount(board(MIXED));
+    await page.refresh();
+    chip("Cancelled").dispatchEvent(new Event("click"));
+
+    chip("Cancelled").dispatchEvent(new Event("click"));
+
+    expect(titles()).toHaveLength(4);
+    expect(($("#searchnote") as HTMLElement).style.display).toBe("none");
+  });
+
+  it("says so rather than going blank when everything is hidden", async () => {
+    const page = mount(board(MIXED));
+    await page.refresh();
+
+    for (const label of ["In progress", "Done", "Cancelled"]) chip(label).dispatchEvent(new Event("click"));
+
+    expect(titles()).toEqual([]);
+    expect($("#board .empty")!.textContent).toBe("Every group is hidden. Switch one back on above.");
+    expect($("#taskcount")!.textContent).toBe("1 of 4 done");
+  });
+
+  it("holds the filter across a poll", async () => {
+    const page = mount(board(MIXED));
+    await page.refresh();
+    chip("Cancelled").dispatchEvent(new Event("click"));
+
+    page.serve(board(MIXED.concat([task({ id: "t5", title: "Dropped three", state: "CANCELLED" })])));
+    await page.refresh();
+
+    expect(titles()).toEqual(["Working one", "Merged one"]);
+    expect(chip("Cancelled").textContent).toBe("Cancelled3");
+  });
+
+  it("tells the search it did not read the hidden tasks", async () => {
+    const page = mount(board(MIXED));
+    await page.refresh();
+    chip("Cancelled").dispatchEvent(new Event("click"));
+
+    const input = $("#tasksearch") as HTMLInputElement;
+    input.value = "dropped";
+    input.dispatchEvent(new Event("input"));
+
+    // The honest answer. Saying "no match" alone would answer a question the
+    // search never asked, of the two tasks that actually contain the word.
+    expect(titles()).toEqual([]);
+    expect($("#searchnote")!.textContent).toContain("No match in 2 tasks");
+    expect($("#searchnote")!.textContent).toContain("2 more are hidden by the group filter and were not searched");
+  });
+
+  it("hides the chips when there is nothing to filter", async () => {
+    const page = mount(state({ runs: [run({ state: "PLANNING", tasks: [] })] }));
+    await page.refresh();
+
+    expect(($("#gfilter") as HTMLElement).style.display).toBe("none");
+  });
+});
