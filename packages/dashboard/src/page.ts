@@ -159,8 +159,30 @@ export const PAGE_HTML = `<!doctype html>
   .g-blocked > summary { color:var(--red); }
   .g-live > summary { color:var(--amber); }
 
+  /* The board can hold sixty tasks under four collapsed groups, which is more
+     than anyone reads to answer "is this already a task?". */
+  .search { display:flex; gap:.35rem; align-items:center; margin:.1rem 0 .45rem; }
+  .search input { flex:1; min-width:0; font:inherit; font-size:.78rem; color:var(--fg);
+                  background:var(--sunken); border:1px solid var(--line); border-radius:6px;
+                  padding:.28rem .5rem; }
+  .search input::placeholder { color:var(--faint); }
+  .search input:focus-visible { outline:none; border-color:var(--blue); }
+  /* The browser's own clear button, next to ours, is two of the same control
+     side by side. Ours stays: it is keyboard-reachable, it matches the page,
+     and it exists in every browser. */
+  .search input::-webkit-search-cancel-button { display:none; }
+  .search button { flex:none; padding:.2rem .45rem; line-height:1; font-size:.95rem; }
+  .searchnote { color:var(--faint); font-size:.72rem; margin:-.25rem 0 .45rem; }
+  .searchnote b { color:var(--fg); font-weight:600; }
+
   .task { border:1px solid var(--line); border-left:2px solid var(--line2); border-radius:7px;
           padding:.5rem .6rem; margin-bottom:.4rem; background:var(--sunken); overflow:hidden; }
+  /* Where a match landed when it did not land in the title — the whole reason
+     the search reads the spec at all. */
+  .task .hit { color:var(--dim); font-size:.72rem; margin-top:.3rem; overflow-wrap:anywhere; }
+  .task .hit b { color:var(--fg); font-weight:600; }
+  .task .hit em { color:var(--faint); font-style:normal; text-transform:uppercase;
+                  letter-spacing:.08em; font-size:.62rem; margin-right:.35rem; }
   .task.st-WORKING, .task.st-QA, .task.st-QA_FAILED { border-left-color:var(--amber); }
   .task.st-NEEDS_HUMAN { border-left-color:var(--red); }
   .task.done { border-left-color:var(--green); }
@@ -475,6 +497,12 @@ export const PAGE_HTML = `<!doctype html>
       <div class="tbar" id="tbar" style="display:none" role="img" aria-label="Task progress">
         <i class="k-done"></i><i class="k-live"></i><i class="k-blocked"></i>
       </div>
+      <div class="search" id="searchbar" style="display:none">
+        <input type="search" id="tasksearch" placeholder="Search tasks&hellip;"
+               aria-label="Search tasks by title, spec, acceptance criteria, files or id" autocomplete="off">
+        <button type="button" class="ghost" id="searchclear" style="display:none" title="Clear (Esc)">&times;</button>
+      </div>
+      <div class="searchnote" id="searchnote" style="display:none"></div>
       <div id="board"></div>
     </div>
     <div class="panel">
@@ -1408,19 +1436,81 @@ function taskStopped(t, run) {
   return run.state === "PAUSED" && groupOf[t.state] === "live";
 }
 
-function cardSig(t, run, isDone) {
+/**
+ * What the operator typed into the board's search box.
+ *
+ * The question it answers is "is this already a task?", asked of a plan the
+ * operator approved days ago and a board of sixty cards under four collapsed
+ * groups. Two real ones: a refresh button nobody could find in a 59-task run,
+ * and DNSSEC in a 55-task one. Both were answerable in a second and neither
+ * was answerable by reading.
+ */
+let taskQuery = "";
+
+/**
+ * Where a task can match, in the order the result prefers to report.
+ *
+ * The spec and the criteria are the point. A title search would have missed
+ * the refresh question entirely — the run had no task titled anything like it,
+ * and the word only appears inside two other tasks' specs, which is itself the
+ * answer: it was folded into other work rather than planned as its own task.
+ * Reading a field the card does not show is why a hit line exists.
+ */
+const SEARCHABLE = [
+  ["title", (t) => t.title],
+  ["id", (t) => t.id],
+  ["spec", (t) => t.spec],
+  ["criteria", (t) => (t.acceptanceCriteria || []).join(" \\u2022 ")],
+  ["files", (t) => (t.touchedPaths || []).join(" ")],
+  ["why", (t) => t.errorSummary],
+];
+
+/** The first field of this task the query appears in, or null for no match. */
+function taskHit(t, q) {
+  for (const pair of SEARCHABLE) {
+    const text = pair[1](t);
+    if (!text) continue;
+    const at = String(text).toLowerCase().indexOf(q);
+    if (at >= 0) return { field: pair[0], text: String(text), at: at, len: q.length };
+  }
+  return null;
+}
+
+/**
+ * The matched text in context, with the match itself picked out.
+ *
+ * Only rendered for a match the card does not already show. A hit line under a
+ * title that visibly contains the word is noise, and the operator scanning
+ * results reads one of these per card.
+ */
+function hitRow(hit) {
+  const row = el("div", "hit");
+  row.append(el("em", null, hit.field));
+  const from = Math.max(0, hit.at - 60);
+  const end = hit.at + hit.len;
+  const tidy = (s) => s.replace(/\\s+/g, " ");
+  row.append(document.createTextNode((from ? "\\u2026" : "") + tidy(hit.text.slice(from, hit.at))));
+  row.append(el("b", null, hit.text.slice(hit.at, end)));
+  row.append(document.createTextNode(tidy(hit.text.slice(end, end + 90)) + (hit.text.length > end + 90 ? "\\u2026" : "")));
+  return row;
+}
+
+function cardSig(t, run, isDone, hit) {
   return JSON.stringify([
     t.state, t.title, t.id, t.dependsOn, t.qaIterations, t.githubIssueNumber, t.prNumber,
     t.assignedSkills, t.errorSummary, t.spec, t.acceptanceCriteria, run.githubRepo, isDone,
     taskStopped(t, run),
+    // A card built before the search ran carries no hit line, and a card built
+    // for one query must not be handed back for the next.
+    hit ? hit.field + ":" + hit.at + ":" + hit.len : "",
   ]);
 }
 
-function cardFor(t, run, isDone, kept) {
+function cardFor(t, run, isDone, kept, hit) {
   const key = run.id + "/" + t.id;
-  const sig = cardSig(t, run, isDone);
+  const sig = cardSig(t, run, isDone, hit);
   const had = cards.get(key);
-  const entry = had && had.sig === sig ? had : { sig: sig, node: taskCard(t, run, isDone) };
+  const entry = had && had.sig === sig ? had : { sig: sig, node: taskCard(t, run, isDone, hit) };
   kept.set(key, entry);
   return entry.node;
 }
@@ -1446,47 +1536,110 @@ function groupFor(g, count) {
 function renderBoard() {
   const box = $("board");
 
+  const q = taskQuery;
   const buckets = {};
-  for (const g of GROUPS) buckets[g.key] = [];
+  // Progress is a fact about the run, not about the search. Counted before the
+  // filter so the bar and "12 of 59 done" do not shrink to whatever was typed.
+  const counts = {};
+  for (const g of GROUPS) { buckets[g.key] = []; counts[g.key] = 0; }
   let total = 0;
+  let matched = 0;
   for (const run of runs) {
     total += run.tasks.length;
-    for (const t of run.tasks) (buckets[groupOf[t.state]] ?? buckets.todo).push({ t, run });
+    for (const t of run.tasks) {
+      const key = groupOf[t.state] ?? "todo";
+      counts[key]++;
+      const hit = q ? taskHit(t, q) : null;
+      if (q && !hit) continue;
+      matched++;
+      buckets[key].push({ t, run, hit });
+    }
   }
+  // The box only appears once there is something to search, and the note under
+  // it only while a search is on.
+  $("searchbar").style.display = total ? "flex" : "none";
+  renderSearchNote(q, matched, total);
 
-  if (!total) {
+  if (!total || !matched) {
     box.textContent = "";
     cards = new Map();
-    for (const run of runs) box.append(el("div", "empty", phaseHint(run.state)));
-    if (!runs.length) box.append(el("div", "empty", "No tasks yet."));
-    $("taskcount").textContent = "";
-    $("tbar").style.display = "none";
+    // A search that found nothing is a real answer — "no task covers this" —
+    // and must not read as an empty board or a run that has not planned yet.
+    if (q) box.append(el("div", "empty", "No task matches \\u201c" + q + "\\u201d."));
+    else {
+      for (const run of runs) box.append(el("div", "empty", phaseHint(run.state)));
+      if (!runs.length) box.append(el("div", "empty", "No tasks yet."));
+    }
+    // A search that matched nothing has not undone the run's progress. Only an
+    // actually empty board has no progress to show.
+    if (total) renderProgress(counts, total);
+    else {
+      $("taskcount").textContent = "";
+      $("tbar").style.display = "none";
+    }
     return;
   }
 
   // Rebuilt from what is on the board now, so a task that goes away takes its
   // cached node with it rather than waiting to be handed back to a later run.
   const kept = new Map();
-  const sections = [];
-  for (const g of GROUPS) {
-    const items = buckets[g.key];
-    if (!items.length) continue;
-    const sec = groupFor(g, items.length);
-    // Past the summary, which groupFor owns.
-    syncChildren(sec, items.map((item) => cardFor(item.t, item.run, g.key === "done", kept)), 1);
-    sections.push(sec);
+  if (q) {
+    // Results are a flat list, most urgent group first. Grouping them would put
+    // the answer behind the same disclosures that made the question hard, and
+    // forcing those open would quietly discard which ones the operator closed —
+    // the state pill on each card carries what the group heading would have.
+    const found = [];
+    for (const g of GROUPS) for (const item of buckets[g.key]) found.push(item);
+    syncChildren(box, found.map((item) => cardFor(item.t, item.run, groupOf[item.t.state] === "done", kept, item.hit)), 0);
+  } else {
+    const sections = [];
+    for (const g of GROUPS) {
+      const items = buckets[g.key];
+      if (!items.length) continue;
+      const sec = groupFor(g, items.length);
+      // Past the summary, which groupFor owns.
+      syncChildren(sec, items.map((item) => cardFor(item.t, item.run, g.key === "done", kept)), 1);
+      sections.push(sec);
+    }
+    syncChildren(box, sections, 0);
   }
-  syncChildren(box, sections, 0);
   cards = kept;
 
-  const done = buckets.done.length;
-  $("taskcount").textContent = done + " of " + total + " done";
+  renderProgress(counts, total);
+}
+
+/** Done / in flight / blocked, always as a share of the whole run. */
+function renderProgress(counts, total) {
+  $("taskcount").textContent = counts.done + " of " + total + " done";
   const bar = $("tbar");
   bar.style.display = "flex";
   const pct = (n) => (n / total) * 100 + "%";
-  bar.children[0].style.width = pct(done);
-  bar.children[1].style.width = pct(buckets.live.length);
-  bar.children[2].style.width = pct(buckets.blocked.length);
+  bar.children[0].style.width = pct(counts.done);
+  bar.children[1].style.width = pct(counts.live);
+  bar.children[2].style.width = pct(counts.blocked);
+}
+
+/**
+ * How much of the board the search is hiding.
+ *
+ * Always says the denominator. "3 tasks" alone leaves the operator wondering
+ * whether the other fifty-six were checked, and the whole value of the answer
+ * is knowing the search read all of them.
+ */
+function renderSearchNote(q, matched, total) {
+  const note = $("searchnote");
+  $("searchclear").style.display = q ? "block" : "none";
+  if (!q) { note.style.display = "none"; note.textContent = ""; return; }
+  note.style.display = "block";
+  note.textContent = "";
+  if (!matched) {
+    note.append(document.createTextNode("No match in "));
+    note.append(el("b", null, String(total)));
+    note.append(document.createTextNode(" task" + (total === 1 ? "" : "s") + " \\u2014 titles, specs, criteria, files and ids all read."));
+    return;
+  }
+  note.append(el("b", null, String(matched)));
+  note.append(document.createTextNode(" of " + total + " task" + (total === 1 ? "" : "s") + " match. Grouping is off while searching; each card keeps its state."));
 }
 
 /**
@@ -1521,7 +1674,7 @@ function skillsRow(assigned) {
   return row;
 }
 
-function taskCard(t, run, isDone) {
+function taskCard(t, run, isDone, hit) {
   const card = el("div", "task st-" + t.state + (isDone ? " done" : ""));
   const top = el("div", "top");
   top.append(el("span", "title", t.title));
@@ -1537,6 +1690,9 @@ function taskCard(t, run, isDone) {
   if (t.githubIssueNumber) sub.append(gh(run.githubRepo, "issues", t.githubIssueNumber, "issue #" + t.githubIssueNumber));
   if (t.prNumber) sub.append(gh(run.githubRepo, "pull", t.prNumber, "PR #" + t.prNumber));
   card.append(sub);
+  // Only when the match is somewhere the card does not already show it. A hit
+  // line under a title that visibly contains the word is noise.
+  if (hit && hit.field !== "title" && hit.field !== "id") card.append(hitRow(hit));
   if (t.assignedSkills.length) card.append(skillsRow(t.assignedSkills));
   if (t.errorSummary) {
     // Clipped, but no longer *only* clipped: a parked task's reason is the case
@@ -2222,10 +2378,20 @@ $("summon-go").addEventListener("click", () => postPitStop({ question: $("fb-tex
    the sentence that was in the box when it was clicked, and a control that keeps
    its authorisation across a rewrite is authorising something nobody read. */
 $("fb-text").addEventListener("input", () => { if (summonArmed) { disarmSummon(); $("summon-price").textContent = ""; } });
+/* Straight to renderBoard, not through a poll: the data is already here, and a
+   search box that answers on the next 5s tick is one the operator types into
+   twice. */
+function runSearch(text) {
+  taskQuery = text.trim().toLowerCase();
+  renderBoard();
+}
+$("tasksearch").addEventListener("input", (e) => runSearch(e.target.value));
+$("searchclear").addEventListener("click", () => { $("tasksearch").value = ""; runSearch(""); $("tasksearch").focus(); });
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (summonArmed) { disarmSummon(); $("summon-price").textContent = ""; }
   if (pauseArmed) { disarmPause(); renderPause(); }
+  if (taskQuery) { $("tasksearch").value = ""; runSearch(""); }
 });
 refresh();
 setInterval(refresh, 5000);
