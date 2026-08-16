@@ -183,7 +183,9 @@ export async function* toolLoop(opts: ToolLoopOptions): AsyncGenerator<Record<st
       for (const call of turn.toolCalls) content.push({ type: "tool_use", id: call.id, name: call.name, input: call.input });
       yield { type: "assistant", session_id: sessionId, message: { content, usage: sdkUsage(turn.usage) } };
 
-      messages.push({ role: "assistant", text: turn.text, toolCalls: turn.toolCalls });
+      // `signature` rides along untouched: the provider that issued it is the
+      // only thing that reads it, and it must come back exactly as it left.
+      messages.push({ role: "assistant", text: turn.text, toolCalls: turn.toolCalls, signature: turn.signature });
 
       // The agent just wrote an account of its own work, so the material that
       // account was derived from can go. This is the only place the harness

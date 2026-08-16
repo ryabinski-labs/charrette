@@ -187,6 +187,68 @@ describe("talking to Google", () => {
     expect(turn.usage).toEqual({ inputTokens: 67, outputTokens: 63, cacheReadTokens: 0, cacheWriteTokens: 0 });
   });
 
+  it("carries each thought signature back on the part it came from", async () => {
+    // The whole of the reviewer outage: a Gemini 3.x model signs the reasoning
+    // behind each function call and refuses the next turn without it —
+    // "Function call is missing a thought_signature in functionCall parts", 400.
+    // The first turn worked, the second never did, so every pit stop's staged
+    // review died a few cents in and was reported as "on-track".
+    const { impl } = stubFetch({
+      candidates: [{
+        content: {
+          parts: [
+            { text: "let me look", thoughtSignature: "sig-text" },
+            { functionCall: { name: "Bash", args: { command: "git status" } }, thoughtSignature: "sig-call" },
+          ],
+        },
+      }],
+    });
+    const first = await googleClient("k", impl)({ model: "gemini-3.7-flash", system: "s", messages: [], tools: [echoTool], signal });
+
+    expect(first.signature).toBe("sig-text");
+    expect(first.toolCalls).toEqual([{ id: "call_1", name: "Bash", input: { command: "git status" }, signature: "sig-call" }]);
+
+    // Now the turn the model refused: its own call, handed back as history.
+    const { impl: again, calls } = stubFetch(answer);
+    await googleClient("k", again)({
+      model: "gemini-3.7-flash",
+      system: "s",
+      messages: [
+        { role: "user", text: "review it" },
+        { role: "assistant", text: first.text, toolCalls: first.toolCalls, signature: first.signature },
+        { role: "tool", callId: "call_1", name: "Bash", text: "clean" },
+      ],
+      tools: [echoTool],
+      signal,
+    });
+
+    expect((calls[0]!.body.contents as Record<string, unknown>[])[1]).toEqual({
+      role: "model",
+      parts: [
+        { text: "let me look", thoughtSignature: "sig-text" },
+        { functionCall: { name: "Bash", args: { command: "git status" } }, thoughtSignature: "sig-call" },
+      ],
+    });
+  });
+
+  it("sends no signature for a provider turn that carried none", async () => {
+    // Every other provider, and Gemini's own non-thinking replies. An empty
+    // `thoughtSignature` key is not the same as no key, and the API validates it.
+    const { impl, calls } = stubFetch(answer);
+    await googleClient("k", impl)({
+      model: "gemini-3.5-flash-lite",
+      system: "s",
+      messages: [{ role: "assistant", text: "ok", toolCalls: [{ id: "call_0", name: "Read", input: {} }] }],
+      tools: [],
+      signal,
+    });
+
+    expect((calls[0]!.body.contents as Record<string, unknown>[])[0]).toEqual({
+      role: "model",
+      parts: [{ text: "ok" }, { functionCall: { name: "Read", args: {} } }],
+    });
+  });
+
   it("copes with an empty candidate and an argument-less call", async () => {
     const { impl } = stubFetch({ candidates: [{ content: { parts: [{ functionCall: { name: "Glob" } }] } }] });
     const turn = await googleClient("k", impl)({ model: "gemini-3.5-flash-lite", system: "s", messages: [], tools: [], signal });

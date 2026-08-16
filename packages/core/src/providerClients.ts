@@ -19,11 +19,22 @@ export interface ToolCall {
   id: string;
   name: string;
   input: Record<string, unknown>;
+  /**
+   * An opaque token the provider attached to this call and requires back,
+   * unchanged, when the call is replayed as history.
+   *
+   * Google's alone so far: a Gemini 3.x model signs the reasoning behind each
+   * function call, and rejects the next turn outright if the signature does not
+   * come back with it. Kept here rather than in the Google client because the
+   * loop owns the transcript — the client is handed a list of messages and has
+   * no memory of the turn it produced them from.
+   */
+  signature?: string;
 }
 
 export type LoopMessage =
   | { role: "user"; text: string }
-  | { role: "assistant"; text: string; toolCalls: ToolCall[] }
+  | { role: "assistant"; text: string; toolCalls: ToolCall[]; signature?: string }
   | { role: "tool"; callId: string; name: string; text: string };
 
 export interface Usage {
@@ -37,6 +48,8 @@ export interface ProviderTurn {
   text: string;
   toolCalls: ToolCall[];
   usage: Usage;
+  /** As `ToolCall.signature`, for the turn's own text part. */
+  signature?: string;
 }
 
 export interface TurnRequest {
@@ -248,8 +261,18 @@ export function googleClient(
       if (m.role === "user") contents.push({ role: "user", parts: [{ text: m.text }] });
       else if (m.role === "assistant") {
         const parts: Record<string, unknown>[] = [];
-        if (m.text) parts.push({ text: m.text });
-        for (const c of m.toolCalls) parts.push({ functionCall: { name: c.name, args: c.input } });
+        // A Gemini 3.x model signs the reasoning behind what it emits and
+        // requires the signature back with the part it came from. Dropping it
+        // does not degrade the next turn, it ends the session: "Function call is
+        // missing a thought_signature in functionCall parts", 400, every time —
+        // so the first turn worked, and the second, which is the first to carry
+        // a tool call back as history, never did. `models.reviewer` runs here on
+        // every pit stop, and a reviewer that cannot start is reported as
+        // "on-track" rather than as broken, so the run bought a rubber stamp.
+        if (m.text) parts.push({ text: m.text, ...(m.signature ? { thoughtSignature: m.signature } : {}) });
+        for (const c of m.toolCalls) {
+          parts.push({ functionCall: { name: c.name, args: c.input }, ...(c.signature ? { thoughtSignature: c.signature } : {}) });
+        }
         // Gemini rejects a content block with no parts at all.
         contents.push({ role: "model", parts: parts.length ? parts : [{ text: "" }] });
       } else {
@@ -282,8 +305,15 @@ export function googleClient(
     const cached = toNumber(meta.cachedContentTokenCount);
     const toolCalls: ToolCall[] = [];
     let text = "";
+    let signature: string | undefined;
     for (const [i, part] of parts.entries()) {
-      if (typeof part.text === "string") text += part.text;
+      // Per part, not per turn: the model signs each thing it emits, and each
+      // has to go back attached to the part it belongs to.
+      const sig = typeof part.thoughtSignature === "string" ? part.thoughtSignature : undefined;
+      if (typeof part.text === "string") {
+        text += part.text;
+        signature = signature ?? sig;
+      }
       const call = part.functionCall as { name?: unknown; args?: unknown } | undefined;
       if (call && typeof call.name === "string") {
         toolCalls.push({
@@ -291,12 +321,14 @@ export function googleClient(
           id: `call_${i}`,
           name: call.name,
           input: call.args && typeof call.args === "object" ? (call.args as Record<string, unknown>) : {},
+          ...(sig ? { signature: sig } : {}),
         });
       }
     }
     return {
       text,
       toolCalls,
+      ...(signature ? { signature } : {}),
       usage: {
         inputTokens: Math.max(0, toNumber(meta.promptTokenCount) - cached),
         // `thoughtsTokenCount` is *not* inside `candidatesTokenCount` — the two

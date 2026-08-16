@@ -33,6 +33,7 @@ const MODEL_CHOICES = [
   "gpt-5.6-luna",
   "gemini-3.5-flash-lite",
   "gemini-3.6-flash",
+  "gemini-3.7-flash",
 ];
 
 export const PAGE_HTML = `<!doctype html>
