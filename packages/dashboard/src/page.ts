@@ -99,6 +99,27 @@ export const PAGE_HTML = `<!doctype html>
   .side { overflow-y:auto; min-height:0; scrollbar-width:thin; scrollbar-color:var(--line2) transparent; }
   .feed { display:flex; flex-direction:column; min-height:0; }
 
+  /*
+   * Past 1400px the 352px column stops being a reasonable share.
+   *
+   * Measured on run 7ef8fb4d at 1512px: the board held 14,707px of cards in a
+   * 323px-wide column while the activity feed had 1102px and was empty — the
+   * feed only fills while an agent is talking, and a run spends a lot of its
+   * life idle or between agents. Below this width the single column is right
+   * and the wrapping is already tuned for it; above it there is simply spare
+   * room, so the board takes some and lays its cards out two-up rather than
+   * one 323px card at a time. The feed still gets more than half at 1512px.
+   */
+  @media (min-width:1400px) {
+    .shell { grid-template-columns:minmax(560px, 44%) minmax(0,1fr); }
+    /* .cards, not the <details> itself: a details element wraps its content
+       in an anonymous box, so its cards are not grid items and every one of
+       them lands in column one. #board.flat is the same layout for search
+       results, which are a flat list with no group around them. */
+    .grp .cards, #board.flat { display:grid; grid-template-columns:repeat(auto-fill, minmax(300px, 1fr));
+                               gap:0 .5rem; align-items:start; }
+  }
+
   h2 { font-size:.68rem; text-transform:uppercase; letter-spacing:.12em; color:var(--dim);
        margin:0 0 .55rem; font-weight:600; display:flex; align-items:baseline; gap:.5rem;
        font-family:var(--mono); }
@@ -932,6 +953,27 @@ function renderNow() {
         : "Paused. Nothing is running."));
       return;
     }
+    /*
+     * Say which tasks, when the answer is known.
+     *
+     * "The harness is waiting on you, on git, or between tasks" offers three
+     * possibilities to the operator's first question, and the store has
+     * already settled it: a parked task carries the reason it stopped and the
+     * button that revives it. On run 7ef8fb4d that sentence sat at the top of
+     * the page while two named tasks waited five hundred pixels below it. The
+     * three-way hedge is right only when nothing is parked, which is when
+     * nobody knows why the run is quiet.
+     */
+    const parked = [];
+    for (const run of runs) for (const t of run.tasks) if (t.state === "NEEDS_HUMAN") parked.push(t.id);
+    if (!busy.length && parked.length) {
+      $("nowcount").textContent = parked.length === 1 ? "1 waiting on you" : parked.length + " waiting on you";
+      const line = el("div", "empty");
+      line.append(el("b", null, parked.length === 1 ? "One task is waiting on you" : parked.length + " tasks are waiting on you"));
+      line.append(document.createTextNode(": " + parked.join(", ") + ". Each one is on the board below with the reason it stopped and the button that revives it."));
+      box.append(line);
+      return;
+    }
     $("nowcount").textContent = busy.length ? "between agents" : "idle";
     box.append(el("div", "empty", !busy.length
       ? "No agent is running \\u2014 the harness is waiting on you, on git, or between tasks."
@@ -1569,6 +1611,10 @@ function groupFor(g, count) {
     const head = el("summary", null, g.label);
     head.append(el("span", "n"));
     sec.append(head);
+    // The cards live in a box of their own so a wide viewport can lay them out
+    // in columns. A <details> wraps its content in an anonymous box, so making
+    // the disclosure itself a grid puts every card in the first column.
+    sec.append(el("div", "cards"));
     groups.set(g.key, sec);
   }
   sec.querySelector("summary .n").textContent = " " + count;
@@ -1639,15 +1685,16 @@ function renderBoard() {
     // the state pill on each card carries what the group heading would have.
     const found = [];
     for (const g of GROUPS) for (const item of buckets[g.key]) found.push(item);
+    box.classList.add("flat");
     syncChildren(box, found.map((item) => cardFor(item.t, item.run, groupOf[item.t.state] === "done", kept, item.hit)), 0);
   } else {
+    box.classList.remove("flat");
     const sections = [];
     for (const g of GROUPS) {
       const items = buckets[g.key];
       if (!items.length) continue;
       const sec = groupFor(g, items.length);
-      // Past the summary, which groupFor owns.
-      syncChildren(sec, items.map((item) => cardFor(item.t, item.run, g.key === "done", kept)), 1);
+      syncChildren(sec.querySelector(".cards"), items.map((item) => cardFor(item.t, item.run, g.key === "done", kept)), 0);
       sections.push(sec);
     }
     syncChildren(box, sections, 0);
@@ -1657,12 +1704,26 @@ function renderBoard() {
   renderProgress(counts, total);
 }
 
-/** Done / in flight / blocked, always as a share of the whole run. */
+/**
+ * Done / in flight / blocked, as a share of the work still standing.
+ *
+ * Cancelled tasks are out of the denominator. Run 7ef8fb4d read "24 of 71
+ * done" with 33 of those 71 cancelled — 34%, when 24 of the 38 tasks that can
+ * still be done were done, which is 63%. Cutting scope made the run look like
+ * it had gone backwards, and cutting scope is how a run is supposed to end
+ * well. The cancelled count is still printed, because dropping it from the
+ * denominator silently would be its own kind of lie.
+ */
 function renderProgress(counts, total) {
-  $("taskcount").textContent = counts.done + " of " + total + " done";
+  const standing = total - counts.gone;
+  $("taskcount").textContent = standing
+    ? counts.done + " of " + standing + " done" + (counts.gone ? " \\u00b7 " + counts.gone + " cancelled" : "")
+    : total + " cancelled";
   const bar = $("tbar");
   bar.style.display = "flex";
-  const pct = (n) => (n / total) * 100 + "%";
+  // Nothing standing means nothing to draw a share of; an all-cancelled run
+  // gets an empty bar rather than three NaN widths.
+  const pct = (n) => (standing ? (n / standing) * 100 : 0) + "%";
   bar.children[0].style.width = pct(counts.done);
   bar.children[1].style.width = pct(counts.live);
   bar.children[2].style.width = pct(counts.blocked);
