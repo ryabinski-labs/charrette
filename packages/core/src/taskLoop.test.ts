@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -372,6 +372,79 @@ describe("what the plan said a task would touch", () => {
     await controller.resume(runId);
 
     expect(specs.find((s) => s.role === "qa")!.prompt as string).not.toContain("Declared in the plan");
+  });
+});
+
+/**
+ * The one thing about an infrastructure change that no reader of the
+ * infrastructure can see. api-service-new-api merged a template declaring a
+ * managed policy it named itself, past `sam validate --lint`, `sam build`, a
+ * suite at 100% coverage and a green pull request, into a pipeline that
+ * deployed with `--capabilities CAPABILITY_IAM`. CloudFormation refused the
+ * changeset, on main, after the merge, and every push behind it was stuck.
+ */
+describe("infrastructure the repo's own pipeline cannot deploy", () => {
+  /** Several files at once, including ones in directories that do not exist yet. */
+  function commitTree(cwd: string, files: Record<string, string>): void {
+    for (const [file, body] of Object.entries(files)) {
+      mkdirSync(path.dirname(path.join(cwd, file)), { recursive: true });
+      writeFileSync(path.join(cwd, file), body);
+    }
+    execFileSync("git", ["add", "-A"], { cwd, stdio: "ignore" });
+    execFileSync("git", ["-c", "user.email=w@example.invalid", "-c", "user.name=W", "commit", "-m", "infra"], { cwd, stdio: "ignore" });
+  }
+
+  const NAMED_IAM = `Resources:
+  RunnerPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: delivery-log-runner-write
+`;
+  const DEPLOY = "name: CD\njobs:\n  deploy:\n    steps:\n      - run: sam deploy --capabilities CAPABILITY_IAM\n";
+
+  it("puts the refused changeset in front of QA before the task is done", async () => {
+    const dir = repo();
+    const { pool, specs } = rolePool({
+      worker: (spec) => (commitTree(spec.cwd, { "template.yaml": NAMED_IAM, ".github/workflows/cd.yml": DEPLOY }), "added the table"),
+      qa: () => QA_PASS,
+    });
+    const { controller, events, runId } = executing({ repoPath: dir, pool });
+
+    await controller.resume(runId);
+
+    const qaPrompt = specs.find((s) => s.role === "qa")!.prompt as string;
+    expect(qaPrompt).toContain("template.yaml names RunnerPolicy (AWS::IAM::ManagedPolicy, via ManagedPolicyName)");
+    expect(qaPrompt).toContain(".github/workflows/cd.yml deploys with CAPABILITY_IAM");
+    expect(qaPrompt).toContain("Requires capabilities : [CAPABILITY_NAMED_IAM]");
+    expect(logs(events).some((t) => t.includes("CloudFormation would refuse the changeset"))).toBe(true);
+  });
+
+  it("says nothing about a repo whose deployment it cannot see", async () => {
+    const dir = repo();
+    const { pool, specs } = rolePool({
+      worker: (spec) => (commitTree(spec.cwd, { "template.yaml": NAMED_IAM }), "added the table"),
+      qa: () => QA_PASS,
+    });
+    const { controller, runId } = executing({ repoPath: dir, pool });
+
+    await controller.resume(runId);
+
+    expect(specs.find((s) => s.role === "qa")!.prompt as string).not.toContain("Deploy capability");
+  });
+
+  it("says nothing about a template that names nothing", async () => {
+    const dir = repo();
+    const { pool, specs } = rolePool({
+      worker: (spec) =>
+        (commitTree(spec.cwd, { "template.yaml": "Resources:\n  Table:\n    Type: AWS::DynamoDB::Table\n", ".github/workflows/cd.yml": DEPLOY }),
+        "added the table"),
+      qa: () => QA_PASS,
+    });
+    const { controller, runId } = executing({ repoPath: dir, pool });
+
+    await controller.resume(runId);
+
+    expect(specs.find((s) => s.role === "qa")!.prompt as string).not.toContain("Deploy capability");
   });
 });
 
