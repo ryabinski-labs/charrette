@@ -279,13 +279,59 @@ describe("what is running now", () => {
   });
 
   it("still says it is idle when no task is in progress either", async () => {
+    // PENDING, not NEEDS_HUMAN: the three-way hedge is only right when nobody
+    // knows why the run is quiet. A parked task is the case where somebody
+    // does, and it is asserted below.
     const page = mount(state({
-      runs: [run({ tasks: [task({ id: "t1", state: "NEEDS_HUMAN" })], sessions: [session({ state: "done" })] })],
+      runs: [run({ tasks: [task({ id: "t1", state: "PENDING" })], sessions: [session({ state: "done" })] })],
     }));
     await page.refresh();
 
     expect($("#now")!.textContent).toContain("the harness is waiting on you, on git, or between tasks");
     expect($("#nowcount")!.textContent).toBe("idle");
+  });
+
+  it("names the parked tasks instead of hedging when it knows which they are", async () => {
+    // Run 7ef8fb4d put "waiting on you, on git, or between tasks" at the top of
+    // the page while two named tasks waited 500px below it, each carrying the
+    // reason it stopped and the button that revives it.
+    const page = mount(state({
+      runs: [run({
+        tasks: [task({ id: "api-push", state: "NEEDS_HUMAN" }), task({ id: "runner-land", state: "NEEDS_HUMAN" })],
+        sessions: [session({ state: "done" })],
+      })],
+    }));
+    await page.refresh();
+
+    expect($("#nowcount")!.textContent).toBe("2 waiting on you");
+    expect($("#now")!.textContent).toContain("2 tasks are waiting on you: api-push, runner-land");
+    expect($("#now")!.textContent).not.toContain("or between tasks");
+  });
+
+  it("says one task, not 1 tasks", async () => {
+    const page = mount(state({
+      runs: [run({ tasks: [task({ id: "only", state: "NEEDS_HUMAN" })], sessions: [session({ state: "done" })] })],
+    }));
+    await page.refresh();
+
+    expect($("#nowcount")!.textContent).toBe("1 waiting on you");
+    expect($("#now")!.textContent).toContain("One task is waiting on you: only");
+  });
+
+  it("does not claim a parked task is waiting while an agent is still working", async () => {
+    // A run can hold a parked task and a running one at once; the panel's job
+    // then is to report the agent, not to send the operator to a gate that is
+    // not the reason nothing is moving.
+    const page = mount(state({
+      runs: [run({
+        tasks: [task({ id: "parked", state: "NEEDS_HUMAN" }), task({ id: "busy", state: "WORKING" })],
+        sessions: [session({ state: "done" })],
+      })],
+    }));
+    await page.refresh();
+
+    expect($("#nowcount")!.textContent).toBe("between agents");
+    expect($("#now")!.textContent).not.toContain("waiting on you:");
   });
 
   it("stops counting the gap as soon as an agent is running again", async () => {
@@ -1105,7 +1151,7 @@ describe("hiding a group of tasks", () => {
     chip("Cancelled").dispatchEvent(new Event("click"));
 
     // Hiding is a reading posture, not a claim that the work went away.
-    expect($("#taskcount")!.textContent).toBe("1 of 4 done");
+    expect($("#taskcount")!.textContent).toBe("1 of 2 done \u00b7 2 cancelled");
   });
 
   it("switches back on", async () => {
@@ -1127,7 +1173,7 @@ describe("hiding a group of tasks", () => {
 
     expect(titles()).toEqual([]);
     expect($("#board .empty")!.textContent).toBe("Every group is hidden. Switch one back on above.");
-    expect($("#taskcount")!.textContent).toBe("1 of 4 done");
+    expect($("#taskcount")!.textContent).toBe("1 of 2 done \u00b7 2 cancelled");
   });
 
   it("holds the filter across a poll", async () => {
@@ -1227,5 +1273,43 @@ describe("what a screen reader and a contrast checker get", () => {
     expect(rule("h2 .count")).not.toContain("var(--faint)");
     expect(rule(".task .sub")).toContain("var(--dim)");
     expect(rule(".task .sub")).not.toContain("var(--faint)");
+  });
+});
+
+/**
+ * The structure a wide viewport needs to lay the board out in columns.
+ *
+ * happy-dom does not evaluate media queries, so these pin the DOM the CSS
+ * hangs off rather than the computed layout — the column count itself is
+ * checked in a real browser. The first attempt put `display:grid` on the
+ * <details> element and every card landed in column one, because a details
+ * wraps its content in an anonymous box; that is the mistake these guard.
+ */
+describe("the board's card container", () => {
+  it("puts a group's cards in a box of their own, not straight into the disclosure", async () => {
+    const page = mount(state({ runs: [run({ tasks: [task({ id: "a" }), task({ id: "b" })] })] }));
+    await page.refresh();
+
+    const group = $("#board > details")!;
+    expect(group.querySelectorAll(":scope > .task")).toHaveLength(0);
+    expect(group.querySelectorAll(":scope > .cards > .task")).toHaveLength(2);
+    // The summary stays a sibling of the box, not one of the cards.
+    expect(group.querySelector(":scope > summary")).not.toBeNull();
+  });
+
+  it("marks the board flat while searching, and unmarks it after", async () => {
+    const page = mount(state({ runs: [run({ tasks: [task({ id: "a", title: "Alpha" }), task({ id: "b", title: "Beta" })] })] }));
+    await page.refresh();
+    const board = $("#board")!;
+    expect(board.classList.contains("flat")).toBe(false);
+
+    const input = $("#tasksearch") as HTMLInputElement;
+    input.value = "alpha";
+    input.dispatchEvent(new Event("input"));
+    expect(board.classList.contains("flat")).toBe(true);
+
+    input.value = "";
+    input.dispatchEvent(new Event("input"));
+    expect(board.classList.contains("flat")).toBe(false);
   });
 });
