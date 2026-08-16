@@ -176,6 +176,12 @@ export const PAGE_HTML = `<!doctype html>
   .task .sub a { color:var(--blue); text-decoration:none; }
   .task .sub a:hover, .task .sub a:focus-visible { text-decoration:underline; }
   .task .why { color:var(--amber); font-size:.76rem; margin-top:.25rem; }
+  .task .whymore { margin-top:.15rem; }
+  .task .whymore summary { color:var(--dim); font-size:.72rem; cursor:pointer; }
+  .task .whymore .why { white-space:pre-wrap; margin-top:.2rem; }
+  /* On the one card that is addressed to the operator, so it reads as the thing
+     to do next rather than as another chip. */
+  .task button.answer { margin-top:.45rem; font-size:.76rem; padding:.2rem .6rem; }
   .task .skills { display:flex; gap:.5rem .7rem; flex-wrap:wrap; margin-top:.3rem; }
   .task .skills .sg { display:inline-flex; gap:.25rem; align-items:center; flex-wrap:wrap; min-width:0; }
   .task .skills .sg b { font-size:.62rem; font-weight:600; letter-spacing:.1em; text-transform:uppercase;
@@ -992,6 +998,45 @@ async function sendFeedback(e) {
   }
 }
 
+/*
+ * Point the composer at one task and put the cursor in it.
+ *
+ * The board and the composer are separate panels with no relationship the page
+ * ever stated, which left the parked card — the only card on the board addressed
+ * to the operator — with nothing to act with. This is the relationship: the card
+ * carries the request, the composer carries the answer, and the button between
+ * them says which task the answer is about.
+ *
+ * It scrolls rather than moving the composer, because the composer is also the
+ * pit stop's question box: two of them would be two ways to spend money on a
+ * page whose whole layout is built around there being one.
+ */
+function aimFeedbackAt(runId, taskId) {
+  fbChosen = runId + "/" + taskId;
+  const sel = $("fb-task");
+  sel.value = fbChosen;
+  // A dropdown that does not contain the option refuses the assignment silently
+  // and leaves the previous target selected, which would aim the answer at the
+  // wrong task. Rebuilt targets arrive on the next poll, so say so instead.
+  const note = $("fb-note");
+  if (sel.value !== fbChosen) {
+    note.style.color = "var(--red)";
+    note.textContent = "that task is not open for feedback any more \\u2014 reload the page";
+    return;
+  }
+  note.style.color = "";
+  // What the answer will actually do, which is not the same on a run that has
+  // stopped: the controller only reopens a parked task while the scheduler is
+  // still looping. Promising a reopen on a paused run would be a promise the
+  // operator watches not happen.
+  const run = runs.find((r) => r.id === runId);
+  note.textContent = run && run.state === "EXECUTING"
+    ? "Answering reopens " + taskId + ": your note is the guidance the next worker starts from."
+    : "This run is not executing, so your note waits with the task \\u2014 the resume puts it in front of the next worker.";
+  $("fb").scrollIntoView({ block: "nearest" });
+  $("fb-text").focus();
+}
+
 /* ---------- summoning a pit stop ---------- */
 
 /* Armed means the operator has clicked once and the second, spending click is
@@ -1492,7 +1537,40 @@ function taskCard(t, run, isDone) {
   if (t.prNumber) sub.append(gh(run.githubRepo, "pull", t.prNumber, "PR #" + t.prNumber));
   card.append(sub);
   if (t.assignedSkills.length) card.append(skillsRow(t.assignedSkills));
-  if (t.errorSummary) card.append(el("div", "why", clip(t.errorSummary, 220)));
+  if (t.errorSummary) {
+    // Clipped, but no longer *only* clipped: a parked task's reason is the case
+    // for and against reviving it, and it was being cut mid-sentence with no way
+    // to read the rest. The full text goes in a disclosure under it.
+    const short = clip(t.errorSummary, 220);
+    card.append(el("div", "why", short));
+    if (short !== t.errorSummary) {
+      const key = run.id + "/" + t.id + "/why";
+      const more = el("details", "whymore");
+      more.open = openTasks.has(key);
+      more.addEventListener("toggle", () => {
+        if (more.open) openTasks.add(key);
+        else openTasks.delete(key);
+      });
+      more.append(el("summary", null, "the rest of the reason"));
+      more.append(el("p", "why", t.errorSummary));
+      card.append(more);
+    }
+  }
+  // A parked task is the one card on this board that is *addressed to* the
+  // operator, and it had nothing on it to act with: the control that revives it
+  // is the composer two panels up, behind a dropdown listing every open task,
+  // with nothing anywhere saying that answering there is what reopens this. The
+  // button does not revive on its own — it aims the composer at this task, so
+  // what reopens the task is still the operator's actual answer.
+  if (t.state === "NEEDS_HUMAN") {
+    const answer = el("button", "ghost answer", "Answer this\\u2026");
+    answer.type = "button";
+    // The run's state is read at click time rather than closed over: what an
+    // answer *does* depends on whether the run is still executing, and the card
+    // is cached across polls that change exactly that.
+    answer.addEventListener("click", () => aimFeedbackAt(run.id, t.id));
+    card.append(answer);
+  }
 
   // A title alone does not say what "done" meant. The acceptance criteria are exactly
   // what QA signed off against, so they are the honest answer to "what did it do?".
