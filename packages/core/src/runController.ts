@@ -16,6 +16,7 @@ import { GitHubAdapter, type PrRef } from "./github.js";
 import { runIntake, type IntakeUi } from "./intake.js";
 import { composeDown, isolationBlock, isolationEnv, taskIsolation } from "./isolation.js";
 import { observeChecks } from "./memory.js";
+import { parseRunbook, withRunbook, type Runbook } from "./operatorRunbook.js";
 import { ceilingNote, grantedTokens, requestTokens, sdkCeiling } from "./outputCeiling.js";
 import { missingKeys } from "./providerClients.js";
 import { reapUnder } from "./reaper.js";
@@ -1916,12 +1917,29 @@ export class RunController {
     // Done before the gate is published, so the answer the operator reads
     // already says what the task is now being held to.
     const amended = probe && advice.probe !== null ? this.amendProbe(runId, taskId, probe, advice.probe, decider, advice.why) : "";
-    const recommendation = amended ? `${amended}\n\n${advice.recommendation}` : advice.recommendation;
+    const drafted = amended ? `${amended}\n\n${advice.recommendation}` : advice.recommendation;
+    // The runbook is for the person, so it is added only on the path that
+    // reaches one. When a decider answers, `recommendation` goes to the worker
+    // verbatim — and a worker told to "open the AWS console" learns only that
+    // its brief was written for somebody else.
+    const forOperator = !decider || advice.needsOperator;
+    const recommendation = forOperator ? withRunbook(drafted, advice.runbook) : drafted;
     // The count goes on the question, not the answer. `recommendation` is sent
     // to the worker verbatim when a decider answers, and the worker has no use
     // for how many times a person was interrupted; the person does.
     const asked = why + repeatNote(repeats, taskId, runId, task.completionProbe);
-    this.bus.publish({ type: "task.gate_opened", runId, taskId, why: asked, recommendation, iterations: task.qaIterations, ts: Date.now() });
+    this.bus.publish({
+      type: "task.gate_opened",
+      runId,
+      taskId,
+      why: asked,
+      recommendation,
+      iterations: task.qaIterations,
+      // Only when a person is the one being asked. A decider's own escalation
+      // is answered in-process and there is nobody to page about it.
+      runbook: forOperator ? advice.runbook : null,
+      ts: Date.now(),
+    });
     const because = advice.why ? ` — ${advice.why}` : "";
     if (decider && recommendation && !advice.needsOperator) {
       // Published as opened-then-resolved rather than never opened: the task
@@ -2061,10 +2079,10 @@ export class RunController {
     decider = "",
     probe = "",
     repeats = 0
-  ): Promise<{ recommendation: string; needsOperator: boolean; why: string; probe: string | null }> {
+  ): Promise<{ recommendation: string; needsOperator: boolean; why: string; probe: string | null; runbook: Runbook | null }> {
     const run = this.store.getRun(runId)!;
     const task = this.store.getTask(runId, taskId)!;
-    const none = { recommendation: "", needsOperator: true, why: "", probe: null };
+    const none = { recommendation: "", needsOperator: true, why: "", probe: null, runbook: null };
     try {
       // Looked up by name, as the pit stop's decider is: the skill was named to
       // be the one answering, and the lexical matcher's opinion of what this
@@ -2087,7 +2105,14 @@ export class RunController {
         // to leave it in. Falling back to the repo means sweeping the repo.
         reapOnEnd: Boolean(task.worktreePath),
       });
-      const parsed = extractJson(result.resultText) as { recommendation?: unknown; checked?: unknown; needsOperator?: unknown; why?: unknown; probe?: unknown };
+      const parsed = extractJson(result.resultText) as {
+        recommendation?: unknown;
+        checked?: unknown;
+        needsOperator?: unknown;
+        why?: unknown;
+        probe?: unknown;
+        runbook?: unknown;
+      };
       if (typeof parsed?.recommendation !== "string") return none;
       const checked = Array.isArray(parsed.checked) ? (parsed.checked as AdvisorCheck[]) : [];
       return {
@@ -2100,6 +2125,10 @@ export class RunController {
         // advisor drafting for a human, an older prompt, a model that dropped
         // it — is saying the same thing by saying nothing.
         probe: probe && typeof parsed.probe === "string" ? parsed.probe : null,
+        // Parsed here and rendered only if the gate actually reaches a person:
+        // a decider that answers its own escalation hands the worker prose, and
+        // a worker has no use for instructions addressed to somebody else.
+        runbook: parseRunbook(parsed.runbook),
       };
     } catch {
       // A session that crashed decided nothing, which is not the same as

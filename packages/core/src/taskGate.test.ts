@@ -867,6 +867,61 @@ describe("the task-escalation gate, answered by a skill", () => {
     expect(opened[0]!.recommendation).toContain("start DynamoDB");
   });
 
+  /**
+   * The other half of handing a question back. "Only a person can answer this"
+   * is where run 7ef8fb4d stopped, and the person was left to work out which
+   * repository, which workflow and what evidence would count. The steps ride on
+   * the gate so every channel that reaches them — dashboard, terminal, mail —
+   * gets the same ones.
+   */
+  it("carries the operator's steps on the gate it hands back", async () => {
+    const { pool } = decidingPool(
+      () =>
+        '```json\n{"recommendation":"After it is deployed, tell the worker to re-run the proof",' +
+        '"checked":[],"needsOperator":true,"why":"nobody has deployed it",' +
+        '"runbook":{"blocked":"the endpoints have to be deployed first","steps":[{"do":"Merge and let CD run","command":"gh pr merge 1631 --squash"}],"sendBack":"the HTTP status from step 1"}}\n```'
+    );
+    const { store, runId } = await run(gates(async () => null), pool, { taskGate: {} });
+
+    const opened = store.eventsSince(runId, 0).map((e) => e.event).filter((e) => e.type === "task.gate_opened") as {
+      recommendation: string;
+      runbook: { steps: { command?: string }[]; sendBack: string } | null;
+    }[];
+    expect(opened[0]!.runbook).toEqual({
+      blocked: "the endpoints have to be deployed first",
+      steps: [{ do: "Merge and let CD run", command: "gh pr merge 1631 --squash" }],
+      sendBack: "the HTTP status from step 1",
+    });
+    // And rendered into what the operator reads, above the prose — the steps
+    // are the half that gets done.
+    const shown = opened[0]!.recommendation;
+    expect(shown).toContain("1. Merge and let CD run");
+    expect(shown).toContain("       gh pr merge 1631 --squash");
+    expect(shown).toContain("Then answer this gate with: the HTTP status from step 1");
+    expect(shown.indexOf("1. Merge and let CD run")).toBeLessThan(shown.indexOf("After it is deployed"));
+  });
+
+  it("never sends the operator's steps to a worker", async () => {
+    // A decider answering its own escalation writes the worker's whole brief.
+    // A worker told to open a console learns only that the brief was addressed
+    // to somebody else.
+    const { pool, workerPrompts } = decidingPool(
+      () =>
+        '```json\n{"recommendation":"the fixture moved to test/fixtures","checked":[],"needsOperator":false,' +
+        '"runbook":{"blocked":"someone has to click deploy","steps":[{"do":"Click deploy in the console"}],"sendBack":"the deploy id"}}\n```'
+    );
+    const { store, runId } = await run(gates(async () => null), pool, { taskGate: {} });
+
+    expect(workerPrompts.join("\n")).not.toContain("Click deploy in the console");
+    // Two rounds answered by the skill, then the third is the operator's. The
+    // steps ride on that one and on neither of the first two.
+    const opened = store.eventsSince(runId, 0).map((e) => e.event).filter((e) => e.type === "task.gate_opened") as { runbook: unknown; recommendation: string }[];
+    expect(opened).toHaveLength(3);
+    expect(opened.slice(0, 2).map((e) => e.runbook)).toEqual([null, null]);
+    expect(opened[2]!.runbook).not.toBeNull();
+    expect(opened[2]!.recommendation).toContain("1. Click deploy in the console");
+  });
+
   it("stops answering the same task once its rounds are spent", async () => {
     // Every answer resets the task's iteration counters, so a skill answering
     // its own escalations is a loop bounded only by the task's budget. Twice is
