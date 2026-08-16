@@ -120,7 +120,7 @@ export const ModelRoutingShape = z.object({
    * tier where a second opinion is cheap enough to run on every lens rather
    * than on the one lens somebody picked.
    */
-  reviewer: z.string().default("gemini-3.6-flash"),
+  reviewer: z.string().default("gemini-3.7-flash"),
   /**
    * Decides what the run does next at a pit stop, having read the demo and
    * every reviewer. It is the only agent in the harness whose output redirects

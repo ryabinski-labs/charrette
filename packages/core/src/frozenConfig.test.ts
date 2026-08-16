@@ -186,7 +186,11 @@ describe("a run created today", () => {
  * no postmortem, no dashboard row, for every run ever recorded.
  */
 const OPUS = "claude-opus-5";
-const GEMINI = "gemini-3.6-flash";
+/* What the migration pins to: today's default, whatever that is. Written as the
+   schema's own answer rather than as a literal because this file is about the
+   migration, not about which Gemini is current — a literal here turns every
+   reviewer upgrade into four unrelated test failures. */
+const GEMINI = RunConfig.parse({}).models.reviewer;
 
 /** Writes a run whose stored config names a reviewer today's schema refuses. */
 function runFromBeforeTheReviewerPin(dbPath: string, reviewer: string | null = OPUS): string {

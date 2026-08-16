@@ -765,7 +765,7 @@ for. Spell the provider out as `openai/<model>` if you ever need a model whose
 name does not announce its family.
 
 **The default is all-Anthropic except one role.** `reviewer` is pinned to
-`gemini-3.6-flash`, so `GEMINI_API_KEY` is required for every run — see the
+`gemini-3.7-flash`, so `GEMINI_API_KEY` is required for every run — see the
 pinned-role table below for why. Nothing else routes off Anthropic unless you
 say so.
 
