@@ -4738,6 +4738,19 @@ export class RunController {
     }
 
     if (task.state === "NEEDS_HUMAN") {
+      // A branch name is not an address. The issue body is written for whoever
+      // picks the task up and its commands are relative to the task's checkout —
+      // but the task branch is not on the base branch, so the same commands run
+      // from the operator's own clone hit files that are not there. One parked
+      // task asked for a `kubectl apply -f deploy/k8s/<file>.yaml` the run had
+      // written itself; the operator ran it from the primary checkout, got "the
+      // path does not exist", and had no way to tell from the issue that the
+      // file existed on disk a few directories away. Print the `cd`.
+      const branch = task.branch ?? "no branch";
+      const where = task.worktreePath
+        ? `The work so far is on \`${branch}\`, checked out at:\n\n\`\`\`sh\ncd ${task.worktreePath}\n\`\`\`\n\n` +
+          `Run anything this issue asks for from there. Nothing on that branch has been merged to the base branch, so a command run from the primary checkout will not find the files this task wrote.`
+        : `The work so far is on \`${branch}\`.`;
       await this.github.commentOnIssue(
         issue,
         key,
@@ -4745,7 +4758,7 @@ export class RunController {
         // there so a future path that parks without one still says something.
         /* v8 ignore next */
         `**Parked for a human** — ${task.errorSummary || why || "the harness could not finish it"}\n\n` +
-          `The work so far is on \`${task.branch ?? "no branch"}\`. While the run is still going, a reply in this thread is picked up as guidance and the task is dispatched again.`
+          `${where} While the run is still going, a reply in this thread is picked up as guidance and the task is dispatched again.`
       );
       return;
     }

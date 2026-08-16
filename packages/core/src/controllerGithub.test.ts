@@ -235,6 +235,15 @@ describe("what a run says on its issues", () => {
     expect(bodies.some((b) => /\*\*Parked for a human\*\*/.test(b))).toBe(true);
     // A parked task's thread is left open: a reply in it is picked up as guidance.
     expect(gh.closed).toEqual([]);
+
+    // The issue has to say where its own commands run. The task branch is not on
+    // the base branch, so the same commands from the operator's clone fail on
+    // files that were never merged — the comment prints the `cd` to the task's
+    // worktree rather than only naming a branch.
+    const parked = bodies.find((b) => /\*\*Parked for a human\*\*/.test(b))!;
+    expect(parked).toContain(`cd ${dir}-wt${path.sep}`);
+    expect(parked).toMatch(/```sh\ncd \S+task-b\n```/);
+    expect(parked).toMatch(/will not find the files this task wrote/);
   });
 
   it("says a task was never attempted and closes its issue as not planned", async () => {
