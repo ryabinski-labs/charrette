@@ -218,6 +218,7 @@ Rules:
 - Decompose into small, independently implementable and testable tasks (prefer S/M sizes; an experienced developer should finish one in under an hour).
 - Every task needs testable acceptance criteria and explicit dependsOn edges. Avoid hidden coupling; if two tasks touch the same file, make one depend on the other.
 - Keep each task spec under ~150 words. A spec tells a competent developer what to build and what "done" means; it is not the implementation. Detail belongs in acceptanceCriteria, which are checked literally.
+- Every task is built in a worktree of THIS repository and merged back into it. A task written against another checkout — "in \`~/projects/other-api\`, add the table" — cannot be branched, merged, reviewed or shipped by this run, and its worker will deliver an empty branch however competently it works. Reading another repository to learn from it is fine and often right; writing to one is not. If the brief genuinely needs work in a second repository, say so in the PRD and leave it out of the DAG: it is a separate run against that repository.
 - Infrastructure is a legitimate deliverable, not a footnote. If the PRD implies something has to run somewhere — a deployment target, a database, a queue, a scheduled job, a CI pipeline, a container image, secrets, DNS, observability — emit tasks for it rather than assuming a human will wire it up afterwards. Name the artifact (a Terraform module, a Helm chart, a CloudFormation stack, a workflow file) and put it under \`touchedPaths\` like any other file.
 - Every plan needs a continuous-integration task, and it is not conditional on the brief asking for one. Nothing else in this system ever sees the merged branch: each task is built and checked in its own worktree, so a plan can merge sixty green tasks into a tree that has never once been built as a whole. That task owns a pipeline definition — \`.github/workflows/ci.yml\`, a \`.gitlab-ci.yml\`, whatever this repo already uses — named under \`touchedPaths\`, and it runs on pull requests against the base branch. Put it early and give the later tasks nothing to wait for: it depends on the scaffold that makes a build possible and on nothing else.
 - That pipeline runs the checks that would otherwise be discovered by hand, and each one is a separate failing step rather than one script: install with a locked dependency file, build or compile, type-check, lint, unit and integration tests, and a coverage floor. Its acceptance criteria must name the floor as a number the build FAILS under — ${PATCH_COVERAGE_FLOOR}% of the lines a change touches and ${PROJECT_COVERAGE_FLOOR}% of the project overall — because "the suite reports coverage" is satisfied by a run that prints 11% and exits zero. Use the repo's own mechanism for it (\`--cov-fail-under\`, \`coverageThreshold\`, \`nyc check-coverage\`, \`go test -coverprofile\` plus a threshold check, a Codecov patch status). Where the product has a critical user path — sign-in, checkout, the one journey the brief is about — one end-to-end test of that path belongs in the pipeline too; a coverage number says how much code ran, never that the product works.
@@ -414,8 +415,17 @@ If you conclude the merge is fundamentally wrong and cannot be resolved this way
  * Neither is a failure of the work, so the prompt does not ask for a redesign.
  * It asks the worker to find out where its changes went, which is a question it
  * can answer in two commands and nobody else can answer at all.
+ *
+ * `foreign` is the third case and it is not a mistake by the worker at all: the
+ * task was written against a repository this run does not own, so an empty
+ * branch here is the correct outcome and there is nothing to go looking for.
+ * Sending that worker the instructions above is worse than sending it nothing —
+ * run 7ef8fb4d told one "every path you need is under this directory" five
+ * times about a task whose spec named a sibling checkout in its first sentence,
+ * and it kept being right that the work was elsewhere.
  */
-export function emptyBranchPrompt(branch: string, commits: number): string {
+export function emptyBranchPrompt(branch: string, commits: number, foreign: string[] = []): string {
+  if (foreign.length) return foreignRepoBranchPrompt(branch, foreign);
   return `Your branch \`${branch}\` delivers nothing: ${
     commits === 0
       ? "it has no commits on it at all."
@@ -432,6 +442,29 @@ This is almost never a problem with the work itself — the work is usually writ
 Only if you find that the work genuinely was never done should you build it, starting from the task's acceptance criteria.
 
 Commit before you finish. A summary describing changes that are not committed on this branch is the failure you are reading about.`;
+}
+
+/**
+ * The empty-branch prompt for a task whose spec points at another repository.
+ *
+ * It asks for the one thing that is still worth having — whatever part of the
+ * task this repository *can* carry — and it explicitly withdraws the "your work
+ * is here somewhere" instruction, because obeying that is what produced the
+ * nested worktree and the commit nothing would ever merge.
+ */
+function foreignRepoBranchPrompt(branch: string, foreign: string[]): string {
+  const names = foreign.map((p) => `\`${p}\``).join(", ");
+  return `Your branch \`${branch}\` carries nothing, and this time that is probably not your mistake.
+
+Your task is written against ${names} — a repository this run does not own. This run has exactly one repository: the one your worktree is a worktree of. It can only branch, commit, merge and open a pull request there. Nothing you write into ${names} can be reviewed or merged by this run, whatever you do to get it there.
+
+So do not go looking for missing work, do not create a nested worktree or clone of another repository inside this one, and do not commit outside this directory. None of that ends in delivered work.
+
+Do this instead:
+
+1. Read the task's acceptance criteria again and decide honestly which of them, if any, can be satisfied **inside this repository**. Configuration this repo reads, a client that calls the other service, a test, a documented assumption — that part is real work and belongs on this branch.
+2. Do that part and commit it here.
+3. If nothing in the task can be done in this repository, commit nothing and say so plainly in your summary: name the repository the task actually belongs to and what would have to happen there. That is the useful answer, and it is the one that gets the task routed instead of retried.`;
 }
 
 /**

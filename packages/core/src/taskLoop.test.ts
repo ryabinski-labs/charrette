@@ -99,7 +99,7 @@ function executing(opts: {
   config?: Partial<Parameters<typeof RunConfig.parse>[0]>;
   guidance?: string | null;
   github?: GitHubAdapter;
-  tasks?: { id: string; dependsOn?: string[]; touchedPaths?: string[]; completionProbe?: string }[];
+  tasks?: { id: string; dependsOn?: string[]; touchedPaths?: string[]; completionProbe?: string; spec?: string }[];
 }): Built {
   const store = new Store(":memory:");
   const bus = new Bus(store);
@@ -138,7 +138,7 @@ function executing(opts: {
       id: t.id,
       epicId: "epic-e",
       title: t.id.toUpperCase(),
-      spec: "do the thing",
+      spec: t.spec ?? "do the thing",
       acceptanceCriteria: ["it works"],
       dependsOn: t.dependsOn ?? [],
       state: "PENDING" as const,
@@ -425,6 +425,51 @@ describe("a branch that arrives empty over and over", () => {
 
     expect(logs(events).some((t) => /changes no file against harness\/run1\/main \(1 commit\)$/.test(t))).toBe(true);
     expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
+  });
+});
+
+/**
+ * The same empty branch, for the other reason.
+ *
+ * Run 7ef8fb4d's `api-delivery-table-infra` was written against a sibling
+ * checkout the run did not own. Its branch was empty because the task was out
+ * of scope, and every message the harness produced said the opposite — "check
+ * whether the work was written somewhere other than the worktree" — which is
+ * how a worker ends up nesting a worktree of another repository inside its own
+ * and committing where nothing will ever merge from. Plans are checked for this
+ * before a worker runs now; this is what the pipeline says when one reaches
+ * here anyway, which a run planned before the check still can.
+ */
+describe("a branch that is empty because the task belongs to another repository", () => {
+  it("says so, instead of sending the worker to look for work it never lost", async () => {
+    const dir = repo();
+    const sibling = path.join(path.dirname(dir), "other-repo");
+    const { pool, specs } = rolePool({ worker: () => "did the work", qa: () => QA_PASS });
+    const { controller, store, events, gates, runId } = executing({
+      repoPath: dir,
+      pool,
+      guidance: "raise it as its own run",
+      config: { qaIterationCap: 1 },
+      tasks: [{ id: "task-a", spec: `In \`${sibling}/\`, add the delivery_log table to the SAM template.` }],
+    });
+
+    await controller.resume(runId);
+
+    const task = store.getTask(runId, "task-a")!;
+    expect(task.state).toBe("NEEDS_HUMAN");
+    expect(task.errorSummary).toContain(`written against ${sibling}`);
+    expect(task.errorSummary).toContain("re-dispatching cannot change that");
+    // The old, false diagnosis is gone from the park reason entirely.
+    expect(task.errorSummary).not.toContain("somewhere other than the worktree");
+    // The log line and the escalation carry the true reason too, so neither the
+    // dashboard nor whoever answers the gate has to reconstruct it.
+    expect(logs(events).some((t) => t.includes(`this task is written against ${sibling}, which this run does not own`))).toBe(true);
+    expect(gates.some((g) => g.why.includes("no worker can change that from here"))).toBe(true);
+    // And the worker is told to stop looking rather than to keep digging.
+    const prompt = workerPrompts(specs).at(-1)!;
+    expect(prompt).toContain("a repository this run does not own");
+    expect(prompt).toContain("do not create a nested worktree");
+    expect(prompt).not.toContain("every path you need is under this directory");
   });
 });
 

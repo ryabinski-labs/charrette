@@ -50,7 +50,7 @@ function repo(withRemote = false): string {
 
 const DOCS = "<prd>\n# PRD — Build the thing\n</prd>\n<conventions>\nuse vitest\n</conventions>";
 
-const dagJson = (tasks = [{ id: "task-a", dependsOn: [] as string[] }]) =>
+const dagJson = (tasks: { id: string; dependsOn: string[]; spec?: string }[] = [{ id: "task-a", dependsOn: [] }]) =>
   "```json\n" +
   JSON.stringify({
     epics: [{ id: "epic-e", title: "E", summary: "s" }],
@@ -58,7 +58,7 @@ const dagJson = (tasks = [{ id: "task-a", dependsOn: [] as string[] }]) =>
       id: t.id,
       epicId: "epic-e",
       title: t.id.toUpperCase(),
-      spec: "s",
+      spec: t.spec ?? "s",
       acceptanceCriteria: ["x"],
       dependsOn: t.dependsOn,
       touchedPaths: [],
@@ -414,6 +414,25 @@ describe("recording a planner attempt that cannot be saved", () => {
 
     await expect(controller.startRun("build a thing", RunConfig.parse({}))).rejects.toThrow(
       /the plan is not a valid DAG: task task-a depends on unknown task task-ghost/
+    );
+  });
+
+  /**
+   * Run 7ef8fb4d planned `api-delivery-table-infra` against a sibling checkout
+   * and nothing stopped it, so a worker was dispatched five times to deliver
+   * work this run could never merge. The plan text says so before a worker
+   * token is spent, and the retry loop is already built to hand the reason back.
+   */
+  it("rejects a plan whose task is written against a repository the run does not own", async () => {
+    const dir = repo();
+    const sibling = path.join(path.dirname(dir), "other-repo");
+    const { pool } = rolePool({
+      planner: (s) => (s.prompt.includes("PRD") ? dagJson([{ id: "task-a", dependsOn: [], spec: `In ${sibling}/, add the delivery_log table.` }]) : DOCS),
+    });
+    const { controller } = build({ repoPath: dir, pool });
+
+    await expect(controller.startRun("build a thing", RunConfig.parse({}))).rejects.toThrow(
+      /the plan reaches outside this run's repository: task task-a is written against other-repo/
     );
   });
 

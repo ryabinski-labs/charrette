@@ -97,6 +97,7 @@ import {
   type SubscriptionReading,
 } from "./subscription.js";
 import { usableProbe } from "./completionProbe.js";
+import { foreignRepoPaths, validatePlanScope } from "./repoScope.js";
 import { hasDrift, pathDrift, renderDrift } from "./pathDrift.js";
 import { confirmFailures, runDeterministicChecks, splitInheritedFailures, type CheckResult } from "./qa.js";
 import { estimatePlan, renderEstimate } from "./estimate.js";
@@ -1929,11 +1930,12 @@ export class RunController {
    * The skill that answers this task's escalation, or "" when the operator does.
    *
    * Empty once the same task has been answered by a skill `autoAnswerRounds`
-   * times. The count is read off the event log rather than held in memory, so a
-   * resumed run does not hand a task that already burned its rounds a fresh set
-   * — the events are the only thing that survives the process, and this bound
-   * exists precisely for the case where an agent is answering its own
-   * escalation in a circle.
+   * times *in a row*. The count is read off the event log rather than held in
+   * memory, so a resumed run does not hand a task that already burned its rounds
+   * a fresh set — the events are the only thing that survives the process, and
+   * this bound exists precisely for the case where an agent is answering its own
+   * escalation in a circle. An operator answer ends the streak; see
+   * `taskGateAutoAnswers`.
    */
   private taskGateDecider(runId: string, taskId: string): string {
     const cfg = this.store.getRun(runId)!.config.taskGate;
@@ -2536,6 +2538,15 @@ export class RunController {
           const errors = validatePlanDag({ ...docs, ...parsed.data });
           if (errors.length) {
             reason = `the plan is not a valid DAG: ${errors.join("; ")}`;
+            break;
+          }
+          // Shape and dependencies are not the only way a plan can be
+          // unbuildable. A task written against a repository this run does not
+          // own is finishable by nobody here, and the retry loop is the last
+          // place that can say so cheaply.
+          const scope = validatePlanScope(parsed.data.tasks, this.repoPath);
+          if (scope.length) {
+            reason = `the plan reaches outside this run's repository: ${scope.join("; ")}`;
             break;
           }
           return parsed.data;
@@ -3652,6 +3663,11 @@ export class RunController {
         tasks: [...keep, ...breakdown.tasks],
       });
       if (errors.length) throw new Error(`re-planned DAG is invalid: ${errors.join("; ")}`);
+      // The pit stop can re-plan into the same out-of-scope mistake the first
+      // plan could, and there is no retry loop here to absorb it — better a
+      // named failure than tasks nothing in this run can build.
+      const scope = validatePlanScope(breakdown.tasks, this.repoPath);
+      if (scope.length) throw new Error(`the re-planned tasks reach outside this run's repository: ${scope.join("; ")}`);
       const replaced = new Set(breakdown.tasks.map((t) => t.id));
       const dropped = pending.filter((t) => !replaced.has(t.id));
       for (const t of dropped) {
@@ -4236,12 +4252,23 @@ export class RunController {
       const delta = await this.wt.taskBranchDelta(runId, taskId);
       if (!delta.files.length) {
         emptyDeliveries++;
+        // An empty branch has two very different causes, and until now every
+        // message said the first one. A task written against a repository this
+        // run does not own delivers nothing *correctly*; telling its worker to
+        // go find the work it lost sends it somewhere no commit can be merged
+        // from. Plans are checked for this before a worker runs, so reaching
+        // here means a run planned before that check, or a repo named in a
+        // shape the check does not read.
+        const foreign = foreignRepoPaths(task, this.repoPath);
         if (emptyDeliveries > EMPTY_DELIVERY_ATTEMPTS) {
           this.park(
             runId,
             taskId,
-            `the task branch is still empty after ${emptyDeliveries} attempts: nothing has been committed to ${this.wt.branchName(runId, taskId)}, ` +
-              `so there is nothing to review or merge. Check whether the work was written somewhere other than the worktree.`
+            foreign.length
+              ? `this task is written against ${foreign.join(", ")}, which this run does not own, so ${this.wt.branchName(runId, taskId)} has nothing on it after ` +
+                  `${emptyDeliveries} attempts and re-dispatching cannot change that. The work belongs to a run on that repository.`
+              : `the task branch is still empty after ${emptyDeliveries} attempts: nothing has been committed to ${this.wt.branchName(runId, taskId)}, ` +
+                  `so there is nothing to review or merge. Check whether the work was written somewhere other than the worktree.`
           );
           return;
         }
@@ -4252,10 +4279,12 @@ export class RunController {
           runId,
           taskId,
           sessionId: workerSession ?? taskId,
-          text: `nothing to review: ${this.wt.branchName(runId, taskId)} changes no file against ${this.wt.integrationBranch(runId)} (${delta.commits} commit${delta.commits === 1 ? "" : "s"})`,
+          text:
+            `nothing to review: ${this.wt.branchName(runId, taskId)} changes no file against ${this.wt.integrationBranch(runId)} (${delta.commits} commit${delta.commits === 1 ? "" : "s"})` +
+            (foreign.length ? ` — this task is written against ${foreign.join(", ")}, which this run does not own` : ""),
           ts: Date.now(),
         });
-        qaFeedback = emptyBranchPrompt(this.wt.branchName(runId, taskId), delta.commits);
+        qaFeedback = emptyBranchPrompt(this.wt.branchName(runId, taskId), delta.commits, foreign);
         lastRejection = `The branch was empty: ${delta.commits} commit${delta.commits === 1 ? "" : "s"}, no files changed against the integration branch.`;
         // The task stays WORKING and is re-dispatched, exactly as a failed
         // deterministic check is: nothing has been reviewed, so there is no
@@ -4263,7 +4292,9 @@ export class RunController {
         // is already in.
         if (iterations >= run.config.qaIterationCap) {
           const guidance = await ask(
-            `the task branch is still empty after ${iterations} attempts — nothing is committed to ${this.wt.branchName(runId, taskId)}, so there is nothing to review or merge`
+            foreign.length
+              ? `this task is written against ${foreign.join(", ")}, which this run does not own — ${this.wt.branchName(runId, taskId)} is still empty after ${iterations} attempts and no worker can change that from here`
+              : `the task branch is still empty after ${iterations} attempts — nothing is committed to ${this.wt.branchName(runId, taskId)}, so there is nothing to review or merge`
           );
           if (guidance === null) return;
           qaFeedback = `The operator looked at the empty branch and says — follow it over anything that contradicts it:\n${guidance}\n\n${qaFeedback}`;
