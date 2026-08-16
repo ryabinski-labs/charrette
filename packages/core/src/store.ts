@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { HarnessEvent, RunConfig, RunState, TaskState, RUN_TRANSITIONS, TASK_TRANSITIONS, providerFor } from "@harness/shared";
+import { HarnessEvent, RunConfig, RunState, TaskState, RUN_TRANSITIONS, TASK_TRANSITIONS, modelId } from "@harness/shared";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS runs (
@@ -252,8 +252,28 @@ export class Store {
   }
 
   /**
-   * Move every recorded run's `reviewer` onto the vendor the role is now pinned
-   * to, so runs created before the pin stay readable.
+   * Move every recorded run's `reviewer` onto the model the role currently
+   * defaults to, so runs created before a reviewer change stay readable and stay
+   * current.
+   *
+   * It began as a vendor migration — runs recorded before `reviewer` was pinned
+   * to Google hold `claude-opus-5`, which `RunConfig` now refuses — and it
+   * compared vendors, which is what a vendor migration needs. That left the
+   * ordinary case out. `gemini-3.6-flash` and `gemini-3.7-flash` are the same
+   * vendor, so a run frozen on 3.6 kept it through every `harness resume`, and
+   * the only way onto the current default was to type
+   * `--model reviewer=gemini-3.7-flash` on every resume line for the rest of that
+   * run's life. Comparing the *model* is what the operator meant by "resume
+   * picks up the new reviewer", and it subsumes the vendor case: a model on the
+   * wrong vendor is never the current default either.
+   *
+   * The trade-off, stated plainly because it is a real one: a reviewer this run
+   * was deliberately put on is now reverted at the next open, not preserved.
+   * Nothing on the row can tell a default frozen at creation from a choice
+   * somebody made, and of the two readings this is the one the operator asked
+   * for. A deliberate choice still has a home that survives — `models.reviewer`
+   * in harness.config.json, or `--model` on the resume line — because `harness
+   * resume` applies both *after* the store opens, so either wins over this.
    *
    * This is not the same problem `freezeLightTier` solves, and the difference is
    * worth stating because the two look alike. That one exists because an
@@ -274,10 +294,10 @@ export class Store {
    * which model writes the code.
    *
    * Idempotent by construction: it only touches rows whose reviewer is not
-   * already on the pinned vendor, and it puts one there.
+   * already the current default, and it writes that default.
    */
   private freezeReviewer(): void {
-    const pinned = RunConfig.parse({}).models.reviewer;
+    const wanted = RunConfig.parse({}).models.reviewer;
     const rows = this.db.prepare("SELECT id, config FROM runs").all() as { id: string; config: string }[];
     const patch = this.db.prepare("UPDATE runs SET config = ? WHERE id = ?");
     for (const row of rows) {
@@ -295,8 +315,12 @@ export class Store {
       // Absent counts too. A config old enough to predate the role would
       // otherwise read as the new default without saying so, which is the
       // failure `freezeLightTier` documents.
-      if (typeof current === "string" && providerFor(current) === providerFor(pinned)) continue;
-      models.reviewer = pinned;
+      //
+      // Compared by `modelId`, so the two spellings of one model —
+      // `gemini-3.7-flash` and `google/gemini-3.7-flash` — are one model here
+      // and a run written with the prefix is not rewritten every open.
+      if (typeof current === "string" && modelId(current) === modelId(wanted)) continue;
+      models.reviewer = wanted;
       patch.run(JSON.stringify(config), row.id);
     }
   }
