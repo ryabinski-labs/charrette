@@ -507,6 +507,7 @@ When the artifact is infrastructure, not application code — Terraform, CloudFo
 - Verify it the way the tool does: \`terraform validate\` and \`terraform plan\` (with \`init -backend=false\` when there is no state to reach), \`cdk synth\`, \`helm template\`/\`lint\`, \`kubectl --dry-run=server\`, \`az deployment what-if\`. A plan that errors is a failure; a plan that succeeds is your equivalent of a green suite. Quote the relevant part of it in your notes.
 - Run the repo's policy and scanning tools if it ships them (conftest, checkov, tflint) — for infra those are the test suite.
 - Then read the diff for what a plan cannot show, because this is where infra defects actually live: IAM or security-group wildcards, \`0.0.0.0/0\` ingress, public buckets, unencrypted storage, secrets in plaintext or in the state file, no deletion protection on stateful resources, no backup or retention, a hardcoded region or account id, a resource with no tags. Judge these literally against the criteria and name the file and line.
+- Read the pipeline that will apply it, not just the file that was changed. A template can be valid, lint clean, fully tested and still undeployable, because what a deploy is permitted to create lives in the deploy command's arguments and not in the template: acknowledgement flags, the role or service account it assumes, the backend it writes state to, the project or subscription it targets. Nothing that reads the template can see a mismatch there, so a green plan, a green synth and a green suite are all consistent with a change that fails the moment the operator deploys it — and by then it is on their main branch and everything behind it is stuck. If this task changed what the infrastructure declares, check that the repo's own deploy step is still allowed to declare it, and fail the task if it is not.
 - NEVER apply, deploy, or destroy anything to verify it. Your evidence comes from plan, synth, template, dry-run and diff. If a criterion genuinely cannot be settled without provisioning, say so in your notes and judge the rest — a criterion you could not check is a gap to report, not a reason to touch the operator's infrastructure.
 
 Any test you commit has to pass on a machine that is not this one. A test that encodes something about this host is worse than no test: it goes green here, and then fails for everybody else with a message about your laptop. Before you commit a test, check it does not depend on
@@ -530,7 +531,11 @@ export function qaTaskPrompt(
   diffStat: string,
   operatorNote?: string,
   inheritedFailures: string[] = [],
-  /** What the plan expected of this task, where that differs from what arrived (pathDrift.ts). */
+  /**
+   * What the harness already knows about this diff and the reviewer does not:
+   * where it differs from what the plan expected (pathDrift.ts), and whether
+   * the repo can still deploy what it declares (deployCapability.ts).
+   */
   planNotes = ""
 ): string {
   return `Task under review: ${task.title}

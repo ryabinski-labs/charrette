@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
@@ -99,6 +99,7 @@ import {
 import { usableProbe } from "./completionProbe.js";
 import { foreignRepoPaths, validatePlanScope } from "./repoScope.js";
 import { hasDrift, pathDrift, renderDrift } from "./pathDrift.js";
+import { namedIamResources, renderDeployCapability, scanDeployCapability, type SourceFile } from "./deployCapability.js";
 import { confirmFailures, runDeterministicChecks, splitInheritedFailures, type CheckResult } from "./qa.js";
 import { estimatePlan, renderEstimate } from "./estimate.js";
 import { renderIntegrations, scanIntegrations } from "./integrationScan.js";
@@ -277,6 +278,52 @@ function issueSummary(error: z.ZodError): string {
  */
 function outputTruncated(resultText: string, errorDetail?: string): boolean {
   return /max_tokens|output token|response exceeded/i.test(`${errorDetail ?? ""}\n${resultText}`);
+}
+
+/**
+ * Files that plausibly hold the command which deploys this repository.
+ *
+ * Read from a fixed list rather than searched for. The alternative — walking
+ * the tree for anything containing `sam deploy` — reads every file in the
+ * repository to answer a question about two of them, and the deploy command
+ * has lived in a CI workflow or a script at the root of the repo for as long
+ * as either has existed. Missing ones cost a failed `readFileSync` and nothing
+ * else.
+ */
+const DEPLOYER_FILES = ["samconfig.toml", "Makefile", "makefile", "Jenkinsfile", "buildspec.yml", ".gitlab-ci.yml", "deploy.sh", "scripts/deploy.sh"];
+
+/**
+ * The QA note for a task that declared infrastructure its own pipeline cannot
+ * create — see `deployCapability.ts` for what is being asked and why here is
+ * the last place it can be asked.
+ *
+ * Reads nothing until the diff contains a template with a named IAM resource
+ * in it, which is rare and cheap to rule out: a task that touched no YAML at
+ * all costs one `filter` over the file list. Every read is tolerant, because
+ * the changed-file list is what the diff says and a deleted file is a normal
+ * entry in it.
+ */
+function deployCapabilityNote(worktree: string, changed: string[]): string {
+  const read = (file: string): SourceFile => {
+    try {
+      return { path: file, text: readFileSync(path.join(worktree, file), "utf8") };
+    } catch {
+      return { path: file, text: "" };
+    }
+  };
+  const templates = changed.filter((f) => /\.(ya?ml|json|template)$/i.test(f)).map(read);
+  if (!templates.some((t) => namedIamResources(t.text).length)) return "";
+
+  let workflows: string[] = [];
+  try {
+    workflows = readdirSync(path.join(worktree, ".github", "workflows"))
+      .filter((f) => /\.ya?ml$/i.test(f))
+      .map((f) => `.github/workflows/${f}`);
+  } catch {
+    // No workflows directory. The repo may still deploy from a script below,
+    // and if it does not, this says nothing at all.
+  }
+  return renderDeployCapability(scanDeployCapability(templates, [...workflows, ...DEPLOYER_FILES].map(read)));
 }
 
 /**
@@ -4453,6 +4500,21 @@ export class RunController {
           ts: Date.now(),
         });
       }
+      // Whether the pipeline that will deploy this repo is allowed to create
+      // what the task just declared. Deterministic, and the only gate that can
+      // see it: the answer lives in a deploy command's arguments rather than
+      // in the template, so every check that reads the template passes.
+      const capability = deployCapabilityNote(wt.path, delta.files);
+      if (capability) {
+        this.bus.publish({
+          type: "agent.log",
+          runId,
+          taskId,
+          sessionId: workerSession ?? taskId,
+          text: "named IAM in this diff, and the repo's deploy command does not acknowledge it — CloudFormation would refuse the changeset",
+          ts: Date.now(),
+        });
+      }
       let qa;
       /**
        * A QA session that dies delivers no verdict, so the minutes it spent
@@ -4488,6 +4550,7 @@ export class RunController {
             inherited.map((i) => i.command),
             [
               renderDrift(drift),
+              capability,
               task.completionProbe ? `This task's completion probe passes: \`${task.completionProbe}\`. That settles the "everywhere" half of the job; it says nothing about whether the change is correct.` : "",
             ]
               .filter(Boolean)
