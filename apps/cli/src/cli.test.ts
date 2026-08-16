@@ -84,7 +84,10 @@ const h = vi.hoisted(() => {
       })
     ),
     resolveRepoRootMock: vi.fn((p: string) => p),
-    existsSyncMock: vi.fn(() => false),
+    // Takes the path it is asked about: `readOnlyStore` distinguishes the
+    // store's own file from everything else, so a zero-arg mock cannot express
+    // what these tests need to say.
+    existsSyncMock: vi.fn((_p: string) => false),
     mkdirSyncMock: vi.fn(),
     writeFileSyncMock: vi.fn(),
     createInterfaceMock: vi.fn(),
@@ -274,7 +277,11 @@ beforeEach(() => {
   h.loadFileConfigMock.mockReset().mockReturnValue({ config: {}, path: null });
   h.resolveGitHubMock.mockReset().mockReturnValue({ token: "gh-tok", slug: "acme/widgets", source: "git remote" });
   h.resolveRepoRootMock.mockReset().mockImplementation((p: string) => p);
-  h.existsSyncMock.mockReset().mockReturnValue(false);
+  // False for everything except the store itself: the default repo in these
+  // tests is one that has been run before, which is what every command that
+  // reads a run assumes. The never-run repo is its own case, and the tests
+  // that want it say so by making this false for the database too.
+  h.existsSyncMock.mockReset().mockImplementation((p: string) => String(p).endsWith("harness.db"));
   h.mkdirSyncMock.mockReset();
   h.writeFileSyncMock.mockReset();
   h.createInterfaceMock.mockReset();
@@ -1841,9 +1848,62 @@ describe("harness postmortem", () => {
 
     expect(printed()).toBe("No run nope in this repo.\n");
   });
+
+  it("fails when the run it was told to explain does not exist", async () => {
+    // `probe` and `regroup` already exit 1 for a named target that is not
+    // there. Reporting a typo as success is what lets the second half of
+    // `harness postmortem $ID && …` run against a run nobody looked at.
+    h.storeMethods.getRun.mockReturnValue(undefined);
+    process.exitCode = undefined;
+
+    await cli("postmortem", "nope", "--repo", "/repo");
+
+    expect(process.exitCode).toBe(1);
+    // The process is shared with every other test in this file; a leaked 1
+    // fails the next one that asserts on it.
+    process.exitCode = undefined;
+  });
+
+  it("succeeds when nothing specific was asked for and there is nothing to explain", async () => {
+    // Not the same failure: no run was named, so "No runs yet" is a true and
+    // complete answer, and a script asking "has anything happened here?"
+    // should not have to treat "no" as an error.
+    h.storeMethods.listRuns.mockReturnValue([]);
+    process.exitCode = undefined;
+
+    await cli("postmortem", "--repo", "/repo");
+
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("does not bring a state directory into being to report that there is none", async () => {
+    h.existsSyncMock.mockReturnValue(false);
+
+    await cli("postmortem", "--repo", "/repo");
+
+    expect(printed()).toBe("No runs yet.\n");
+    expect(h.StoreMock).not.toHaveBeenCalled();
+    expect(h.mkdirSyncMock).not.toHaveBeenCalled();
+    expect(h.writeFileSyncMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("harness status", () => {
+  it("leaves a repository it was only asked to read exactly as it found it", async () => {
+    // `harness status` in a checkout that has never been run used to create
+    // `.harness/`, open an empty database in it and add a `.gitignore` entry —
+    // three writes to answer a question about whether anything had happened.
+    h.existsSyncMock.mockReturnValue(false);
+
+    await cli("status", "--repo", "/repo");
+
+    expect(printed()).toBe("No runs yet.\n");
+    expect(h.StoreMock).not.toHaveBeenCalled();
+    expect(h.mkdirSyncMock).not.toHaveBeenCalled();
+    expect(h.writeFileSyncMock).not.toHaveBeenCalled();
+    expect(h.armCrashLogMock).not.toHaveBeenCalled();
+  });
+
   it("says so when the repo has never been run", async () => {
     await cli("status", "--repo", "/repo");
 

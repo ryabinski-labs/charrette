@@ -82,6 +82,26 @@ function makeDashboardFactory(want: boolean, port: number | undefined, repoPath:
   };
 }
 
+/**
+ * The store for a command that only reads, without bringing a run's worth of
+ * state into being to read it.
+ *
+ * `makeController` creates `.harness/`, arms the crash log and adds a
+ * `.gitignore` entry, because every one of its callers is about to write a
+ * run's worth of state. `status` and `postmortem` are not: they answer "what
+ * has happened here", and in a repo where nothing has, the honest answer is
+ * "nothing" — not a new state directory, an empty database and a modified
+ * `.gitignore` in someone's clean checkout. Running `harness status` to look
+ * at a repository should leave it exactly as it was found.
+ *
+ * Null means the repo has never been run, which every caller already has a
+ * sentence for.
+ */
+function readOnlyStore(repoPath: string): Store | null {
+  const db = path.join(repoPath, ".harness", "harness.db");
+  return existsSync(db) ? new Store(db) : null;
+}
+
 function makeController(
   repoPath: string,
   gateOverride?: (bus: Bus, store: Store) => GateHandler
@@ -914,10 +934,17 @@ export function buildProgram(): Command {
     .option("-r, --repo <path>", "target repo (default: the git repo containing the cwd)", process.cwd())
     .action(async (runIdArg: string | undefined, opts: { repo: string }) => {
       const repo = resolveRepoRoot(opts.repo);
-      const { store } = makeController(repo);
-      const runId = runIdArg ?? store.listRuns()[0]?.id;
-      if (!runId || !store.getRun(runId)) {
+      const store = readOnlyStore(repo);
+      const runId = store ? (runIdArg ?? store.listRuns()[0]?.id) : undefined;
+      if (!store || !runId || !store.getRun(runId)) {
         process.stdout.write(runIdArg ? `No run ${runIdArg} in this repo.\n` : "No runs yet.\n");
+        // Naming a run that does not exist is a failure to do what was asked,
+        // and `probe` and `regroup` already exit 1 on it. Reporting it as
+        // success is what lets `harness postmortem $ID && rm -rf $WORKTREE`
+        // reach the second half after a typo. Asking with no id at all is not
+        // the same thing: nothing specific was requested and "No runs yet" is
+        // a true and complete answer to it.
+        if (runIdArg) process.exitCode = 1;
         return;
       }
       process.stdout.write(`${renderPostmortem(postmortem(store, runId))}\n`);
@@ -930,7 +957,11 @@ export function buildProgram(): Command {
     .option("--all", "include finished runs (default: the open ones plus the last finished)", false)
     .action(async (opts: { repo: string; all: boolean }) => {
       const repo = resolveRepoRoot(opts.repo);
-      const { store } = makeController(repo);
+      const store = readOnlyStore(repo);
+      if (!store) {
+        process.stdout.write("No runs yet.\n");
+        return;
+      }
       const all = store.listRuns();
       // VERIFYING counts as open: the pull request is merged but the cycle has not
       // closed, and that is precisely the run the operator needs to see.
