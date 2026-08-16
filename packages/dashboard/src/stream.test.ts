@@ -6,14 +6,15 @@ import { Dashboard } from "./index.js";
 import { PAGE_HTML } from "./page.js";
 
 /**
- * The three sink methods these tests do not exercise, so a fake can name only
- * the one it is about. Spread, not optional in the interface: a controller that
- * stopped implementing one of these should break the build, not the dashboard.
+ * The sink methods these tests do not exercise, so a fake can name only the one
+ * it is about. Spread, not optional in the interface: a controller that stopped
+ * implementing one of these should break the build, not the dashboard.
  */
 const otherSink = {
   requestPitStop: () => "pit stop requested",
   cancelPitStop: () => "pit stop cancelled",
   rerouteModel: () => "worker: a \u2192 b",
+  pauseRun: () => "pausing",
 };
 
 
@@ -312,6 +313,7 @@ describe("finding a port when every one is taken", () => {
       close: async () => undefined,
       // start() registers the routes before it binds; the stub only has to
       // accept them, since nothing here ever sends a request.
+      addContentTypeParser: () => undefined,
       get: () => undefined,
       post: () => undefined,
     };
@@ -341,6 +343,7 @@ describe("finding a port when every one is taken", () => {
       close: async () => undefined,
       // start() registers the routes before it binds; the stub only has to
       // accept them, since nothing here ever sends a request.
+      addContentTypeParser: () => undefined,
       get: () => undefined,
       post: () => undefined,
     };

@@ -31,6 +31,30 @@ export function recordDashboard(repoPath: string, url: string): void {
   }
 }
 
+/**
+ * The port and token this repo's dashboard last served on, if any.
+ *
+ * Read by `resume` so a run picked up after a pause comes back at the URL the
+ * operator already has open, rather than at a new port with a new credential.
+ * Both halves matter: the port is where the tab is pointed and the fragment is
+ * what gets it past the bearer check, so recovering one without the other still
+ * leaves them looking at a dead page.
+ *
+ * Best-effort by design — a missing, unreadable or malformed file simply means
+ * "no opinion", and the caller takes a fresh port and a fresh token exactly as
+ * it did before. Nothing here may stop a resume.
+ */
+export function recordedDashboard(repoPath: string): { port: number; token: string } | null {
+  try {
+    const url = new URL(String(JSON.parse(readFileSync(linkPath(repoPath), "utf8")).url ?? ""));
+    const port = Number(url.port);
+    const token = url.hash.slice(1);
+    return port && token ? { port, token } : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Forget it, on the way out. */
 export function clearDashboard(repoPath: string): void {
   rmSync(linkPath(repoPath), { force: true });

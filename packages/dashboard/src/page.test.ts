@@ -52,6 +52,10 @@ interface Mounted {
   refresh(): Promise<void>;
   /** Serve this on the next poll. */
   serve(next: Any): void;
+  /** Every write the page sent, in order. */
+  posts: { url: string; method: string; contentType?: string }[];
+  /** What the next write is answered with. */
+  reply(res: { ok: boolean; body?: Any }): void;
 }
 
 /**
@@ -71,9 +75,19 @@ function mount(initial: Any): Mounted {
       .replace(/<\/html>\s*$/, "");
 
   let payload = initial;
-  const fetchStub = (url: string): Promise<Any> => {
+  const posts: { url: string; method: string; contentType?: string }[] = [];
+  let answer: { ok: boolean; body?: Any } = { ok: true, body: {} };
+  const fetchStub = (url: string, init?: Any): Promise<Any> => {
     if (url === "/api/state") {
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(payload) });
+    }
+    if (init && init.method === "POST") {
+      posts.push({ url, method: init.method, contentType: init.headers && init.headers["content-type"] });
+      return Promise.resolve({
+        ok: answer.ok,
+        status: answer.ok ? 200 : 409,
+        json: () => Promise.resolve(answer.body ?? {}),
+      });
     }
     // The event stream, opened once per run. Never answering it is what a run
     // with nothing to say looks like, and keeps the test to the poll path.
@@ -85,6 +99,8 @@ function mount(initial: Any): Mounted {
   return {
     refresh: () => api.refresh(),
     serve: (next: Any) => { payload = next; },
+    posts,
+    reply: (res: { ok: boolean; body?: Any }) => { answer = res; },
   };
 }
 
@@ -616,5 +632,156 @@ describe("the subscription banner", () => {
     page.serve(state({ subscriptionGate: gate({ summary: "97% of the weekly opus limit", alternatives: ["work"] }) }));
     await page.refresh();
     expect($("#sub-detail")!.textContent).toContain("97% of the weekly opus limit");
+  });
+});
+
+describe("the Pause button", () => {
+  /** Click it the way the operator does, through the listener the page attached. */
+  const clickPause = () => $("#pause")!.dispatchEvent(new Event("click"));
+  const btn = () => $("#pause") as HTMLButtonElement;
+
+  it("is offered only while a single run is still working", async () => {
+    const page = mount(state({ runs: [run({ state: "EXECUTING" })] }));
+    await page.refresh();
+    expect(btn().hidden).toBe(false);
+
+    // Browsing history, or two repositories on one page: pausing "the run"
+    // would be choosing which one for them.
+    page.serve(state({ runs: [run({ id: "r1" }), run({ id: "r2" })] }));
+    await page.refresh();
+    expect(btn().hidden).toBe(true);
+
+    page.serve(state({ runs: [run({ state: "PR_REVIEW" })] }));
+    await page.refresh();
+    expect(btn().hidden).toBe(true);
+  });
+
+  it("takes two clicks to stop a run", async () => {
+    const page = mount(state());
+    await page.refresh();
+
+    clickPause();
+    expect(page.posts).toEqual([]);
+    expect(btn().textContent).toBe("Stop the run?");
+
+    clickPause();
+    await Promise.resolve();
+    // No content-type, because there is no content. Declaring one is what made
+    // this button answer 400 rather than stop the run.
+    expect(page.posts).toEqual([{ url: "/api/runs/r1/pause", method: "POST", contentType: undefined }]);
+  });
+
+  it("stands down on its own, so an armed button is never left lying around", async () => {
+    const page = mount(state());
+    await page.refresh();
+
+    clickPause();
+    vi.advanceTimersByTime(6000);
+    expect(btn().textContent).toBe("Pause");
+
+    clickPause();
+    expect(page.posts).toEqual([]);
+  });
+
+  it("stands down on Escape", async () => {
+    const page = mount(state());
+    await page.refresh();
+
+    clickPause();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(btn().textContent).toBe("Pause");
+  });
+
+  it("says the request landed, and refuses to send a second one", async () => {
+    const page = mount(state());
+    page.reply({ ok: true, body: { message: "pausing — the agents stop at their next message" } });
+    await page.refresh();
+
+    clickPause();
+    clickPause();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(btn().textContent).toBe("Pausing…");
+    expect(btn().disabled).toBe(true);
+    // In the panel, not the header's status line: renderHeader() rewrites that
+    // on the very next poll, and pausing triggers one immediately.
+    expect($("#paused-h")!.textContent).toBe("Stopping the run…");
+    expect($("#paused-detail")!.textContent).toBe("pausing — the agents stop at their next message");
+
+    clickPause();
+    expect(page.posts).toHaveLength(1);
+  });
+
+  it("shows the refusal rather than claiming the run stopped", async () => {
+    const page = mount(state());
+    page.reply({ ok: false, body: { error: "this run is PAUSED — only a run that is still working can be paused" } });
+    await page.refresh();
+
+    clickPause();
+    clickPause();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect($("#paused-detail")!.textContent).toContain("only a run that is still working");
+    expect(($("#paused-detail p") as HTMLElement).style.color).toBe("var(--red)");
+    expect(btn().disabled).toBe(false);
+  });
+});
+
+describe("a run that has stopped", () => {
+  it("says nothing while the run is working", async () => {
+    const page = mount(state());
+    await page.refresh();
+    expect(($("#paused") as HTMLElement).style.display).toBe("none");
+  });
+
+  it("stops calling its tasks working, on a run where nothing is working", async () => {
+    // The pause leaves in-flight tasks in the state their session died in —
+    // that is what tells `resume` to requeue them from their own commits. An
+    // amber WORKING pill on a stopped run reads as "Pause did nothing".
+    const page = mount(state({ runs: [run({ state: "PAUSED", tasks: [task({ state: "WORKING" })] })] }));
+    await page.refresh();
+
+    expect($("#board .task .pill")!.textContent).toBe("PAUSED");
+    expect($("#board .task .pill")!.className).toBe("pill s-PAUSED");
+  });
+
+  it("rebuilds the card when the run pauses under it", async () => {
+    // The bug this pins: the card is cached on a signature, the run's state was
+    // not in it, and a card built while the run was EXECUTING kept saying
+    // WORKING through every poll after the pause. Mounting straight into a
+    // paused run does not reproduce it — only the transition does.
+    const page = mount(state({ runs: [run({ state: "EXECUTING", tasks: [task({ state: "WORKING" })] })] }));
+    await page.refresh();
+    expect($("#board .task .pill")!.textContent).toBe("WORKING");
+
+    page.serve(state({ runs: [run({ state: "PAUSED", tasks: [task({ state: "WORKING" })] })] }));
+    await page.refresh();
+
+    expect($("#board .task .pill")!.textContent).toBe("PAUSED");
+  });
+
+  it("does not narrate a handover on a run that has stopped", async () => {
+    const page = mount(state({ runs: [run({ state: "PAUSED", tasks: [task({ state: "WORKING" })] })] }));
+    await page.refresh();
+
+    expect($("#nowcount")!.textContent).toBe("paused");
+    expect($("#now")!.textContent).toContain("t1 stopped mid-task");
+    expect($("#now")!.textContent).not.toContain("Between agents");
+  });
+
+  it("says nothing is running when the paused run had nothing in flight", async () => {
+    const page = mount(state({ runs: [run({ state: "PAUSED", tasks: [task({ state: "PENDING" })] })] }));
+    await page.refresh();
+
+    expect($("#now")!.textContent).toBe("Paused. Nothing is running.");
+  });
+
+  it("names the command that brings the run and this page back", async () => {
+    const page = mount(state({ runs: [run({ state: "PAUSED" })] }));
+    await page.refresh();
+
+    expect(($("#paused") as HTMLElement).style.display).toBe("block");
+    expect($("#paused-detail code")!.textContent).toBe("harness resume r1");
+    expect($("#paused-detail")!.textContent).toContain("still in their worktrees");
   });
 });

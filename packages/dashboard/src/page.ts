@@ -225,10 +225,17 @@ export const PAGE_HTML = `<!doctype html>
   .hide-tool .k-tool, .hide-say .k-say, .hide-state .k-state,
   .hide-cost .k-cost, .hide-git .k-git { display:none; }
 
-  #gate, #budget, #sub, #taskgates, #pitstop { display:none; flex:none; border-bottom:1px solid var(--amber);
+  #gate, #budget, #sub, #taskgates, #pitstop, #paused { display:none; flex:none; border-bottom:1px solid var(--amber);
     background:linear-gradient(180deg, #191307, #140f06); border-left:3px solid var(--amber);
     padding:.9rem 1.25rem; }
-  #gate h2, #budget h2, #sub h2, #taskgates h2, #pitstop h2 { color:var(--amber); }
+  #gate h2, #budget h2, #sub h2, #taskgates h2, #pitstop h2, #paused h2 { color:var(--amber); }
+  /* Nothing is waiting on the operator here — the run already stopped — so this
+     one states a fact rather than asking a question, and is coloured for it. */
+  #paused { border-color:var(--line); border-left-color:var(--dim);
+            background:linear-gradient(180deg, #131313, #0f0f0f); }
+  #paused h2 { color:var(--fg); }
+  #paused p { margin:.35rem 0 .2rem; font-size:.88rem; }
+  #paused code { background:var(--sunken); border-radius:4px; padding:.08rem .35rem; }
   #taskgates .tg { border:1px solid var(--line); border-radius:6px; background:var(--sunken); padding:.6rem .8rem; margin:.5rem 0; }
   #taskgates .tg b { font-size:.9rem; }
   #taskgates .tg .why { color:var(--mute); font-size:.82rem; white-space:pre-wrap; margin:.3rem 0;
@@ -282,6 +289,10 @@ export const PAGE_HTML = `<!doctype html>
      reviewer lens. The loud button here is the free one. */
   #summon { margin-top:.55rem; border-top:1px solid var(--line); padding-top:.5rem; }
   #summon .lead { color:var(--dim); font-size:.75rem; display:block; margin-bottom:.35rem; }
+  /* The scope line, not the invitation: it is the answer to "does this go to the
+     task in the dropdown?", so it sits with the button and reads brighter. */
+  #summon .scope { color:var(--mute); font-size:.75rem; display:block; margin:-.2rem 0 .35rem; }
+  #summon .scope b { color:var(--fg); font-weight:600; }
   #summon .why { color:var(--mute); font-size:.75rem; display:block; margin-bottom:.4rem; line-height:1.45; }
   #summon .price { color:var(--faint); font-size:.72rem; display:block; margin-top:.3rem;
                    font-family:var(--mono); }
@@ -345,6 +356,10 @@ export const PAGE_HTML = `<!doctype html>
   <h1><span class="mark">harness</span><span class="repo" id="repo">&hellip;</span></h1>
   <span id="runpills"></span>
   <button id="notify" class="ghost" aria-pressed="false" onclick="toggleNotify()">Notify me</button>
+  <!-- Shown only while there is one run still working. Two clicks, because the
+       first one stops every agent in the run and an operator reaching for
+       "Notify me" should not be able to do that by missing. -->
+  <button id="pause" class="ghost" hidden>Pause</button>
   <div class="meter">
     <b id="spend">$0.00</b> <span id="cap" style="color:var(--dim)" tabindex="-1"></span><input id="capinput" type="number" step="1" min="0" aria-label="New run budget cap in USD" hidden>
     <div class="bar" id="bar"><i></i></div>
@@ -403,6 +418,17 @@ export const PAGE_HTML = `<!doctype html>
   <p id="sub-error" style="color:var(--red)" role="alert"></p>
 </section>
 
+<!--
+  Not a gate: there is nothing here to answer. The run has stopped and the page
+  is about to lose the process serving it, so this is the last thing it can say
+  — and what it has to say is the one command that brings both back.
+-->
+<section id="paused" aria-labelledby="paused-h">
+  <h2 id="paused-h">Paused &mdash; nothing is running</h2>
+  <div id="paused-detail"></div>
+  <p id="paused-note" style="color:var(--dim)">This page comes back at this same address. Leave the tab open and reload it after the resume.</p>
+</section>
+
 <div class="shell">
   <div class="side">
     <div class="panel">
@@ -415,8 +441,15 @@ export const PAGE_HTML = `<!doctype html>
         <button type="submit">Send feedback</button>
         <small id="fb-note"></small>
       </form>
+      <!--
+        The question above the button says "the agent"; this one is about the
+        whole run, and it reads the same textarea. Nothing said so, so the only
+        project-level control on the page looked like a third thing to do to the
+        task named in the dropdown.
+      -->
       <div id="summon" style="display:none" aria-live="polite">
         <small class="lead">Not sure it&rsquo;s building the right thing?</small>
+        <small class="scope">Asks about <b>the whole run</b>, not the task selected above.</small>
         <div id="summon-armed" style="display:none">
           <small class="why">The demo agent starts the half-built product and drives what you asked
             about, every reviewer lens reads it, then the PM answers you and recommends what to do
@@ -825,6 +858,18 @@ function renderNow() {
     const busy = [];
     for (const run of runs) for (const t of run.tasks) if (groupOf[t.state] === "live") busy.push(t.id);
     const waited = Date.now() - idleSince;
+    // A paused run leaves its tasks in the state their sessions died in, so the
+    // "live" ones above are real rows about work that has stopped. Narrating
+    // them as a handover — "one finished and the next has not started" — tells
+    // the operator the run is still moving, which is the one thing they clicked
+    // Pause to make untrue.
+    if (runs.length && runs.every((r) => r.state === "PAUSED")) {
+      $("nowcount").textContent = "paused";
+      box.append(el("div", "empty", busy.length
+        ? "Paused. " + busy.join(", ") + " stopped mid-task and pick up from their own commits on resume."
+        : "Paused. Nothing is running."));
+      return;
+    }
     $("nowcount").textContent = busy.length ? "between agents" : "idle";
     box.append(el("div", "empty", !busy.length
       ? "No agent is running \\u2014 the harness is waiting on you, on git, or between tasks."
@@ -1025,7 +1070,7 @@ function armSummon() {
   // fine?" is the single most likely way to waste one, and the cheapest moment
   // to stop it is before the spending button has ever been shown.
   if (!$("fb-text").value.trim()) {
-    note.textContent = "write the question the PM should answer first";
+    note.textContent = "write the question the PM should answer in the box above";
     $("fb-text").focus();
     return;
   }
@@ -1054,6 +1099,116 @@ async function postPitStop(payload) {
   if (res.ok && !payload.cancel) $("fb-text").value = "";
   disarmSummon();
   refresh();
+}
+
+/* ---------- pausing the run ---------- */
+
+/*
+ * The run this page can stop: exactly one, and still working.
+ *
+ * Several runs at once is the standalone dashboard browsing a repository's
+ * history, and a single Pause button there would be choosing between them on
+ * the operator's behalf. One is the case the button exists for.
+ */
+function pausableRun() {
+  const working = runs.filter((r) => r.state === "EXECUTING" || r.state === "INTEGRATING");
+  return working.length === 1 ? working[0] : null;
+}
+
+/* Clicked once and waiting for the second. */
+let pauseArmed = false;
+/* The run the pause has already been asked for, so the button keeps saying so
+   for the seconds it takes the agents to reach their next message. */
+let pauseSentFor = "";
+let pauseDisarm = 0;
+/* What the server said about it, and whether that was a refusal.
+ *
+ * It goes in the panel below rather than in the header's status line, which is
+ * rebuilt by renderHeader() on the very next poll — and the pause triggers one
+ * immediately, so a sentence put there was gone before it was read.
+ */
+let pauseSaid = "";
+let pauseRefused = false;
+
+function disarmPause() {
+  pauseArmed = false;
+  clearTimeout(pauseDisarm);
+}
+
+function renderPause() {
+  const btn = $("pause");
+  const run = pausableRun();
+  if (!run) {
+    // The run stopped, finished, or there is more than one. Either way the
+    // authorisation the armed button was carrying is about nothing now.
+    btn.hidden = true;
+    disarmPause();
+    pauseSentFor = "";
+    pauseSaid = "";
+    return;
+  }
+  btn.hidden = false;
+  const sent = pauseSentFor === run.id;
+  btn.disabled = sent;
+  btn.className = pauseArmed ? "reject" : "ghost";
+  btn.textContent = sent ? "Pausing\\u2026" : pauseArmed ? "Stop the run?" : "Pause";
+}
+
+/* First click arms, second stops the run. */
+async function clickPause() {
+  const run = pausableRun();
+  if (!run || pauseSentFor === run.id) return;
+  if (!pauseArmed) {
+    pauseArmed = true;
+    // It stands down on its own: an armed button left on screen becomes an
+    // ordinary-looking button again by the time anyone comes back to it.
+    pauseDisarm = setTimeout(() => { disarmPause(); renderPause(); }, 6000);
+    renderPause();
+    return;
+  }
+  disarmPause();
+  /* No content-type: there is no content. The other posts on this page all
+     carry a body, and copying their headers here is what made this button
+     answer 400 instead of stopping the run. */
+  const res = await fetch("/api/runs/" + encodeURIComponent(run.id) + "/pause", {
+    method: "POST",
+    headers: headers,
+  });
+  const body = await res.json().catch(() => ({}));
+  if (res.ok) pauseSentFor = run.id;
+  pauseRefused = !res.ok;
+  pauseSaid = res.ok ? body.message || "pausing" : body.error || "could not reach the run";
+  renderPause();
+  renderPaused();
+  refresh();
+}
+
+/* What the page says while the run is stopping, and once it has stopped. */
+function renderPaused() {
+  const paused = runs.filter((r) => r.state === "PAUSED");
+  const box = $("paused-detail");
+  $("paused").style.display = paused.length || pauseSaid ? "block" : "none";
+  // Only the stopped run gets the resume instruction. Saying it while agents
+  // are still finishing their turn would be telling the operator to start a
+  // second harness against a repository this one still holds worktrees in.
+  $("paused-h").textContent = paused.length ? "Paused \\u2014 nothing is running" : "Stopping the run\\u2026";
+  $("paused-note").style.display = paused.length ? "block" : "none";
+  box.textContent = "";
+  if (!paused.length) {
+    if (pauseSaid) {
+      const p = el("p", null, pauseSaid);
+      if (pauseRefused) p.style.color = "var(--red)";
+      box.append(p);
+    }
+    return;
+  }
+  for (const run of paused) {
+    const p = el("p", null, null);
+    p.append("Run " + run.id + " is paused. Pick it up with ");
+    p.append(el("code", null, "harness resume " + run.id));
+    p.append(" \\u2014 every commit its agents made is still in their worktrees.");
+    box.append(p);
+  }
 }
 
 /* ---------- live model routing ---------- */
@@ -1193,10 +1348,25 @@ let cards = new Map();
 /** Group sections, kept across renders for the same reason the cards are. */
 const groups = new Map();
 
+/*
+ * A task whose session was stopped by the operator rather than by finishing.
+ *
+ * Derived rather than stored: pausing does not move the task, because leaving it
+ * WORKING is exactly what tells a resume to requeue it from its own commits.
+ * Read by the card and by the signature below, from one place, because a card
+ * that renders on a value its signature does not include is a card that never
+ * rebuilds — which is how the pill went on saying WORKING on a stopped run
+ * through every poll, in a browser, with the panel above it saying "paused".
+ */
+function taskStopped(t, run) {
+  return run.state === "PAUSED" && groupOf[t.state] === "live";
+}
+
 function cardSig(t, run, isDone) {
   return JSON.stringify([
     t.state, t.title, t.id, t.dependsOn, t.qaIterations, t.githubIssueNumber, t.prNumber,
     t.assignedSkills, t.errorSummary, t.spec, t.acceptanceCriteria, run.githubRepo, isDone,
+    taskStopped(t, run),
   ]);
 }
 
@@ -1309,7 +1479,10 @@ function taskCard(t, run, isDone) {
   const card = el("div", "task st-" + t.state + (isDone ? " done" : ""));
   const top = el("div", "top");
   top.append(el("span", "title", t.title));
-  top.append(el("span", "pill s-" + t.state, t.state));
+  // The pill must not report a stopped task as an agent at work: an amber
+  // WORKING on a run that has stopped reads as "the Pause button did nothing".
+  const stopped = taskStopped(t, run);
+  top.append(el("span", "pill s-" + (stopped ? "PAUSED" : t.state), stopped ? "PAUSED" : t.state));
   card.append(top);
   const sub = el("div", "sub");
   sub.append(el("span", null, t.id));
@@ -1815,7 +1988,7 @@ async function refresh() {
     notify("Subscription nearly spent", sg.summary + " — the run is paused and waiting for you", "subscription");
   }
   if (!sg) subShown = null;
-  renderHeader(); renderNow(); renderFeedback(); renderSummon(); renderBoard(); renderPrs(); renderRunInfo();
+  renderHeader(); renderNow(); renderFeedback(); renderSummon(); renderPause(); renderPaused(); renderBoard(); renderPrs(); renderRunInfo();
   for (const run of runs) stream(run.id);
 }
 
@@ -1963,6 +2136,7 @@ $("fb-task").addEventListener("change", () => {
   fbChosen = $("fb-task").value;
   if (fbChosen) { $("fb-note").style.color = ""; $("fb-note").textContent = ""; }
 });
+$("pause").addEventListener("click", clickPause);
 $("summon-ask").addEventListener("click", armSummon);
 $("summon-go").addEventListener("click", () => postPitStop({ question: $("fb-text").value.trim() }));
 /* Editing the question after arming disarms: the armed button was offered for
@@ -1970,7 +2144,9 @@ $("summon-go").addEventListener("click", () => postPitStop({ question: $("fb-tex
    its authorisation across a rewrite is authorising something nobody read. */
 $("fb-text").addEventListener("input", () => { if (summonArmed) { disarmSummon(); $("summon-price").textContent = ""; } });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && summonArmed) { disarmSummon(); $("summon-price").textContent = ""; }
+  if (e.key !== "Escape") return;
+  if (summonArmed) { disarmSummon(); $("summon-price").textContent = ""; }
+  if (pauseArmed) { disarmPause(); renderPause(); }
 });
 refresh();
 setInterval(refresh, 5000);

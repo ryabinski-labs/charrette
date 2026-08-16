@@ -551,6 +551,24 @@ If you resume headlessly, with no terminal to answer in, the run still plans fro
 the assignment, but each dropped question is named in the log and counted in the
 state-change reason rather than disappearing.
 
+A run that was **paused** on purpose resumes onto the dashboard it was serving —
+same port, same token, so the tab you left open still works. See
+[§13.1](#131-stopping-on-purpose).
+
+### `harness pause [runId]`
+
+```bash
+harness pause             # the run this repo is running
+harness pause 3f9a2c11    # a specific one
+```
+
+Stops the run at every agent's next message and leaves it `PAUSED`. The run lives
+in another process — the one holding the worktrees and the sessions — so this is
+a request sent to its dashboard, and a repo with no dashboard running has no
+reachable run to pause. What it prints is the `harness resume` line that brings it
+back, and the URL it will come back on. Full semantics in
+[§13.1](#131-stopping-on-purpose).
+
 ### `harness postmortem [runId]`
 
 ```bash
@@ -1028,6 +1046,13 @@ else sits in a fixed sidebar.
   60% and red past 85%. It only moves when a session *ends*, because that is when
   usage is booked; the note under the meter says so rather than leaving you to
   wonder why a long planner run reads `$0.00`.
+- **Pause** — beside the cost meter while exactly one run is still working. Two
+  clicks: the first arms it, the second stops the run, and it stands down on its
+  own after six seconds or on Escape — the button next to it grants notification
+  permission, and missing that one must not be able to stop a run. Once the
+  request lands the page says so until the run actually settles, then tells you
+  the `harness resume` line that brings both the run and this page back. Full
+  semantics in [§13.1](#131-stopping-on-purpose).
 - **Gate 1** — when the plan needs approval it takes over the full width above
   everything else, because it is blocking the run.
 - **Budget cap reached** — the same treatment when a cap trips ([§12](#12-budget-control)).
@@ -1510,6 +1535,44 @@ harness status            # find the runId and where it stopped
 harness resume <runId>
 ```
 
+### 13.1 Stopping on purpose
+
+Ctrl-C is a crash the harness happens to survive: the agents that were mid-turn
+lose that turn, and the process dies before it can say what state it left behind.
+A planned stop — you are closing the laptop, or the machine is needed for
+something else — has its own control.
+
+```bash
+harness pause             # stop the run this repo is running
+harness pause <runId>     # or name one
+```
+
+or the **Pause** button in the dashboard header, which takes two clicks because
+the first one stops every agent in the run.
+
+What happens:
+
+- Every live session stops at its **next message** — a worker mid-edit, a QA
+  agent mid-verdict, the planner. Nothing is cancelled and nothing is rolled
+  back: each session books what it spent and closes, and every commit its worker
+  had already made stays in that task's worktree.
+- The scheduler stops dispatching, so no new task starts.
+- The run parks in `PAUSED`, and `harness resume <runId>` picks it up. A task
+  that was mid-flight is requeued with its worktree intact, so the next session
+  starts by reading what the last one had already committed.
+- The dashboard **comes back at the same URL**, port and token both — the tab
+  you left open is the tab you return to. Reload it after the resume. If
+  something else has taken that port in the meantime, the resume still happens,
+  on the next free one.
+
+What is lost is exactly what an agent had in its head and had not committed —
+the current turn, not the current task. Pausing costs at most one turn per
+running agent.
+
+A pause is only accepted while the run is still working (`EXECUTING` or
+`INTEGRATING`). Anything else — a run waiting at a gate you have not answered,
+one already in `PR_REVIEW` — is refused with the state it is actually in.
+
 | Symptom | What happened | What to do |
 |---|---|---|
 | Task in `NEEDS_HUMAN`, reason `QA iteration cap` | 3 worker↔QA rounds without a PASS | read the QA reasons in the log, fix it yourself in the task worktree and commit, or drop the task and replan |
@@ -1518,6 +1581,7 @@ harness resume <runId>
 | Tasks `CANCELLED`, reason `unreachable` | their dependencies parked, so they can never become ready | expected fallout; fix the blocking task and start a new run |
 | Run `FAILED` at planning | planner produced invalid JSON/DAG 3× | the assignment is probably ambiguous — rewrite it more concretely |
 | Run `FAILED` at planning, reason `cut off mid-JSON` | the plan was longer than one message allows, 3× | the assignment covers too much — split it, or name a narrower scope |
+| Run in `PAUSED`, reason `the operator paused the run` | you stopped it with `harness pause` or the dashboard's Pause button | `harness resume <runId>`, on the same dashboard URL |
 | Run in `BUDGET_HOLD` | a cap was reached and you declined to raise it | `harness resume <runId>` re-opens the gate; raise it there |
 | `BudgetExceeded` | cap reached and declined | raise the cap, `resume` |
 | Run in `LIMIT_HOLD` | the account's plan is nearly spent and you declined to carry on ([§12.1](#121-subscription-limits)) | `harness resume <runId> --account <name>` to continue on another subscription, or resume after the window resets |

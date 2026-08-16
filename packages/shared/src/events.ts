@@ -145,6 +145,15 @@ export const HarnessEvent = z.discriminatedUnion("type", [
     /** What the operator had asked, so the log says what was called off. */
     question: z.string().default(""),
   }),
+  // The operator asked the run to stop and be picked up later. Recorded when it
+  // is *asked for* rather than when it takes effect, because the gap between
+  // the two is the interesting part: every session has to reach its next
+  // message to notice, and a feed that only showed the finished pause would
+  // leave the operator watching a page that appears to be ignoring them.
+  z.object({
+    ...base,
+    type: z.literal("run.pause_requested"),
+  }),
   // A pit stop: the run stopped to show the operator what it has built so far.
   // `epicIds` are the epics this stop covers, and they are what stops a second
   // pit stop firing for the same finished epic — so this event is the whole of
