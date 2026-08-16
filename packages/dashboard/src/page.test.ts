@@ -1191,6 +1191,12 @@ describe("what a screen reader and a contrast checker get", () => {
     if (!m) throw new Error(`no --${name} in the palette`);
     return m[1]!;
   };
+  /** The declarations of the page's own rule for a selector, first one wins. */
+  const rule = (selector: string): string => {
+    const m = new RegExp(`(?:^|[\\s,])${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{([^}]*)\\}`, "m").exec(PAGE_HTML);
+    if (!m) throw new Error(`no rule for ${selector}`);
+    return m[1]!;
+  };
 
   it("has one main landmark holding the content", async () => {
     const page = mount(state());
@@ -1207,6 +1213,31 @@ describe("what a screen reader and a contrast checker get", () => {
     expect(mains[0]!.querySelector("header")).toBeNull();
   });
 
+  /**
+   * The landmark above cost the page its scrolling. body is a flex column with
+   * `overflow:hidden`, and .shell claims the leftover height with `flex:1;
+   * min-height:0`. Inserting <main> between them made <main> the flex item —
+   * `flex:0 1 auto` on a block box, so it sized to its content, .shell's
+   * `flex:1` resolved against nothing, and .side never got a bounded height to
+   * scroll inside. Measured on the running page at 1512x900: 3,498px of board
+   * clipped to 900px, `window.scrollY` and `.side.scrollTop` both pinned at 0
+   * after a 3,000px wheel. Every row past the fold was unreachable.
+   *
+   * happy-dom does not lay out, so the assertion is on the chain itself: each
+   * element between the scroll container and the scroll region has to pass the
+   * height down, and `min-height:0` is what lets it shrink enough to clip.
+   */
+  it("passes the viewport height down to the panel that scrolls", () => {
+    for (const selector of ["main", ".shell", ".side", ".feed"]) {
+      expect(rule(selector)).toContain("min-height:0");
+    }
+    for (const selector of ["main", ".shell"]) {
+      expect(rule(selector)).toContain("flex:1");
+    }
+    // And the one that actually scrolls, at the bottom of that chain.
+    expect(rule(".side")).toContain("overflow-y:auto");
+  });
+
   it("keeps content text off the token that cannot carry it", () => {
     // Measured by axe on the running page: --faint is 2.95:1 on the panel and
     // 3.25:1 on a card, against a 4.5:1 floor at these sizes. --dim clears it
@@ -1218,11 +1249,6 @@ describe("what a screen reader and a contrast checker get", () => {
   });
 
   it("does not paint the panel counts or a task's id in it", () => {
-    const rule = (selector: string): string => {
-      const m = new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{([^}]*)\\}`).exec(PAGE_HTML);
-      if (!m) throw new Error(`no rule for ${selector}`);
-      return m[1]!;
-    };
     expect(rule("h2 .count")).toContain("var(--dim)");
     expect(rule("h2 .count")).not.toContain("var(--faint)");
     expect(rule(".task .sub")).toContain("var(--dim)");
