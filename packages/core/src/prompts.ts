@@ -586,7 +586,8 @@ ${toolbelt}${skills}
 
 Your FINAL message must be exactly one JSON object inside a \`\`\`json fence:
 {"recommendation":string,
- "checked":[{"claim":string,"status":"confirmed"|"refuted"|"unverified","evidence":string}]${probe ? `,\n "probe":string|null` : ""}${
+ "checked":[{"claim":string,"status":"confirmed"|"refuted"|"unverified","evidence":string}],
+ "runbook":{"blocked":string,"steps":[{"do":string,"command":string}],"sendBack":string}|null${probe ? `,\n "probe":string|null` : ""}${
    decider
      ? `,
  "needsOperator":boolean,
@@ -595,6 +596,12 @@ Your FINAL message must be exactly one JSON object inside a \`\`\`json fence:
  }
 
 \`checked\` carries one entry per distinct claim you found in step 1 — \`evidence\` cites the file and line you looked at, or says why you could not settle it. Prefer "unverified" over a guess.
+
+\`runbook\` is the part a person has to do, written so they can do it without reading anything else. Set it whenever your answer depends on something outside the repository — a deploy, a credential, an account, a service started, a product decision — and \`null\` whenever the worker can act on the recommendation alone. Most escalations are \`null\`; do not manufacture chores for the operator.
+
+When you do set it: \`blocked\` is one sentence on why this cannot be an agent's job. \`steps\` are literal and ordered — each \`command\` is a command that can be pasted into a shell exactly as written, with the real repository, workflow, path or identifier filled in rather than a placeholder, and \`do\` says what it accomplishes. Omit \`command\` for a step that is genuinely not a command (approve something, decide something, look at a screen). \`sendBack\` names what the operator should paste into the gate when they are done — the output, the URL, the status code, the SHA — precisely enough that they can collect it while they are there. "Confirm it worked" is not an answer the worker can use; "the HTTP status and the first line of the JSON body from step 3" is.
+
+A runbook is read by someone who is not in front of this worktree and may be reading it on a phone. Do not send them to look something up that you could have looked up: you have the repository, so put the actual stack name, the actual workflow file, the actual account in the command.
 
 The recommendation is instructions addressed to the worker's next attempt. Carry every confirmed finding into it; say which to do first when one blocks another. Be as long as the findings require and no longer — no restating the task, no padding. If the operator must do something outside the repo first (start a service, provide credentials), open with that: "After you start X, tell the worker: ...". If you genuinely cannot tell what is wrong, say what to check rather than guessing.${
     probe

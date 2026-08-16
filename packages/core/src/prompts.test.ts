@@ -376,6 +376,24 @@ describe("what the advisor is told about the repository", () => {
     for (const p of [draft, decides]) expect(p).toMatch(/Check the cheap ones against the code/);
   });
 
+  /**
+   * The operator's half of an escalation, and the reason it has to be asked for
+   * rather than left to the prose: run 7ef8fb4d parked a task on "this needs a
+   * real deploy and a real magic-link token" — true, complete, and it left the
+   * operator to work out which repository, which workflow, which account, and
+   * what evidence would count as an answer.
+   */
+  it("asks for a runbook whoever is answering, and says when not to write one", () => {
+    for (const p of [advisorSystemPrompt(), advisorSystemPrompt("", "product-manager")]) {
+      expect(p).toContain('"runbook":{"blocked":string,"steps":[{"do":string,"command":string}],"sendBack":string}|null');
+      expect(p).toContain("Most escalations are `null`; do not manufacture chores for the operator");
+      // The two failure modes that make a runbook useless: a placeholder
+      // command, and an answer the worker cannot act on.
+      expect(p).toMatch(/rather than a placeholder/);
+      expect(p).toContain('"Confirm it worked" is not an answer the worker can use');
+    }
+  });
+
   it("offers the probe field only at the gate the probe opened", () => {
     // Every other escalation is about the attempt, and a knob for rewriting the
     // task's definition of done has no business being on the table there.

@@ -3,6 +3,28 @@ import { AgentRole, GateKind, GateState, RunState, TaskState } from "./states.js
 
 const base = { runId: z.string(), ts: z.number().int() };
 
+/**
+ * The operator's half of an escalation, as steps rather than prose.
+ *
+ * It rides on the gate event rather than being folded into `recommendation` and
+ * left there, because the two readers want different things from it. The
+ * dashboard and the terminal want the rendered text; anything that has to reach
+ * a person who is not looking at either — mail, chat, a pager — wants the steps
+ * apart from each other so it can lay them out. Rendering happens once, in
+ * `renderRunbook`; keeping the structure here is what stops every other channel
+ * from having to parse that rendering back.
+ *
+ * `command` is optional because half of what an operator has to do has no
+ * command — approve a plan, create an account, decide something — and a shape
+ * that demands one gets invented shell.
+ */
+export const RunbookShape = z.object({
+  blocked: z.string().default(""),
+  steps: z.array(z.object({ do: z.string(), command: z.string().optional() })).default([]),
+  sendBack: z.string().default(""),
+});
+export type Runbook = z.infer<typeof RunbookShape>;
+
 export const HarnessEvent = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("run.created"), assignment: z.string(), repoPath: z.string() }),
   z.object({ ...base, type: z.literal("run.state_changed"), from: RunState, to: RunState, reason: z.string().default("") }),
@@ -60,7 +82,20 @@ export const HarnessEvent = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("task.qa_verdict"), taskId: z.string(), verdict: z.enum(["PASS", "FAIL"]), iteration: z.number().int(), detail: z.unknown() }),
   // The task-escalation gate (GateKind has named it since v0.0): a task hit a cap
   // and the operator is being asked for guidance before it is parked for good.
-  z.object({ ...base, type: z.literal("task.gate_opened"), taskId: z.string(), why: z.string(), iterations: z.number().int(), recommendation: z.string().default("") }),
+  // `runbook` is null on every gate a worker can act on alone, which is most of
+  // them, and on every row written before it existed.
+  z.object({
+    ...base,
+    type: z.literal("task.gate_opened"),
+    taskId: z.string(),
+    why: z.string(),
+    iterations: z.number().int(),
+    recommendation: z.string().default(""),
+    // Optional rather than defaulted, so the field is absent from the thousands
+    // of gate rows written before it existed and from every publisher that has
+    // no runbook to attach, instead of carrying an explicit null apiece.
+    runbook: RunbookShape.nullable().optional(),
+  }),
   // `decidedBy` names the skill that answered, or "operator" when a person did.
   // The old rows have no such field and were all answered by a person, which is
   // exactly what the default reads back as.

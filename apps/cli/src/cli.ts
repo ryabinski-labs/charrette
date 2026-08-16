@@ -20,6 +20,7 @@ import { TerminalChat } from "./chat.js";
 import { armCrashLog } from "./crashlog.js";
 import { clearDashboard, liveDashboardUrl, recordDashboard, recordedDashboard } from "./dashboardLink.js";
 import { notifyDone } from "./notify.js";
+import { mailBanner, mailTarget, watchGateMail } from "./gateMail.js";
 
 /**
  * The run a dashboard is currently working on, so `harness pause` does not make
@@ -605,7 +606,7 @@ export function buildProgram(): Command {
       if (await repoBlocked(resolveRepoRoot(opts.repo))) return;
       const { repo, config, dashboard: wantDashboard, dashboardPort, chat: wantChat, banner } = resolveRun(cmd, opts, assignment);
       const dash = makeDashboardFactory(wantDashboard, dashboardPort, repo);
-      const { controller, store, liveRunId } = makeController(repo, dash.gateOverride);
+      const { controller, store, bus, liveRunId } = makeController(repo, dash.gateOverride);
       // A new run forks from the base branch as it is right now. Another run whose
       // work is merged locally but not yet in that base is invisible to it — so the
       // two plan against different trees, build the same thing twice, and the second
@@ -634,10 +635,13 @@ export function buildProgram(): Command {
         banner.push("dashboard  off — the plan gate will be resolved in this terminal");
       }
       banner.push("           type 'budget run <usd>' any time to raise the cap before it's hit");
+      const mail = mailTarget();
+      banner.push(...mailBanner(mail));
       process.stdout.write(`\n${banner.map((l) => `  ${l}`).join("\n")}\n`);
 
       const chat = wantChat || assignment === undefined ? new TerminalChat() : undefined;
       const seed = assignment ?? (await chat!.promptSeed(wantChat));
+      const stopGateMail = watchGateMail(bus, { project: path.basename(repo), url: url ?? "", target: mail });
       const stopBudgetWatch = watchBudgetCommands(controller, liveRunId);
       try {
         const runId = await controller.startRun(seed, config, wantChat ? chat : undefined);
@@ -646,6 +650,7 @@ export function buildProgram(): Command {
         notifyDone(`${path.basename(repo)} — run stopped`, e instanceof Error ? e.message : String(e));
         throw e;
       } finally {
+        stopGateMail();
         stopBudgetWatch();
         chat?.close();
         await dash.stop();
@@ -669,7 +674,7 @@ export function buildProgram(): Command {
       const fromCli = (name: string) => cmd.getOptionValueSource(name) === "cli";
       const wantDashboard = fromCli("dashboard") ? opts.dashboard === true : file.dashboard ?? true;
       const dash = makeDashboardFactory(wantDashboard, fromCli("port") ? port(opts.port!) : file.dashboardPort, repo, true);
-      const { controller, store } = makeController(repo, dash.gateOverride);
+      const { controller, store, bus } = makeController(repo, dash.gateOverride);
       dash.connect(controller);
       // Resumable = interrupted mid-run, or finished with parked tasks, cancelled
       // tasks whose blockers have since merged, or merged work whose PRs never
@@ -845,6 +850,9 @@ export function buildProgram(): Command {
       // readline for any other resume would hold stdin for a question never asked.
       const chat = existing?.state === "INTAKE" ? new TerminalChat() : undefined;
       if (chat) process.stdout.write("This run stopped mid-conversation — picking it up where it left off.\n");
+      const mail = mailTarget();
+      mailBanner(mail).forEach((l) => process.stdout.write(`${l}\n`));
+      const stopGateMail = watchGateMail(bus, { project: path.basename(repo), url: url ?? "", target: mail });
       const stopBudgetWatch = watchBudgetCommands(controller, () => runId);
       try {
         await controller.resume(runId, chat);
@@ -853,6 +861,7 @@ export function buildProgram(): Command {
         notifyDone(`${path.basename(repo)} — run stopped`, e instanceof Error ? e.message : String(e));
         throw e;
       } finally {
+        stopGateMail();
         stopBudgetWatch();
         chat?.close();
         await dash.stop();
