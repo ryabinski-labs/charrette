@@ -785,3 +785,89 @@ describe("a run that has stopped", () => {
     expect($("#paused-detail")!.textContent).toContain("still in their worktrees");
   });
 });
+
+describe("a task that is waiting on the operator", () => {
+  const parked = (over: Record<string, Any> = {}) =>
+    task({ id: "t1", state: "NEEDS_HUMAN", errorSummary: "the task branch is still empty after 5 attempts", ...over });
+
+  it("carries the control that answers it, which no other card needs", async () => {
+    // The card says NEEDS YOU and had nothing on it to act with: the composer
+    // that revives the task is two panels up, behind a dropdown listing every
+    // open task, with nothing anywhere connecting the two.
+    const page = mount(state({ runs: [run({ tasks: [parked(), task({ id: "t2", state: "WORKING" })] })] }));
+    await page.refresh();
+
+    const buttons = all("#board .task button.answer");
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0]!.closest(".task")!.textContent).toContain("t1");
+  });
+
+  it("aims the composer at that task and says what answering will do", async () => {
+    const page = mount(state({ runs: [run({ tasks: [parked()] })] }));
+    await page.refresh();
+
+    ($("#board .task button.answer") as HTMLButtonElement).dispatchEvent(new Event("click"));
+
+    expect(($("#fb-task") as HTMLSelectElement).value).toBe("r1/t1");
+    expect($("#fb-note")!.textContent).toContain("Answering reopens t1");
+    expect(document.activeElement).toBe($("#fb-text"));
+  });
+
+  it("does not promise a reopen on a run that has stopped", async () => {
+    // The controller only reopens a parked task while the scheduler is looping.
+    // On a paused run the note waits instead, and saying otherwise is a promise
+    // the operator watches not happen.
+    const page = mount(state({ runs: [run({ state: "PAUSED", tasks: [parked()] })] }));
+    await page.refresh();
+
+    ($("#board .task button.answer") as HTMLButtonElement).dispatchEvent(new Event("click"));
+
+    expect($("#fb-note")!.textContent).toContain("waits with the task");
+    expect($("#fb-note")!.textContent).not.toContain("reopens");
+  });
+
+  it("refuses to aim at a task the composer no longer lists", async () => {
+    // Between the poll that drew the card and the click, the task merged. A
+    // <select> silently keeps its old value, which would send the answer to
+    // whichever task happened to be selected.
+    const page = mount(state({ runs: [run({ tasks: [parked()] })] }));
+    await page.refresh();
+    const button = $("#board .task button.answer") as HTMLButtonElement;
+
+    page.serve(state({ runs: [run({ tasks: [task({ id: "t2", state: "WORKING" })] })] }));
+    await page.refresh();
+    button.dispatchEvent(new Event("click"));
+
+    expect($("#fb-note")!.textContent).toContain("not open for feedback any more");
+    expect(($("#fb-note") as HTMLElement).style.color).toBe("var(--red)");
+  });
+
+  it("lets the whole reason be read, not just the first 220 characters", async () => {
+    const long = "the task branch is still empty after 5 attempts: ".padEnd(400, "x") + "END";
+    const page = mount(state({ runs: [run({ tasks: [parked({ errorSummary: long })] })] }));
+    await page.refresh();
+
+    expect($("#board .task .why")!.textContent!.length).toBeLessThan(long.length);
+    expect($("#board .task .whymore .why")!.textContent).toBe(long);
+    expect($("#board .task .whymore summary")!.textContent).toBe("the rest of the reason");
+  });
+
+  it("adds nothing to unclip when the reason already fits", async () => {
+    const page = mount(state({ runs: [run({ tasks: [parked()] })] }));
+    await page.refresh();
+
+    expect($("#board .task .whymore")).toBeNull();
+  });
+
+  it("keeps the reason open across a poll", async () => {
+    const long = "parked: ".padEnd(400, "y");
+    const page = mount(state({ runs: [run({ tasks: [parked({ errorSummary: long })] })] }));
+    await page.refresh();
+    open($("#board .task .whymore")!);
+
+    page.serve(state({ runs: [run({ spentUsd: 9, tasks: [parked({ errorSummary: long })] })] }));
+    await page.refresh();
+
+    expect(($("#board .task .whymore") as HTMLDetailsElement).open).toBe(true);
+  });
+});
