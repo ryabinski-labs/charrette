@@ -310,14 +310,32 @@ describe("a run created before the reviewer was pinned to Google", () => {
     cleanup();
   });
 
-  it("accepts any Google reviewer a run already had, rather than forcing the default id", () => {
-    // The pin is about the vendor. A run recorded on another Gemini model is
-    // already compliant, and rewriting it would be the silent model swap this
-    // whole file exists to prevent.
+  it("moves a run frozen on a superseded Gemini onto the reviewer default", () => {
+    // The case the vendor comparison could not see, and the one an operator
+    // actually hits. `gemini-3.6-flash` and today's default are the same vendor,
+    // so a run frozen on 3.6 kept it through every resume and the only way onto
+    // the current reviewer was to retype `--model reviewer=…` on every resume
+    // line for the rest of that run's life. A plain `harness resume` picks it up
+    // now — which is the whole point of the migration, and was true of the
+    // Anthropic→Google move only by accident of the vendor changing too.
     const { dbPath, cleanup } = onDisk();
-    const runId = runFromBeforeTheReviewerPin(dbPath, "gemini-3.1-pro-preview");
+    const runId = runFromBeforeTheReviewerPin(dbPath, "gemini-3.6-flash");
 
-    expect(new Store(dbPath).getRun(runId)!.config.models.reviewer).toBe("gemini-3.1-pro-preview");
+    expect(new Store(dbPath).getRun(runId)!.config.models.reviewer).toBe(GEMINI);
+    cleanup();
+  });
+
+  it("reads the two spellings of the default as one model, so a prefixed row is left alone", () => {
+    // `google/gemini-3.7-flash` and `gemini-3.7-flash` name the same model, and
+    // a config written with the prefix must not be rewritten on every open —
+    // that is a row churning in the database to say what it already said.
+    const { dbPath, cleanup } = onDisk();
+    const runId = runFromBeforeTheReviewerPin(dbPath, `google/${GEMINI}`);
+
+    const raw = JSON.parse(
+      (new Store(dbPath).db.prepare("SELECT config FROM runs WHERE id = ?").get(runId) as { config: string }).config
+    ) as { models: Record<string, string> };
+    expect(raw.models.reviewer).toBe(`google/${GEMINI}`);
     cleanup();
   });
 });
