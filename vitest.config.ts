@@ -46,6 +46,24 @@ export default defineConfig({
     // tree while passing in the same suite an hour earlier; a bound that a
     // green test lands inside by a second is not measuring anything.
     testTimeout: 60_000,
+    /**
+     * Leave the machine half its cores.
+     *
+     * CI runs on whichever self-hosted runner is free, and that can be a host
+     * with other work on it. Uncapped, the fork pool takes a worker per core;
+     * the parent process — which serves every worker's transforms and answers
+     * their RPC — then competes with its own children for the CPU. birpc's
+     * call timeout is a fixed 60s with no knob on it, so once the parent stalls
+     * past that, a worker throws `Timeout calling "onTaskUpdate"`. Vitest
+     * counts that as an unhandled error and exits 1 — which is how PR #63
+     * failed with `2275 passed (2275)` and 100% coverage in the same log.
+     *
+     * Halving the pool leaves the parent cores to be responsive on. It is a
+     * mitigation, not a proof: a host loaded enough will still starve it.
+     * Local runs stay uncapped — the flake needs a contended machine, and the
+     * cap would cost every local run for it.
+     */
+    maxWorkers: process.env.CI ? "50%" : undefined,
     coverage: {
       provider: "v8",
       reporter: ["text", "html", "lcov", "json-summary"],
