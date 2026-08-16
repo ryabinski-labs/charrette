@@ -871,3 +871,183 @@ describe("a task that is waiting on the operator", () => {
     expect(($("#board .task .whymore") as HTMLDetailsElement).open).toBe(true);
   });
 });
+
+/**
+ * Searching the board.
+ *
+ * The operator asked two questions this exists to answer: "is there already a
+ * task for a refresh button?" of a 59-task run, and "is DNSSEC covered?" of a
+ * 55-task one. Both boards held every answer and neither could be read — the
+ * cards sit under collapsed groups, and the word that settles it is usually in
+ * a spec the card never shows.
+ */
+describe("finding a task on a board too long to read", () => {
+  const board = (tasks: Any[]) => state({ runs: [run({ tasks })] });
+  const type = (text: string) => {
+    const input = $("#tasksearch") as HTMLInputElement;
+    input.value = text;
+    input.dispatchEvent(new Event("input"));
+  };
+  const hits = () => all("#board .task .hit").map((n) => n.textContent);
+
+  const TASKS = [
+    task({ id: "ui-log", title: "Delivery log page", state: "MERGED", spec: "The list refetches after an export." }),
+    task({ id: "api-table", title: "Delivery table", state: "MERGED", spec: "DynamoDB table and GSI." }),
+    task({ id: "ui-cap", title: "Cap copy", state: "WORKING", acceptanceCriteria: ["A refresh button sits above the list"] }),
+  ];
+
+  it("reads the specs, not just the titles", async () => {
+    const page = mount(board(TASKS));
+    await page.refresh();
+    expect(titles()).toHaveLength(3);
+
+    type("refresh");
+
+    // Nothing is *titled* anything like it. Both answers live in fields the
+    // board does not show, which is the whole reason the search reads them.
+    expect(titles()).toEqual(["Cap copy"]);
+    expect(hits()[0]).toContain("A refresh button sits above the list");
+    expect($("#searchnote")!.textContent).toContain("1 of 3 tasks match");
+  });
+
+  it("shows where a match landed and picks it out", async () => {
+    const page = mount(board(TASKS));
+    await page.refresh();
+
+    type("refetch");
+
+    expect(titles()).toEqual(["Delivery log page"]);
+    expect($("#board .task .hit em")!.textContent).toBe("spec");
+    expect($("#board .task .hit b")!.textContent).toBe("refetch");
+  });
+
+  it("says no, and says how much it read to say so", async () => {
+    const page = mount(board(TASKS));
+    await page.refresh();
+
+    type("dnssec");
+
+    expect(titles()).toEqual([]);
+    expect($("#board .empty")!.textContent).toBe("No task matches “dnssec”.");
+    expect($("#searchnote")!.textContent).toContain("No match in 3 tasks");
+    expect($("#searchnote")!.textContent).toContain("specs, criteria, files and ids all read");
+    // Finding nothing has not undone the run's progress. The board is empty;
+    // two of three tasks are still done, and the header must keep saying so.
+    expect($("#taskcount")!.textContent).toBe("2 of 3 done");
+    expect(($("#tbar") as HTMLElement).style.display).toBe("flex");
+  });
+
+  it("leaves the run's progress alone while the board is filtered", async () => {
+    const page = mount(board(TASKS));
+    await page.refresh();
+    const before = $("#taskcount")!.textContent;
+
+    type("refresh");
+
+    // Two of three are done whatever is typed in the box. A count that tracked
+    // the filter would read "0 of 1 done" and look like work had been lost.
+    expect(before).toBe("2 of 3 done");
+    expect($("#taskcount")!.textContent).toBe("2 of 3 done");
+    expect(($("#tbar") as HTMLElement).style.display).toBe("flex");
+  });
+
+  // Direct children only: a card carries disclosures of its own, and the
+  // question here is about the group sections around them.
+  it("drops the grouping, keeping each card's state on it", async () => {
+    const page = mount(board(TASKS));
+    await page.refresh();
+    expect(all("#board > details").length).toBeGreaterThan(0);
+
+    type("delivery");
+
+    // A flat list: grouping the results would put them back behind the
+    // disclosures that made the question hard in the first place.
+    expect(all("#board > details")).toHaveLength(0);
+    expect(titles()).toEqual(["Delivery log page", "Delivery table"]);
+    expect(all("#board .task .pill").map((n) => n.textContent)).toEqual(["MERGED", "MERGED"]);
+  });
+
+  it("finds a task by its id and does not explain what is already on the card", async () => {
+    const page = mount(board(TASKS));
+    await page.refresh();
+
+    type("api-table");
+
+    expect(titles()).toEqual(["Delivery table"]);
+    expect(hits()).toEqual([]);
+  });
+
+  it("matches a file the plan said the task would touch", async () => {
+    const page = mount(board([task({ id: "t1", title: "Wire it up", touchedPaths: ["template.yaml"] })]));
+    await page.refresh();
+
+    type("template.yaml");
+
+    expect($("#board .task .hit em")!.textContent).toBe("files");
+  });
+
+  it("matches the reason a task is parked", async () => {
+    const page = mount(board([task({ id: "t1", title: "Wire it up", state: "NEEDS_HUMAN", errorSummary: "the migration never ran" })]));
+    await page.refresh();
+
+    type("migration");
+
+    expect($("#board .task .hit em")!.textContent).toBe("why");
+  });
+
+  it("gives the whole board back when the search is cleared", async () => {
+    const page = mount(board(TASKS));
+    await page.refresh();
+    type("refresh");
+    expect(titles()).toEqual(["Cap copy"]);
+
+    ($("#searchclear") as HTMLElement).dispatchEvent(new Event("click"));
+
+    expect(($("#tasksearch") as HTMLInputElement).value).toBe("");
+    expect(titles()).toHaveLength(3);
+    expect(($("#searchnote") as HTMLElement).style.display).toBe("none");
+    expect(all("#board > details").length).toBeGreaterThan(0);
+  });
+
+  it("clears on Escape", async () => {
+    const page = mount(board(TASKS));
+    await page.refresh();
+    type("refresh");
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+
+    expect(($("#tasksearch") as HTMLInputElement).value).toBe("");
+    expect(titles()).toHaveLength(3);
+  });
+
+  it("survives a poll arriving while a search is on", async () => {
+    const page = mount(board(TASKS));
+    await page.refresh();
+    type("refresh");
+
+    page.serve(board(TASKS.concat([task({ id: "late", title: "Refresh the token", state: "PENDING" })])));
+    await page.refresh();
+
+    // The new task matches too, and the filter still holds — a poll that reset
+    // the box would drop the operator back into the full board mid-read.
+    expect(titles()).toEqual(["Cap copy", "Refresh the token"]);
+    expect(($("#tasksearch") as HTMLInputElement).value).toBe("refresh");
+  });
+
+  it("keeps the box hidden until there is something to search", async () => {
+    const page = mount(state({ runs: [run({ state: "PLANNING", tasks: [] })] }));
+    await page.refresh();
+
+    expect(($("#searchbar") as HTMLElement).style.display).toBe("none");
+    expect(($("#searchnote") as HTMLElement).style.display).toBe("none");
+  });
+
+  it("ignores case and surrounding whitespace", async () => {
+    const page = mount(board(TASKS));
+    await page.refresh();
+
+    type("  DELIVERY TABLE  ");
+
+    expect(titles()).toEqual(["Delivery table"]);
+  });
+});
