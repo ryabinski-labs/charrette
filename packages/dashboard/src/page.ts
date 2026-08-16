@@ -104,7 +104,11 @@ export const PAGE_HTML = `<!doctype html>
        font-family:var(--mono); }
   h2::after { content:""; flex:1; height:1px; align-self:center;
               background:linear-gradient(90deg, var(--line), transparent); }
-  h2 .count { color:var(--faint); font-weight:400; letter-spacing:0; text-transform:none; }
+  /* --dim, not --faint: "4 of 10 done" and "between agents" are the readouts
+     these panels exist for, and --faint measures 2.95:1 on the panel — under
+     the 4.5:1 floor at this size. --faint stays for the labels that carry no
+     reading of their own. */
+  h2 .count { color:var(--dim); font-weight:400; letter-spacing:0; text-transform:none; }
   .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:.85rem; margin-bottom:.9rem; }
   .empty { color:var(--dim); font-size:.84rem; }
   .apierr { color:var(--red); }
@@ -204,7 +208,9 @@ export const PAGE_HTML = `<!doctype html>
   .task .top { display:flex; justify-content:space-between; gap:.5rem; align-items:flex-start; }
   .task .title { font-size:.87rem; min-width:0; overflow-wrap:anywhere; }
   .task .top .pill { flex:none; }
-  .task .sub { color:var(--faint); font-size:.72rem; margin-top:.2rem; display:flex; gap:.6rem; flex-wrap:wrap;
+  /* Same reason: the task id here is how the operator names the task to
+     \`harness probe\`, and it measured 3.25:1 on the card. */
+  .task .sub { color:var(--dim); font-size:.72rem; margin-top:.2rem; display:flex; gap:.6rem; flex-wrap:wrap;
                font-family:var(--mono); min-width:0; }
   .task .sub span { overflow-wrap:anywhere; }
   .task .sub a { color:var(--blue); text-decoration:none; }
@@ -407,6 +413,14 @@ export const PAGE_HTML = `<!doctype html>
   </div>
 </header>
 
+<!-- Everything below the masthead, in one landmark. Without it axe reports
+     \`landmark-one-main\` and 31 nodes under \`region\` — every panel on the page
+     outside any landmark, so a screen reader offers no way to jump to the
+     content and "skip to main" has nothing to skip to. The gates belong inside
+     it too: a plan gate is the most important thing on the page while it is
+     open, not an aside to it. -->
+<main>
+
 <section id="gate" aria-labelledby="gate-h">
   <h2 id="gate-h">Gate 1 — approve the plan?</h2>
   <div class="plan" id="gate-tasks"></div>
@@ -535,6 +549,7 @@ export const PAGE_HTML = `<!doctype html>
     <div id="log" role="log" aria-label="Live agent activity" tabindex="0"></div>
   </div>
 </div>
+</main>
 
 <script>
 const token = location.hash.slice(1);

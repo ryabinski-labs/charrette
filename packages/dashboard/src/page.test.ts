@@ -1165,3 +1165,67 @@ describe("hiding a group of tasks", () => {
     expect(($("#gfilter") as HTMLElement).style.display).toBe("none");
   });
 });
+
+/**
+ * The two accessibility failures axe found on the running page, pinned.
+ *
+ * Both were real rather than pedantic: the panel counts are the readouts the
+ * panels exist for, the task id under a card is how the operator names that
+ * task to `harness probe`, and none of the page's content sat inside a
+ * landmark, so a screen reader had nothing to jump to.
+ */
+describe("what a screen reader and a contrast checker get", () => {
+  /** WCAG 2.x relative luminance, from the spec. */
+  const luminance = (hex: string): number => {
+    const ch = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+    const lin = ch.map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * lin[0]! + 0.7152 * lin[1]! + 0.0722 * lin[2]!;
+  };
+  const ratio = (a: string, b: string): number => {
+    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+    return (hi! + 0.05) / (lo! + 0.05);
+  };
+  /** A `--name:#rrggbb` declaration out of the page's own palette. */
+  const token = (name: string): string => {
+    const m = new RegExp(`--${name}:\\s*(#[0-9a-f]{6})`, "i").exec(PAGE_HTML);
+    if (!m) throw new Error(`no --${name} in the palette`);
+    return m[1]!;
+  };
+
+  it("has one main landmark holding the content", async () => {
+    const page = mount(state());
+    await page.refresh();
+
+    const mains = all("main");
+    expect(mains).toHaveLength(1);
+    // The panels axe counted as orphaned, and the gates — a plan gate is the
+    // most important thing on the page while it is open, not an aside to it.
+    expect(mains[0]!.querySelector("#board")).not.toBeNull();
+    expect(mains[0]!.querySelector("#log")).not.toBeNull();
+    expect(mains[0]!.querySelector("#gate")).not.toBeNull();
+    // The masthead is not content and must stay outside it.
+    expect(mains[0]!.querySelector("header")).toBeNull();
+  });
+
+  it("keeps content text off the token that cannot carry it", () => {
+    // Measured by axe on the running page: --faint is 2.95:1 on the panel and
+    // 3.25:1 on a card, against a 4.5:1 floor at these sizes. --dim clears it
+    // on both. If the palette moves, this is the assertion that should fail
+    // before anyone's eyes have to.
+    expect(ratio(token("faint"), token("panel"))).toBeLessThan(4.5);
+    expect(ratio(token("dim"), token("panel"))).toBeGreaterThanOrEqual(4.5);
+    expect(ratio(token("dim"), token("sunken"))).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("does not paint the panel counts or a task's id in it", () => {
+    const rule = (selector: string): string => {
+      const m = new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{([^}]*)\\}`).exec(PAGE_HTML);
+      if (!m) throw new Error(`no rule for ${selector}`);
+      return m[1]!;
+    };
+    expect(rule("h2 .count")).toContain("var(--dim)");
+    expect(rule("h2 .count")).not.toContain("var(--faint)");
+    expect(rule(".task .sub")).toContain("var(--dim)");
+    expect(rule(".task .sub")).not.toContain("var(--faint)");
+  });
+});
