@@ -174,6 +174,17 @@ export const PAGE_HTML = `<!doctype html>
   .search button { flex:none; padding:.2rem .45rem; line-height:1; font-size:.95rem; }
   .searchnote { color:var(--faint); font-size:.72rem; margin:-.25rem 0 .45rem; }
   .searchnote b { color:var(--fg); font-weight:600; }
+  /* Same chip as the activity feed's kind filters — the operator has already
+     learned that a dimmed pill means "hidden" once. */
+  .gfilter { display:flex; align-items:center; gap:.3rem; flex-wrap:wrap; margin:0 0 .5rem; }
+  .gfilter button { background:transparent; color:var(--faint); border:1px solid var(--line);
+                    border-radius:20px; padding:.1rem .5rem; font-size:.7rem; cursor:pointer; margin:0; }
+  .gfilter button[aria-pressed="true"] { color:var(--fg); border-color:var(--dim); background:var(--panel); }
+  .gfilter button .n { color:var(--faint); margin-left:.3rem; }
+  .gfilter button[aria-pressed="true"] .n { color:var(--dim); }
+  .gfilter .g-blocked[aria-pressed="true"] { border-color:var(--red); }
+  .gfilter .g-live[aria-pressed="true"] { border-color:var(--amber); }
+  .gfilter .g-done[aria-pressed="true"] { border-color:var(--green); }
 
   .task { border:1px solid var(--line); border-left:2px solid var(--line2); border-radius:7px;
           padding:.5rem .6rem; margin-bottom:.4rem; background:var(--sunken); overflow:hidden; }
@@ -502,6 +513,7 @@ export const PAGE_HTML = `<!doctype html>
                aria-label="Search tasks by title, spec, acceptance criteria, files or id" autocomplete="off">
         <button type="button" class="ghost" id="searchclear" style="display:none" title="Clear (Esc)">&times;</button>
       </div>
+      <div class="gfilter" id="gfilter" style="display:none" role="group" aria-label="Show or hide task groups"></div>
       <div class="searchnote" id="searchnote" style="display:none"></div>
       <div id="board"></div>
     </div>
@@ -1448,6 +1460,21 @@ function taskStopped(t, run) {
 let taskQuery = "";
 
 /**
+ * Task groups the operator has switched off.
+ *
+ * Cancelled is the one that prompted this: it is dead weight on a long board,
+ * it never becomes interesting again, and it sits between the operator and the
+ * groups that do change. Collapsing its disclosure is not the same thing — a
+ * collapsed group still counts, still takes a row, and reopens itself in the
+ * next reading. Hiding is a decision that stays made.
+ *
+ * Not persisted across a reload, deliberately: this is a reading posture for
+ * the next few minutes, and a filter that survives a refresh is one the
+ * operator forgets is on and then reads a board that is lying to them.
+ */
+const hiddenGroups = new Set();
+
+/**
  * Where a task can match, in the order the result prefers to report.
  *
  * The spec and the criteria are the point. A title search would have missed
@@ -1543,22 +1570,26 @@ function renderBoard() {
   const counts = {};
   for (const g of GROUPS) { buckets[g.key] = []; counts[g.key] = 0; }
   let total = 0;
+  let shown = 0;
   let matched = 0;
   for (const run of runs) {
     total += run.tasks.length;
     for (const t of run.tasks) {
       const key = groupOf[t.state] ?? "todo";
       counts[key]++;
+      if (hiddenGroups.has(key)) continue;
+      shown++;
       const hit = q ? taskHit(t, q) : null;
       if (q && !hit) continue;
       matched++;
       buckets[key].push({ t, run, hit });
     }
   }
-  // The box only appears once there is something to search, and the note under
-  // it only while a search is on.
+  // The box and the chips only appear once there is something to search or
+  // filter; the note under them only while one of the two is on.
   $("searchbar").style.display = total ? "flex" : "none";
-  renderSearchNote(q, matched, total);
+  renderGroupFilter(counts, total);
+  renderSearchNote(q, matched, shown, total);
 
   if (!total || !matched) {
     box.textContent = "";
@@ -1566,6 +1597,9 @@ function renderBoard() {
     // A search that found nothing is a real answer — "no task covers this" —
     // and must not read as an empty board or a run that has not planned yet.
     if (q) box.append(el("div", "empty", "No task matches \\u201c" + q + "\\u201d."));
+    // Not "no tasks": there are tasks, and the operator switched them off. A
+    // board that goes blank without saying why reads as a bug.
+    else if (total) box.append(el("div", "empty", "Every group is hidden. Switch one back on above."));
     else {
       for (const run of runs) box.append(el("div", "empty", phaseHint(run.state)));
       if (!runs.length) box.append(el("div", "empty", "No tasks yet."));
@@ -1620,26 +1654,68 @@ function renderProgress(counts, total) {
 }
 
 /**
- * How much of the board the search is hiding.
+ * One chip per group, carrying its whole-run count, switching it off.
+ *
+ * The count is the group's real size, not the filtered or searched one — a
+ * chip that read "Cancelled 0" while hiding four cancelled tasks would be the
+ * one thing on this bar that is not true.
+ */
+function renderGroupFilter(counts, total) {
+  const bar = $("gfilter");
+  bar.style.display = total ? "flex" : "none";
+  const chips = [];
+  for (const g of GROUPS) {
+    if (!counts[g.key]) continue;
+    const on = !hiddenGroups.has(g.key);
+    const b = el("button", "g-" + g.key, g.label);
+    b.type = "button";
+    b.setAttribute("aria-pressed", on ? "true" : "false");
+    b.title = on ? "Hide " + g.label.toLowerCase() : "Show " + g.label.toLowerCase();
+    b.append(el("span", "n", String(counts[g.key])));
+    b.addEventListener("click", () => {
+      if (hiddenGroups.has(g.key)) hiddenGroups.delete(g.key);
+      else hiddenGroups.add(g.key);
+      renderBoard();
+    });
+    chips.push(b);
+  }
+  syncChildren(bar, chips, 0);
+}
+
+/**
+ * How much of the board is hidden, and by which of the two things that hide it.
  *
  * Always says the denominator. "3 tasks" alone leaves the operator wondering
  * whether the other fifty-six were checked, and the whole value of the answer
- * is knowing the search read all of them.
+ * is knowing the search read all of them. When a group filter is also on, the
+ * denominator is what the filter left — and it says so, because a search that
+ * silently skipped a hidden group would answer "no" to a question it never
+ * asked.
  */
-function renderSearchNote(q, matched, total) {
+function renderSearchNote(q, matched, shown, total) {
   const note = $("searchnote");
   $("searchclear").style.display = q ? "block" : "none";
-  if (!q) { note.style.display = "none"; note.textContent = ""; return; }
+  const filtered = total - shown;
+  if (!q && !filtered) { note.style.display = "none"; note.textContent = ""; return; }
   note.style.display = "block";
   note.textContent = "";
-  if (!matched) {
-    note.append(document.createTextNode("No match in "));
-    note.append(el("b", null, String(total)));
-    note.append(document.createTextNode(" task" + (total === 1 ? "" : "s") + " \\u2014 titles, specs, criteria, files and ids all read."));
+  const say = (s) => note.append(document.createTextNode(s));
+  const tasks = (n) => " task" + (n === 1 ? "" : "s");
+
+  if (!q) {
+    note.append(el("b", null, String(filtered)));
+    say(tasks(filtered) + " hidden by the group filter.");
     return;
   }
-  note.append(el("b", null, String(matched)));
-  note.append(document.createTextNode(" of " + total + " task" + (total === 1 ? "" : "s") + " match. Grouping is off while searching; each card keeps its state."));
+  if (!matched) {
+    say("No match in ");
+    note.append(el("b", null, String(shown)));
+    say(tasks(shown) + " \\u2014 titles, specs, criteria, files and ids all read.");
+  } else {
+    note.append(el("b", null, String(matched)));
+    say(" of " + shown + tasks(shown) + " match. Grouping is off while searching; each card keeps its state.");
+  }
+  if (filtered) say(" " + filtered + " more " + (filtered === 1 ? "is hidden by the group filter and was" : "are hidden by the group filter and were") + " not searched.");
 }
 
 /**
