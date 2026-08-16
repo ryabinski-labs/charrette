@@ -40,12 +40,11 @@ const KILL_GRACE_MS = 5_000;
  * child was spawned `detached`, which makes it a group leader. `try` because
  * the group is routinely gone already — that is a win, not an error.
  */
-function killTree(pid: number | undefined, signal: NodeJS.Signals): void {
-  if (pid === undefined) return;
+function killTree(pid: number, signal: NodeJS.Signals): void {
   try {
     process.kill(-pid, signal);
   } catch {
-    /* already exited */
+    /* the group is already gone, which is the outcome this was asking for */
   }
 }
 
@@ -78,8 +77,12 @@ function run(command: string[], cwd: string, timeoutMs: number): Promise<boolean
       resolve(ok);
     };
     const timer = setTimeout(() => {
-      killTree(child.pid, "SIGTERM");
-      setTimeout(() => killTree(child.pid, "SIGKILL"), KILL_GRACE_MS).unref();
+      // `child.pid` is undefined only when the spawn itself failed, and that
+      // path settles through `error` — measured at a millisecond, against a
+      // timeout measured in minutes — so this timer is long cleared by then.
+      const pid = child.pid!;
+      killTree(pid, "SIGTERM");
+      setTimeout(() => killTree(pid, "SIGKILL"), KILL_GRACE_MS).unref();
       settle(false);
     }, timeoutMs);
     child.on("error", () => settle(false));

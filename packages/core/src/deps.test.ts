@@ -120,6 +120,47 @@ describe("worktree dependency seeding", () => {
     expect(() => process.kill(pid, 0)).toThrow();
   }, 60_000);
 
+  /**
+   * The other half of the kill path. When the polite signal is enough, the
+   * group is already gone by the time the SIGKILL follow-up fires five seconds
+   * later, and `process.kill` answers that with ESRCH. That throw happens on a
+   * bare timer with no promise attached to it, so letting it escape would take
+   * the whole harness process down long after the install it came from was
+   * reported and forgotten — the worst possible shape for a crash.
+   */
+  it("swallows the follow-up kill when the polite signal already worked", async () => {
+    const d = dir();
+    const pidfile = path.join(d, "grandchild.pid");
+    emptyNpmProject(d, "polite");
+    writeFileSync(
+      path.join(d, "package.json"),
+      JSON.stringify({ name: "polite", version: "1.0.0", scripts: { postinstall: "node hang.js" } })
+    );
+    // No signal handlers this time: it hangs, but it dies when asked.
+    writeFileSync(
+      path.join(d, "hang.js"),
+      `require("node:fs").writeFileSync(${JSON.stringify(pidfile)}, String(process.pid));\n` +
+        `setInterval(() => {}, 1000);\n`
+    );
+
+    const seeded = await seedWorktreeDeps(d, 8_000);
+    expect(seeded).toEqual([{ dir: "", manager: "npm", ok: false, seconds: expect.any(Number) }]);
+
+    // Seeding resolves the instant the signal is *sent* — that is the whole
+    // point of settling on the timer — so give delivery a moment. Two seconds
+    // is still comfortably inside the five-second grace, which is what makes
+    // this fixture distinguishable from the one that ignores SIGTERM: this one
+    // is already dead before SIGKILL is ever scheduled to arrive.
+    const pid = Number(readFileSync(pidfile, "utf8"));
+    await new Promise((r) => setTimeout(r, 2_000));
+    expect(() => process.kill(pid, 0)).toThrow();
+
+    // Now outlive the grace, so the SIGKILL lands on a group that no longer
+    // exists. Reaching the end of this test at all is the assertion.
+    await new Promise((r) => setTimeout(r, 5_000));
+    expect(() => process.kill(pid, 0)).toThrow();
+  }, 60_000);
+
   it("reports a failed install instead of throwing", async () => {
     const d = dir();
     // A lockfile that does not match the manifest: `npm ci` refuses.
