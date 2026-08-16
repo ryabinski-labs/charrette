@@ -18,11 +18,17 @@ permissions:
 jobs:
   verify:
     name: build, test @ 100% coverage
-    # The org's self-hosted pool. Targeted by the `github-runner` label so the
-    # job never lands on the special-purpose runners (api-service-mx1, mobile)
-    # that share the `self-hosted, Linux, X64` labels.
-    runs-on: [self-hosted, Linux, X64, github-runner]
-    timeout-minutes: 20
+    # Any self-hosted runner in the org, on purpose. The old `github-runner`
+    # label claimed to keep this off the special-purpose hosts (api-service-mx1,
+    # mobile) — it never did, because those carry that label too; the ephemeral
+    # pool simply picked jobs up first. When the pool went offline the job
+    # landed on the mail host and, at ~5x the wall clock, failed a suite in
+    # which every test passed. So: run anywhere, and make the suite survive the
+    # slowest machine that will take it (see `maxWorkers` in vitest.config.ts).
+    runs-on: [self-hosted, Linux, X64]
+    # Ample for a dedicated runner (~2m30s end to end) and for a busy shared one
+    # taking four times that.
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v7
