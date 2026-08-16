@@ -274,6 +274,29 @@ describe("rewriting a task's definition of done", () => {
     expect(store.taskProbeAmendments("run1", "a")).toBe(0);
     expect(store.getTask("run1", "a")!.completionProbe).toBe("test -f nope.txt");
   });
+
+  it("counts how many times a task has stopped for its gate, whoever answered", () => {
+    // The one number no other counter keeps: answering a gate resets
+    // `qaIterations`, and `taskGateAutoAnswers` deliberately skips the rounds a
+    // person answered — so on run 1e7d3df3, where the operator answered eleven
+    // of fourteen, every existing counter read the fourteenth as the first.
+    const store = makeStore();
+    makeRun(store);
+    store.insertTasks("run1", [{ id: "e1", title: "E" }], [probeTask("test -f nope.txt")]);
+
+    expect(store.taskGateOpenings("run1", "a")).toBe(0);
+
+    for (const decidedBy of ["product-manager", "operator", "operator"]) {
+      store.appendEvent({ type: "task.gate_opened", runId: "run1", taskId: "a", why: "w", recommendation: "", iterations: 3, ts: 1 });
+      store.appendEvent({ type: "task.gate_resolved", runId: "run1", taskId: "a", parked: false, guidance: "g", decidedBy, ts: 2 });
+    }
+
+    expect(store.taskGateOpenings("run1", "a")).toBe(3);
+    // Which is exactly what the auto-answer bound does not, and must not, count.
+    expect(store.taskGateAutoAnswers("run1", "a")).toBe(1);
+    // Scoped to the task that was asked about, not to the run.
+    expect(store.taskGateOpenings("run1", "b")).toBe(0);
+  });
 });
 
 describe("what previous runs in this repository cost", () => {

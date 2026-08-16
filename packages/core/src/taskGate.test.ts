@@ -550,6 +550,8 @@ const PROBE_DAG =
 /** PROBE_DAG, a worker that writes `feature.txt`, and an advisor under test. */
 function probePool(advisorJson: (round: number) => string) {
   const workerPrompts: string[] = [];
+  const advisorPrompts: string[] = [];
+  const advisorSystems: string[] = [];
   let planning = 0;
   let advising = 0;
   const pool = {
@@ -563,12 +565,15 @@ function probePool(advisorJson: (round: number) => string) {
         gitIn(spec.cwd, "commit", "-m", "wip");
         resultText = "worker done";
       } else if (spec.role === "qa") resultText = '{"verdict":"FAIL","reasons":["QA has its own opinion"],"mustFix":["something else entirely"]}';
-      else if (spec.role === "advisor") resultText = advisorJson(advising++);
-      else resultText = '{"verdict":"PASS","summary":"n/a"}';
+      else if (spec.role === "advisor") {
+        advisorPrompts.push(spec.prompt);
+        advisorSystems.push(spec.systemPrompt);
+        resultText = advisorJson(advising++);
+      } else resultText = '{"verdict":"PASS","summary":"n/a"}';
       return { sessionId: `s${Math.random()}`, resultText, costUsd: 0, turns: 1, outcome: "done" };
     },
   };
-  return { pool: pool as unknown as AgentPool, workerPrompts };
+  return { pool: pool as unknown as AgentPool, workerPrompts, advisorPrompts, advisorSystems };
 }
 
 const logs = (store: Store, runId: string) =>
@@ -688,6 +693,119 @@ describe("a completion probe that cannot pass", () => {
     expect(logs(store, runId).some((t) => t.includes(`harness probe task-a 'test -f feature.txt'`))).toBe(true);
     expect(asked).toHaveLength(1);
     expect(store.getTask(runId, "task-a")!.state).toBe("NEEDS_HUMAN");
+  });
+
+  it("is still the decider's to move after the decider has run out of answers", async () => {
+    // Run 1e7d3df3, exactly: `autoAnswerRounds` retired the product-manager from
+    // answering, and the probe amendment was hung off the same "is there a live
+    // decider" test — so from that round on nothing could touch a probe that no
+    // answer could ever satisfy, and the operator was asked eleven more times.
+    // The two allowances bound different things and are counted separately;
+    // running out of one must not spend the other.
+    const { pool } = probePool(
+      () =>
+        '```json\n{"recommendation":"the probe demands an artifact this run\'s tooling forbids producing","checked":[],"needsOperator":true,"why":"the probe named the wrong artifact","probe":"test -f feature.txt"}\n```'
+    );
+    const { store, runId } = await run(gates(async () => null), pool, {
+      taskGate: { decidedBy: "product-manager", autoAnswerRounds: 0, probeAmendments: 1 },
+    });
+
+    expect(store.getTask(runId, "task-a")!.completionProbe).toBe("test -f feature.txt");
+    const amended = store.eventsSince(runId, 0).map((e) => e.event).filter((e) => e.type === "task.probe_amended") as { by: string }[];
+    expect(amended).toHaveLength(1);
+    // Named for the authority it was made under, not for "" — an amendment
+    // recorded as the operator's own would not count against the allowance, and
+    // the bound this preserves is the one on agents rewriting their own bar.
+    expect(amended[0]!.by).toBe("product-manager");
+    expect(store.taskProbeAmendments(runId, "task-a")).toBe(1);
+  });
+
+  it("is the operator's alone on a run that never delegated the gate", async () => {
+    // The other reading of "no decider", and it keeps the old answer: an
+    // operator who set `decidedBy: "operator"` kept this gate for themselves,
+    // and an advisor drafting for them has no authority over the bar.
+    const { pool } = probePool(
+      () => '```json\n{"recommendation":"the probe names a file nothing writes","checked":[],"probe":"test -f feature.txt"}\n```'
+    );
+    const { store, runId } = await run(gates(async () => null), pool, {
+      taskGate: { decidedBy: "operator", autoAnswerRounds: 5, probeAmendments: 5 },
+    });
+
+    expect(store.getTask(runId, "task-a")!.completionProbe).toBe("test -f nope.txt");
+    expect(store.taskProbeAmendments(runId, "task-a")).toBe(0);
+    expect(logs(store, runId).some((t) => t.includes("harness probe"))).toBe(true);
+  });
+});
+
+describe("a gate that keeps opening on the same task", () => {
+  it("tells the operator they have been here before, and how to change the bar", async () => {
+    // The fourteen questions run 1e7d3df3 asked about one task were, on their
+    // own evidence, indistinguishable: answering a gate resets `qaIterations`,
+    // so every one of them said "after 3 attempts". Nothing said "again".
+    const { pool } = probePool(() => '```json\n{"recommendation":"try again","checked":[],"probe":null}\n```');
+    const asked: string[] = [];
+    const { store, runId } = await run(
+      gates(async (why) => {
+        asked.push(why);
+        return asked.length === 1 ? "have another go" : null;
+      }),
+      pool,
+      { taskGate: { decidedBy: "operator" } }
+    );
+
+    expect(asked).toHaveLength(2);
+    // The first question is unchanged: a gate that has opened once is a normal
+    // gate, and prefixing every escalation with its own history is noise.
+    expect(asked[0]).not.toContain("stopped for the same gate");
+    expect(asked[1]).toContain("This task has stopped for the same gate once before");
+    expect(asked[1]).toContain("That answer did not settle it");
+    // The way out, named rather than implied — and it was only ever in agent.log,
+    // which is not where anyone answering a gate is looking.
+    expect(asked[1]).toContain("test -f nope.txt");
+    expect(asked[1]).toContain(`harness probe task-a 'test -f nope.txt' --run ${runId}`);
+    expect(asked[1]).toContain(`harness probe task-a --clear --run ${runId}`);
+    expect(store.getTask(runId, "task-a")!.state).toBe("NEEDS_HUMAN");
+  });
+
+  it("does not put the count in the answer the worker is sent", async () => {
+    // `recommendation` goes to the worker verbatim when a decider answers it.
+    // How many times a person was interrupted is the question's business, not
+    // the worker's brief.
+    const { pool, workerPrompts } = probePool(
+      () => '```json\n{"recommendation":"carry on with the second half","checked":[],"needsOperator":false,"probe":null}\n```'
+    );
+    const { store, runId } = await run(gates(async () => null), pool, {
+      taskGate: { decidedBy: "product-manager", autoAnswerRounds: 2 },
+    });
+
+    const guidance = store
+      .eventsSince(runId, 0)
+      .map((e) => e.event)
+      .filter((e) => e.type === "task.gate_resolved") as { guidance: string }[];
+    expect(guidance.length).toBeGreaterThan(1);
+    expect(guidance[1]!.guidance).toContain("carry on with the second half");
+    expect(guidance[1]!.guidance).not.toContain("stopped for the same gate");
+    expect(workerPrompts.join("\n")).not.toContain("stopped for the same gate");
+  });
+
+  it("tells the advisor it is repeating itself, so it stops reaching the same conclusion", async () => {
+    // The advisor investigated from scratch fourteen times because nothing in
+    // its briefing said the previous thirteen had happened.
+    const { pool, advisorPrompts } = probePool(() => '```json\n{"recommendation":"try again","checked":[],"probe":null}\n```');
+    const asked: string[] = [];
+    const { store, runId } = await run(
+      gates(async () => {
+        asked.push("x");
+        return asked.length === 1 ? "have another go" : null;
+      }),
+      pool,
+      { taskGate: { decidedBy: "operator" } }
+    );
+
+    expect(advisorPrompts).toHaveLength(2);
+    expect(advisorPrompts[0]).not.toContain("This is not the first time");
+    expect(advisorPrompts[1]).toContain("This gate has opened once before on this task");
+    expect(store.getRun(runId)!.state).toBeTruthy();
   });
 });
 
