@@ -127,7 +127,7 @@ const MAX_FULL_TEXT_SKILLS = 2;
 const INTENT_FIX_EPIC = { id: "intent-gaps", title: "Gaps the intent check found" };
 
 /** A planner's task as it enters the store: everything it said, nothing started yet. */
-function pendingRow(t: PlannedTask): Omit<TaskRow, "runId"> {
+function pendingRow(t: PlannedTask): Omit<TaskRow, "runId" | "unverified"> {
   return {
     id: t.id,
     epicId: t.epicId,
@@ -1697,6 +1697,9 @@ export class RunController {
     for (const n of priors) if ((await this.github.prState?.(n)) === "merged") shipped.push(n);
 
     const intent = this.store.intentVerdict(runId);
+    // Every criterion the run passed on without settling, gathered from the
+    // tasks that are actually in this diff. See `QaVerdict`'s PASS branch.
+    const unsettled = merged.flatMap((t) => t.unverified.map((u) => ({ task: t.title, gap: u })));
     const body = [
       `${merged.length} task${merged.length === 1 ? "" : "s"} merged on the run's integration branch, one \`--no-ff\` merge commit each. Opened by harness — merge is always human.`,
       "",
@@ -1717,6 +1720,18 @@ export class RunController {
                   "mark it ready yourself if you have decided to ship it incomplete on purpose.",
                 ]
               : []),
+          ]
+        : []),
+      ...(unsettled.length
+        ? [
+            "",
+            `Passed but **not verified** — ${unsettled.length} criteri${unsettled.length === 1 ? "on" : "a"} QA could not settle in its environment:`,
+            ...unsettled.map((u) => `- ${u.task}: ${u.gap.slice(0, 500)}`),
+            "",
+            "**This PR is held as a draft because of that.** Each line is something the",
+            "run reports as unproven, not something it found wrong — QA said so itself",
+            "rather than passing quietly, which is the only reason you are reading it.",
+            "Settle them, or mark the PR ready if you have decided to ship on them.",
           ]
         : []),
       ...(shipped.length
@@ -1753,7 +1768,22 @@ export class RunController {
      * do any more is ship it by not reading.
      */
     const intentFailed = intent?.verdict === "FAIL";
-    const draft = stillWorking || intentFailed;
+    /**
+     * The same hold, for the gap the intent check cannot see.
+     *
+     * The intent verdict judges the run against the operator's brief: it asks
+     * whether the work is there. It has no way to ask whether the work was ever
+     * exercised, because a task whose criteria are all satisfied against mocks
+     * reaches it looking exactly like one that was run for real.
+     *
+     * dns-project's `af60742` is what that costs. Its own commit message ends "NOT
+     * YET verified this session (turn budget ran out first)" and names both
+     * halves of the outage — the live DynamoDB run it skipped, and the manifest
+     * variable it talked itself out of adding. The information was there, in
+     * writing, at merge time, in a field nothing gated on. Honesty that reaches
+     * no control is indistinguishable from silence.
+     */
+    const draft = stillWorking || intentFailed || unsettled.length > 0;
     const pr = await this.github.ensurePR(runId, "run", this.wt.integrationBranch(runId), base, title, body, { draft });
     if (!pr) {
       this.bus.publish({
@@ -2458,7 +2488,7 @@ export class RunController {
         systemPrompt: "You are finishing a verification you have already done. Answer with JSON and nothing else.",
         prompt:
           "Your previous message did not contain the verdict JSON this task requires. Do not investigate anything further and do not change your judgment — just state the conclusion you already reached, as exactly one JSON object inside a ```json fence:\n" +
-          '{"verdict":"PASS","notes":string}\nor\n{"verdict":"FAIL","reasons":[string],"mustFix":[string]}',
+          '{"verdict":"PASS","notes":string,"unverified":[string]}\nor\n{"verdict":"FAIL","reasons":[string],"mustFix":[string]}',
         cwd,
         resume: qa.sdkSessionId,
         maxTurns: 2,
@@ -4758,6 +4788,20 @@ export class RunController {
       this.bus.publish({ type: "task.qa_verdict", runId, taskId, verdict: verdict.verdict, iteration: iterations, detail: verdict, ts: Date.now() });
 
       if (verdict.verdict === "PASS") {
+        // What this PASS did not settle, kept as data rather than as prose in
+        // the ACCEPTED reason. Written on every PASS, including the empty case,
+        // so a later iteration that verifies more replaces an earlier
+        // disclosure instead of leaving a stale one to hold the PR.
+        this.store.updateTask(runId, taskId, { unverified: verdict.unverified });
+        if (verdict.unverified.length) {
+          this.bus.publish({
+            type: "agent.log",
+            runId,
+            sessionId: "qa",
+            text: `QA passed ${taskId} but could not settle ${verdict.unverified.length} criteri${verdict.unverified.length === 1 ? "on" : "a"}: ${verdict.unverified.join("; ")}`,
+            ts: Date.now(),
+          });
+        }
         // Feedback that landed after QA already judged must not be merged away
         // unread — it buys the operator one more worker iteration instead.
         const late = this.store.drainFeedback(runId, taskId);

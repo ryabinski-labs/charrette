@@ -519,10 +519,27 @@ Assert on the behaviour instead: use the repository's own fixtures, a temp direc
 ${toolbelt}${skills}
 
 Your FINAL message must be exactly one JSON object inside a \`\`\`json fence:
-{"verdict":"PASS","notes":string}
+{"verdict":"PASS","notes":string,"unverified":[string]}
 or
 {"verdict":"FAIL","reasons":[string],"mustFix":[string]}
-mustFix items must be concrete, actionable instructions for the worker.`;
+mustFix items must be concrete, actionable instructions for the worker.
+
+\`unverified\` is where every gap this prompt has asked you to disclose actually
+goes — the criterion you could only check against a mock, the screen you could
+not render, the plan you could not run, the live service that was not there.
+One entry per criterion, naming the criterion and why it stayed unsettled.
+
+It is a field, not a paragraph, because prose does not gate. Writing "criterion
+3 was only exercised against an in-memory double" into \`notes\` and passing is
+indistinguishable, to everything downstream, from having verified it — which is
+how a console that had passed ten checks started answering 503 to every request,
+with the gap named in the commit message that shipped it.
+
+Listing something here does not fail the task and does not cost the worker an
+iteration; a criterion you cannot settle in this environment is a fact about the
+environment. It marks the run's pull request as a draft so a human decides
+whether to ship on it. An empty list is a claim that you settled everything —
+make it only when that is true.`;
 }
 
 export function qaTaskPrompt(
