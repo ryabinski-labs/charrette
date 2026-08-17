@@ -270,9 +270,26 @@ describe("what the session is configured with", () => {
       allowedTools: ["Read"],
       disallowedTools: ["Write"],
       resume: "prior-sdk-session",
-      // The operator's own filesystem settings and skills must not leak in.
-      settingSources: [],
+      // Skills are discovered from a setting source and nowhere else, so the
+      // source is loaded and `skills` does the isolating.
+      settingSources: ["user"],
+      skills: [],
     });
+  });
+
+  it("lets a session invoke exactly the skills the run routed to it", async () => {
+    await pool.run(spec({ skills: ["qa-agent", "feedback-provider"] }));
+
+    expect(optionsGiven().skills).toEqual(["qa-agent", "feedback-provider"]);
+  });
+
+  it("names no skill when the run routed none", async () => {
+    // Not omitted: the SDK reads an absent `skills` as "leave the CLI defaults
+    // alone", which with a user setting source is every skill on the operator's
+    // disk. A task that matched nothing has to say so with an empty list.
+    await pool.run(spec({}));
+
+    expect(optionsGiven().skills).toEqual([]);
   });
 
   it("raises the Bash timeout floor for every session", async () => {

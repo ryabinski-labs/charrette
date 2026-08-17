@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { declaredResources, pathMatches, pushTrigger, renderDeployOrder, scanDeployOrder } from "./deployOrder.js";
+import { declaredResources, pathMatches, pushTrigger, renderDeployOrder, scanDeployOrder, withoutComments } from "./deployOrder.js";
 
 /**
  * The files that actually took dns-project's console down, trimmed to the shape
@@ -77,6 +77,12 @@ const WORKFLOWS = [
   { path: ".github/workflows/deploy-edge.yml", text: DEPLOY_EDGE },
 ];
 
+/** A deployer with no paths filter: everything the merge carries goes live. */
+const WIDE_CD = {
+  path: ".github/workflows/cd.yml",
+  text: `on:\n  push:\n    branches: [main]\njobs:\n  ship:\n    steps:\n      - run: kubectl rollout restart deploy/api\n`,
+};
+
 describe("Terraform resources a change declares", () => {
   it("finds the table whose absence returned 503", () => {
     expect(declaredResources({ path: "infra/aws/dynamodb/main.tf", text: TERRAFORM })).toEqual([
@@ -141,6 +147,27 @@ describe("what a workflow's push trigger says", () => {
   it("does not read a pull_request paths filter as the push one", () => {
     const both = `on:\n  pull_request:\n    paths:\n      - 'docs/**'\n  push:\n    branches: [main]\n    paths:\n      - 'src/**'\n`;
     expect(pushTrigger(both)).toEqual({ branches: ["main"], paths: ["src/**"] });
+  });
+});
+
+describe("reading steps rather than prose", () => {
+  it("drops a whole-line and a trailing comment", () => {
+    expect(withoutComments("# note\n  - run: go test\n")).toBe("\n  - run: go test\n");
+    expect(withoutComments("  - run: make  # builds it")).toBe("  - run: make  ");
+  });
+
+  it("keeps a # that is part of a value", () => {
+    expect(withoutComments(`  color: "#fff"`)).toBe(`  color: "#fff"`);
+    expect(withoutComments(`  tag: 'sha#1'`)).toBe(`  tag: 'sha#1'`);
+    expect(withoutComments("  - run: echo a#b")).toBe("  - run: echo a#b");
+  });
+
+  it("does not let an escaped quote end the string early", () => {
+    expect(withoutComments(`  s: "a \\" # b" # gone`)).toBe(`  s: "a \\" # b" `);
+  });
+
+  it("leaves a line with no comment untouched", () => {
+    expect(withoutComments("  - run: kubectl apply -f x.yaml")).toBe("  - run: kubectl apply -f x.yaml");
   });
 });
 
@@ -215,15 +242,61 @@ describe("a merge that deploys ahead of its own prerequisite", () => {
   });
 
   it("still fires when the deploying workflow has no paths filter at all", () => {
-    const everything = [{ path: ".github/workflows/cd.yml", text: `on:\n  push:\n    branches: [main]\njobs: {}\n` }];
-    const findings = scanDeployOrder(CHANGED, everything);
+    const findings = scanDeployOrder(CHANGED, [WIDE_CD]);
     expect(findings).toHaveLength(1);
     expect(findings[0]!.via).toBe("");
   });
 
   it("does not report the Terraform file as the thing being deployed", () => {
-    const wide = [{ path: ".github/workflows/cd.yml", text: `on:\n  push:\n    branches: [main]\njobs: {}\n` }];
-    expect(scanDeployOrder(CHANGED, wide)[0]!.deploys).not.toBe("infra/aws/dynamodb/main.tf");
+    expect(scanDeployOrder(CHANGED, [WIDE_CD])[0]!.deploys).not.toBe("infra/aws/dynamodb/main.tf");
+  });
+
+  it("does not name a workflow that only builds and tests on the merge", () => {
+    // Measured against forty commits each of dns-project, billing-app and waf, the
+    // rule that asked only "does something run on the merge?" fired on all
+    // twenty commits that touched a .tf file, because every repo's ci.yml runs
+    // on push to main with no paths filter. Tests do not go live.
+    const ci = [{ path: ".github/workflows/ci.yml", text: `on:\n  push:\n    branches: [main]\njobs:\n  test:\n    steps:\n      - run: go build ./...\n      - run: go test ./...\n` }];
+    expect(scanDeployOrder(CHANGED, ci)).toEqual([]);
+  });
+
+  it("does not read a comment as a deploy, or as an apply that excuses one", () => {
+    // dns-project's ci.yml carries the line `# unit-tested with doctl+dig faked.`,
+    // which named it the deployer. The same read in reverse is worse: a note
+    // saying the team runs `terraform apply` by hand satisfies the
+    // merge-applies-it test and switches the gate off on the one repo whose
+    // manual apply is the whole hazard.
+    const chatty = { path: ".github/workflows/ci.yml", text: `on:\n  push:\n    branches: [main]\njobs:\n  test:\n    steps:\n      # unit-tested with doctl+dig faked.\n      - run: go test ./...\n` };
+    expect(scanDeployOrder(CHANGED, [chatty])).toEqual([]);
+
+    const excuse = { ...WIDE_CD, text: `${WIDE_CD.text}      # we run terraform apply by hand first\n` };
+    expect(scanDeployOrder(CHANGED, [excuse])).toHaveLength(1);
+  });
+
+  it("names source rather than a README when both ship", () => {
+    // Against dns-project's real history this reported a `.coveragerc`, a README
+    // and a `_test.go` on three of five true findings. All of them do ship on
+    // the merge, so the finding was sound — it just read like a false one.
+    const docsFirst = [
+      { path: "infra/aws/dynamodb/main.tf", text: TERRAFORM },
+      { path: "control-plane/README.md", text: "# control plane" },
+      { path: "control-plane/internal/api/auth_test.go", text: "func TestAuth(t *testing.T) {}" },
+      { path: "control-plane/internal/api/auth.go", text: "a.revocations.IsSessionRevoked(...)" },
+    ];
+    expect(scanDeployOrder(docsFirst, WORKFLOWS)[0]!.deploys).toBe("control-plane/internal/api/auth.go");
+  });
+
+  it("still names a document when the merge ships nothing else", () => {
+    const docsOnly = [
+      { path: "infra/aws/dynamodb/main.tf", text: TERRAFORM },
+      { path: "control-plane/README.md", text: "# control plane" },
+    ];
+    expect(scanDeployOrder(docsOnly, WORKFLOWS)[0]!.deploys).toBe("control-plane/README.md");
+  });
+
+  it("does not blame a workflow file for the code it ships", () => {
+    const withWorkflow = [...CHANGED, { path: ".github/workflows/cd.yml", text: WIDE_CD.text }];
+    expect(scanDeployOrder(withWorkflow, [WIDE_CD])[0]!.deploys).not.toMatch(/^\.github\//);
   });
 });
 
@@ -247,8 +320,7 @@ describe("the paragraph QA reads", () => {
   });
 
   it("says so plainly when the deployer filters on no paths at all", () => {
-    const everything = [{ path: ".github/workflows/cd.yml", text: `on:\n  push:\n    branches: [main]\njobs: {}\n` }];
-    expect(renderDeployOrder(scanDeployOrder(CHANGED, everything))).toContain("(no paths filter — it ships everything)");
+    expect(renderDeployOrder(scanDeployOrder(CHANGED, [WIDE_CD]))).toContain("(no paths filter — it ships everything)");
   });
 
   it("says which direction to fix it in, and that it is a FAIL", () => {

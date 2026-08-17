@@ -102,6 +102,73 @@ const DEFAULT_BRANCHES = new Set(["main", "master"]);
 const APPLY_COMMAND = /\b(?:terraform|tofu)\b[^\n]*\bapply\b/;
 
 /**
+ * A step that puts code in front of users.
+ *
+ * Without this the rule asks "does a workflow run on the merge?", and the
+ * answer in every repo is yes — `ci.yml` runs on push to main with no paths
+ * filter, so it matches every file changed. Measured over forty commits each
+ * of dns-project, billing-app and waf, that reading fired on twenty of the twenty
+ * commits that touched any `.tf` file and stayed silent on none of them. A
+ * check that never clears is one people learn to click past, which costs the
+ * gate the one time it is right.
+ *
+ * The hazard is not that something ran on the merge. It is that the merge made
+ * code live before the thing that code needs existed. Tests do not go live, so
+ * a workflow that only builds and tests cannot create the ordering problem no
+ * matter what it triggers on. The verbs below are the ones these repos
+ * actually deploy with, taken from their workflows rather than guessed at.
+ */
+/**
+ * The workflow with its comments removed.
+ *
+ * Every command question below is asked of this and not of the raw file. A
+ * comment is prose about the workflow, not a step in it, and reading the two
+ * alike goes wrong in both directions: dns-project's `ci.yml` says
+ * `# unit-tested with doctl+dig faked.` and was read as a deploy, while a note
+ * reading `we run terraform apply by hand` would have satisfied the
+ * merge-applies-it test and switched the whole gate off — silently, on exactly
+ * the repo that documents its manual apply. Being talked out of a finding by a
+ * sentence is the failure this gate exists to stop.
+ *
+ * Quotes are tracked so a `#` inside a string stays put; YAML has no escape
+ * inside single quotes, and a `\"` inside double quotes is handled.
+ */
+export function withoutComments(text: string): string {
+  return text
+    .split(/\r?\n/)
+    .map((line) => {
+      let quote: string | null = null;
+      for (let i = 0; i < line.length; i++) {
+        const c = line[i]!;
+        if (quote) {
+          if (c === "\\" && quote === '"') i++;
+          else if (c === quote) quote = null;
+        } else if (c === '"' || c === "'") quote = c;
+        // A `#` only opens a comment at the start of a line or after a space.
+        else if (c === "#" && (i === 0 || /\s/.test(line[i - 1]!))) return line.slice(0, i);
+      }
+      return line;
+    })
+    .join("\n");
+}
+
+const DEPLOY_COMMAND = new RegExp(
+  [
+    /\bkubectl\s+(?:apply|rollout|set\s+image|patch|create|delete)\b/,
+    /\bhelm\s+(?:upgrade|install)\b/,
+    /\baws\s+(?:s3\s+(?:sync|cp)|cloudfront|ecs|lambda|elasticbeanstalk|deploy)\b/,
+    /\bdocker\s+(?:push|buildx\s+build[^\n]*--push)\b/,
+    /\bdoctl\s+\w+[^\n]*\b(?:create|update|delete|replace|restore|apply)\b/,
+    /\b(?:flyctl|fly)\s+deploy\b|\bvercel\b|\bnetlify\b|\bserverless\s+deploy\b/,
+    /\bansible-playbook\b|\bpulumi\s+up\b|\bnpm\s+publish\b/,
+    /\bgh\s+release\s+create\b/,
+    APPLY_COMMAND.source,
+  ]
+    .map((r) => (typeof r === "string" ? r : r.source))
+    .join("|"),
+);
+
+/**
  * A job condition that holds only when a human launched the workflow by hand.
  *
  * The reason this is read at all: a workflow can trigger on push to main and
@@ -118,6 +185,13 @@ const APPLY_COMMAND = /\b(?:terraform|tofu)\b[^\n]*\bapply\b/;
  * readings disagree this takes the one that asks.
  */
 const DISPATCH_GUARD = /github\.event_name\s*==\s*["']workflow_dispatch["']/;
+
+/**
+ * A file that ships on the merge but does not illustrate why that matters —
+ * documentation, tests and tool configuration. Not excluded from the finding,
+ * only passed over when naming it: see the pick in `scanDeployOrder`.
+ */
+const INCIDENTAL = /(?:^|\/)(?:README|CHANGELOG|LICENSE)|\.(?:md|txt|coveragerc|editorconfig|gitignore)$|(?:^|\/)docs?\/|_test\.go$|\.(?:test|spec)\.[jt]sx?$/i;
 
 /**
  * Every Terraform resource declared in this file.
@@ -277,26 +351,39 @@ export function scanDeployOrder(changed: SourceFile[], workflows: SourceFile[]):
   if (!resources.length) return [];
 
   const declaring = new Set(resources.map((r) => r.file));
-  const triggers = workflows.map((w) => ({ ...w, trigger: pushTrigger(w.text) }));
+  const triggers = workflows.map((w) => ({ ...w, trigger: pushTrigger(w.text), steps: withoutComments(w.text) }));
 
   // An apply the merge performs settles the ordering by itself. An apply some
   // human launches is the step whose ordering is in question, so it does not —
   // and a workflow can be both, triggering on push while keeping its apply
   // behind a hand-launch guard. Only an unguarded one counts.
-  if (triggers.some((w) => firesOnMerge(w.trigger) && APPLY_COMMAND.test(w.text) && !DISPATCH_GUARD.test(w.text))) return [];
+  if (triggers.some((w) => firesOnMerge(w.trigger) && APPLY_COMMAND.test(w.steps) && !DISPATCH_GUARD.test(w.steps))) return [];
 
   const findings: OrderFinding[] = [];
   for (const workflow of triggers) {
     if (!firesOnMerge(workflow.trigger)) continue;
+    // Running on the merge is not deploying on the merge. See DEPLOY_COMMAND.
+    if (!DEPLOY_COMMAND.test(workflow.steps)) continue;
+    const shipped: { file: string; via: string }[] = [];
     for (const file of changed.map((f) => f.path)) {
+      // A workflow is not the code it ships, and neither is the rest of CI's
+      // furniture. Naming one of these as the deployed file makes a true
+      // finding read like a false one.
+      if (file.startsWith(".github/")) continue;
       // The configuration itself riding along is not what gets deployed; the
       // code that will run against the resource is.
       if (declaring.has(file)) continue;
       const via = workflow.trigger.paths?.find((p) => pathMatches(p, file));
       if (workflow.trigger.paths && via === undefined) continue;
-      findings.push({ deployer: workflow.path, deploys: file, via: via ?? "", resources });
-      break;
+      shipped.push({ file, via: via ?? "" });
     }
+    // Report the file that makes the ordering obvious. Every one of these ships
+    // on the merge, so any of them proves the finding — but a reader shown
+    // `deploy-edge.yml deploys README.md` reads a true finding as a false one
+    // and stops there. Running against dns-project's history this picked a
+    // `.coveragerc`, a README and a `_test.go` on three of five real findings.
+    const pick = shipped.find((s) => !INCIDENTAL.test(s.file)) ?? shipped[0];
+    if (pick) findings.push({ deployer: workflow.path, deploys: pick.file, via: pick.via, resources });
   }
   return findings;
 }
