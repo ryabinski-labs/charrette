@@ -118,7 +118,32 @@ export function validatePlanDag(plan: Plan): string[] {
 }
 
 export const QaVerdict = z.discriminatedUnion("verdict", [
-  z.object({ verdict: z.literal("PASS"), notes: z.string().default("") }),
+  z.object({
+    verdict: z.literal("PASS"),
+    notes: z.string().default(""),
+    /**
+     * Criteria this PASS did not actually settle, in QA's own words.
+     *
+     * The QA prompt has always told the agent to disclose these — five separate
+     * times, once per artifact kind — and until now the only place to put them
+     * was `notes`, free prose that is written to the task's ACCEPTED reason and
+     * read by nobody. So an honest QA agent doing exactly as instructed produced
+     * something indistinguishable from a clean pass.
+     *
+     * That is not hypothetical. dns-project's `af60742` shipped with its own commit
+     * message ending "NOT YET verified this session (turn budget ran out
+     * first)", naming the live DynamoDB run it had skipped and the manifest
+     * variable it had not added. Both were the outage. The disclosure was
+     * perfect and it was written into a field nothing gates on.
+     *
+     * Empty is the honest default and the common case. A non-empty list does
+     * NOT fail the task — an unverifiable criterion is a fact about the
+     * environment, not a defect in the work, and parking the task would only
+     * teach the agent to stop saying so. It holds the rollup PR as a draft
+     * instead, the same one-click hold an intent FAIL gets.
+     */
+    unverified: z.array(z.string().min(1)).default([]),
+  }),
   z.object({
     verdict: z.literal("FAIL"),
     reasons: z.array(z.string().min(1)).min(1),

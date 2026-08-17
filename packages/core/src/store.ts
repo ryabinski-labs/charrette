@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   qaIterations INTEGER NOT NULL DEFAULT 0, respawns INTEGER NOT NULL DEFAULT 0,
   assignedSkills TEXT NOT NULL DEFAULT '[]', errorSummary TEXT,
   touchedPaths TEXT NOT NULL DEFAULT '[]', estimatedSize TEXT NOT NULL DEFAULT 'M',
-  completionProbe TEXT NOT NULL DEFAULT '',
+  completionProbe TEXT NOT NULL DEFAULT '', unverified TEXT NOT NULL DEFAULT '[]',
   PRIMARY KEY (runId, id)
 );
 CREATE TABLE IF NOT EXISTS sessions (
@@ -122,6 +122,11 @@ export interface TaskRow {
    * back empty. See `PlannedTask.completionProbe`.
    */
   completionProbe: string;
+  /**
+   * What QA's PASS did not actually settle, in its own words. See
+   * `QaVerdict`'s PASS branch for why this is a field and not prose.
+   */
+  unverified: string[];
   /** The planner's size guess, and the only input a pre-run cost estimate has. */
   estimatedSize: "S" | "M" | "L";
 }
@@ -183,6 +188,11 @@ export class Store {
         // Empty is the honest default for a run planned before probes existed:
         // no command, so nothing is checked and nothing is claimed to be.
         completionProbe: "TEXT NOT NULL DEFAULT ''",
+        // Empty is honest for a task QA judged before it had anywhere to put
+        // this: it disclosed nothing structured, so nothing structured is known.
+        // Not "unknown" — an old run's rollup must not be held as a draft over a
+        // column that did not exist when it was judged.
+        unverified: "TEXT NOT NULL DEFAULT '[]'",
       },
       // Empty rather than 'unknown': the sessions of a run that predates this
       // column are not a build the postmortem should name, and the report says
@@ -849,7 +859,9 @@ export class Store {
     this.db.prepare("UPDATE runs SET prdPath = ?, planHash = ?, updatedAt = ? WHERE id = ?").run(prdPath, planHash, Date.now(), runId);
   }
 
-  insertTasks(runId: string, epics: { id: string; title: string }[], tasks: Omit<TaskRow, "runId">[]): void {
+  // `unverified` is omitted: it is QA's answer, so a task being planned has no
+  // value for it, and the column's `'[]'` default is that absence spelled out.
+  insertTasks(runId: string, epics: { id: string; title: string }[], tasks: Omit<TaskRow, "runId" | "unverified">[]): void {
     const insEpic = this.db.prepare("INSERT OR REPLACE INTO epics (id, runId, title, ord) VALUES (?,?,?,?)");
     const insTask = this.db.prepare(
       "INSERT OR REPLACE INTO tasks (id, runId, epicId, title, spec, acceptanceCriteria, dependsOn, state, branch, worktreePath, githubIssueNumber, prNumber, qaIterations, respawns, assignedSkills, errorSummary, touchedPaths, estimatedSize, completionProbe) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
@@ -906,6 +918,7 @@ export class Store {
       // `migrate` has already added the column to any database old enough to
       // lack it, so this is never reading an absence.
       touchedPaths: JSON.parse(r.touchedPaths as string),
+      unverified: JSON.parse(r.unverified as string),
     } as TaskRow;
   }
 
@@ -967,12 +980,16 @@ export class Store {
     }).length;
   }
 
-  updateTask(runId: string, taskId: string, patch: Partial<Pick<TaskRow, "branch" | "worktreePath" | "githubIssueNumber" | "prNumber" | "qaIterations" | "respawns" | "errorSummary" | "assignedSkills">>): void {
+  updateTask(
+    runId: string,
+    taskId: string,
+    patch: Partial<Pick<TaskRow, "branch" | "worktreePath" | "githubIssueNumber" | "prNumber" | "qaIterations" | "respawns" | "errorSummary" | "assignedSkills" | "unverified">>
+  ): void {
     const sets: string[] = [];
     const vals: (string | number | null)[] = [];
     for (const [k, v] of Object.entries(patch)) {
       sets.push(`${k} = ?`);
-      vals.push(k === "assignedSkills" ? JSON.stringify(v) : (v as string | number | null));
+      vals.push(k === "assignedSkills" || k === "unverified" ? JSON.stringify(v) : (v as string | number | null));
     }
     if (!sets.length) return;
     this.db.prepare(`UPDATE tasks SET ${sets.join(", ")} WHERE runId = ? AND id = ?`).run(...vals, runId, taskId);

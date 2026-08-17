@@ -424,6 +424,70 @@ describe("the pull request's title and body", () => {
     expect(created[0]!.body).toContain("**This PR is held as a draft because of that.**");
   });
 
+  /**
+   * The intent check asks whether the work is there. It cannot ask whether the
+   * work was ever exercised, because a task satisfied entirely against mocks
+   * arrives at it looking exactly like one that was run for real — so a run can
+   * pass every gate here and still have shipped something nobody ran.
+   *
+   * dns-project's af60742 is what that costs. Its own commit message ends "NOT YET
+   * verified this session (turn budget ran out first)" and names both halves of
+   * the outage that followed. The disclosure was written; nothing read it.
+   */
+  it("holds the rollup as a draft over a criterion QA passed without settling", async () => {
+    const dir = repo({ remote: true });
+    const { adapter } = fakeGithub();
+    const created: { draft?: boolean; body: string }[] = [];
+    (adapter as unknown as { octokit: { rest: { pulls: { create: unknown } } } }).octokit.rest.pulls.create = async (a: {
+      draft?: boolean;
+      body: string;
+    }) => (created.push(a), { data: { number: 54, html_url: "https://x.invalid/pull/54" } });
+    let flippedReady = false;
+    (adapter as unknown as { markPrReady: unknown }).markPrReady = async () => ((flippedReady = true), true);
+    const { pool } = rolePool({
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS("no heading here, just prose") : dagJson()),
+      worker,
+      // A PASS — the work is accepted and merges. What it could not settle is
+      // the session table's live behaviour, said out loud instead of implied.
+      qa: () =>
+        '```json\n{"verdict":"PASS","notes":"ok","unverified":["criterion 3: revocation exercised only against an in-memory double; no live DynamoDB run"]}\n```',
+      validator: () => '```json\n{"verdict":"PASS","gaps":[],"summary":"does what was asked"}\n```',
+    });
+    const { controller } = build({ repoPath: dir, pool, github: adapter });
+
+    await controller.startRun("move session revocation to its own table", RunConfig.parse({ ...BASE, intentFixRounds: 0 }));
+
+    // The intent check PASSED. The hold comes from the unverified list alone —
+    // if it did not, this run would ship exactly the way dns-project's did.
+    expect(created[0]!.draft).toBe(true);
+    expect(flippedReady).toBe(false);
+    expect(created[0]!.body).toMatch(/Passed but \*\*not verified\*\* — 1 criterion/);
+    expect(created[0]!.body).toContain("no live DynamoDB run");
+  });
+
+  it("names every unsettled criterion, and says so while the run is still going", async () => {
+    const dir = repo({ remote: true });
+    const { adapter } = fakeGithub();
+    const created: { body: string }[] = [];
+    (adapter as unknown as { octokit: { rest: { pulls: { create: unknown } } } }).octokit.rest.pulls.create = async (a: { body: string }) =>
+      (created.push(a), { data: { number: 55, html_url: "https://x.invalid/pull/55" } });
+    const { pool } = rolePool({
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS("no heading here, just prose") : dagJson()),
+      worker,
+      qa: () => '```json\n{"verdict":"PASS","notes":"ok","unverified":["no live DynamoDB run","the manifest was never applied"]}\n```',
+      validator: () => '```json\n{"verdict":"PASS","gaps":[],"summary":"ok"}\n```',
+    });
+    const { controller, events } = build({ repoPath: dir, pool, github: adapter });
+
+    await controller.startRun("move session revocation to its own table", RunConfig.parse({ ...BASE, intentFixRounds: 0 }));
+
+    expect(created[0]!.body).toMatch(/Passed but \*\*not verified\*\* — 2 criteria/);
+    expect(created[0]!.body).toContain("the manifest was never applied");
+    // The PR is where an operator eventually reads this; the run's own log is
+    // where they can see it at the moment it happens, with tasks still running.
+    expect(logs(events).some((t) => /could not settle 2 criteria[\s\S]*no live DynamoDB run/.test(t))).toBe(true);
+  });
+
   it("still flips the rollup ready when the intent check passed", async () => {
     const dir = repo({ remote: true });
     const { adapter } = fakeGithub();
