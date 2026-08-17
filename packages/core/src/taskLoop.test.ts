@@ -1038,3 +1038,96 @@ describe("the advisor's draft answer", () => {
     expect(gates[0]!.recommendation).toBe("");
   });
 });
+
+/**
+ * The one thing about a cutover that no reader of the cutover can see. Run
+ * 1e7d3df3 changed `control-plane/internal/store/dynamostore.go` and
+ * `infra/aws/dynamodb/main.tf` in the same commit, wrote a 207-line plan
+ * saying the table had to exist before the image rolled, confirmed against the
+ * live account that it did not, and handed a human an ordered runbook. Then
+ * the merge ran `deploy-web.yml`, which is CD on push to main with
+ * `control-plane/**` in its paths, and the console answered 503 to every
+ * authenticated request. A document cannot sequence a deploy it does not gate.
+ */
+describe("a merge that deploys ahead of the infrastructure it needs", () => {
+  /** Several files at once, including ones in directories that do not exist yet. */
+  function commitTree(cwd: string, files: Record<string, string>): void {
+    for (const [file, body] of Object.entries(files)) {
+      mkdirSync(path.dirname(path.join(cwd, file)), { recursive: true });
+      writeFileSync(path.join(cwd, file), body);
+    }
+    execFileSync("git", ["add", "-A"], { cwd, stdio: "ignore" });
+    execFileSync("git", ["-c", "user.email=w@example.invalid", "-c", "user.name=W", "commit", "-m", "cutover"], { cwd, stdio: "ignore" });
+  }
+
+  const SESSIONS_TF = `resource "aws_dynamodb_table" "sessions" {\n  name = "dns-project-sessions"\n}\n`;
+  const CD = `on:\n  push:\n    branches: [main]\n    paths:\n      - 'control-plane/**'\njobs:\n  api:\n    steps:\n      - run: kubectl rollout status deploy/api\n`;
+
+  it("puts the ordering in front of QA before the task is done", async () => {
+    const dir = repo();
+    const { pool, specs } = rolePool({
+      worker: (spec) => (
+        commitTree(spec.cwd, {
+          "infra/aws/dynamodb/main.tf": SESSIONS_TF,
+          "control-plane/internal/store/dynamostore.go": "func IsSessionRevoked() {}",
+          ".github/workflows/deploy-web.yml": CD,
+        }),
+        // A deletion in the same diff, because the changed-file list is what the
+        // diff says and a removed file is an ordinary entry in it. Reading one
+        // has to answer "declares nothing" rather than throw.
+        execFileSync("git", ["rm", "-q", "README.md"], { cwd: spec.cwd, stdio: "ignore" }),
+        execFileSync("git", ["-c", "user.email=w@example.invalid", "-c", "user.name=W", "commit", "-m", "drop readme"], {
+          cwd: spec.cwd,
+          stdio: "ignore",
+        }),
+        "moved revocation to its own table"
+      ),
+      qa: () => QA_PASS,
+    });
+    const { controller, events, runId } = executing({ repoPath: dir, pool });
+
+    await controller.resume(runId);
+
+    const qaPrompt = specs.find((s) => s.role === "qa")!.prompt as string;
+    expect(qaPrompt).toContain("Deploy order");
+    expect(qaPrompt).toContain("aws_dynamodb_table.sessions");
+    expect(qaPrompt).toContain("control-plane/**");
+    expect(qaPrompt).toContain("A runbook, a handover document or a plan that states the order is not one of these.");
+    expect(logs(events).some((t) => t.includes("the deploy would land first"))).toBe(true);
+  });
+
+  it("says nothing when nothing deploys on the merge", async () => {
+    const dir = repo();
+    const { pool, specs } = rolePool({
+      worker: (spec) => (
+        commitTree(spec.cwd, {
+          "infra/aws/dynamodb/main.tf": SESSIONS_TF,
+          "control-plane/internal/store/dynamostore.go": "func IsSessionRevoked() {}",
+        }),
+        "moved revocation to its own table"
+      ),
+      qa: () => QA_PASS,
+    });
+    const { controller, runId } = executing({ repoPath: dir, pool });
+
+    await controller.resume(runId);
+
+    expect(specs.find((s) => s.role === "qa")!.prompt as string).not.toContain("Deploy order");
+  });
+
+  it("says nothing about a change that declares no infrastructure", async () => {
+    const dir = repo();
+    const { pool, specs } = rolePool({
+      worker: (spec) => (
+        commitTree(spec.cwd, { "control-plane/internal/store/dynamostore.go": "func x() {}", ".github/workflows/deploy-web.yml": CD }),
+        "touched the store"
+      ),
+      qa: () => QA_PASS,
+    });
+    const { controller, runId } = executing({ repoPath: dir, pool });
+
+    await controller.resume(runId);
+
+    expect(specs.find((s) => s.role === "qa")!.prompt as string).not.toContain("Deploy order");
+  });
+});

@@ -387,6 +387,64 @@ describe("the pull request's title and body", () => {
     expect(created[0]!.body).toMatch(/Intent check: \*\*FAIL\*\* — 1 gap:/);
   });
 
+  /**
+   * Run 1e7d3df3's rollup carried `Intent check: FAIL` and four gaps in its own
+   * description — the NetworkPolicy, the CloudFront CSP, the edge fleet roll,
+   * and the session table nobody had applied — and was flipped ready anyway,
+   * because the only question asked here was whether the tasks had stopped.
+   * It was merged with the FAIL still in the body, dns-project's CD shipped the
+   * application half of it, and the console answered 503 to every request.
+   *
+   * A verdict a reviewer has to notice is not a control. A draft is one.
+   */
+  it("holds the rollup as a draft when the intent check failed", async () => {
+    const dir = repo({ remote: true });
+    const { adapter } = fakeGithub();
+    const created: { draft?: boolean; body: string }[] = [];
+    (adapter as unknown as { octokit: { rest: { pulls: { create: unknown } } } }).octokit.rest.pulls.create = async (a: {
+      draft?: boolean;
+      body: string;
+    }) => (created.push(a), { data: { number: 52, html_url: "https://x.invalid/pull/52" } });
+    let flippedReady = false;
+    (adapter as unknown as { markPrReady: unknown }).markPrReady = async () => ((flippedReady = true), true);
+    const { pool } = rolePool({
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS("no heading here, just prose") : dagJson()),
+      worker,
+      qa: () => QA_PASS,
+      validator: () => '```json\n{"verdict":"FAIL","gaps":["the NetworkPolicy was never applied"],"summary":"half of it"}\n```',
+    });
+    const { controller } = build({ repoPath: dir, pool, github: adapter });
+
+    await controller.startRun("roll the edge fleet", RunConfig.parse({ ...BASE, intentFixRounds: 0 }));
+
+    expect(created[0]!.draft).toBe(true);
+    expect(flippedReady).toBe(false);
+    // And the body says why, so the draft is not a mystery the operator clears
+    // by clicking the button the moment they notice it.
+    expect(created[0]!.body).toContain("**This PR is held as a draft because of that.**");
+  });
+
+  it("still flips the rollup ready when the intent check passed", async () => {
+    const dir = repo({ remote: true });
+    const { adapter } = fakeGithub();
+    const created: { draft?: boolean }[] = [];
+    (adapter as unknown as { octokit: { rest: { pulls: { create: unknown } } } }).octokit.rest.pulls.create = async (a: { draft?: boolean }) =>
+      (created.push(a), { data: { number: 53, html_url: "https://x.invalid/pull/53" } });
+    let flippedReady = false;
+    (adapter as unknown as { markPrReady: unknown }).markPrReady = async () => ((flippedReady = true), true);
+    const { pool } = rolePool({
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS("no heading here, just prose") : dagJson()),
+      worker,
+      qa: () => QA_PASS,
+      validator: () => '```json\n{"verdict":"PASS","gaps":[],"summary":"does what was asked"}\n```',
+    });
+    const { controller } = build({ repoPath: dir, pool, github: adapter });
+
+    await controller.startRun("roll the edge fleet", RunConfig.parse({ ...BASE, intentFixRounds: 0 }));
+
+    expect(flippedReady).toBe(true);
+  });
+
   it("cuts a very long title on a word boundary", async () => {
     const dir = repo({ remote: true });
     const { adapter } = fakeGithub();

@@ -101,6 +101,7 @@ import { usableProbe } from "./completionProbe.js";
 import { foreignRepoPaths, validatePlanScope } from "./repoScope.js";
 import { hasDrift, pathDrift, renderDrift } from "./pathDrift.js";
 import { namedIamResources, renderDeployCapability, scanDeployCapability, type SourceFile } from "./deployCapability.js";
+import { declaredResources, renderDeployOrder, scanDeployOrder } from "./deployOrder.js";
 import { confirmFailures, runDeterministicChecks, splitInheritedFailures, type CheckResult } from "./qa.js";
 import { estimatePlan, renderEstimate } from "./estimate.js";
 import { renderIntegrations, scanIntegrations } from "./integrationScan.js";
@@ -325,6 +326,39 @@ function deployCapabilityNote(worktree: string, changed: string[]): string {
     // and if it does not, this says nothing at all.
   }
   return renderDeployCapability(scanDeployCapability(templates, [...workflows, ...DEPLOYER_FILES].map(read)));
+}
+
+/**
+ * The QA note for a task whose merge deploys it ahead of infrastructure the
+ * merge will not have applied — see `deployOrder.ts` for what is being asked
+ * and why here is the last place it can be asked.
+ *
+ * Reads nothing until the diff contains a `.tf` file with a resource in it,
+ * which is rare and free to rule out: a task that touched no Terraform costs
+ * one `filter` over the file list. The changed-file list is what the diff
+ * says, so a deleted file reading as empty is the correct answer, not an
+ * error — a resource that is gone declares nothing.
+ */
+function deployOrderNote(worktree: string, changed: string[]): string {
+  const read = (file: string): SourceFile => {
+    try {
+      return { path: file, text: readFileSync(path.join(worktree, file), "utf8") };
+    } catch {
+      return { path: file, text: "" };
+    }
+  };
+  const files = changed.map(read);
+  if (!files.some((f) => declaredResources(f).length)) return "";
+
+  let workflows: string[] = [];
+  try {
+    workflows = readdirSync(path.join(worktree, ".github", "workflows"))
+      .filter((f) => /\.ya?ml$/i.test(f))
+      .map((f) => `.github/workflows/${f}`);
+  } catch {
+    // No workflows directory, so no merge-triggered deploy to be ahead of.
+  }
+  return renderDeployOrder(scanDeployOrder(files, workflows.map(read)));
 }
 
 /**
@@ -1667,7 +1701,21 @@ export class RunController {
       ...merged.map((t) => `- ${t.title} (QA iterations: ${t.qaIterations}${t.githubIssueNumber ? `, closes #${t.githubIssueNumber}` : ""})`),
       // The reviewer arrives with the validator's answer in hand, PASS or not.
       ...(intent
-        ? ["", intent.verdict === "PASS" ? "Intent check: **PASS**." : `Intent check: **FAIL** — ${intent.gaps.length || "unstated"} gap${intent.gaps.length === 1 ? "" : "s"}:`, ...intent.gaps.map((g) => `- ${g.slice(0, 500)}`)]
+        ? [
+            "",
+            intent.verdict === "PASS" ? "Intent check: **PASS**." : `Intent check: **FAIL** — ${intent.gaps.length || "unstated"} gap${intent.gaps.length === 1 ? "" : "s"}:`,
+            ...intent.gaps.map((g) => `- ${g.slice(0, 500)}`),
+            ...(intent.verdict === "FAIL"
+              ? [
+                  "",
+                  "**This PR is held as a draft because of that.** Every gap above is work this run",
+                  "did not deliver, and merging is not a way to finish it — on a repo with CD, the",
+                  "merge ships the half that is done and leaves the rest as a difference between",
+                  "production and this description. Close the gaps and the run flips this ready, or",
+                  "mark it ready yourself if you have decided to ship it incomplete on purpose.",
+                ]
+              : []),
+          ]
         : []),
       ...(shipped.length
         ? ["", `Continues ${shipped.map((n) => `#${n}`).join(", ")} — this PR carries only the commits merged into the run after that one shipped.`]
@@ -1683,7 +1731,28 @@ export class RunController {
     // (marrymath #89), so until every task is terminal the rollup is a draft;
     // completion flips it ready with the final task list and intent verdict.
     const stillWorking = run.state !== "INTEGRATING" && run.state !== "PR_REVIEW";
-    const pr = await this.github.ensurePR(runId, "run", this.wt.integrationBranch(runId), base, title, body, { draft: stillWorking });
+    /**
+     * A run that did not deliver what it was asked for does not hand a human a
+     * mergeable button.
+     *
+     * The verdict has always been written into the body, and on run 1e7d3df3 it
+     * said FAIL and listed four gaps: the NetworkPolicy, the CloudFront CSP, the
+     * edge fleet roll, and the session table's apply. The PR was flipped ready
+     * anyway, because until now the only question asked here was whether the
+     * tasks had stopped running. It was merged with the FAIL in its own
+     * description, and dns-project's CD shipped the application half of a change
+     * whose infrastructure half was in the gap list — which is how a console
+     * that had passed ten checks started answering 503 to every request.
+     *
+     * A verdict a reviewer has to notice is not a control; a draft is. GitHub
+     * refuses to merge one, so the same sentence now has to be acted on rather
+     * than read past. This is not a veto: `markPrReady` is one click, and an
+     * operator who means to ship an incomplete run still can. What they cannot
+     * do any more is ship it by not reading.
+     */
+    const intentFailed = intent?.verdict === "FAIL";
+    const draft = stillWorking || intentFailed;
+    const pr = await this.github.ensurePR(runId, "run", this.wt.integrationBranch(runId), base, title, body, { draft });
     if (!pr) {
       this.bus.publish({
         type: "agent.log",
@@ -1694,7 +1763,7 @@ export class RunController {
       });
       return null;
     }
-    if (!stillWorking) await this.github.markPrReady?.(runId, "run", pr.number, title, body);
+    if (!draft) await this.github.markPrReady?.(runId, "run", pr.number, title, body);
     if (pr.fresh && shipped.length) {
       this.bus.publish({
         type: "agent.log",
@@ -4544,6 +4613,22 @@ export class RunController {
           ts: Date.now(),
         });
       }
+      // Whether merging this diff deploys it before the infrastructure it needs
+      // exists. Same shape of question as the capability gate above and the same
+      // reason it lives here: the answer is in a workflow's trigger rather than
+      // in the code, so every check that reads the code passes and the first
+      // report is production.
+      const order = deployOrderNote(wt.path, delta.files);
+      if (order) {
+        this.bus.publish({
+          type: "agent.log",
+          runId,
+          taskId,
+          sessionId: workerSession ?? taskId,
+          text: "this diff declares infrastructure nothing applies on the merge, and the merge deploys code that needs it — the deploy would land first",
+          ts: Date.now(),
+        });
+      }
       let qa;
       /**
        * A QA session that dies delivers no verdict, so the minutes it spent
@@ -4580,6 +4665,7 @@ export class RunController {
             [
               renderDrift(drift),
               capability,
+              order,
               task.completionProbe ? `This task's completion probe passes: \`${task.completionProbe}\`. That settles the "everywhere" half of the job; it says nothing about whether the change is correct.` : "",
             ]
               .filter(Boolean)
