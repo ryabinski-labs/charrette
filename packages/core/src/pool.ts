@@ -131,6 +131,14 @@ export interface AgentSpec {
   disallowedTools?: string[];
   /** In-process MCP servers (SDK `tool()` definitions) exposed to this agent only. */
   mcpServers?: Options["mcpServers"];
+  /**
+   * The operator skills this session may invoke, by name.
+   *
+   * Always passed, never omitted: the SDK reads an absent `skills` as "leave
+   * the CLI's defaults alone", which with a `user` setting source enables all
+   * of them. `[]` is what "this task routed no skill" has to look like.
+   */
+  skills?: string[];
   maxTurns?: number;
   /**
    * Characters of transcript the harness-run loop may send before it compacts.
@@ -772,8 +780,21 @@ export class AgentPool {
       mcpServers: spec.mcpServers,
       resume: spec.resume,
       abortController: abort,
-      // Do not inherit the operator's filesystem settings/skills into worker context.
-      settingSources: [],
+      // Skills are discovered from a setting source and nowhere else. With `[]`
+      // a session sees the sixteen skills built into the CLI and none of the
+      // operator's — `skills: "all"` does not change that, because the filter
+      // runs after a discovery that never happened. So the source is loaded and
+      // the filter does the isolating: `skills` names exactly what skillRouting
+      // picked for this task, and every other skill stays invisible to the Skill
+      // tool. What the run injects into the prompt and what the agent may invoke
+      // are then the same short list.
+      //
+      // The cost is that `user` brings the operator's settings.json with it,
+      // including their own PreToolUse rtk hook alongside the one below. That
+      // one is safe — rtk returns no rewrite for a command it has already
+      // rewritten — but their other hooks now run in worker sessions too.
+      settingSources: ["user"],
+      skills: spec.skills ?? [],
       // …which also strips the operator's token-compression hook, so re-add it
       // programmatically: Bash commands route through rtk when it's installed —
       // alongside the guard that stops an agent applying real infrastructure,

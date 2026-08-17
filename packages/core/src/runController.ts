@@ -1292,6 +1292,7 @@ export class RunController {
         role: "pm",
         model: run.config.models.pm,
         systemPrompt: planGateDeciderSystemPrompt(skill, bound, toolbeltBlock(detectToolbelt(run.config.externalTools)), skillsBlock(skills)),
+        skills: skills.map((s) => s.name),
         prompt: planGateDeciderPrompt(run.assignment, this.planPrd(runId), this.planSummary(runId), gaps, priorVeto),
         cwd: this.repoPath,
         // The tree it would build in is the one it is standing in, and reading
@@ -1549,6 +1550,7 @@ export class RunController {
         role: "prod",
         model: run.config.models.prod,
         systemPrompt: prodValidatorSystemPrompt(toolbeltBlock(detectToolbelt(run.config.externalTools)), skillsBlock(skills)),
+        skills: skills.map((s) => s.name),
         prompt: prodValidatorPrompt(run.assignment, this.planPrd(runId), url, taskLines),
         cwd: this.repoPath,
         // Production is read through the network, not through the checkout, and
@@ -2146,6 +2148,7 @@ export class RunController {
         role: "advisor",
         model: run.config.models.advisor,
         systemPrompt: advisorSystemPrompt("", decider, skillsBlock(skills), probe, repeats),
+        skills: skills.map((s) => s.name),
         prompt: advisorPrompt(task, why, run.config.deterministicChecks, repeats),
         cwd: task.worktreePath ?? this.repoPath,
         disallowedTools: ["Write", "Edit", "NotebookEdit", "WebSearch"],
@@ -2519,6 +2522,7 @@ export class RunController {
         role: "planner",
         model: run.config.models.planner,
         systemPrompt: plannerDocsSystemPrompt(skillsBlock(this.planSkills(runId))),
+        skills: this.planSkills(runId).map((s) => s.name),
         prompt:
           `Assignment:\n${run.assignment}\n` +
           (feedback ? `\nOperator feedback on the previous plan:\n${feedback}\n` : "") +
@@ -2600,6 +2604,7 @@ export class RunController {
           role: "planner",
           model: run.config.models.planner,
           systemPrompt: plannerBreakdownSystemPrompt(skillsBlock(this.planSkills(runId)), perMessage),
+          skills: this.planSkills(runId).map((s) => s.name),
           resume,
           prompt:
             batch > 1
@@ -3325,6 +3330,7 @@ export class RunController {
         role: "demo" as const,
         model: run.config.models.demo,
         systemPrompt: demoSystemPrompt(dir, toolbeltBlock(detectToolbelt(run.config.externalTools)), skillsBlock(skills)),
+        skills: skills.map((s) => s.name),
         cwd: wtPath,
         disallowedTools: ["WebSearch"],
         // Its own port block and compose project, like a task worktree — a demo
@@ -3528,6 +3534,7 @@ export class RunController {
           role: "reviewer",
           model: run.config.models.reviewer,
           systemPrompt: reviewerSystemPrompt(lens, toolbeltBlock(detectToolbelt(run.config.externalTools)), skillsBlock(skills)),
+          skills: skills.map((s) => s.name),
           prompt: reviewerPrompt(lens, run.assignment, prd, demoText, taskLines, upcomingLines),
           cwd: wtPath,
           disallowedTools: ["Write", "Edit", "NotebookEdit", "WebSearch"],
@@ -3654,6 +3661,7 @@ export class RunController {
         role: "pm",
         model: run.config.models.pm,
         systemPrompt: pitStopDeciderSystemPrompt(skill, toolbeltBlock(detectToolbelt(run.config.externalTools)), skillsBlock(skills)),
+        skills: skills.map((s) => s.name),
         prompt: pitStopDeciderPrompt(
           run.assignment,
           this.planPrd(runId),
@@ -3753,6 +3761,7 @@ export class RunController {
         role: "planner",
         model: run.config.models.planner,
         systemPrompt: plannerBreakdownSystemPrompt(skillsBlock(this.planSkills(runId))),
+          skills: this.planSkills(runId).map((s) => s.name),
         prompt: replanPrompt(
           run.assignment,
           this.planPrd(runId),
@@ -4289,6 +4298,9 @@ export class RunController {
           // into. `escalated` in `taskSpend` is what separates the two.
           tier: tier.decision.tier,
           systemPrompt: workerSystemPrompt(conventions, skillsBlock(workerSkills), toolbelt),
+          // The same list the prompt names, so a skill an agent is told to read
+          // is one the Skill tool will actually run.
+          skills: workerSkills.map((s) => s.name),
           prompt: workerSession && qaFeedback ? workerResumePrompt(qaFeedback) : workerTaskPrompt(task, qaFeedback),
           resume: workerSession,
           cwd: wt.path,
@@ -4627,6 +4639,7 @@ export class RunController {
           role: "qa",
           model: run.config.models.qa,
           systemPrompt: qaSystemPrompt(toolbelt, skillsBlock(qaSkills)),
+          skills: qaSkills.map((s) => s.name),
           prompt: qaTaskPrompt(
             task,
             workerSummary.slice(0, 4000),
