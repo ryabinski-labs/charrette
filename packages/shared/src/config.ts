@@ -40,14 +40,20 @@ export const ModelRoutingShape = z.object({
   workerLight: z.string().default(HAIKU),
   qa: z.string().default("claude-sonnet-5"),
   /**
-   * Unused. No agent is dispatched with this model.
+   * Resolves the run's merge conflict with its own base branch.
    *
-   * Every `sessionId: "integrator"` in runController.ts is deterministic git
-   * work — merging a task branch, opening a pull request, waiting on checks —
-   * and none of it calls a model. The key is kept because run configs recorded
-   * before anyone noticed carry it, and because removing it would silently
-   * change nothing while looking like it changed something. Setting it has no
-   * effect and never had.
+   * Almost every `sessionId: "integrator"` in runController.ts is deterministic
+   * git work — merging a task branch, opening a pull request, waiting on checks —
+   * and calls no model at all. This key was documented as unused for exactly
+   * that reason. `reconcileWithBase` is the one exception: when `main` has moved
+   * under a long run and the integration branch no longer merges into it, an
+   * agent is dispatched into the integration worktree to resolve it, because the
+   * alternative is a pull request nobody can merge.
+   *
+   * Stays on Sonnet. The judgment it needs is narrow — which side of a hunk
+   * belongs, given two commit histories it can read — and it is bounded by
+   * `BASE_CONFLICT_FIX_ATTEMPTS` and verified against the branch afterwards
+   * rather than taken on trust.
    */
   integrator: z.string().default("claude-sonnet-5"),
   /**
@@ -874,6 +880,22 @@ export const RunConfig = z.object({
   waitForChecks: z.boolean().default(true),
   /** How long to wait for those checks before reporting them as still pending. */
   checkTimeoutMinutes: z.number().int().min(1).max(120).default(20),
+  /**
+   * How many rounds of fix tasks a red CI may queue before the run stops
+   * treating it as its own work and hands it to a person.
+   *
+   * `waitForChecks` made the run *see* a red branch; this makes it act. A
+   * failing check is work in exactly the sense a base conflict is: something
+   * only the run can fix while it still has agents, not something to report.
+   * Each round re-runs the failed jobs once first (CI flakes; a fix task
+   * against a flake "fixes" code that was never broken), then queues one task
+   * per failing check with that job's log in the spec. Two rounds by default:
+   * the first fixes the ordinary breakage, the second catches what the first
+   * missed, and past that the failure is telling you something about the repo
+   * or its runner that an agent loop will only spend money restating. `0`
+   * restores the old behaviour — report the red branch and stop.
+   */
+  ciFixRounds: z.number().int().min(0).max(3).default(2),
   /**
    * The live URL this repo deploys to. Set it and a run does not end at the
    * pull request: once a human merges, the harness follows the deploy and sends

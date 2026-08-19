@@ -155,6 +155,33 @@ export const HarnessEvent = z.discriminatedUnion("type", [
     failing: z.array(z.string()).default([]),
     total: z.number().int().default(0),
   }),
+  // The run asked GitHub to re-run the failed jobs before spending a fix task
+  // on them. CI flakes; a task queued against a flake "fixes" code that was
+  // never broken. `reran` is false when nothing could be re-run — checks not
+  // from Actions, or an API refusal — and the fix round proceeds on the
+  // failure as it stands.
+  z.object({ ...base, type: z.literal("run.ci_retry"), prNumber: z.number().int(), reran: z.boolean() }),
+  /**
+   * Whether the run's pull request can be merged into its base at all.
+   *
+   * The sibling of `run.ci_status`, for the half of "is this branch shippable"
+   * that CI cannot see. A green check on a branch whose base moved underneath it
+   * is still a branch nobody can merge, and the harness used to report exactly
+   * that as a finished run.
+   *
+   * `conflicts` carries the files when the harness found them itself, merging
+   * the base into the integration branch. It is empty when the verdict came from
+   * GitHub, which reports mergeability without saying where it broke.
+   */
+  z.object({
+    ...base,
+    type: z.literal("run.merge_status"),
+    prNumber: z.number().int().default(0),
+    state: z.enum(["mergeable", "conflicting", "unknown"]),
+    baseBranch: z.string().default(""),
+    conflicts: z.array(z.string()).default([]),
+    resolvedBy: z.enum(["already-current", "merge", "agent", "none"]).default("none"),
+  }),
   // The operator asked for a pit stop instead of waiting for one. Like the
   // trigger's own memory below, this is held in the event log rather than on the
   // controller: a request made at 2am against a run that is restarted at 3am is

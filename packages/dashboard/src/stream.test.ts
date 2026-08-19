@@ -71,9 +71,14 @@ const cursor = (store: Store, runId = "r1") => store.eventsSince(runId, 0, 10_00
  * so `fetch` would not resolve until the very event the caller is waiting to
  * publish, and the test would deadlock against itself.
  */
-async function tailing(url: string, dash: Dashboard, after: number, publish: () => void): Promise<Response> {
+async function tailing(url: string, dash: Dashboard, bus: Bus, after: number, publish: () => void): Promise<Response> {
+  // Publishing into a stream that has not attached yet only looks like a live
+  // tail: the frames still arrive (the store backfill serves them), but the
+  // subscription's own filter never runs. Wait for the subscriber, not the
+  // clock — a fixed sleep loses that race on a loaded machine.
+  const before = bus.subscribers;
   const pending = fetch(new URL(`/api/runs/r1/events?after=${after}`, url), { headers: auth(dash) });
-  await new Promise((r) => setTimeout(r, 50));
+  while (bus.subscribers === before) await new Promise((r) => setTimeout(r, 5));
   publish();
   return pending;
 }
@@ -462,7 +467,7 @@ describe("the event stream", () => {
     makeRun(store);
     makeRun(store, "r2");
 
-    const res = await tailing(url, dash, cursor(store), () => {
+    const res = await tailing(url, dash, bus, cursor(store), () => {
       bus.publish({ type: "agent.log", runId: "r2", sessionId: "s", text: "another run", ts: 1 });
       bus.publish({ type: "agent.log", runId: "r1", sessionId: "s", text: "this run", ts: 2 });
     });
@@ -481,7 +486,7 @@ describe("the event stream", () => {
     const { dash, url, store, bus } = await serving();
     makeRun(store);
 
-    const res = await tailing(url, dash, cursor(store), () => {
+    const res = await tailing(url, dash, bus, cursor(store), () => {
       bus.publish({ type: "run.state_changed", runId: "r1", from: "INTEGRATING", to, ts: 1 } as never);
     });
     const frames = await readFrames(res, 1);
@@ -492,7 +497,7 @@ describe("the event stream", () => {
   it("stops buffering for a browser that has gone away", async () => {
     const { dash, url, store, bus } = await serving();
     makeRun(store);
-    const res = await tailing(url, dash, cursor(store), () => {
+    const res = await tailing(url, dash, bus, cursor(store), () => {
       bus.publish({ type: "agent.log", runId: "r1", sessionId: "s", text: "while watching", ts: 1 });
     });
     await readFrames(res, 1);
@@ -505,7 +510,7 @@ describe("the event stream", () => {
   it("drops frames rather than growing without bound when nothing is reading", async () => {
     const { dash, url, store, bus } = await serving();
     makeRun(store);
-    await tailing(url, dash, cursor(store), () => {
+    await tailing(url, dash, bus, cursor(store), () => {
       bus.publish({ type: "agent.log", runId: "r1", sessionId: "s", text: "first", ts: 0 });
     });
 

@@ -141,6 +141,15 @@ describe("reading back a row an older harness wrote", () => {
     expect(s.deployStatus("run1")).toEqual({ sha: "abc123", state: "pending", failing: [], total: 0 });
   });
 
+  it("survives a merge status recorded before the conflict list existed", () => {
+    // A run that was mid-flight when the mergeability phase shipped: the row is
+    // there, the fields around it are not, and the closing report still renders.
+    const { store: s } = withRun();
+    legacyEvent(s, "run.merge_status", { state: "unknown" });
+
+    expect(s.mergeStatus("run1")).toEqual({ prNumber: 0, state: "unknown", baseBranch: "", conflicts: [], resolvedBy: "none" });
+  });
+
   it("survives a production verdict recorded before findings existed", () => {
     const { store: s } = withRun();
     legacyEvent(s, "run.prod_verdict", { url: "https://app.example.com", verdict: "PASS" });

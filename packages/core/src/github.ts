@@ -420,6 +420,91 @@ export class GitHubAdapter {
   }
 
   /**
+   * Ask Actions to re-run the failed jobs on this pull request's head commit.
+   *
+   * The cheapest possible answer to a red check is that it was never really
+   * red: a serialized self-hosted runner, a network blip, a container that
+   * lost a race. Asked once before any fix task is queued, because a task
+   * spawned against a flake "fixes" code that was never broken and the diff it
+   * produces is pure noise. Returns whether any re-run was actually requested
+   * — commit statuses from external CI have nothing to re-run, and a `false`
+   * tells the caller to diagnose the failure as it stands.
+   */
+  async rerunFailedChecks(prNumber: number): Promise<boolean> {
+    if (!this.octokit) return false;
+    const pr = await this.octokit.rest.pulls
+      .get({ owner: this.owner, repo: this.repo, pull_number: prNumber })
+      .then((r) => r.data)
+      .catch(() => null);
+    if (!pr) return false;
+    const runs = await this.octokit.rest.actions
+      .listWorkflowRunsForRepo({ owner: this.owner, repo: this.repo, head_sha: pr.head.sha, per_page: 100 })
+      .then((r) => r.data.workflow_runs)
+      .catch(() => [] as { id: number; conclusion: string | null }[]);
+    let reran = 0;
+    for (const run of runs) {
+      // The same set `checksForRef` reads as red. "cancelled" and
+      // "action_required" are here for the same reason they are there: neither
+      // is a green branch, and both can be a runner's bad day.
+      if (!run.conclusion || !["failure", "timed_out", "cancelled", "action_required", "startup_failure"].includes(run.conclusion)) continue;
+      const ok = await this.octokit.rest.actions
+        .reRunWorkflowFailedJobs({ owner: this.owner, repo: this.repo, run_id: run.id })
+        .then(() => true)
+        // A workflow that failed before any job started (a bad `services:`
+        // block, a syntax error) has no failed jobs to re-run and GitHub
+        // refuses. That is a real answer: nothing about this failure is flake.
+        .catch(() => false);
+      if (ok) reran++;
+    }
+    return reran > 0;
+  }
+
+  /**
+   * The failing jobs on this pull request's head commit, each with the tail of
+   * its own log.
+   *
+   * This is what turns "CI is red: Backend (Go) vet + test" into a task an
+   * agent can act on: the log carries the failing assertion, the coverage
+   * number, the missing binary — the thing the fix is actually about. Only the
+   * tail is kept: a Go test log is megabytes of pass lines and the verdict is
+   * at the bottom.
+   *
+   * Best-effort by design. Jobs from external CI have no Actions log, a log
+   * can expire, and the API can refuse — every failure here degrades to a
+   * name with no log rather than an error, because "fix this check, log
+   * unavailable" is still a workable task and a crash here is not.
+   */
+  async failingJobLogs(prNumber: number): Promise<{ name: string; log: string }[]> {
+    if (!this.octokit) return [];
+    const pr = await this.octokit.rest.pulls
+      .get({ owner: this.owner, repo: this.repo, pull_number: prNumber })
+      .then((r) => r.data)
+      .catch(() => null);
+    if (!pr) return [];
+    const runs = await this.octokit.rest.actions
+      .listWorkflowRunsForRepo({ owner: this.owner, repo: this.repo, head_sha: pr.head.sha, per_page: 100 })
+      .then((r) => r.data.workflow_runs)
+      .catch(() => [] as { id: number; conclusion: string | null }[]);
+    const out: { name: string; log: string }[] = [];
+    for (const run of runs) {
+      if (!run.conclusion || run.conclusion === "success" || run.conclusion === "skipped" || run.conclusion === "neutral") continue;
+      const jobs = await this.octokit.rest.actions
+        .listJobsForWorkflowRun({ owner: this.owner, repo: this.repo, run_id: run.id, per_page: 100 })
+        .then((r) => r.data.jobs)
+        .catch(() => [] as { id: number; name: string; conclusion: string | null }[]);
+      for (const job of jobs) {
+        if (job.conclusion !== "failure" && job.conclusion !== "timed_out" && job.conclusion !== "startup_failure") continue;
+        const log = await this.octokit.rest.actions
+          .downloadJobLogsForWorkflowRun({ owner: this.owner, repo: this.repo, job_id: job.id })
+          .then((r) => String(r.data ?? ""))
+          .catch(() => "");
+        out.push({ name: job.name, log: tailOfLog(log) });
+      }
+    }
+    return out;
+  }
+
+  /**
    * The commit a merged pull request landed as, or `null` if it is not merged.
    * That commit is where the base branch's own workflows run — the deploy the
    * merge triggered — so it is what "did this actually ship?" is asked about.
@@ -432,6 +517,47 @@ export class GitHubAdapter {
       .catch(() => null);
     if (!data?.merged_at) return null;
     return data.merge_commit_sha ?? null;
+  }
+
+  /**
+   * Whether GitHub can merge this pull request into its base.
+   *
+   * Not the same question as `prChecks`, and the one nothing here used to ask.
+   * CI judges the head commit in isolation; mergeability is about the head and
+   * the base *together*, and a base that moved under a long run makes the pull
+   * request unmergeable without turning a single check red. That is how run
+   * 5743ce85 reported a conflicting #834 as ready for review.
+   *
+   * `mergeable` is computed by GitHub in the background, so it is `null` for a
+   * few seconds after a push or an open. "unknown" is therefore a real, ordinary
+   * state and not an error — the caller polls it the way it polls a pending
+   * check, and must never read it as a pass.
+   *
+   * `null` means GitHub is off or the pull request could not be read, which is
+   * different again: nothing was learned at all.
+   */
+  async prMergeable(prNumber: number): Promise<{ state: "mergeable" | "conflicting" | "unknown"; mergeStateStatus: string } | null> {
+    if (!this.octokit) return null;
+    const data = await this.octokit.rest.pulls
+      .get({ owner: this.owner, repo: this.repo, pull_number: prNumber })
+      .then((r) => r.data)
+      .catch(() => null);
+    if (!data) return null;
+    // A merged or closed pull request has no merge to compute, and GitHub
+    // reports `mergeable: null` for both forever. Polling one is a timeout
+    // waiting to happen, so answer from the state instead.
+    if (data.merged_at) return { state: "mergeable", mergeStateStatus: "merged" };
+    const status = data.mergeable_state ?? "unknown";
+    if (data.mergeable === true) return { state: "mergeable", mergeStateStatus: status };
+    if (data.mergeable === false) return { state: "conflicting", mergeStateStatus: status };
+    // `null` is GitHub still computing, and is worth waiting on. The field being
+    // absent entirely is not the same thing and must not be polled: a response
+    // that never carries `mergeable` will never start carrying it, so treating
+    // the two alike spends the whole settle window learning nothing. `null` is
+    // what a single-pull-request GET always returns while the background job
+    // runs; absent is a response that is not one.
+    if (!("mergeable" in data)) return null;
+    return { state: "unknown", mergeStateStatus: status };
   }
 
   /** The combined verdict of every check and status attached to one commit. */
@@ -517,6 +643,15 @@ export async function originSlug(repoPath: string): Promise<string | null> {
  * failure, distinguishable only by its message. Everything else — bad token,
  * protected branch, missing ref — must still surface.
  */
+/**
+ * The last stretch of a CI job's log — where the verdict lives. Bounded in
+ * both lines and bytes so a task spec carrying three of these stays a spec.
+ */
+export function tailOfLog(log: string, lines = 120, bytes = 8_000): string {
+  const tail = log.split("\n").slice(-lines).join("\n");
+  return tail.length > bytes ? tail.slice(-bytes) : tail;
+}
+
 export function isNoCommitsError(e: unknown): boolean {
   return is422Matching(e, /no commits between/i);
 }

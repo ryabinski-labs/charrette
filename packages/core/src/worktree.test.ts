@@ -370,3 +370,39 @@ describe("catching a task branch up with what has merged since", () => {
     expect(existsSync(path.join(task, ".git", "MERGE_HEAD"))).toBe(false);
   });
 });
+
+/**
+ * The two answers about the base that are not "it merged" or "it conflicted".
+ *
+ * Both exist because the caller publishes what it is told: an empty conflict
+ * list that reads as a conflict would send an agent to resolve nothing, and a
+ * containment check that says yes to an empty sha would let a run publish a
+ * branch that never took the base at all.
+ */
+describe("catching up to a base that is not there", () => {
+  it("reports a merge that failed without conflicts, and leaves no half-merge behind", async () => {
+    const dir = repo();
+    const wt = new WorktreeManager(dir);
+    await wt.ensureIntegrationBranch("run1");
+    await wt.ensureIntegrationWorktree("run1");
+
+    const result = await wt.catchUpIntegrationBranch("run1", "no-such-branch");
+
+    expect(result.ok).toBe(false);
+    // An unresolvable ref is not a conflict anybody can resolve. Saying so with
+    // an empty list is what tells the caller to report it rather than spend a
+    // session on it.
+    expect(result).toMatchObject({ conflicts: [] });
+    await expect(wt.integrationMergeState("run1")).resolves.toMatchObject({ merging: false, conflicts: [] });
+  });
+
+  it("does not claim to contain a commit it was given no sha for", async () => {
+    const dir = repo();
+    const wt = new WorktreeManager(dir);
+    await wt.ensureIntegrationBranch("run1");
+    await wt.ensureIntegrationWorktree("run1");
+
+    await expect(wt.integrationContains("run1", "")).resolves.toBe(false);
+    await expect(wt.integrationContains("run1", sha(dir))).resolves.toBe(true);
+  });
+});

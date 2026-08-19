@@ -522,6 +522,28 @@ export class Store {
     return { prNumber: p.prNumber, state: p.state, failing: p.failing ?? [], total: p.total ?? 0 };
   }
 
+  /** Whether the run's pull request can be merged into its base, and what broke if not. */
+  mergeStatus(runId: string): { prNumber: number; state: "mergeable" | "conflicting" | "unknown"; baseBranch: string; conflicts: string[]; resolvedBy: string } | null {
+    const row = this.db
+      .prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.merge_status' ORDER BY seq DESC LIMIT 1")
+      .get(runId) as { payload: string } | undefined;
+    if (!row) return null;
+    const p = JSON.parse(row.payload) as {
+      prNumber?: number;
+      state: "mergeable" | "conflicting" | "unknown";
+      baseBranch?: string;
+      conflicts?: string[];
+      resolvedBy?: string;
+    };
+    return {
+      prNumber: p.prNumber ?? 0,
+      state: p.state,
+      baseBranch: p.baseBranch ?? "",
+      conflicts: p.conflicts ?? [],
+      resolvedBy: p.resolvedBy ?? "none",
+    };
+  }
+
   /** What the deploy triggered by the human's merge did. */
   deployStatus(runId: string): { sha: string; state: "passing" | "failing" | "pending" | "none"; failing: string[]; total: number } | null {
     const row = this.db

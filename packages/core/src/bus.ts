@@ -25,4 +25,13 @@ export class Bus {
     this.emitter.on("event", fn);
     return () => this.emitter.off("event", fn);
   }
+
+  /**
+   * How many live subscribers are attached right now. A test that publishes
+   * into a stream it just opened needs to know the subscription is real before
+   * it publishes — a fixed sleep only pretends to.
+   */
+  get subscribers(): number {
+    return this.emitter.listenerCount("event");
+  }
 }

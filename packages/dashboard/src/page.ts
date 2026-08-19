@@ -777,6 +777,27 @@ function describe(ev) {
       return ["git", ev.taskId, "merged " + ev.branch + " @ " + String(ev.sha).slice(0, 8)];
     case "git.merge_conflict":
       return ["bad", ev.taskId, "merge conflict: " + ev.files.join(", ")];
+    /* Ruling a flake out before spending a fix task on it. Falling through
+       to the default printed the bare type while the harness quietly re-ran
+       jobs — a feed gap exactly where the operator wonders what it is doing. */
+    case "run.ci_retry":
+      return ["git", "integrator", ev.reran
+        ? "re-ran the failed checks on PR #" + ev.prNumber + " in case they were flakes"
+        : "could not re-run the failed checks on PR #" + ev.prNumber + " \u2014 treating the failure as real"];
+    /* The run's own branch against the branch it has to merge into. Falling
+       through to the default here printed the bare event type, which is the
+       least useful possible rendering of the one fact that decides whether the
+       pull request this run produced can be merged by anybody. */
+    case "run.merge_status":
+      return [ev.state === "mergeable" ? "git" : "bad", "integrator",
+        ev.state === "conflicting"
+          ? "CANNOT MERGE into " + (ev.baseBranch || "the base branch") +
+            (ev.conflicts.length ? " \u2014 " + ev.conflicts.join(", ") : "")
+          : ev.state === "unknown"
+            ? "mergeability unconfirmed \u2014 GitHub did not settle whether this branch merges"
+            : "merges into " + (ev.baseBranch || "the base branch") +
+              (ev.resolvedBy === "agent" ? " (an agent resolved the conflict)"
+                : ev.resolvedBy === "merge" ? " (the base was merged in to keep it that way)" : "")];
     case "github.issue_created":
       return ["git", ev.taskId || "run", "issue #" + ev.issueNumber];
     case "github.pr_opened":
