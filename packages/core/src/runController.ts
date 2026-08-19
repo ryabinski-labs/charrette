@@ -3502,10 +3502,16 @@ export class RunController {
     // holds every committed iteration — rather than leaving a state the
     // scheduler would eventually cancel as unreachable.
     for (const t of this.store.listTasks(runId)) {
-      if (t.state === "WORKING" || t.state === "QA" || t.state === "QA_FAILED") {
+      if (t.state === "WORKING" || t.state === "QA" || t.state === "QA_FAILED" || t.state === "ACCEPTED") {
         this.revivalGuidance.set(
           `${runId}/${t.id}`,
-          "The previous session for this task was interrupted (the harness process died mid-task). Inspect git log in this worktree first: earlier iterations may already contain most or all of the work — verify it and finish."
+          t.state === "ACCEPTED"
+            ? // Its work is done and QA already passed it; what did not finish is
+              // the merge. Saying so keeps the worker from re-deriving a task it
+              // has already completed, and the loop it re-enters ends in the
+              // integrate() call that was interrupted.
+              "The previous session for this task was interrupted (the harness process died) after QA accepted the work but before it merged into the integration branch. The work in this worktree is complete and already passed QA — inspect git log first, confirm it is still what the task asked for, and do not rewrite it."
+            : "The previous session for this task was interrupted (the harness process died mid-task). Inspect git log in this worktree first: earlier iterations may already contain most or all of the work — verify it and finish."
         );
         this.store.transitionTask(runId, t.id, "READY", "requeued: the previous harness process died mid-task");
       }
@@ -3632,10 +3638,20 @@ export class RunController {
       // Nothing runnable, nothing in flight: whatever is left waits on parked
       // or cancelled dependencies and can never start.
       for (const t of tasks) {
-        if (!terminal(t.state)) {
-          this.store.transitionTask(runId, t.id, "CANCELLED", "unreachable: dependencies parked");
-          this.queueIssueSync(runId, t.id);
-        }
+        if (terminal(t.state)) continue;
+        // The backstop for a state this sweep cannot legally cancel. An accepted
+        // task is the one that got here: it waits on nothing but its own merge,
+        // so "unreachable" was already the wrong word, and ACCEPTED -> CANCELLED
+        // is not a transition — the attempt threw, and the throw took the whole
+        // run down rather than the one task (run bc691359, `m1-exit-evidence`,
+        // with sixty-odd merged tasks behind it). The requeue at the top of this
+        // loop now claims those before they reach here, so nothing should; what
+        // must never happen again is a sweep that ends a run by cancelling
+        // something it may not. Park it — the work exists and passed QA.
+        /* v8 ignore next */
+        if (t.state === "ACCEPTED") this.park(runId, t.id, "accepted by QA, but the run ended before the work merged into the integration branch");
+        else this.store.transitionTask(runId, t.id, "CANCELLED", "unreachable: dependencies parked");
+        this.queueIssueSync(runId, t.id);
       }
       break;
     }
