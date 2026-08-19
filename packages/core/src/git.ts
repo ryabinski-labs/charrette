@@ -515,6 +515,17 @@ export class WorktreeManager {
       const branch = this.branchName(runId, taskId);
       const wtPath = await this.ensureIntegrationWorktree(runId);
       try {
+        // The integration worktree holds no work of its own — every commit in it
+        // arrives by merge — so anything in its working tree is an artifact some
+        // check left behind, and git refuses to merge over it. That refusal is
+        // not a conflict: it names no unmerged paths, so it used to reach the
+        // worker as "resolve the conflicts in " with an empty list, pointing at
+        // a worktree where nothing was wrong. Run bc691359 lost two QA-accepted
+        // tasks that way, to one generated markdown file a test suite rewrote in
+        // here. Ignored files are left alone: they are build caches, and
+        // discarding them costs a rebuild without preventing anything.
+        await git(wtPath, ["reset", "--hard", "HEAD"], { serialize: true });
+        await git(wtPath, ["clean", "-fd"], { serialize: true });
         const before = await git(wtPath, ["rev-parse", "HEAD"], { serialize: true });
         await git(wtPath, ["merge", "--no-ff", "--no-edit", branch], { serialize: true });
         const sha = await git(wtPath, ["rev-parse", "HEAD"], { serialize: true });
@@ -525,10 +536,25 @@ export class WorktreeManager {
         // impossible to book a MERGED task against a commit it did not write.
         if (sha === before) return { ok: false, empty: true };
         return { ok: true, sha };
-      } catch {
+      } catch (e) {
         const status = await git(wtPath, ["diff", "--name-only", "--diff-filter=U"], { serialize: true }).catch(() => "");
         await git(wtPath, ["merge", "--abort"], { serialize: true }).catch(() => undefined);
-        return { ok: false, conflicts: status.split("\n").filter(Boolean) };
+        const conflicts = status.split("\n").filter(Boolean);
+        // A merge can fail without conflicting — a hook that rejected it, an
+        // index left wedged, a worktree that could not be cleaned above. Git
+        // names no files in those cases, and an empty conflict list is not a
+        // conflict: handed back as one it sends a worker to reconcile files
+        // nothing reported, and the failure repeats on every attempt because
+        // the worker was never able to address its cause. Say what happened
+        // instead and let the caller park it for a human.
+        if (!conflicts.length) {
+          // execFile folds git's stderr into the message, which is where the
+          // actual reason lives ("your local changes would be overwritten by
+          // merge", a hook's own words) — the exit status alone says nothing.
+          const detail = String(e).trim().split("\n").slice(0, 4).join("; ");
+          throw new Error(`merging ${branch} into ${this.integrationBranch(runId)} failed without naming a conflict: ${detail}`);
+        }
+        return { ok: false, conflicts };
       }
     };
     const next = this.mergeLock.then(run, run);

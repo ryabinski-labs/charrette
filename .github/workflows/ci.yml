@@ -33,9 +33,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # No `version:` on purpose — the action reads `packageManager` from
+      # package.json, so CI and every developer machine run the same pnpm.
+      # They did not: CI pinned 9 while local was 11, and the two read their
+      # settings from different files. pnpm 10 moved `overrides` out of
+      # package.json into pnpm-workspace.yaml, so the version that wrote the
+      # lockfile recorded overrides the version installing it could not see —
+      # `--frozen-lockfile` then failed with ERR_PNPM_LOCKFILE_CONFIG_MISMATCH.
       - uses: pnpm/action-setup@v6
-        with:
-          version: 9
 
       # Node 24: `node:sqlite` (packages/core/src/store.ts) is only available
       # unflagged from 23.4 on, and the store is not an optional part of the

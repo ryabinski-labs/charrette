@@ -301,3 +301,43 @@ describe("resuming a run whose planning phase failed", () => {
     expect(controller.replannable(runId)).toBe(false);
   });
 });
+
+/**
+ * Run bc691359: a task passed QA, its merge into the integration branch was
+ * refused by a dirty worktree rather than a conflict, and the harness process
+ * ended while the operator was being asked about it — leaving the task ACCEPTED.
+ *
+ * Nothing dispatches an ACCEPTED task, so the resumed run found it neither
+ * runnable nor in flight, swept it as "unreachable: dependencies parked", and
+ * tried to cancel it. That is not a legal move from ACCEPTED, and the throw did
+ * not park the task — it killed the run, sixty merged tasks and all:
+ *
+ *     harness: fatal — task m1-exit-evidence: ACCEPTED -> CANCELLED
+ */
+describe("a task left accepted by a harness process that died", () => {
+  it("requeues it on resume instead of sweeping it away, and its work merges", async () => {
+    const { repoPath, store, bus, runId } = await parkedRun();
+    // Exactly the state the dead process left behind: QA had passed the work,
+    // and the merge that was to follow never happened.
+    store.transitionTask(runId, "task-a", "READY", "revived for the fixture");
+    store.transitionTask(runId, "task-a", "WORKING", "revived for the fixture");
+    store.transitionTask(runId, "task-a", "QA", "revived for the fixture");
+    store.transitionTask(runId, "task-a", "ACCEPTED", "QA passed; the process died before the merge");
+    // And the run itself is mid-execution, which is where a killed process
+    // leaves it — `harness resume` reported exactly this: "[EXECUTING]".
+    store.db.prepare("UPDATE runs SET state = 'EXECUTING' WHERE id = ?").run(runId);
+
+    const { pool, workerPrompts } = healedPool();
+    const controller = new RunController(store, bus, pool, noGithub, gates(async () => null), repoPath);
+    await controller.resume(runId);
+
+    // It ran, it merged, and the run reached its end rather than dying on the
+    // illegal transition.
+    expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    // The worker is told its work already passed QA, so it does not set about
+    // rewriting a task it had in fact finished.
+    expect(workerPrompts[0]).toContain("already passed QA");
+    expect(workerPrompts[0]).toContain("do not rewrite it");
+  });
+});
