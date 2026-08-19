@@ -50,6 +50,7 @@ import {
   advisorAnswer,
   advisorPrompt,
   advisorSystemPrompt,
+  baseConflictPrompt,
   budgetDeciderPrompt,
   budgetDeciderSystemPrompt,
   conflictPrompt,
@@ -126,6 +127,9 @@ const MAX_FULL_TEXT_SKILLS = 2;
  */
 const INTENT_FIX_EPIC = { id: "intent-gaps", title: "Gaps the intent check found" };
 
+/** Where CI-fix tasks land on the board. */
+const CI_FIX_EPIC = { id: "ci-red", title: "Checks the repo's CI failed" };
+
 /** A planner's task as it enters the store: everything it said, nothing started yet. */
 function pendingRow(t: PlannedTask): Omit<TaskRow, "runId" | "unverified"> {
   return {
@@ -201,6 +205,32 @@ const MAX_SKILLS_PER_ROLE = 4;
  * and each attempt costs a worker session and a QA session.
  */
 const CONFLICT_FIX_ATTEMPTS = 1;
+/**
+ * How many times the run's own conflict with the base branch goes to an agent
+ * before it goes to the operator.
+ *
+ * Two, where a task conflict gets one. The reasoning that bounds that one at a
+ * single attempt — the worker already has every file and every piece of context
+ * it will ever have — does not hold here. This conflict is against commits the
+ * run has never seen, so the first attempt is partly spent reading what the base
+ * did, and a second attempt starts from a genuinely better position. It is also
+ * the last thing standing between a finished run and a reviewable pull request,
+ * which makes one more session cheap against what is already spent.
+ */
+const BASE_CONFLICT_FIX_ATTEMPTS = 2;
+/**
+ * How long to wait for GitHub to say whether the pull request merges.
+ *
+ * Deliberately not `checkTimeoutMinutes`. That budget is sized for CI — a queue,
+ * a runner, a test suite — and mergeability is none of those: GitHub computes it
+ * in the background within a few seconds of a push, and an answer that has not
+ * arrived in half a minute is not going to. Spending a twenty-minute CI budget
+ * polling for it would stall every run that hits the one case this exists for.
+ *
+ * Short, but not zero: the first read after a push genuinely does return `null`,
+ * and a single call would report "unconfirmed" on healthy runs.
+ */
+const MERGEABILITY_SETTLE_MINUTES = 0.5;
 
 /**
  * How many times a task may come back with a branch that changes nothing
@@ -662,6 +692,14 @@ const BudgetDecisionJson = z.object({
 export class RunController {
   private wt: WorktreeManager;
 
+  /**
+   * The mergeability settle budget, as a field rather than the constant so a
+   * test can shrink it. The timeout path is the one thing this phase exists to
+   * prove — that "not known yet" is never reported as a merge — and at the real
+   * half-minute it costs more wall clock than the rest of the suite together.
+   */
+  mergeabilitySettleMinutes = MERGEABILITY_SETTLE_MINUTES;
+
   constructor(
     private store: Store,
     private bus: Bus,
@@ -831,7 +869,18 @@ export class RunController {
     const tasks = this.store.listTasks(runId);
     return (
       tasks.some((t) => t.state === "NEEDS_HUMAN" || (this.github.enabled && t.state === "MERGED" && t.prNumber === null)) ||
-      this.revivableCancelled(runId, tasks).size > 0
+      this.revivableCancelled(runId, tasks).size > 0 ||
+      // A pull request that cannot be merged is work, and it is work only the
+      // run can do. Without this a run whose every task succeeded would report
+      // nothing to resume while holding the one artifact it produced hostage.
+      (this.github.enabled && this.store.mergeStatus(runId)?.state === "conflicting") ||
+      // So does CI the repo has not answered green for: red because the repo
+      // rejected the branch, pending because the run stopped waiting — a kill,
+      // a GitHub that went unreadable mid-wait — before CI ever settled.
+      // Either way `resume` re-asks and re-enters the fix loop rather than
+      // waiting on a human to merge a branch the repo rejected, or one nothing
+      // ever judged.
+      (this.github.enabled && ["failing", "pending"].includes(this.store.ciStatus(runId)?.state ?? ""))
     );
   }
 
@@ -1119,6 +1168,12 @@ export class RunController {
     // tells them they stopped their own run at 3am is worse than one that says
     // only that it was stopped. Who decided is on `run.pitstop_resolved`, one
     // event earlier.
+    // Whether this call published. `republishUnmergeable` below exists for the
+    // call that did *not* — a resume landing straight in PR_REVIEW — and running
+    // it after a publish in the same pass would redo the whole reconcile,
+    // spending a second set of merge-resolution sessions on the conflict the
+    // first set just failed to resolve.
+    let published = false;
     for (;;) {
       if (run.state === "EXECUTING") {
         const stopped = await this.execute(runId);
@@ -1158,15 +1213,47 @@ export class RunController {
           continue;
         }
         await this.openPrs(runId);
+        published = true;
         await this.awaitChecks(runId);
+        // Red CI is work, not a report — the same rule the base merge follows,
+        // one gate further down. The escalation is only consulted on a pass
+        // that queued nothing: a round queued this pass has not run yet, and
+        // counting it as spent would show the operator a stop about work the
+        // run was still about to do.
+        const ciTasks = await this.queueCiFixes(runId);
+        const ciCall = ciTasks.length ? ("proceed" as const) : await this.ciPitStop(runId);
+        if (ciCall === "stop") {
+          this.store.transitionRun(runId, "PAUSED", "the run was stopped at a pit stop");
+          return;
+        }
+        if (ciCall === "back-to-work" || ciTasks.length) {
+          this.store.transitionRun(
+            runId,
+            "EXECUTING",
+            ciCall === "back-to-work" ? "the pit stop sent the run back to work" : `fixing ${ciTasks.length} failing CI check(s)`
+          );
+          run = this.store.getRun(runId)!;
+          continue;
+        }
+        await this.confirmMergeable(runId);
         this.store.transitionRun(runId, "PR_REVIEW", this.outcome(runId).line);
         run = this.store.getRun(runId)!;
+      }
+      // A resume landing here with CI not green asks again before anything
+      // waits on a human merging a branch the repo has rejected.
+      if (run.state === "PR_REVIEW" && !published) {
+        if ((await this.recheckRedCi(runId)) === "back-to-work") {
+          this.store.transitionRun(runId, "EXECUTING", "fixing the CI checks that were red when the run last reported");
+          run = this.store.getRun(runId)!;
+          continue;
+        }
       }
       break;
     }
     // A merge that already happened — an eager human merging the rollup while
     // the run was still finishing — is verified now rather than next resume.
     if (run.state === "PR_REVIEW" || run.state === "VERIFYING") {
+      if (!published) await this.republishUnmergeable(runId);
       const closed = await this.verify(runId);
       const now = this.store.getRun(runId)!;
       if (closed && now.state === "VERIFYING") this.store.transitionRun(runId, "DONE", this.outcome(runId).line);
@@ -1421,6 +1508,175 @@ export class RunController {
   }
 
   /**
+   * Turn a red CI into work, the way `reconcileWithBase` turned an unmergeable
+   * branch into work.
+   *
+   * `awaitChecks` made the run *see* a failing check and then walked on: the
+   * red state went into the outcome line and the run reported itself in review
+   * over a branch the repo itself had rejected — the same shape as opening a
+   * CONFLICTING pull request and calling it finished, one gate further down.
+   *
+   * The failed jobs are re-run once per round first, because the cheapest red
+   * check is a flake and a fix task spawned against one produces a diff about
+   * nothing. Only a failure that survives its re-run gets tasks: one per
+   * failing check, carrying that job's own log tail, chained so they cannot
+   * conflict. The caller sends the run back to EXECUTING; the next pass
+   * through INTEGRATING re-merges, re-pushes and asks CI again.
+   *
+   * Returns the queued task ids — empty when CI is green, when checks are off,
+   * when the rounds are spent (that is `ciPitStop`'s moment), or when the
+   * re-run alone turned the branch green.
+   */
+  private async queueCiFixes(runId: string): Promise<string[]> {
+    const run = this.store.getRun(runId)!;
+    if (!run.config.waitForChecks || !this.github.enabled || !run.config.ciFixRounds) return [];
+    let ci = this.store.ciStatus(runId);
+    if (!ci || ci.state !== "failing") return [];
+    // A CI status on the record means `awaitChecks` ran, and it only runs with
+    // a pull request to ask about — so the rollup exists here by construction.
+    const prNumber = this.rollupPr(runId)!;
+    const tasks = this.store.listTasks(runId);
+    const rounds = new Set(tasks.map((t) => /^ci-fix-(\d+)-/.exec(t.id)?.[1]).filter(Boolean));
+    if (rounds.size >= run.config.ciFixRounds) return [];
+    // One re-run per round: each round pushes a new head, and each head gets
+    // one chance to have been unlucky before it is treated as broken.
+    if (this.store.eventCount(runId, "run.ci_retry") <= rounds.size) {
+      const reran = await (this.github.rerunFailedChecks?.(prNumber) ?? Promise.resolve(false));
+      this.bus.publish({ type: "run.ci_retry", runId, prNumber, reran, ts: Date.now() });
+      if (reran) {
+        this.bus.publish({
+          type: "agent.log",
+          runId,
+          sessionId: "integrator",
+          text: `re-ran the failed jobs on #${prNumber} before diagnosing — a flake that passes on the second go is not work`,
+          ts: Date.now(),
+        });
+        await this.awaitChecks(runId);
+        // Non-null by the same construction as `prNumber` above: a status was
+        // on the record before the re-run, and events only accumulate.
+        ci = this.store.ciStatus(runId)!;
+        if (ci.state !== "failing") return [];
+      }
+    }
+    const round = rounds.size + 1;
+    // The same bound as the intent gaps, for the same reason: enough for a
+    // real failure list, few enough that a matrix of shards cannot re-plan the
+    // run. Anything dropped is said out loud below.
+    const MAX_CHECKS = 10;
+    const failing = ci.failing.slice(0, MAX_CHECKS);
+    const logs = await (this.github.failingJobLogs?.(prNumber) ?? Promise.resolve([])).catch(() => [] as { name: string; log: string }[]);
+    const queued: PlannedTask[] = failing.map((check, i) => {
+      const log = logs.find((l) => l.name === check)?.log ?? "";
+      return {
+        id: `ci-fix-${round}-${i + 1}`,
+        epicId: CI_FIX_EPIC.id,
+        title: `Fix red CI check: ${check.slice(0, 80)}`,
+        spec:
+          `The run's pull request #${prNumber} is red: the repo's own CI check "${check}" failed on the merged branch, after a re-run — this is not flake.\n\n` +
+          (log
+            ? `The tail of the failing job's log:\n\n\`\`\`\n${log}\n\`\`\`\n\n`
+            : `No log could be fetched for it; reproduce it from the workflow definition in .github/workflows/.\n\n`) +
+          `You are working on the integration branch, which already contains every merged task — the code the failure is about is here. Find the cause and fix it. If the check itself is the defect — it gates on a number nobody ever measured, or needs something this repo's runner cannot provide — fix the check and say exactly why in your summary; a gate that can never pass is not a quality bar. Do not weaken a working check to get past it.`,
+        acceptanceCriteria: [
+          `The command the "${check}" workflow job runs passes locally from the repo root`,
+          "Whatever made it fail is fixed at its cause, or the check itself is corrected with the reason stated",
+        ],
+        // Chained like the intent fixes: CI failures routinely share a cause,
+        // and nothing here is urgent enough to be worth a conflict.
+        dependsOn: i === 0 ? [] : [`ci-fix-${round}-${i}`],
+        touchedPaths: [],
+        // The workflow's own command is in the spec; inventing a probe here
+        // would be the harness guessing at a second one.
+        completionProbe: "",
+        estimatedSize: "M",
+      };
+    });
+    this.store.insertTasks(runId, [...this.store.listEpics(runId), CI_FIX_EPIC], queued.map(pendingRow));
+    this.bus.publish({
+      type: "agent.log",
+      runId,
+      sessionId: "integrator",
+      text:
+        `CI is red on #${prNumber} with ${ci.failing.length} failing check(s); queued ${queued.length} task(s) to fix them (round ${round} of ${run.config.ciFixRounds})` +
+        (ci.failing.length > failing.length ? `. Not queued, and yours to judge: ${ci.failing.slice(MAX_CHECKS).join(", ")}` : ""),
+      ts: Date.now(),
+    });
+    this.wakeScheduler();
+    return queued.map((t) => t.id);
+  }
+
+  /**
+   * The escalation for a red CI that has outlived its fix rounds.
+   *
+   * The sibling of `closingPitStop`, and bounded for the same reason: "do not
+   * exit until CI is green" without a bound is a run that never exits, spending
+   * fix rounds restating a fact about the repo — a runner that cannot host
+   * service containers, a floor no test suite meets — that only a person can
+   * change. Opens only when CI is failing, the rounds are spent, and nobody has
+   * been shown this failure yet.
+   */
+  private async ciPitStop(runId: string): Promise<"proceed" | "stop" | "back-to-work"> {
+    const run = this.store.getRun(runId)!;
+    if (!this.gates.resolvePitStop || run.config.pitStop.every === "never" || !run.config.ciFixRounds) return "proceed";
+    const ci = this.store.ciStatus(runId);
+    if (!ci || ci.state !== "failing") return "proceed";
+    // No rounds-remaining guard: reaching here with a failing status means
+    // `queueCiFixes` just returned empty despite it, and its only such path
+    // leaves the rounds spent — every other empty return leaves the recorded
+    // state not-failing (a failing status always names its checks, so a round
+    // with capacity always queues). The count below is for the operator.
+    const rounds = new Set(this.store.listTasks(runId).map((t) => /^ci-fix-(\d+)-/.exec(t.id)?.[1]).filter(Boolean));
+    // No "already answered" guard like `closingPitStop`'s, because the status
+    // here cannot go stale the way a verdict can: every pass through
+    // INTEGRATING republishes `run.ci_status` after any pit stop resolves, so
+    // by construction this is only reached with a failure newer than the last
+    // stop — asking about it again IS the correct behaviour.
+    this.bus.publish({
+      type: "agent.log",
+      runId,
+      sessionId: "pitstop",
+      text:
+        `CI is still red after ${rounds.size} fix round(s): ${ci.failing.join(", ")} — ` +
+        `the failure has survived everything the run can do to it, so this one is yours to answer`,
+      ts: Date.now(),
+    });
+    const action = await this.pitStop(runId, { reason: "the repo's CI is red on the run's pull request", epicIds: [] }, true);
+    if (action === "stop") return "stop";
+    return action === "continue" ? "proceed" : "back-to-work";
+  }
+
+  /**
+   * A resume landing on a run whose CI was not green when it last reported.
+   *
+   * The world moves while a run is parked in review: a human re-runs a job, a
+   * runner comes back, someone pushes a fix. Ask again rather than trusting
+   * the stale answer — and if it is still red with fix rounds left, the resume
+   * is the operator asking the run to try, so it tries. No pit stop here: the
+   * escalation was already shown on the way in, and PR_REVIEW has no legal
+   * transition to PAUSED for a "stop" to land on.
+   */
+  private async recheckRedCi(runId: string): Promise<"proceed" | "back-to-work"> {
+    const run = this.store.getRun(runId)!;
+    if (!run.config.waitForChecks || !this.github.enabled) return "proceed";
+    const prior = this.store.ciStatus(runId);
+    if (!prior || prior.state === "passing") return "proceed";
+    // The recheck is work, and PR_REVIEW is the one working moment the
+    // dashboard cannot see: `listOpenRuns` excludes it by design, because a
+    // run that ends there has ended. A resume that re-asks GitHub about a red
+    // or unsettled check is not ended — it is integrating — so it wears that
+    // state for as long as the recheck runs, and hands PR_REVIEW back only
+    // when there is nothing left to fix. Without this, an operator who ran
+    // `harness resume` watched a dashboard that said "no active runs" while
+    // the run it had just resumed was waiting on the repo's answer.
+    this.store.transitionRun(runId, "INTEGRATING", "resumed to re-check CI the repo had not answered green");
+    await this.awaitChecks(runId);
+    const tasks = await this.queueCiFixes(runId);
+    if (tasks.length) return "back-to-work";
+    this.store.transitionRun(runId, "PR_REVIEW", this.outcome(runId).line);
+    return "proceed";
+  }
+
+  /**
    * Open the pull requests for everything merged — after validation, so no PR
    * exists before the run has been judged against the operator's intent. Each
    * task is attempted independently: a GitHub failure on one must not orphan
@@ -1449,6 +1705,11 @@ export class RunController {
       try {
         await this.openRunPr(runId);
       } catch (e) {
+        // A run that is stopping is not a pull request that failed to open.
+        // `reconcileWithBase` re-throws an operator's pause rather than
+        // retrying into it, and swallowing it one frame up would undo that and
+        // march a stopped run on to PR_REVIEW with no merge status at all.
+        if (stopsTheRun(e)) throw e;
         this.bus.publish({
           type: "agent.log",
           runId,
@@ -1635,13 +1896,37 @@ export class RunController {
    *
    * A timeout is reported as pending, never as a pass: the answer is "not known
    * yet", and saying anything stronger is the failure this exists to prevent.
+   *
+   * And pending is not an answer, so the wait starts over rather than walking
+   * on. Run 5743ce85's twelve checks on one self-hosted runner simply outlived
+   * the budget: the run recorded "pending", moved to PR_REVIEW saying "CI
+   * still running", and the check that then went red was the very one
+   * `queueCiFixes` below exists to turn into work. The budget bounds each
+   * round of asking, not the waiting: every expiry records what is known, says
+   * so, and asks again. An operator's pause lands between rounds, and only
+   * GitHub going unreadable ends the wait unsettled — leaving "pending" on the
+   * record, which `hasRecoverableWork` counts as work, so a resume re-asks.
    */
   private async awaitChecks(runId: string): Promise<void> {
     const run = this.store.getRun(runId)!;
     if (!run.config.waitForChecks || !this.github.enabled) return;
     const prNumber = this.rollupPr(runId);
     if (prNumber === undefined) return;
-    const checks = await this.settleChecks(runId, (n: number) => this.github.prChecks?.(n) ?? Promise.resolve(null), prNumber, run.config.checkTimeoutMinutes);
+    const settle = () =>
+      this.settleChecks(runId, (n: number) => this.github.prChecks?.(n) ?? Promise.resolve(null), prNumber, run.config.checkTimeoutMinutes);
+    let checks = await settle();
+    while (checks !== null && checks.state === "pending") {
+      this.bus.publish({ type: "run.ci_status", runId, prNumber, state: "pending", failing: [], total: checks.total, ts: Date.now() });
+      this.bus.publish({
+        type: "agent.log",
+        runId,
+        sessionId: "integrator",
+        text: `CI on #${prNumber} has not settled after another ${run.config.checkTimeoutMinutes} minute(s): ${checks.total} check(s) still running — waiting for the repo's answer`,
+        ts: Date.now(),
+      });
+      if (this.pauseAsked.has(runId)) throw new RunPaused(runId);
+      checks = await settle();
+    }
     if (!checks) return;
     this.bus.publish({ type: "run.ci_status", runId, prNumber, state: checks.state, failing: checks.failing, total: checks.total, ts: Date.now() });
     if (checks.state === "failing") {
@@ -1672,6 +1957,262 @@ export class RunController {
   }
 
   /**
+   * Make the run's integration branch mergeable into its base — or find out that
+   * it is not, before a pull request tells the operator otherwise.
+   *
+   * The run cuts its integration branch once, at the start, and merges every
+   * accepted task into it. Nothing brings the other direction back: `main` keeps
+   * moving, and on a long run the branch the harness publishes is one GitHub
+   * will not merge. Every check in the run can still be green while that is
+   * true, because every one of them judges this branch alone — `deterministicChecks`
+   * in a worktree, QA on a task branch, the intent validator on the merged tree,
+   * and CI on a head commit whose base it never looks at.
+   *
+   * Run 5743ce85 is what that costs. It spent $373.36, merged 64 tasks, opened
+   * #834 CONFLICTING, and moved to PR_REVIEW with the line "1 pull request open
+   * for review" — a finished-looking run whose single deliverable could not be
+   * merged by anyone. The operator found out by opening GitHub.
+   *
+   * So the base is merged in here, before the push, and a conflict is treated as
+   * what it is: work, not a report. An agent gets `BASE_CONFLICT_FIX_ATTEMPTS`
+   * at it in the integration worktree — the same shape as handing a task's
+   * conflict back to its worker, one level up. Only when that fails does the
+   * merge get aborted and the branch published as it stands, held as a draft and
+   * named in the outcome line, which is the honest version of what run 5743ce85
+   * reported as success.
+   *
+   * Never force-pushes and never discards a base commit: a merge nobody could
+   * resolve leaves the integration branch exactly where it was.
+   */
+  private async reconcileWithBase(
+    runId: string,
+    base: string
+  ): Promise<{ state: "mergeable" | "conflicting"; conflicts: string[]; resolvedBy: "already-current" | "merge" | "agent" | "none" }> {
+    const run = this.store.getRun(runId)!;
+    const integration = this.wt.integrationBranch(runId);
+    const settled = (
+      state: "mergeable" | "conflicting",
+      conflicts: string[],
+      resolvedBy: "already-current" | "merge" | "agent" | "none"
+    ): { state: "mergeable" | "conflicting"; conflicts: string[]; resolvedBy: "already-current" | "merge" | "agent" | "none" } => {
+      this.bus.publish({ type: "run.merge_status", runId, prNumber: 0, state, baseBranch: base, conflicts, resolvedBy, ts: Date.now() });
+      return { state, conflicts, resolvedBy };
+    };
+
+    let caught = await this.wt.catchUpIntegrationBranch(runId, base);
+    if (caught.ok) {
+      if (caught.moved) {
+        this.bus.publish({
+          type: "agent.log",
+          runId,
+          sessionId: "integrator",
+          text: `${caught.ref} moved while the run was working and has been merged into ${integration}; the pull request opens against a current base`,
+          ts: Date.now(),
+        });
+      }
+      return settled("mergeable", [], caught.moved ? "merge" : "already-current");
+    }
+
+    // A merge that failed with no unmerged paths did not conflict — the ref
+    // would not resolve, or the worktree was not clean. There is nothing to hand
+    // an agent, and saying "conflicts" about it would send the operator looking
+    // for markers that are not there.
+    if (!caught.conflicts.length) {
+      this.bus.publish({
+        type: "agent.log",
+        runId,
+        sessionId: "integrator",
+        text: `could not merge ${caught.ref} into ${integration}, and git reported no conflicted files — the branch is published as it stands and may not be mergeable`,
+        ts: Date.now(),
+      });
+      return settled("conflicting", [], "none");
+    }
+
+    for (let attempt = 1; attempt <= BASE_CONFLICT_FIX_ATTEMPTS; attempt++) {
+      this.bus.publish({
+        type: "agent.log",
+        runId,
+        sessionId: "integrator",
+        text: `${caught.ref} conflicts with ${integration} in ${caught.conflicts.length} file(s): ${caught.conflicts.slice(0, 5).join(", ")}${caught.conflicts.length > 5 ? `, +${caught.conflicts.length - 5} more` : ""} — sending an agent to resolve it (attempt ${attempt} of ${BASE_CONFLICT_FIX_ATTEMPTS})`,
+        ts: Date.now(),
+      });
+      try {
+        await this.pool.run({
+          runId,
+          role: "integrator",
+          model: run.config.models.integrator,
+          systemPrompt:
+            "You are resolving a git merge conflict between a finished body of work and the base branch it must merge into. " +
+            "You are not reviewing, redesigning or extending either side. Resolve the merge, prove it still builds and passes, and commit it — " +
+            "or abort it and explain what decision it needs. Both are acceptable answers; forcing through a resolution you do not believe in is not.",
+          prompt: baseConflictPrompt(integration, caught.ref, caught.conflicts, attempt, BASE_CONFLICT_FIX_ATTEMPTS),
+          cwd: await this.wt.ensureIntegrationWorktree(runId),
+          disallowedTools: ["WebSearch"],
+          maxTurns: 80,
+          budgetCheck: () => this.checkStops(runId),
+        });
+      } catch (e) {
+        if (stopsTheRun(e)) throw e;
+        this.bus.publish({
+          type: "agent.log",
+          runId,
+          sessionId: "integrator",
+          text: `the merge-resolution session did not complete: ${String(e).slice(0, 300)}`,
+          ts: Date.now(),
+        });
+      }
+      // The branch, not the session's own account of itself. An agent that says
+      // it resolved the merge and left MERGE_HEAD behind has not, and an
+      // unfinished merge published as a pull request is the failure this method
+      // exists to prevent. The base's own commit is the thing asked about, so an
+      // agent that aborted and then committed something unrelated cannot read as
+      // a success.
+      const state = await this.wt.integrationMergeState(runId);
+      const contains = await this.wt.integrationContains(runId, caught.sha);
+      if (!state.merging && !state.conflicts.length && contains) {
+        this.bus.publish({
+          type: "agent.log",
+          runId,
+          sessionId: "integrator",
+          text: `the conflict with ${caught.ref} was resolved and committed on ${integration}`,
+          ts: Date.now(),
+        });
+        return settled("mergeable", [], "agent");
+      }
+      // Either it aborted, or it stopped mid-merge. Put the worktree back before
+      // anything else touches it, then re-create the conflict for the next go.
+      await this.wt.abortIntegrationMerge(runId);
+      if (attempt === BASE_CONFLICT_FIX_ATTEMPTS) break;
+      const again = await this.wt.catchUpIntegrationBranch(runId, base);
+      if (again.ok) return settled("mergeable", [], "merge");
+      if (!again.conflicts.length) break;
+      caught = again;
+    }
+
+    this.bus.publish({
+      type: "agent.log",
+      runId,
+      sessionId: "integrator",
+      text: `${integration} still does not merge into ${caught.ref} after ${BASE_CONFLICT_FIX_ATTEMPTS} attempt(s) — the merge has been abandoned and the branch is unchanged. The pull request is held as a draft: ${caught.conflicts.join(", ")}`,
+      ts: Date.now(),
+    });
+    return settled("conflicting", caught.conflicts, "none");
+  }
+
+  /**
+   * A resume on a run that already published a pull request nobody can merge.
+   *
+   * Everything else in this phase happens on the way to PR_REVIEW, and a run
+   * that is already there never passes through it again: the loop above breaks
+   * out of INTEGRATING and drops straight into `verify`, which waits for a human
+   * merge that a conflicting pull request makes impossible. That is a run with
+   * work left to do and no way to reach it — the operator's only remaining move
+   * is to resolve the conflict by hand, which is the thing `reconcileWithBase`
+   * exists to spare them.
+   *
+   * So a resume reconciles and republishes. `openPrs` is idempotent — `ensurePR`
+   * finds the pull request that already exists and updates it — and it is where
+   * the base merge, the draft decision and the body all live, so re-entering it
+   * is the whole fix rather than a second copy of it.
+   *
+   * Skipped once the branch is known to merge, and once a human has merged or
+   * closed the pull request: neither has anything left to reconcile. A run
+   * recorded before any of this existed has no merge status at all, which is
+   * treated as "not known to merge" on purpose — those are exactly the runs
+   * sitting on a conflict nobody has looked at.
+   */
+  private async republishUnmergeable(runId: string): Promise<void> {
+    const run = this.store.getRun(runId)!;
+    if (run.state !== "PR_REVIEW" || !this.github.enabled) return;
+    const prNumber = this.rollupPr(runId);
+    if (prNumber === undefined) return;
+    if (this.store.mergeStatus(runId)?.state === "mergeable") return;
+    // Whatever the harness last thought, a pull request a human has already
+    // dealt with is not this method's business.
+    const state = await (this.github.prState?.(prNumber) ?? Promise.resolve(null));
+    if (state === "merged" || state === "closed") return;
+    this.bus.publish({
+      type: "agent.log",
+      runId,
+      sessionId: "integrator",
+      text: `#${prNumber} is open and not known to merge into ${run.config.baseBranch} — reconciling the branch with the base before anything waits on a human merging it`,
+      ts: Date.now(),
+    });
+    await this.openPrs(runId);
+    await this.confirmMergeable(runId);
+  }
+
+  /**
+   * Ask GitHub whether the pull request it now has can actually be merged.
+   *
+   * `reconcileWithBase` already merged the base in before the push, so this
+   * normally only confirms it. It is here for the gap that leaves: the base can
+   * move between that merge and the push, the push can land on a branch a
+   * protection rule blocks, and GitHub computes mergeability against a base it
+   * knows about rather than the one this machine fetched.
+   *
+   * "unknown" is what a timeout reports, and it is never upgraded to mergeable —
+   * the whole point of this phase is that a run must not claim a merge it has
+   * not been told about.
+   */
+  private async confirmMergeable(runId: string): Promise<void> {
+    const run = this.store.getRun(runId)!;
+    if (!this.github.enabled) return;
+    const prNumber = this.rollupPr(runId);
+    const local = this.store.mergeStatus(runId);
+    // No local verdict means nothing reconciled this branch against its base,
+    // which is the same position as having no pull request at all: there is
+    // nothing for GitHub's answer to confirm or contradict, and a run says
+    // nothing rather than inventing a comparison it never made.
+    if (prNumber === undefined || !local) return;
+    // Mapped onto the check vocabulary so the settling, the grace period and the
+    // timeout-is-not-a-pass rule are the ones `settleChecks` already proves.
+    // GitHub computes `mergeable` in the background, so "unknown" is pending in
+    // exactly the sense that phase was written for.
+    const settled = await this.settleChecks(
+      runId,
+      async (n: number) => {
+        const m = await (this.github.prMergeable?.(n) ?? Promise.resolve(null));
+        if (!m) return null;
+        return {
+          state: m.state === "mergeable" ? ("passing" as const) : m.state === "conflicting" ? ("failing" as const) : ("pending" as const),
+          failing: m.state === "conflicting" ? [m.mergeStateStatus] : [],
+          total: 1,
+        };
+      },
+      prNumber,
+      Math.min(this.mergeabilitySettleMinutes, run.config.checkTimeoutMinutes)
+    );
+    if (!settled) return;
+    const state = settled.state === "passing" ? "mergeable" : settled.state === "failing" ? "conflicting" : "unknown";
+    this.bus.publish({
+      type: "run.merge_status",
+      runId,
+      prNumber,
+      state,
+      baseBranch: run.config.baseBranch,
+      // GitHub says whether it merges, never where it broke. The file list is
+      // only ever the one the harness found itself.
+      conflicts: state === "conflicting" ? local.conflicts : [],
+      resolvedBy: state === "conflicting" ? "none" : (local.resolvedBy as "already-current" | "merge" | "agent" | "none"),
+      ts: Date.now(),
+    });
+    if (state === "conflicting") {
+      this.bus.publish({
+        type: "agent.log",
+        runId,
+        sessionId: "integrator",
+        text:
+          `#${prNumber} cannot be merged into ${run.config.baseBranch}: GitHub reports it as conflicting` +
+          (local.state === "mergeable"
+            ? ` — the base moved again between the harness's own merge and the push, so this branch is already out of date. \`harness resume\` reconciles it and re-checks.`
+            : `. Nothing downstream of this pull request can happen until that is resolved.`),
+        ts: Date.now(),
+      });
+    }
+  }
+
+  /**
    * One PR for the whole run, head = the integration branch. Task branches are
    * cut from the integration branch, so per-task PRs against the base overlap —
    * the last task's PR carries nearly every earlier commit again. The rollup is
@@ -1685,6 +2226,11 @@ export class RunController {
     const merged = this.store.listTasks(runId).filter((t) => t.state === "MERGED");
     if (!merged.length) return null;
     if (!base) throw new Error("the run has no base branch (detached HEAD) — nothing to open a PR against");
+
+    // Before the push, not after: a branch that cannot merge into its base is
+    // something to fix while the run still has agents, not something to report
+    // once the pull request is already open and reading as finished.
+    const merge = await this.reconcileWithBase(runId, base);
 
     // SEC-5: only the harness/<runId>/* namespace is ever pushed.
     await pushRunBranch(this.repoPath, this.wt.integrationBranch(runId));
@@ -1732,6 +2278,23 @@ export class RunController {
             "run reports as unproven, not something it found wrong — QA said so itself",
             "rather than passing quietly, which is the only reason you are reading it.",
             "Settle them, or mark the PR ready if you have decided to ship on them.",
+          ]
+        : []),
+      ...(merge.state === "conflicting"
+        ? [
+            "",
+            `**This branch does not merge into \`${base}\`.**${merge.conflicts.length ? ` Conflicts in ${merge.conflicts.length} file${merge.conflicts.length === 1 ? "" : "s"}:` : ""}`,
+            ...merge.conflicts.slice(0, 20).map((f) => `- \`${f}\``),
+            ...(merge.conflicts.length > 20 ? [`- …and ${merge.conflicts.length - 20} more`] : []),
+            "",
+            `\`${base}\` moved while this run was working. The harness merged it into the run's`,
+            "integration branch, gave an agent the conflict, and could not resolve it — so the",
+            "merge was abandoned and this branch is exactly as the run left it. **It is held as a**",
+            "**draft because of that**: there is no version of this pull request a reviewer can merge",
+            "until the two are reconciled, and every check above judged this branch alone.",
+            "",
+            `To take it on by hand: \`git fetch origin ${base} && git merge origin/${base}\` in the run's`,
+            "integration worktree, then `harness resume`.",
           ]
         : []),
       ...(shipped.length
@@ -1783,7 +2346,19 @@ export class RunController {
      * writing, at merge time, in a field nothing gated on. Honesty that reaches
      * no control is indistinguishable from silence.
      */
-    const draft = stillWorking || intentFailed || unsettled.length > 0;
+    /**
+     * The same hold again, for the one defect that makes every other verdict on
+     * this pull request beside the point.
+     *
+     * A conflicting branch cannot be merged by anybody, so holding it as a draft
+     * takes nothing away — GitHub was never going to accept it. What the draft
+     * buys is that the run stops reading as finished. Run 5743ce85 published a
+     * CONFLICTING #834 as ready for review and moved to PR_REVIEW; the operator
+     * had no way to tell that outcome from a mergeable one without leaving the
+     * dashboard.
+     */
+    const cannotMerge = merge.state === "conflicting";
+    const draft = stillWorking || intentFailed || unsettled.length > 0 || cannotMerge;
     const pr = await this.github.ensurePR(runId, "run", this.wt.integrationBranch(runId), base, title, body, { draft });
     if (!pr) {
       this.bus.publish({
@@ -1861,6 +2436,7 @@ export class RunController {
     total: number;
     intent: { verdict: "PASS" | "FAIL"; gaps: string[]; summary: string } | null;
     ci: { prNumber: number; state: "passing" | "failing" | "pending" | "none"; failing: string[]; total: number } | null;
+    mergeable: { state: "mergeable" | "conflicting" | "unknown"; baseBranch: string; conflicts: string[] } | null;
     deploy: { sha: string; state: "passing" | "failing" | "pending" | "none"; failing: string[]; total: number } | null;
     prod: { url: string; verdict: "PASS" | "FAIL"; findings: string[]; summary: string } | null;
     line: string;
@@ -1899,6 +2475,25 @@ export class RunController {
         ? `${prs.length} pull request${prs.length === 1 ? "" : "s"} open for review`
         : "no pull requests opened",
     ];
+    // Immediately after the count, and ahead of everything else, because it
+    // disqualifies everything else. "1 pull request open for review; CI green;
+    // intent check passed" describes run 5743ce85 accurately and still leaves
+    // out the only fact that mattered: nobody could merge it.
+    const mergeable = this.store.mergeStatus(runId);
+    if (mergeable && prs.length) {
+      if (mergeable.state === "conflicting") {
+        parts.push(
+          `CANNOT MERGE — conflicts with ${mergeable.baseBranch || "the base branch"}` +
+            (mergeable.conflicts.length ? ` in ${mergeable.conflicts.length} file${mergeable.conflicts.length === 1 ? "" : "s"}` : "")
+        );
+      } else if (mergeable.state === "unknown") {
+        parts.push("mergeability unconfirmed");
+      } else if (mergeable.resolvedBy === "agent" || mergeable.resolvedBy === "merge") {
+        // Worth a clause of its own: the branch in the pull request is not only
+        // the run's work, it carries a base merge the operator did not ask for.
+        parts.push(`${mergeable.baseBranch || "the base branch"} merged in to keep it mergeable`);
+      }
+    }
     if (parked.length) parts.push(parked.length === 1 ? "1 task needs you" : `${parked.length} tasks need you`);
     if (cancelled) {
       parts.push(parked.length ? `${cancelled} never started, blocked behind them` : `${cancelled} never started`);
@@ -1945,7 +2540,19 @@ export class RunController {
           : `production check found ${prod.findings.length || "unstated"} problem${prod.findings.length === 1 ? "" : "s"}`
       );
     }
-    return { prs, parked, merged: count("MERGED"), cancelled, total: tasks.length, intent, ci, deploy, prod, line: parts.join("; ") };
+    return {
+      prs,
+      parked,
+      merged: count("MERGED"),
+      cancelled,
+      total: tasks.length,
+      intent,
+      ci,
+      mergeable: mergeable ? { state: mergeable.state, baseBranch: mergeable.baseBranch, conflicts: mergeable.conflicts } : null,
+      deploy,
+      prod,
+      line: parts.join("; "),
+    };
   }
 
   /**

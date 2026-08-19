@@ -128,7 +128,7 @@ async function build(
   prMode: "single" | "per-task" = "single",
   pool?: AgentPool,
   checkTimeoutMinutes = 20,
-  extra?: { prodUrl?: string; prodOut?: string }
+  extra?: { prodUrl?: string; prodOut?: string; ciFixRounds?: number }
 ) {
   const { repo } = repoWithOrigin();
   const store = new Store(":memory:");
@@ -147,7 +147,7 @@ async function build(
   }, repo);
   const runId = await controller.startRun(
     "do a thing",
-    RunConfig.parse({ deterministicChecks: [], prMode, checkTimeoutMinutes, deployTimeoutMinutes: 1, prodUrl: extra?.prodUrl ?? "" })
+    RunConfig.parse({ deterministicChecks: [], prMode, checkTimeoutMinutes, deployTimeoutMinutes: 1, prodUrl: extra?.prodUrl ?? "", ciFixRounds: extra?.ciFixRounds ?? 2 })
   );
   return { store, runId, logs, repo, controller };
 }
@@ -294,7 +294,9 @@ describe("what the run says it produced", () => {
     // that is exactly the blind spot. They ran on one task's branch in isolation
     // and never saw the merged whole, the workflow, or a base that had moved.
     const { adapter } = fakeGitHub(() => ({ number: 7, url: "u" }), { state: "failing", failing: ["Deploy", "CI / build"], total: 3 });
-    const { store, runId, logs } = await build(adapter);
+    // The fix loop is ciGate.test.ts's subject; off here, so this stays a test
+    // of what the run *says* about a red branch it is not going to fix.
+    const { store, runId, logs } = await build(adapter, true, undefined, "single", undefined, 20, { ciFixRounds: 0 });
 
     expect(store.ciStatus(runId)).toMatchObject({ prNumber: 7, state: "failing", failing: ["Deploy", "CI / build"] });
     expect(reason(store, runId)).toBe("1 pull request open for review; CI red (Deploy, CI / build); intent check passed");

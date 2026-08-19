@@ -258,6 +258,26 @@ async function reportOutcome(
     }
   }
 
+  // Ahead of CI, because it outranks it. A green check on a branch that will not
+  // merge describes a pull request nobody can act on, and the operator has to be
+  // told which of the two they are looking at before they read anything else.
+  if (out.mergeable && out.mergeable.state !== "mergeable" && out.prs.length) {
+    if (out.mergeable.state === "conflicting") {
+      lines.push(
+        "",
+        `  CANNOT MERGE: this run's branch conflicts with ${out.mergeable.baseBranch || "its base"}.`,
+        `    ${out.mergeable.baseBranch || "The base branch"} moved while the run was working. The harness merged it in, gave an`,
+        "    agent the conflict and could not resolve it, so the branch is unchanged and the pull",
+        "    request is held as a draft — there is no version of it a reviewer can merge yet."
+      );
+      for (const f of out.mergeable.conflicts.slice(0, 10)) lines.push(`    - ${f}`);
+      if (out.mergeable.conflicts.length > 10) lines.push(`    …and ${out.mergeable.conflicts.length - 10} more`);
+      lines.push("    Resolve it in the run's integration worktree, then `harness resume`.");
+    } else {
+      lines.push("", `  Mergeable: UNCONFIRMED — GitHub did not settle whether this branch merges into ${out.mergeable.baseBranch || "its base"}.`);
+    }
+  }
+
   // What the repo and the world said, in the order they said it. A green CI over
   // a red deploy, or a green deploy over a production that disagrees, are the two
   // shapes of "merged but not actually done" — both belong above the artifacts.

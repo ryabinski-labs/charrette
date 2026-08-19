@@ -38,6 +38,12 @@ function fakeOctokit() {
       update: endpoint(),
     },
     checks: { listForRef: endpoint([]) },
+    actions: {
+      listWorkflowRunsForRepo: endpoint({ workflow_runs: [] }),
+      reRunWorkflowFailedJobs: endpoint(),
+      listJobsForWorkflowRun: endpoint({ jobs: [] }),
+      downloadJobLogsForWorkflowRun: endpoint("a log line"),
+    },
     repos: { getCombinedStatusForRef: endpoint({ statuses: [] }) },
   };
   return {
@@ -102,6 +108,9 @@ describe("an adapter with nothing configured", () => {
     await expect(adapter.markPrReady("r", "t", 1, "title", "body")).resolves.toBe(false);
     await expect(adapter.prState(1)).resolves.toBeNull();
     await expect(adapter.prChecks(1)).resolves.toBeNull();
+    await expect(adapter.prMergeable(1)).resolves.toBeNull();
+    await expect(adapter.rerunFailedChecks(1)).resolves.toBe(false);
+    await expect(adapter.failingJobLogs(1)).resolves.toEqual([]);
     await expect(adapter.mergedSha(1)).resolves.toBeNull();
     await expect(adapter.checksForRef("sha")).resolves.toBeNull();
     await expect(adapter.closePR(1, "why")).resolves.toBe(false);
@@ -720,5 +729,170 @@ describe("telling the no-commits 422 apart", () => {
   it("copes with a 422 whose body carries no errors array or message", () => {
     expect(isNoCommitsError({ status: 422 })).toBe(false);
     expect(isNoCommitsError(Object.assign(new Error(""), { status: 422, response: { data: { errors: [{}] } } }))).toBe(false);
+  });
+});
+
+/**
+ * Whether GitHub thinks the run's branch merges into its base.
+ *
+ * The distinction the whole phase turns on is between "no" and "not yet": a
+ * conflict is a verdict, `mergeable: null` is a background job that has not
+ * finished, and a response with no `mergeable` field at all is neither — it is
+ * a shape that will never start carrying one, and polling it burns the settle
+ * window learning nothing.
+ */
+describe("asking whether a pull request merges", () => {
+  it("reads a computed yes and no, and carries the merge state status through", async () => {
+    const { adapter, api } = adapterWith();
+
+    api.rest.pulls.get.mockResolvedValue({ data: { mergeable: true, mergeable_state: "clean" } });
+    await expect(adapter.prMergeable(42)).resolves.toEqual({ state: "mergeable", mergeStateStatus: "clean" });
+
+    api.rest.pulls.get.mockResolvedValue({ data: { mergeable: false, mergeable_state: "dirty" } });
+    await expect(adapter.prMergeable(42)).resolves.toEqual({ state: "conflicting", mergeStateStatus: "dirty" });
+  });
+
+  it("answers a merged pull request from its state instead of polling a merge that no longer exists", async () => {
+    // GitHub reports `mergeable: null` on a merged or closed pull request for
+    // ever. Waiting on that is a timeout with a known answer already on the row.
+    const { adapter, api } = adapterWith();
+    api.rest.pulls.get.mockResolvedValue({ data: { merged_at: "2026-08-19T10:00:00Z", mergeable: null } });
+
+    await expect(adapter.prMergeable(42)).resolves.toEqual({ state: "mergeable", mergeStateStatus: "merged" });
+  });
+
+  it("reports a null as unknown, which is the one answer worth waiting on", async () => {
+    const { adapter, api } = adapterWith();
+    api.rest.pulls.get.mockResolvedValue({ data: { mergeable: null, mergeable_state: "unstable" } });
+
+    await expect(adapter.prMergeable(42)).resolves.toEqual({ state: "unknown", mergeStateStatus: "unstable" });
+  });
+
+  it("falls back to unknown when the state is missing as well", async () => {
+    const { adapter, api } = adapterWith();
+    api.rest.pulls.get.mockResolvedValue({ data: { mergeable: null } });
+
+    await expect(adapter.prMergeable(42)).resolves.toEqual({ state: "unknown", mergeStateStatus: "unknown" });
+  });
+
+  it("learns nothing at all from a response that does not carry the field", async () => {
+    // Not the same as null: null is the background job running, absent is a
+    // response that is not the one this reads. `null` here stops the polling.
+    const { adapter, api } = adapterWith();
+    api.rest.pulls.get.mockResolvedValue({ data: { state: "open", mergeable_state: "unknown" } });
+
+    await expect(adapter.prMergeable(42)).resolves.toBeNull();
+  });
+
+  it("learns nothing from a pull request it could not read", async () => {
+    const { adapter, api } = adapterWith();
+    api.rest.pulls.get.mockRejectedValue(new Error("404"));
+
+    await expect(adapter.prMergeable(42)).resolves.toBeNull();
+  });
+});
+
+import { tailOfLog } from "./github.js";
+
+/**
+ * Re-running failed jobs and reading their logs — the two reads that turn
+ * "CI is red" from a report into a task.
+ */
+describe("re-running the failed jobs on a pull request", () => {
+  it("re-runs every red workflow run on the head commit and reports that it did", async () => {
+    const { adapter, api } = adapterWith();
+    api.rest.pulls.get.mockResolvedValue({ data: { head: { sha: "abc" } } });
+    api.rest.actions.listWorkflowRunsForRepo.mockResolvedValue({
+      data: { workflow_runs: [{ id: 1, conclusion: "failure" }, { id: 2, conclusion: "success" }, { id: 3, conclusion: "timed_out" }] },
+    });
+
+    await expect(adapter.rerunFailedChecks(7)).resolves.toBe(true);
+    expect(api.rest.actions.reRunWorkflowFailedJobs).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports false when GitHub refuses every re-run", async () => {
+    // A workflow that failed before any job started — a bad `services:` block —
+    // has no failed jobs to re-run and GitHub refuses. Not flake, an answer.
+    const { adapter, api } = adapterWith();
+    api.rest.pulls.get.mockResolvedValue({ data: { head: { sha: "abc" } } });
+    api.rest.actions.listWorkflowRunsForRepo.mockResolvedValue({ data: { workflow_runs: [{ id: 1, conclusion: "failure" }] } });
+    api.rest.actions.reRunWorkflowFailedJobs.mockRejectedValue(new Error("422"));
+
+    await expect(adapter.rerunFailedChecks(7)).resolves.toBe(false);
+  });
+
+  it("reports false with nothing red, an unreadable pull request, or an unlistable run set", async () => {
+    const { adapter, api } = adapterWith();
+    api.rest.pulls.get.mockResolvedValue({ data: { head: { sha: "abc" } } });
+    await expect(adapter.rerunFailedChecks(7)).resolves.toBe(false);
+
+    api.rest.actions.listWorkflowRunsForRepo.mockRejectedValue(new Error("500"));
+    await expect(adapter.rerunFailedChecks(7)).resolves.toBe(false);
+
+    api.rest.pulls.get.mockRejectedValue(new Error("404"));
+    await expect(adapter.rerunFailedChecks(7)).resolves.toBe(false);
+  });
+});
+
+describe("reading the failing jobs' logs", () => {
+  it("returns each failing job with the tail of its own log", async () => {
+    const { adapter, api } = adapterWith();
+    api.rest.pulls.get.mockResolvedValue({ data: { head: { sha: "abc" } } });
+    api.rest.actions.listWorkflowRunsForRepo.mockResolvedValue({
+      data: { workflow_runs: [{ id: 1, conclusion: "failure" }, { id: 2, conclusion: "success" }, { id: 3, conclusion: "skipped" }, { id: 4, conclusion: "neutral" }, { id: 5, conclusion: null }] },
+    });
+    api.rest.actions.listJobsForWorkflowRun.mockResolvedValue({
+      data: { jobs: [{ id: 10, name: "build", conclusion: "failure" }, { id: 11, name: "lint", conclusion: "success" }, { id: 12, name: "e2e", conclusion: "startup_failure" }] },
+    });
+    api.rest.actions.downloadJobLogsForWorkflowRun.mockResolvedValue({ data: "line one\nthe verdict" });
+
+    await expect(adapter.failingJobLogs(7)).resolves.toEqual([
+      { name: "build", log: "line one\nthe verdict" },
+      { name: "e2e", log: "line one\nthe verdict" },
+    ]);
+  });
+
+  it("degrades to a name with no log rather than an error", async () => {
+    const { adapter, api } = adapterWith();
+    api.rest.pulls.get.mockResolvedValue({ data: { head: { sha: "abc" } } });
+    api.rest.actions.listWorkflowRunsForRepo.mockResolvedValue({ data: { workflow_runs: [{ id: 1, conclusion: "failure" }] } });
+    api.rest.actions.listJobsForWorkflowRun.mockResolvedValue({ data: { jobs: [{ id: 10, name: "build", conclusion: "failure" }] } });
+    api.rest.actions.downloadJobLogsForWorkflowRun.mockRejectedValue(new Error("410 expired"));
+
+    await expect(adapter.failingJobLogs(7)).resolves.toEqual([{ name: "build", log: "" }]);
+  });
+
+  it("answers empty for an unreadable pull request, unlistable runs, or unlistable jobs", async () => {
+    const { adapter, api } = adapterWith();
+    api.rest.pulls.get.mockRejectedValue(new Error("404"));
+    await expect(adapter.failingJobLogs(7)).resolves.toEqual([]);
+
+    api.rest.pulls.get.mockResolvedValue({ data: { head: { sha: "abc" } } });
+    api.rest.actions.listWorkflowRunsForRepo.mockRejectedValue(new Error("500"));
+    await expect(adapter.failingJobLogs(7)).resolves.toEqual([]);
+
+    api.rest.actions.listWorkflowRunsForRepo.mockResolvedValue({ data: { workflow_runs: [{ id: 1, conclusion: "failure" }] } });
+    api.rest.actions.listJobsForWorkflowRun.mockRejectedValue(new Error("500"));
+    await expect(adapter.failingJobLogs(7)).resolves.toEqual([]);
+  });
+
+  it("copes with a log endpoint that answers with nothing at all", async () => {
+    const { adapter, api } = adapterWith();
+    api.rest.pulls.get.mockResolvedValue({ data: { head: { sha: "abc" } } });
+    api.rest.actions.listWorkflowRunsForRepo.mockResolvedValue({ data: { workflow_runs: [{ id: 1, conclusion: "failure" }] } });
+    api.rest.actions.listJobsForWorkflowRun.mockResolvedValue({ data: { jobs: [{ id: 10, name: "build", conclusion: "failure" }] } });
+    api.rest.actions.downloadJobLogsForWorkflowRun.mockResolvedValue({ data: undefined });
+
+    await expect(adapter.failingJobLogs(7)).resolves.toEqual([{ name: "build", log: "" }]);
+  });
+});
+
+describe("the tail of a log", () => {
+  it("keeps a short log whole and cuts a long one by lines, then by bytes", () => {
+    expect(tailOfLog("a\nb")).toBe("a\nb");
+    const lines = Array.from({ length: 200 }, (_, i) => `line ${i}`).join("\n");
+    expect(tailOfLog(lines).split("\n")[0]).toBe("line 80");
+    const fat = Array.from({ length: 100 }, () => "x".repeat(200)).join("\n");
+    expect(tailOfLog(fat).length).toBe(8_000);
   });
 });

@@ -328,6 +328,7 @@ Rules:
 - Implement the task to its acceptance criteria. Write or update tests alongside the code.
 - Commit incrementally with clear messages (git add + git commit) so progress survives interruption. Commit at least once before finishing.
 - Never push, never touch branches, never open or merge pull requests. The harness handles integration.
+- If you add or edit a CI gate (.github/workflows/ or this repo's equivalent), execute the command it gates on right here and make sure this tree passes the threshold you are shipping — measure a coverage floor against the real number, and never declare runners, service containers or privileges this repo's CI does not have. A gate that fails on the branch that ships it is a defect in the task, and QA runs exactly this check.
 - Follow the project conventions below exactly.
 ${toolbelt}
 Interface standard. This applies whenever what you build renders anything a human being looks at — a page, a screen, a component, an email, a report, a CLI table. It is not extra credit and it is not a later pass: QA checks these literally and will send the task back. Ignore it only when this task produces nothing anyone sees.
@@ -400,6 +401,50 @@ Rules for resolving:
 Then run the full test suite and the repo's deterministic checks. If something fails, fix the merge, not the feature. Commit the merge when it is green.
 
 If you conclude the merge is fundamentally wrong and cannot be resolved this way, \`git merge --abort\` and say so plainly in your summary rather than forcing something you do not believe in.`;
+}
+
+/**
+ * Handed to an agent when the run's own integration branch will not merge into
+ * the base branch it is about to open a pull request against.
+ *
+ * A different problem from `conflictPrompt`, and it needs different rules. There
+ * the two sides are both this run's work and the answer is almost always the
+ * union. Here one side is the run and the other is everything the rest of the
+ * world merged into `main` while the run was working — code this run has never
+ * seen, written by people who do not know it exists. Taking the union is the
+ * wrong instinct: the base's version of a file may be a deliberate replacement
+ * of the very thing this run edited.
+ *
+ * The agent works in the integration worktree, on a merge that is deliberately
+ * left conflicted, and its output is a commit. It is told it may refuse: a merge
+ * resolved wrongly here is worse than one the operator is asked about, because
+ * it lands in the pull request as if the run had always been current.
+ */
+export function baseConflictPrompt(integrationBranch: string, baseRef: string, files: string[], attempt: number, attempts: number): string {
+  const list = files.length ? files.map((f) => `- ${f}`).join("\n") : "- (see `git status`)";
+  return `This run's work is finished and merged onto \`${integrationBranch}\`. The only thing standing between it and a reviewable pull request is that \`${baseRef}\` has moved while the run was working, and the two no longer merge.
+
+\`${baseRef}\` has been merged into \`${integrationBranch}\` and left conflicted on purpose, in this worktree, so you can resolve it with the files in front of you. Conflict markers are in:
+${list}
+
+This is attempt ${attempt} of ${attempts}.
+
+What each side is:
+- **Ours** (\`HEAD\`, \`--ours\`) is this run's work. It has been through QA and is the reason the run exists.
+- **Theirs** (\`${baseRef}\`, \`--theirs\`) is what other people merged into the base branch while this run was working. This run has never seen it and knows nothing about why it was written.
+
+Rules for resolving:
+- Read what the base actually changed before you touch it — \`git log HEAD..MERGE_HEAD -- <file>\` on each conflicted file. A conflict is a question about intent, and the commit messages are the only place the other side's intent is written down.
+- Where both sides added to the same list, registry or module, keep both.
+- Where the base *changed* something this run also changed, the base usually wins on the shape and this run wins on its own feature: re-apply the run's change on top of the base's version rather than reverting the base to make the marker go away.
+- Never resolve by deleting the base's side wholesale. Those commits are other people's shipped work, they are already on \`${baseRef}\`, and dropping them here silently reverts them the moment this pull request merges.
+- Do not use this merge as an opportunity to improve, refactor or re-verify anything. Touch only what the merge forces you to touch.
+
+Then run the repo's test suite and its deterministic checks. A textually clean resolution that does not build is not a resolution. If something fails, fix the merge — not the run's features, and not the base's.
+
+Commit the merge when it is green. Leave no unresolved paths and no \`MERGE_HEAD\`: an unfinished merge here is published as if it were finished.
+
+If you conclude this merge needs a decision that is not yours to make — the base deleted or rewrote something this run depends on, or the two changes are genuinely incompatible — run \`git merge --abort\` and say so plainly in your summary, naming the file and the decision. That answer is wanted. It goes to the operator, who can make the call; a merge you forced through without believing in it goes to nobody.`;
 }
 
 /**
@@ -509,6 +554,7 @@ When the artifact is infrastructure, not application code — Terraform, CloudFo
 - Then read the diff for what a plan cannot show, because this is where infra defects actually live: IAM or security-group wildcards, \`0.0.0.0/0\` ingress, public buckets, unencrypted storage, secrets in plaintext or in the state file, no deletion protection on stateful resources, no backup or retention, a hardcoded region or account id, a resource with no tags. Judge these literally against the criteria and name the file and line.
 - Read the pipeline that will apply it, not just the file that was changed. A template can be valid, lint clean, fully tested and still undeployable, because what a deploy is permitted to create lives in the deploy command's arguments and not in the template: acknowledgement flags, the role or service account it assumes, the backend it writes state to, the project or subscription it targets. Nothing that reads the template can see a mismatch there, so a green plan, a green synth and a green suite are all consistent with a change that fails the moment the operator deploys it — and by then it is on their main branch and everything behind it is stuck. If this task changed what the infrastructure declares, check that the repo's own deploy step is still allowed to declare it, and fail the task if it is not.
 - NEVER apply, deploy, or destroy anything to verify it. Your evidence comes from plan, synth, template, dry-run and diff. If a criterion genuinely cannot be settled without provisioning, say so in your notes and judge the rest — a criterion you could not check is a gap to report, not a reason to touch the operator's infrastructure.
+- A CI workflow change is the one piece of infrastructure you CAN execute, so execute it: a gate that was never run against the tree it gates is the classic way this repo's CI goes red on the first real push. For every step the diff adds or edits in .github/workflows/ (or the CI equivalent), run its command here and compare the outcome to the gate's own threshold — a coverage floor must be run against this tree's real coverage number, a lint step against this tree's lint output. FAIL the task if the gate it ships would fail on the branch that ships it. Environmental demands are part of this: a job that declares service containers, specific runners or privileged features on infrastructure the repo does not have is a job that can never start, and validity of the YAML proves nothing about that.
 
 Any test you commit has to pass on a machine that is not this one. A test that encodes something about this host is worse than no test: it goes green here, and then fails for everybody else with a message about your laptop. Before you commit a test, check it does not depend on
 - an address or interface belonging to this machine — a link-local address like \`fe80::1\`, \`127.0.0.1\` where the code accepts any loopback, this host's name, its LAN address, whatever \`ifconfig\` happens to say today;

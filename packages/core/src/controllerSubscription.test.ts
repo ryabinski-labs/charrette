@@ -65,7 +65,11 @@ const dagJson = (ids: string[] = ["task-a"]) =>
 const weekly = (percent: number, over: Partial<SubscriptionReading> = {}): SubscriptionReading => ({
   window: "seven_day",
   percent,
-  resetsAt: Date.parse("2026-08-18T11:59:59Z"),
+  // Relative to now, never a fixed date. An absolute reset time is in the past
+  // the moment the calendar passes it, `untilReset` clamps to zero and starts
+  // answering "under an hour", and the suite fails on a date rather than on a
+  // change — which is exactly what it did from 2026-08-18 onwards.
+  resetsAt: Date.now() + 3 * 3_600_000,
   ...over,
 });
 
@@ -372,7 +376,7 @@ describe("a live session reporting the window running out", () => {
     // one was answered.
     let asks = 0;
     const { pool } = watchingPool(ROLES, {
-      readings: [weekly(96), weekly(96, { resetsAt: Date.parse("2026-08-25T11:59:59Z") })],
+      readings: [weekly(96), weekly(96, { resetsAt: Date.now() + 10 * 24 * 3_600_000 })],
     });
     const { controller } = build({
       repoPath: repo(),

@@ -392,6 +392,120 @@ export class WorktreeManager {
   }
 
   /**
+   * Bring the base branch *into* the run's integration branch, so the pull
+   * request it opens can actually be merged.
+   *
+   * A run branches once, at the start, and merges every accepted task into that
+   * branch. `main` does not stop moving while it works — and on a run of any
+   * length the two diverge, so the rollup opened at the end is one GitHub
+   * refuses to merge. Nothing in the harness ever looked: run 5743ce85 spent
+   * $373, merged 64 tasks, opened #834 CONFLICTING, and reported it to the
+   * operator as "1 pull request open for review".
+   *
+   * `origin` is re-read first, because the local ref is only ever as fresh as
+   * the operator's last fetch and is routinely months stale — reconciling
+   * against it would produce a branch that still cannot merge. A repo with no
+   * remote, or a fetch that fails, falls back to the local branch and says so:
+   * a stale answer is worth more than no answer here, and the pull request's own
+   * mergeability is checked against GitHub afterwards either way.
+   *
+   * A conflicted merge is left in place exactly as `catchUpTaskBranch` leaves
+   * one. The integration worktree is where the agent that resolves it works,
+   * and it needs the markers; `abortIntegrationMerge` is the way back out.
+   */
+  async catchUpIntegrationBranch(
+    runId: string,
+    base: string
+  ): Promise<{ ok: true; moved: boolean; ref: string; sha: string } | { ok: false; conflicts: string[]; ref: string; sha: string }> {
+    const run = async (): Promise<{ ok: true; moved: boolean; ref: string; sha: string } | { ok: false; conflicts: string[]; ref: string; sha: string }> => {
+      const wtPath = await this.ensureIntegrationWorktree(runId);
+      // Fetched in the worktree rather than the primary checkout so FETCH_HEAD
+      // is unambiguously the ref that was just written, whatever else the
+      // operator's repository is doing.
+      const fetched = await git(wtPath, ["fetch", "origin", base], { serialize: true }).then(
+        () => true,
+        () => false
+      );
+      const ref = fetched ? "FETCH_HEAD" : base;
+      const label = fetched ? `origin/${base}` : base;
+      // Resolved once, here. `FETCH_HEAD` is rewritten by the next fetch of any
+      // ref, so it is not something a later call can ask a question about — and
+      // "did the agent actually merge the base?" is asked after an agent has had
+      // a whole session to run git commands of its own.
+      const sha = await git(wtPath, ["rev-parse", ref], { serialize: true }).catch(() => "");
+      // Already contained: `git merge` would print "Already up to date" and exit
+      // 0, which is indistinguishable from a merge that landed a commit.
+      const contained = await git(wtPath, ["merge-base", "--is-ancestor", ref, "HEAD"], { serialize: true }).then(
+        () => true,
+        () => false
+      );
+      if (contained) return { ok: true, moved: false, ref: label, sha };
+      try {
+        await git(wtPath, ["merge", "--no-ff", "--no-edit", ref], { serialize: true });
+        return { ok: true, moved: true, ref: label, sha };
+      } catch {
+        const status = await git(wtPath, ["diff", "--name-only", "--diff-filter=U"], { serialize: true }).catch(() => "");
+        const conflicts = status.split("\n").filter(Boolean);
+        // No unmerged paths means the merge failed for some other reason — an
+        // unresolvable ref, a dirty worktree. A half-merge left behind then
+        // helps nobody, and the empty list tells the caller to say so.
+        if (!conflicts.length) await git(wtPath, ["merge", "--abort"], { serialize: true }).catch(() => undefined);
+        return { ok: false, conflicts, ref: label, sha };
+      }
+    };
+    const next = this.mergeLock.then(run, run);
+    this.mergeLock = next.catch(() => undefined);
+    return next;
+  }
+
+  /**
+   * Whether the integration worktree is sitting on an unfinished merge, and what
+   * is still conflicted in it.
+   *
+   * Asked after an agent has been sent to resolve one. An agent that resolved
+   * and committed leaves no MERGE_HEAD; one that gave up half way leaves the
+   * merge open, and a run must never publish that tree as if it were finished.
+   */
+  async integrationMergeState(runId: string): Promise<{ merging: boolean; conflicts: string[] }> {
+    const wtPath = await this.ensureIntegrationWorktree(runId);
+    const merging = await git(wtPath, ["rev-parse", "--verify", "--quiet", "MERGE_HEAD"], { serialize: true }).then(
+      (out) => Boolean(out),
+      () => false
+    );
+    const status = await git(wtPath, ["diff", "--name-only", "--diff-filter=U"], { serialize: true }).catch(() => "");
+    return { merging, conflicts: status.split("\n").filter(Boolean) };
+  }
+
+  /**
+   * Whether the integration branch actually contains a commit.
+   *
+   * Asked of the base's own sha after an agent has been let loose on a conflict,
+   * because the cheap proxies both lie. "The head moved" is also true of an
+   * agent that aborted the merge and then committed something else; "no
+   * conflicts left" is also true of an agent that aborted and tidied up. Only
+   * ancestry answers the question the pull request depends on.
+   */
+  async integrationContains(runId: string, sha: string): Promise<boolean> {
+    if (!sha) return false;
+    const wtPath = await this.ensureIntegrationWorktree(runId);
+    return git(wtPath, ["merge-base", "--is-ancestor", sha, "HEAD"], { serialize: true }).then(
+      () => true,
+      () => false
+    );
+  }
+
+  /** Put the integration worktree back where it was after a merge nobody could resolve. */
+  async abortIntegrationMerge(runId: string): Promise<void> {
+    const run = async (): Promise<void> => {
+      const wtPath = await this.ensureIntegrationWorktree(runId);
+      await git(wtPath, ["merge", "--abort"], { serialize: true }).catch(() => undefined);
+    };
+    const next = this.mergeLock.then(run, run);
+    this.mergeLock = next.catch(() => undefined);
+    return next;
+  }
+
+  /**
    * Continuous integration (PRD §11.1): merge an accepted task branch into the run's
    * integration branch. Returns conflict file list on failure instead of throwing.
    * One merge sequence at a time (see mergeLock).

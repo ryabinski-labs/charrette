@@ -43,3 +43,58 @@ suite("the skills.forged feed line", () => {
     expect(text).toContain("extended skill “log-rotation” (~890 tokens)");
   });
 });
+
+suite("the run.merge_status feed line", () => {
+  it("names the files when the branch cannot merge", () => {
+    const describeEv = extractDescribe();
+    const [kind, who, text] = describeEv({
+      type: "run.merge_status", runId: "r1", prNumber: 834, state: "conflicting",
+      baseBranch: "main", conflicts: ["src/a.ts", "src/b.ts"], resolvedBy: "none", ts: 3,
+    });
+    expect(kind).toBe("bad");
+    expect(who).toBe("integrator");
+    expect(text).toBe("CANNOT MERGE into main — src/a.ts, src/b.ts");
+  });
+
+  it("credits the agent that resolved the conflict", () => {
+    const describeEv = extractDescribe();
+    const [kind, , text] = describeEv({
+      type: "run.merge_status", runId: "r1", prNumber: 834, state: "mergeable",
+      baseBranch: "main", conflicts: [], resolvedBy: "agent", ts: 4,
+    });
+    expect(kind).toBe("git");
+    expect(text).toBe("merges into main (an agent resolved the conflict)");
+  });
+
+  it("says unconfirmed when GitHub never settled", () => {
+    const describeEv = extractDescribe();
+    const [, , text] = describeEv({
+      type: "run.merge_status", runId: "r1", prNumber: 834, state: "unknown",
+      baseBranch: "main", conflicts: [], resolvedBy: "none", ts: 5,
+    });
+    expect(text).toContain("mergeability unconfirmed");
+  });
+});
+
+suite("the run.ci_retry feed line", () => {
+  // Driving the real page showed this event falling through to the default
+  // case and printing the bare type "run.ci_retry" — the least useful possible
+  // rendering of "the harness is ruling out a flake before spending money".
+  it("says the failed checks were re-run when they were", () => {
+    const describeEv = extractDescribe();
+    const [kind, who, text] = describeEv({
+      type: "run.ci_retry", runId: "r1", prNumber: 834, reran: true, ts: 6,
+    });
+    expect(kind).toBe("git");
+    expect(who).toBe("integrator");
+    expect(text).toBe("re-ran the failed checks on PR #834 in case they were flakes");
+  });
+
+  it("says so when nothing could be re-run", () => {
+    const describeEv = extractDescribe();
+    const [, , text] = describeEv({
+      type: "run.ci_retry", runId: "r1", prNumber: 834, reran: false, ts: 7,
+    });
+    expect(text).toBe("could not re-run the failed checks on PR #834 — treating the failure as real");
+  });
+});

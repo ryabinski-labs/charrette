@@ -209,6 +209,7 @@ const RUN_OUTCOME = {
   cancelled: 0,
   total: 0,
   intent: null,
+  mergeable: null,
   ci: null,
   deploy: null,
   prod: null,
@@ -2281,6 +2282,77 @@ describe("the closing report", () => {
 
     expect(shown).toContain("    - a gap");
     expect(shown.trimEnd().split("\n").filter((l) => l.trim().startsWith("- ")).length).toBe(1);
+  });
+
+  it("puts a branch that cannot merge above CI, and names the files", async () => {
+    // Ahead of the CI line on purpose: green checks on a branch nobody can
+    // merge describe a pull request that cannot be acted on either way.
+    const shown = await reportFor({
+      prs: [{ number: 12, title: "Auth" }] as never,
+      mergeable: { prNumber: 12, state: "conflicting", baseBranch: "main", conflicts: [".gitignore", "changelog.js"], resolvedBy: "none" } as never,
+    });
+
+    expect(shown).toContain("CANNOT MERGE: this run's branch conflicts with main.");
+    expect(shown).toContain("    - .gitignore");
+    expect(shown).toContain("    - changelog.js");
+    expect(shown).toContain("Resolve it in the run's integration worktree, then `harness resume`.");
+  });
+
+  it("names the first ten conflicts and counts the rest", async () => {
+    const shown = await reportFor({
+      prs: [{ number: 12, title: "Auth" }] as never,
+      mergeable: {
+        prNumber: 12,
+        state: "conflicting",
+        baseBranch: "main",
+        conflicts: Array.from({ length: 13 }, (_, i) => `f${i}.ts`),
+        resolvedBy: "none",
+      } as never,
+    });
+
+    expect(shown).toContain("    - f9.ts");
+    expect(shown).not.toContain("    - f10.ts");
+    expect(shown).toContain("    …and 3 more");
+  });
+
+  it("says the base branch is unknown rather than printing an empty name", async () => {
+    const shown = await reportFor({
+      prs: [{ number: 12, title: "Auth" }] as never,
+      mergeable: { prNumber: 12, state: "conflicting", baseBranch: "", conflicts: [], resolvedBy: "none" } as never,
+    });
+
+    expect(shown).toContain("CANNOT MERGE: this run's branch conflicts with its base.");
+    expect(shown).toContain("The base branch moved while the run was working");
+  });
+
+  it("reports an unsettled mergeability as unconfirmed rather than as a conflict", async () => {
+    const shown = await reportFor({
+      prs: [{ number: 12, title: "Auth" }] as never,
+      mergeable: { prNumber: 12, state: "unknown", baseBranch: "main", conflicts: [], resolvedBy: "merge" } as never,
+    });
+
+    expect(shown).toContain("Mergeable: UNCONFIRMED — GitHub did not settle whether this branch merges into main.");
+    expect(shown).not.toContain("CANNOT MERGE");
+
+    const noBase = await reportFor({
+      prs: [{ number: 12, title: "Auth" }] as never,
+      mergeable: { prNumber: 12, state: "unknown", baseBranch: "", conflicts: [], resolvedBy: "merge" } as never,
+    });
+    expect(noBase).toContain("whether this branch merges into its base.");
+  });
+
+  it("says nothing about mergeability when the branch merges, or when no pull request opened", async () => {
+    const merges = await reportFor({
+      prs: [{ number: 12, title: "Auth" }] as never,
+      mergeable: { prNumber: 12, state: "mergeable", baseBranch: "main", conflicts: [], resolvedBy: "merge" } as never,
+    });
+    expect(merges).not.toContain("CANNOT MERGE");
+    expect(merges).not.toContain("UNCONFIRMED");
+
+    const noPr = await reportFor({
+      mergeable: { prNumber: 0, state: "conflicting", baseBranch: "main", conflicts: ["a.ts"], resolvedBy: "none" } as never,
+    });
+    expect(noPr).not.toContain("CANNOT MERGE");
   });
 
   it.each([

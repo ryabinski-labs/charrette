@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   INTERFACE_STANDARD,
   advisorPrompt,
+  baseConflictPrompt,
   advisorSystemPrompt,
   demoEvidenceReaskPrompt,
   demoSystemPrompt,
@@ -467,5 +468,40 @@ describe("telling a worker its branch delivers nothing", () => {
   it("counts the commits that changed nothing, in the singular and the plural", () => {
     expect(emptyBranchPrompt("b", 1)).toContain("it has 1 commit, and together they change no files.");
     expect(emptyBranchPrompt("b", 3)).toContain("it has 3 commits, and together they change no files.");
+  });
+});
+
+describe("the prompt an agent is given for a conflict with the base", () => {
+  it("lists the conflicted files", () => {
+    const p = baseConflictPrompt("harness/run1/main", "origin/main", ["a.ts", "b.ts"], 1, 2);
+
+    expect(p).toContain("- a.ts");
+    expect(p).toContain("- b.ts");
+  });
+
+  it("points at git status when nothing could be listed", () => {
+    // `git diff --diff-filter=U` can come back empty on a merge that failed for
+    // a reason other than a textual conflict. Sending an agent in with an empty
+    // bullet list reads as "there is nothing to do", which is the opposite.
+    const p = baseConflictPrompt("harness/run1/main", "origin/main", [], 1, 2);
+
+    expect(p).toContain("- (see `git status`)");
+  });
+});
+
+describe("the rule that a CI gate must be run against the tree that ships it", () => {
+  // The rule exists because run 5743ce85 shipped a coverage floor nobody had
+  // measured (75% against a real 63.5%) and a job its containerized runner
+  // could never start — both discovered by the operator, on the pull request.
+  it("is in the worker's standing orders", () => {
+    const p = workerSystemPrompt("c", "");
+    expect(p).toContain("execute the command it gates on right here");
+    expect(p).toContain("measure a coverage floor against the real number");
+  });
+
+  it("is in QA's standing orders, as a FAIL", () => {
+    const p = qaSystemPrompt();
+    expect(p).toContain("FAIL the task if the gate it ships would fail on the branch that ships it");
+    expect(p).toContain("service containers, specific runners or privileged features");
   });
 });
