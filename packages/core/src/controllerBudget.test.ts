@@ -281,6 +281,30 @@ describe("reopening a run the operator parked", () => {
     expect(asked()).toBe(0);
   });
 
+  /**
+   * The same run, resumed after that fix shipped, came back with the same task
+   * parked: it had been killed mid-flight, so it sat in `EXECUTING` rather than
+   * `PR_REVIEW`, and the check above lives behind a gate only a finished run
+   * passes. Nothing dispatches a parked task, so nothing else was ever going to
+   * look at it either.
+   */
+  it("books it even when the run was killed mid-flight rather than finished", async () => {
+    const { controller, store, runId, dir, asked } = await withAParkedTask("look again");
+    const wt = path.join(`${dir}-wt`, runId, "task-b");
+    writeFileSync(path.join(wt, "late.txt"), "done\n");
+    execFileSync("git", ["add", "-A"], { cwd: wt, stdio: "ignore" });
+    execFileSync("git", ["-c", "user.email=w@e.invalid", "-c", "user.name=W", "commit", "-m", "late work"], { cwd: wt, stdio: "ignore" });
+    const merge = path.join(`${dir}-wt`, runId, "__integration__");
+    execFileSync("git", ["-c", "user.email=i@e.invalid", "-c", "user.name=I", "merge", "--no-ff", "--no-edit", `harness/${runId}/task-b`], { cwd: merge, stdio: "ignore" });
+    // Where a run whose process died sits: still executing, nobody driving it.
+    store.transitionRun(runId, "EXECUTING", "the previous harness process died");
+
+    await controller.resume(runId);
+
+    expect(store.getTask(runId, "task-b")!.state).toBe("MERGED");
+    expect(asked()).toBe(0);
+  });
+
   it("leaves it parked when the operator still has nothing to add", async () => {
     const { controller, store, runId } = await withAParkedTask(null);
 
