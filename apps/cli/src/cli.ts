@@ -3,7 +3,7 @@ import { createInterface } from "node:readline/promises";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { ModelRoutingShape, RunConfig, SubscriptionConfig } from "@harness/shared";
-import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, accountEnv, assembleReport, checkMemoryBanner, detectToolbelt, ensureIgnored, harnessBuild, missingKeys, originSlug, postmortem, renderCompletionReport, renderPostmortem, reportPath, repoUnusable, wasMerged } from "@harness/core";
+import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, accountEnv, assembleReport, checkMemoryBanner, detectToolbelt, ensureIgnored, harnessBuild, missingKeys, originSlug, postmortem, renderPostmortem, reportPath, standaloneReport, repoUnusable, wasMerged } from "@harness/core";
 import { Dashboard } from "@harness/dashboard";
 import { promptForNewCap, watchBudgetCommands } from "./budget.js";
 import { promptForAccount } from "./subscription.js";
@@ -1006,7 +1006,7 @@ export function buildProgram(): Command {
       const report = await assembleReport({ store, repoPath: repo, runId, merged, slug, origin: "cli", now: Date.now() });
       const out = opts.out ?? reportPath(repo, runId);
       mkdirSync(path.dirname(out), { recursive: true });
-      writeFileSync(out, renderCompletionReport(report));
+      writeFileSync(out, standaloneReport(report));
       const { counts } = report.ledger;
       process.stdout.write(
         `${report.ledger.headline}\n\n` +

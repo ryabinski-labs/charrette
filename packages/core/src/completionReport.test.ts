@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderCompletionReport, reportTitle, type CompletionReport } from "./completionReport.js";
+import { renderCompletionReport, reportTitle, standaloneReport, type CompletionReport } from "./completionReport.js";
 import { deliveryLedger, type LedgerInput, type LedgerTask } from "./deliveryLedger.js";
 import type { DarkSwitch } from "./darkSwitches.js";
 
@@ -102,6 +102,18 @@ describe("the page holds together as a document", () => {
     // A transparent body borrows the host's ground, which is the other half of
     // the same bug.
     expect(html).toMatch(/body\s*\{[^}]*background: var\(--ground\)/);
+  });
+
+  /**
+   * Lighthouse's remaining deduction on the finished page: a document with no
+   * main landmark gives a screen reader nothing to skip to. `.wrap` is already
+   * the only content container, so naming it costs nothing.
+   */
+  it("gives a screen reader a main landmark to skip to", () => {
+    const html = renderCompletionReport(report());
+    expect(html).toContain('<main class="wrap">');
+    expect(html.trimEnd().endsWith("</main>")).toBe(true);
+    expect(html).not.toContain('<div class="wrap">');
   });
 
   it("keeps wide content inside its own scroller so the page never scrolls sideways", () => {
@@ -339,5 +351,117 @@ describe("what would notice if this broke", () => {
   it("says nothing at all about proof for a run that was never specified", () => {
     const html = renderCompletionReport(report());
     expect(html).not.toContain("What would notice if this broke");
+  });
+});
+
+/**
+ * Measured on an emulated iPhone viewport, run 1e7d3df3's report drew the
+ * four-rung ladder and the four-cell instrument panel at 980px and scaled them
+ * down to fit 390px of glass: with no viewport tag a phone picks a 980px
+ * layout viewport, and every `max-width: 620px` rule in the stylesheet is dead.
+ */
+describe("the report as a file somebody opens", () => {
+  it("is a whole document, so a phone lays it out at the width it actually has", () => {
+    const doc = standaloneReport(report());
+    expect(doc.startsWith("<!doctype html>")).toBe(true);
+    expect(doc).toContain('<meta name="viewport" content="width=device-width,initial-scale=1">');
+    expect(doc).toContain('<meta charset="utf-8">');
+    expect(doc.trimEnd().endsWith("</html>")).toBe(true);
+  });
+
+  it("carries the page itself, unchanged", () => {
+    const r = report();
+    expect(standaloneReport(r)).toContain(renderCompletionReport(r));
+  });
+
+  /**
+   * The embedded form stays skeleton-free: an artifact host supplies its own,
+   * and the tags below are the ones it owns.
+   */
+  it("leaves the embedded form for a host that brings its own skeleton", () => {
+    const html = renderCompletionReport(report());
+    expect(html).not.toContain("<!doctype");
+    expect(html).not.toContain("<html");
+    expect(html).not.toContain("<head>");
+    expect(html).not.toContain("<body");
+  });
+});
+
+/**
+ * Lighthouse scored this page 94 on an emulated phone, and every deduction was
+ * one of two muted tokens failing WCAG AA against the surface behind it. It
+ * only ever tested the dark theme, because that is what the emulated browser
+ * was in — the light theme was worse and nothing had looked at it.
+ *
+ * So the check lives here, over the palette the page actually ships, rather
+ * than in whichever theme an auditing browser happens to prefer.
+ */
+describe("text a person has to be able to read", () => {
+  const luminance = (hex: string): number => {
+    const v = hex.replace("#", "");
+    const channel = (i: number) => {
+      const c = parseInt(v.slice(i, i + 2), 16) / 255;
+      return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    };
+    return 0.2126 * channel(0) + 0.7152 * channel(2) + 0.0722 * channel(4);
+  };
+  const contrast = (a: string, b: string): number => {
+    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x) as [number, number];
+    return (hi + 0.05) / (lo + 0.05);
+  };
+
+  /** Pull one theme's tokens straight out of the stylesheet the page ships. */
+  const palette = (block: string): Record<string, string> => {
+    const html = renderCompletionReport(report());
+    const start = html.indexOf(block);
+    const body = html.slice(start, html.indexOf("}", start));
+    return Object.fromEntries([...body.matchAll(/--([a-z-]+):\s*(#[0-9A-Fa-f]{6})/g)].map((m) => [m[1]!, m[2]!]));
+  };
+
+  // Every foreground/background pair the stylesheet actually puts together,
+  // and whether WCAG treats it as large text (3:1) or body text (4.5:1).
+  const PAIRS: [string, string, string, boolean][] = [
+    ["body text", "ink", "ground", false],
+    ["eyebrow", "accent", "ground", false],
+    ["standfirst", "ink-soft", "ground", false],
+    ["byline", "ink-faint", "ground", false],
+    ["rung meaning", "ink-faint", "ground", false],
+    ["cell label", "ink-faint", "surface", false],
+    ["cell note", "ink-soft", "surface", false],
+    ["table head", "ink-faint", "surface-alt", false],
+    ["table cell", "ink", "surface", false],
+    ["where", "ink-faint", "surface", false],
+    ["footnote heading", "ink-faint", "ground", false],
+    ["footnote body", "ink-soft", "ground", false],
+    ["code", "ink", "surface-alt", false],
+    ["link on ground", "accent", "ground", false],
+    ["link on surface", "accent", "surface", false],
+    ["tag live", "live", "live-wash", false],
+    ["tag dark", "off", "off-wash", false],
+    ["tag unproven", "unproven", "surface-alt", false],
+    ["tag not-delivered", "absent", "surface-alt", false],
+    ["tag kind", "accent", "accent-wash", false],
+    ["reading live", "live", "surface", true],
+    ["reading dark", "off", "surface", true],
+    ["reading unproven", "unproven", "surface", true],
+    ["reading absent", "absent", "surface", true],
+  ];
+
+  for (const [theme, block] of [
+    ["light", ":root {"],
+    ["dark", ':root[data-theme="dark"] {'],
+  ] as const) {
+    it(`meets WCAG AA in the ${theme} theme, on every pair the page puts together`, () => {
+      const tokens = palette(block);
+      const failures = PAIRS.filter(([, fg, bg, large]) => contrast(tokens[fg]!, tokens[bg]!) < (large ? 3 : 4.5)).map(
+        ([label, fg, bg, large]) => `${label}: ${tokens[fg]} on ${tokens[bg]} = ${contrast(tokens[fg]!, tokens[bg]!).toFixed(2)} (needs ${large ? 3 : 4.5})`
+      );
+      expect(failures).toEqual([]);
+    });
+  }
+
+  /** The media-query palette and the stamped one must not drift apart. */
+  it("gives the two dark blocks identical values", () => {
+    expect(palette(':root:not([data-theme="light"])')).toEqual(palette(':root[data-theme="dark"] {'));
   });
 });

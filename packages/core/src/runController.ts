@@ -32,7 +32,7 @@ import { composeDown, isolationBlock, isolationEnv, taskIsolation } from "./isol
 import { observeChecks } from "./memory.js";
 import { parseRunbook, withRunbook, type Runbook } from "./operatorRunbook.js";
 import { acceptanceVerdict, scenarioCommand, scenarioProbeCommand, suiteRunFrom, type AcceptanceVerdict } from "./acceptance.js";
-import { renderCompletionReport } from "./completionReport.js";
+import { standaloneReport } from "./completionReport.js";
 import { assembleReport, reportPath } from "./reportRun.js";
 import { ceilingNote, grantedTokens, requestTokens, sdkCeiling } from "./outputCeiling.js";
 import { missingKeys } from "./providerClients.js";
@@ -1488,7 +1488,7 @@ export class RunController {
       const report = await assembleReport({ store: this.store, repoPath: this.repoPath, runId, merged: true, origin: "done", now: Date.now() });
       const file = reportPath(this.repoPath, runId);
       mkdirSync(path.dirname(file), { recursive: true });
-      writeFileSync(file, renderCompletionReport(report));
+      writeFileSync(file, standaloneReport(report));
       this.bus.publish({ type: "agent.log", runId, sessionId: "integrator", text: `completion report written: ${file} — ${report.ledger.headline}`, ts: Date.now() });
     } catch (e) {
       this.bus.publish({ type: "agent.log", runId, sessionId: "integrator", text: `the completion report could not be written: ${String(e).slice(0, 200)}`, ts: Date.now() });

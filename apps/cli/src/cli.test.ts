@@ -117,7 +117,7 @@ const h = vi.hoisted(() => {
       ledger: { headline: "Nothing from this run has shipped.", counts: { live: 0, dark: 3, unproven: 1, "not-delivered": 2 }, switches: [{ name: "A_KEY" }] },
     })),
     reportPathMock: vi.fn((repo: string, runId: string) => `${repo}/.harness/reports/${runId}.html`),
-    renderCompletionReportMock: vi.fn(() => "<title>report</title>"),
+    standaloneReportMock: vi.fn(() => "<!doctype html><title>report</title>"),
   };
 });
 
@@ -153,7 +153,7 @@ vi.mock("@harness/core", () => ({
   wasMerged: h.wasMergedMock,
   assembleReport: h.assembleReportMock,
   reportPath: h.reportPathMock,
-  renderCompletionReport: h.renderCompletionReportMock,
+  standaloneReport: h.standaloneReportMock,
 }));
 vi.mock("@harness/dashboard", () => ({ Dashboard: h.DashboardMock }));
 vi.mock("./defaults.js", async (importOriginal) => {
@@ -1861,7 +1861,7 @@ describe("harness report", () => {
     expect(printed()).toContain("live 0   dark 3   unproven 1   not delivered 2");
     expect(printed()).toContain("1 switch the run could not throw");
     expect(printed()).toContain("/repo/.harness/reports/run-1.html");
-    expect(h.writeFileSyncMock).toHaveBeenCalledWith("/repo/.harness/reports/run-1.html", "<title>report</title>");
+    expect(h.writeFileSyncMock).toHaveBeenCalledWith("/repo/.harness/reports/run-1.html", "<!doctype html><title>report</title>");
   });
 
   it("tells the assembler which repository this is and whether anyone merged it", async () => {
@@ -1915,7 +1915,7 @@ describe("harness report", () => {
 
     await cli("report", "run-1", "--repo", "/repo", "--out", "/tmp/elsewhere.html");
 
-    expect(h.writeFileSyncMock).toHaveBeenCalledWith("/tmp/elsewhere.html", "<title>report</title>");
+    expect(h.writeFileSyncMock).toHaveBeenCalledWith("/tmp/elsewhere.html", "<!doctype html><title>report</title>");
     expect(h.mkdirSyncMock).toHaveBeenCalledWith("/tmp", { recursive: true });
   });
 
