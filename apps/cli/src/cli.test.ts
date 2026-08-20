@@ -2427,6 +2427,56 @@ describe("harness init", () => {
     expect(printed()).toContain("command not found: cargo-deny");
   });
 
+  /**
+   * The ceiling the checks are proved under has to be the ceiling QA gives
+   * them, and before this it was neither settable nor shared. `verifyChecks`
+   * held its own hardcoded ten minutes, so a repository whose suite is honestly
+   * slower — waf's `cargo test --workspace` takes 21 — had its real test
+   * command killed here and dropped from the config it was writing. That is
+   * quieter than the failure it replaced and worse: the run then has no test
+   * check at all, and nobody decided that.
+   */
+  it("proves the checks at the ceiling it is told, not one this file picked", async () => {
+    h.detectChecksMock.mockReturnValue({ checks: ["cargo test --workspace"], source: "1 step(s) from 1 CI workflow(s)", skipped: [] });
+
+    await cli("init", "--repo", "/repo", "--check-timeout", "45");
+
+    expect(h.verifyChecksMock).toHaveBeenCalledWith("/repo", ["cargo test --workspace"], expect.objectContaining({ timeoutMs: 45 * 60 * 1000 }));
+    expect(printed()).toContain("45 minute(s) each");
+  });
+
+  it("writes that ceiling down, so QA gives the check the time it was proved in", async () => {
+    h.detectChecksMock.mockReturnValue({ checks: ["cargo test --workspace"], source: "1 step(s) from 1 CI workflow(s)", skipped: [] });
+
+    await cli("init", "--repo", "/repo", "--check-timeout", "45");
+
+    const [, body] = h.writeFileSyncMock.mock.calls[0] as [string, string];
+    expect(JSON.parse(body).deterministicCheckTimeoutMinutes).toBe(45);
+  });
+
+  it("leaves the default out of the file rather than restating it", async () => {
+    // A config restating a default teaches the reader nothing and invites them
+    // to read it as a decision somebody made.
+    h.detectChecksMock.mockReturnValue({ checks: ["npm test"], source: "package.json", skipped: [] });
+
+    await cli("init", "--repo", "/repo");
+
+    const [, body] = h.writeFileSyncMock.mock.calls[0] as [string, string];
+    expect(body).not.toContain("deterministicCheckTimeoutMinutes");
+    expect(h.verifyChecksMock).toHaveBeenCalledWith("/repo", ["npm test"], expect.objectContaining({ timeoutMs: 10 * 60 * 1000 }));
+  });
+
+  it("refuses a ceiling that is not a positive number of minutes", async () => {
+    // Left to `Number()` this becomes NaN, which reaches `execFileSync` as no
+    // timeout at all — an init that hangs on the first slow check instead of
+    // saying what is wrong with the flag.
+    h.detectChecksMock.mockReturnValue({ checks: ["npm test"], source: "package.json", skipped: [] });
+
+    await expect(cli("init", "--repo", "/repo", "--check-timeout", "soon")).rejects.toThrow("--check-timeout wants a positive number of minutes");
+    await expect(cli("init", "--repo", "/repo", "--check-timeout", "0")).rejects.toThrow("--check-timeout wants a positive number of minutes");
+    expect(h.writeFileSyncMock).not.toHaveBeenCalled();
+  });
+
   it("takes the checks unproven when told to skip the running", async () => {
     h.detectChecksMock.mockReturnValue({ checks: ["cargo test"], source: "1 step(s) from 1 CI workflow(s)", skipped: [] });
 

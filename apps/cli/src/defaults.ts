@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import { SUBPROJECT_DIRS, scanCiChecks, type CiCheck, type SkippedStep } from "@harness/core";
-import { PitStopConfig, PlanGateConfig, SubscriptionConfig, TaskGateConfig } from "@harness/shared";
+import { DEFAULT_CHECK_TIMEOUT_MINUTES, PitStopConfig, PlanGateConfig, SubscriptionConfig, TaskGateConfig } from "@harness/shared";
 
 export const CONFIG_FILENAME = "harness.config.json";
 
@@ -194,9 +194,7 @@ export interface VerifiedChecks {
  * This is the gate the whole feature rests on. Lifting a command out of a
  * workflow says what CI does; it says nothing about whether this machine can do
  * it. `cargo deny` and `cargo audit` are installed by a `cargo install` step
- * that was correctly refused as setup. `npm run test:e2e` wants browsers. A
- * coverage run that takes twelve minutes will be killed by QA's own ten-minute
- * timeout on every task, forever, and be recorded as a failure each time.
+ * that was correctly refused as setup. `npm run test:e2e` wants browsers.
  *
  * Every one of those is a check that is red before any task starts, which is
  * the single failure that parks an entire run — every task inherits it, every
@@ -204,6 +202,15 @@ export interface VerifiedChecks {
  * only after it has been watched to pass, here, in the time QA will give it,
  * and the ones that did not are printed with the reason rather than dropped
  * quietly.
+ *
+ * "The time QA will give it" is the whole of `timeoutMs`, and it has to be the
+ * ceiling that run is actually going to use rather than a number this file
+ * picked. When they disagree the disagreement is silent and it goes the worst
+ * way: a suite honestly slower than the default is killed here and dropped from
+ * the config, so the repository's real test command is simply absent from the
+ * run — quieter than the failure it replaced, and worse. That is how a twelve-
+ * or twenty-one-minute `cargo test` disappears from a Rust repo's checks
+ * without anybody deciding it should.
  *
  * Green on the repo's current tree is not a promise it stays green: a run's
  * tasks change the code, and a check is meant to be able to go red. What this
@@ -214,7 +221,7 @@ export function verifyChecks(
   checks: string[],
   opts: { timeoutMs?: number; onStart?: (command: string) => void; onResult?: (command: string, ms: number, reason: string | null) => void } = {}
 ): VerifiedChecks {
-  const timeoutMs = opts.timeoutMs ?? 10 * 60 * 1000;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_CHECK_TIMEOUT_MINUTES * 60 * 1000;
   const kept: string[] = [];
   const dropped: { command: string; reason: string }[] = [];
   for (const command of checks) {
@@ -232,7 +239,7 @@ export function verifyChecks(
       const output = [err.stdout, err.stderr].map((b) => (b ? b.toString() : "")).join("\n").trim();
       reason =
         err.signal === "SIGTERM"
-          ? `did not finish in ${Math.round(timeoutMs / 60000)} minute(s) — QA would kill it on every task`
+          ? `did not finish in ${Math.round(timeoutMs / 60000)} minute(s) — QA would kill it on every task. Raise deterministicCheckTimeoutMinutes above its honest wall clock, or split it`
           : firstLine(output) || firstLine(err.message);
     }
     const ms = Date.now() - started;

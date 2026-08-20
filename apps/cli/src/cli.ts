@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { createInterface } from "node:readline/promises";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { ModelRoutingShape, RunConfig, SubscriptionConfig } from "@harness/shared";
+import { DEFAULT_CHECK_TIMEOUT_MINUTES, ModelRoutingShape, RunConfig, SubscriptionConfig } from "@harness/shared";
 import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, accountEnv, assembleReport, checkMemoryBanner, detectToolbelt, ensureIgnored, harnessBuild, missingKeys, originSlug, postmortem, renderPostmortem, reportPath, standaloneReport, repoUnusable, wasMerged } from "@harness/core";
 import { Dashboard } from "@harness/dashboard";
 import { promptForNewCap, watchBudgetCommands } from "./budget.js";
@@ -1169,11 +1169,26 @@ export function buildProgram(): Command {
     .option("-r, --repo <path>", "target repo (default: the git repo containing the cwd)", process.cwd())
     .option("-f, --force", "overwrite an existing config file", false)
     .option("--no-verify", "write the detected checks without running them first")
-    .action((opts: { repo: string; force: boolean; verify: boolean }) => {
+    .option(
+      "--check-timeout <minutes>",
+      "how long any one check may run, here and in the run this writes",
+      String(DEFAULT_CHECK_TIMEOUT_MINUTES)
+    )
+    .action((opts: { repo: string; force: boolean; verify: boolean; checkTimeout: string }) => {
       const repo = resolveRepoRoot(opts.repo);
       const target = path.join(repo, CONFIG_FILENAME);
       if (existsSync(target) && !opts.force) {
         throw new Error(`${target} already exists. Pass --force to overwrite.`);
+      }
+      // One number for both jobs on purpose. It is the ceiling each candidate
+      // is proved under *and* the ceiling written into the config for QA to use
+      // later, so "it passed when I proved it" and "QA gives it that long"
+      // cannot come apart. Proving at a stricter ceiling than the run will use
+      // drops checks the run could have afforded; proving at a looser one
+      // adopts checks QA is going to kill on every task.
+      const checkTimeout = Number(opts.checkTimeout);
+      if (!Number.isFinite(checkTimeout) || checkTimeout <= 0) {
+        throw new Error(`--check-timeout wants a positive number of minutes, not ${opts.checkTimeout}.`);
       }
       const detected = detectChecks(repo);
       const out = (line: string) => process.stdout.write(`${line}\n`);
@@ -1188,13 +1203,14 @@ export function buildProgram(): Command {
       // sit through it to get a config file.
       let checks = detected.checks;
       if (opts.verify && checks.length) {
-        out(`\nRunning each one here first — a check that cannot pass in a fresh worktree parks every task in a run.`);
-        // A check can take ten minutes, so a terminal is shown the one in
+        out(`\nRunning each one here first, ${checkTimeout} minute(s) each — a check that cannot pass in a fresh worktree parks every task in a run.`);
+        // A check can take many minutes, so a terminal is shown the one in
         // flight and then has that line replaced by the verdict. Redirected to
         // a file there is no cursor to move, so only the verdict is written —
         // a log full of escape codes is worse than a log with no progress in it.
         const live = process.stdout.isTTY === true;
         const verified = verifyChecks(repo, checks, {
+          timeoutMs: checkTimeout * 60 * 1000,
           onStart: (c) => live && process.stdout.write(`  …    ${c}`),
           onResult: (c, ms, reason) =>
             process.stdout.write(`${live ? "\r\u001b[2K" : ""}  ${reason === null ? "ok  " : "drop"} ${c}  (${Math.round(ms / 1000)}s)\n`),
@@ -1210,6 +1226,11 @@ export function buildProgram(): Command {
       const contents = {
         budget: { runCapUsd: DEFAULT_RUN_CAP },
         deterministicChecks: checks,
+        // Written whenever it is not the default, so the ceiling the checks
+        // were proved under is the one QA gives them. Left out when it is the
+        // default, because a config file restating a default teaches the reader
+        // nothing and invites them to treat it as a decision somebody made.
+        ...(checkTimeout === DEFAULT_CHECK_TIMEOUT_MINUTES ? {} : { deterministicCheckTimeoutMinutes: checkTimeout }),
         dashboard: true,
         skillsDirs: DEFAULT_SKILLS_DIRS,
       };

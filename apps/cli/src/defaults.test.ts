@@ -439,6 +439,10 @@ describe("proving a check can pass here before adopting it", () => {
   it("drops one that outlives the time QA would give it, since it would be killed on every task", () => {
     const { dropped } = verifyChecks(tmpRepo(), ["sleep 5"], { timeoutMs: 200 });
     expect(dropped[0]!.reason).toContain("did not finish");
+    // Names the fix, because the drop is only correct while the ceiling is. A
+    // suite honestly slower than this one is not a check to abandon — it is a
+    // ceiling to raise, and the operator's config is the only place to raise it.
+    expect(dropped[0]!.reason).toContain("Raise deterministicCheckTimeoutMinutes");
   });
 
   it("judges each one on its own, so a broken check does not take the rest with it", () => {
