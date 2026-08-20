@@ -275,6 +275,49 @@ describe("rewriting a task's definition of done", () => {
     expect(store.getTask("run1", "a")!.completionProbe).toBe("test -f nope.txt");
   });
 
+  const criteriaAmendments = (store: Store) =>
+    store.eventsSince("run1", 0).map((e) => e.event).filter((e) => e.type === "task.criteria_amended");
+
+  it("records who moved the acceptance criteria and what they were before", () => {
+    // The lever `amendProbe` could not pull. Run bc691359's
+    // `tier1-three-arm-capture` was judged against a bundle only `terraform
+    // apply` could produce, which this harness denies — so a rewritten probe
+    // changed nothing, because QA reads the criteria.
+    const store = makeStore();
+    makeRun(store);
+    store.insertTasks("run1", [{ id: "e1", title: "E" }], [probeTask("test -f nope.txt")]);
+
+    store.amendCriteria("run1", "a", ["  the deferral is recorded honestly  ", "", " tests/not-run.sh exits 0 "], "operator", "no agent here can run terraform apply");
+
+    expect(store.getTask("run1", "a")!.acceptanceCriteria).toEqual(["the deferral is recorded honestly", "tests/not-run.sh exits 0"]);
+    expect(criteriaAmendments(store)).toMatchObject([
+      { from: ["ok"], to: ["the deferral is recorded honestly", "tests/not-run.sh exits 0"], by: "operator", why: "no agent here can run terraform apply" },
+    ]);
+  });
+
+  it("writes nothing when the criteria are the ones already in force", () => {
+    const store = makeStore();
+    makeRun(store);
+    store.insertTasks("run1", [{ id: "e1", title: "E" }], [probeTask("test -f nope.txt")]);
+
+    store.amendCriteria("run1", "a", ["  ok  "], "operator");
+
+    expect(criteriaAmendments(store)).toEqual([]);
+    expect(store.getTask("run1", "a")!.acceptanceCriteria).toEqual(["ok"]);
+  });
+
+  it("refuses to leave a task with no criteria at all", () => {
+    // A probe can be withdrawn because QA still judges the task afterwards.
+    // Withdrawing the criteria leaves QA nothing to judge it by, and a task
+    // that cannot be failed is not a task that has been done.
+    const store = makeStore();
+    makeRun(store);
+    store.insertTasks("run1", [{ id: "e1", title: "E" }], [probeTask("test -f nope.txt")]);
+
+    expect(() => store.amendCriteria("run1", "a", ["   ", ""], "operator")).toThrow(/at least one/);
+    expect(store.getTask("run1", "a")!.acceptanceCriteria).toEqual(["ok"]);
+  });
+
   it("counts how many times a task has stopped for its gate, whoever answered", () => {
     // The one number no other counter keeps: answering a gate resets
     // `qaIterations`, and `taskGateAutoAnswers` deliberately skips the rounds a

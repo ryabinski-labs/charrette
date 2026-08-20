@@ -957,6 +957,48 @@ export function buildProgram(): Command {
     });
 
   program
+    .command("criteria")
+    .description("rewrite the acceptance criteria a task is judged against — for a bar no agent in this harness can clear")
+    .argument("<taskId>", "the task whose bar is wrong")
+    .argument("<criteria...>", "the criteria to judge it by instead, one argument each")
+    .option("-r, --repo <path>", "target repo (default: the git repo containing the cwd)", process.cwd())
+    .option("--run <runId>", "which run (default: the newest one with this task)")
+    .option("--why <words>", "one line for the record: what was wrong with the old ones", "")
+    .action(async (taskId: string, criteria: string[], opts: { repo: string; run?: string; why: string }) => {
+      const repo = resolveRepoRoot(opts.repo);
+      const { store } = makeController(repo);
+      const runId = opts.run ?? store.listRuns().find((r) => store.getTask(r.id, taskId))?.id;
+      const task = runId ? store.getTask(runId, taskId) : undefined;
+      if (!task || !runId) {
+        process.stdout.write(opts.run ? `No task ${taskId} in run ${opts.run}.\n` : `No run in this repo has a task called ${taskId}.\n`);
+        process.exitCode = 1;
+        return;
+      }
+      const next = criteria.map((c) => c.trim()).filter(Boolean);
+      // There is no --clear here on purpose. A probe can be withdrawn because QA
+      // still judges the task afterwards; withdrawing the criteria would leave
+      // QA nothing to judge it by at all.
+      if (!next.length) {
+        process.stdout.write(`Give at least one criterion. ${taskId} is currently judged by:\n${task.acceptanceCriteria.map((c) => `  - ${c}`).join("\n")}\n`);
+        process.exitCode = 1;
+        return;
+      }
+      if (JSON.stringify(next) === JSON.stringify(task.acceptanceCriteria)) {
+        process.stdout.write(`${runId}/${taskId} is already judged by exactly those. Nothing changed.\n`);
+        return;
+      }
+      store.amendCriteria(runId, taskId, next, "operator", opts.why);
+      process.stdout.write(
+        `${runId}/${taskId} [${task.state}]\n  was\n${task.acceptanceCriteria.map((c) => `    - ${c}`).join("\n")}\n  now\n${next.map((c) => `    - ${c}`).join("\n")}\n`
+      );
+      // Same as `probe`: QA reads the criteria off the task at the top of every
+      // iteration, so the next pass is judged by these without a restart. This
+      // is the part `probe` could not do — a probe stands in front of the bar,
+      // and QA reads the bar itself.
+      process.stdout.write("A run in flight picks these up on the task's next QA pass; you do not need to resume it.\n");
+    });
+
+  program
     .command("postmortem")
     .argument("[runId]", "the run to explain (default: the most recent)")
     .description("why a run produced what it produced — unanswered questions, verdicts, and where the money went")

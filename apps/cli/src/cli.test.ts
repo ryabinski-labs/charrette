@@ -17,6 +17,7 @@ const h = vi.hoisted(() => {
     listTasks: vi.fn(() => [] as unknown[]),
     getTask: vi.fn(() => undefined as unknown),
     amendProbe: vi.fn(),
+  amendCriteria: vi.fn(),
     patchRunConfig: vi.fn(),
     spentUsd: vi.fn(() => 0),
     deployStatus: vi.fn(() => null as unknown),
@@ -1694,6 +1695,67 @@ describe("harness resume — settings the operator changed since the run started
     await cli("resume", "run-x", "--repo", "/repo", "--no-dashboard");
 
     expect(h.storeMethods.patchRunConfig).not.toHaveBeenCalled();
+  });
+});
+
+describe("harness criteria", () => {
+  // Run bc691359, `tier1-three-arm-capture`: the criteria asked for a bundle
+  // that only `terraform apply` can produce, which `infraGuard` denies at the
+  // Bash chokepoint. Five QA passes, four correct refusals and a rewritten
+  // probe all ended the same way, because QA reads the criteria and the
+  // criteria had not moved — and there was no command that could move them.
+  const stuck = { id: "tier1", state: "WORKING", acceptanceCriteria: ["a real terraform apply produced the bundle", "docs no longer say deferred"] };
+
+  beforeEach(() => {
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "EXECUTING", assignment: "a" }]);
+    h.storeMethods.getTask.mockReturnValue(stuck);
+    process.exitCode = undefined;
+  });
+
+  it("rewrites the bar of the newest run holding that task, and says it lands without a restart", async () => {
+    await cli("criteria", "tier1", "the deferral is recorded honestly", "tests/not-run.sh exits 0", "--repo", "/repo", "--why", "no agent here can run terraform apply");
+
+    expect(h.storeMethods.amendCriteria).toHaveBeenCalledWith("run-1", "tier1", ["the deferral is recorded honestly", "tests/not-run.sh exits 0"], "operator", "no agent here can run terraform apply");
+    expect(printed()).toContain("- a real terraform apply produced the bundle");
+    expect(printed()).toContain("- the deferral is recorded honestly");
+    expect(printed()).toContain("you do not need to resume it");
+  });
+
+  it("refuses to leave a task with nothing to be judged by", async () => {
+    // No --clear here on purpose: a withdrawn probe still leaves QA judging the
+    // task, and withdrawn criteria leave it judging nothing.
+    await cli("criteria", "tier1", "   ", "--repo", "/repo");
+
+    expect(h.storeMethods.amendCriteria).not.toHaveBeenCalled();
+    expect(printed()).toContain("Give at least one criterion");
+    expect(printed()).toContain("- a real terraform apply produced the bundle");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("does not report a change when the bar is already what you typed", async () => {
+    await cli("criteria", "tier1", "a real terraform apply produced the bundle", "docs no longer say deferred", "--repo", "/repo");
+
+    expect(h.storeMethods.amendCriteria).not.toHaveBeenCalled();
+    expect(printed()).toContain("already judged by exactly those");
+  });
+
+  it("says so when no run in the repo has that task", async () => {
+    h.storeMethods.getTask.mockReturnValue(undefined);
+
+    await cli("criteria", "nope", "anything", "--repo", "/repo");
+
+    expect(printed()).toContain("No run in this repo has a task called nope");
+    expect(h.storeMethods.amendCriteria).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("names the run you asked about when the task is not in that one", async () => {
+    h.storeMethods.getTask.mockReturnValue(undefined);
+
+    await cli("criteria", "tier1", "anything", "--run", "run-9", "--repo", "/repo");
+
+    expect(printed()).toContain("No task tier1 in run run-9");
+    expect(process.exitCode).toBe(1);
   });
 });
 
