@@ -1105,6 +1105,32 @@ export class Store {
   }
 
   /**
+   * Rewrite the acceptance criteria a task is judged against.
+   *
+   * The operator could already amend a task's probe and could not amend the bar
+   * behind it, which left one shape with no way out at all: a task whose
+   * criteria no agent in this harness can satisfy. Run bc691359's
+   * `tier1-three-arm-capture` asked for a bundle produced by `terraform apply`,
+   * which `infraGuard` denies at the Bash chokepoint — so five QA passes, four
+   * correct refusals and a rewritten probe all ended the same way, because QA
+   * reads the criteria and the criteria had not moved. QA is right to distrust
+   * a worker that says "the operator withdrew AC1-AC6": the transcript is not
+   * evidence. This is, and it is written where QA actually looks.
+   *
+   * Recorded as an event with the operator's reason, like `amendProbe`: a task
+   * merged against a bar somebody moved has to say who moved it and why.
+   */
+  amendCriteria(runId: string, taskId: string, criteria: string[], by: string, why = ""): void {
+    const from = this.getTask(runId, taskId)!.acceptanceCriteria;
+    const to = criteria.map((c) => c.trim()).filter(Boolean);
+    if (!to.length) throw new Error("a task with no acceptance criteria cannot be judged — give it at least one");
+    if (JSON.stringify(to) === JSON.stringify(from)) return;
+    this.appendEvent({ type: "task.criteria_amended", runId, taskId, from, to, by, why: why.slice(0, 300), ts: Date.now() }, () => {
+      this.db.prepare("UPDATE tasks SET acceptanceCriteria = ? WHERE runId = ? AND id = ?").run(JSON.stringify(to), runId, taskId);
+    });
+  }
+
+  /**
    * How many times an agent has rewritten this task's probe. Read off the event
    * log for the same reason the auto-answer count is: it is the only thing that
    * survives the process, and the bound exists precisely for the run that keeps

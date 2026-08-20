@@ -122,6 +122,19 @@ export const HarnessEvent = z.discriminatedUnion("type", [
     by: z.string().default("operator"),
     why: z.string().default(""),
   }),
+  // The bar itself moved, not just the probe in front of it. Only the operator
+  // writes this: an agent that could rewrite the criteria it is judged against
+  // is not being judged. A task merged against amended criteria has to be able
+  // to say who amended them and why, so `from` keeps the original wording.
+  z.object({
+    ...base,
+    type: z.literal("task.criteria_amended"),
+    taskId: z.string(),
+    from: z.array(z.string()),
+    to: z.array(z.string()),
+    by: z.string().default("operator"),
+    why: z.string().default(""),
+  }),
   // Which worker model a task was dispatched on, and what the rule in
   // modelTier.ts made of it. Recorded for every task, refused ones included, and
   // still recorded when `models.workerLight` is pointed back at `models.worker`
