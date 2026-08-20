@@ -51,8 +51,15 @@ function normalizeLine(line: string): string {
     .trim();
 }
 
-/** How the common runners announce a failing test, across node:test, vitest, jest, go and pytest. */
-const FAILURE_MARKER = /^(?:[✖✕×✗✘●]|not ok\b|FAIL\b|FAILED\b|--- FAIL:|\d+\)\s)/;
+/**
+ * How the common runners announce a failing test, across node:test, vitest,
+ * jest, go, pytest and cargo. Cargo earns its own alternative because it is the
+ * one runner here that puts the verdict at the end of the line — `test path ...
+ * FAILED` — and for as long as it was missing, every Rust failure collapsed
+ * into one whole-tail signature and none of the per-failure comparisons below
+ * ever applied to a Rust repository.
+ */
+const FAILURE_MARKER = /^(?:[✖✕×✗✘●]|not ok\b|FAIL\b|FAILED\b|--- FAIL:|\d+\)\s|test .+ \.\.\. FAILED\b)/;
 
 /**
  * The distinct failures in a check's output, in a form that survives a re-run.
@@ -69,6 +76,19 @@ export function failureSignatures(output: string): string[] {
   return marked.length ? marked : [lines.join("\n").slice(-2000)];
 }
 
+/**
+ * Whether two runs of this output could be compared failure by failure.
+ *
+ * The per-signature judgements in `confirmFailures` are only sound when the
+ * signatures name individual failures. A whole-tail signature is one blob of
+ * everything the command printed, and two runs of the same real defect can
+ * differ anywhere in that blob — so for unmarked output the comparisons fall
+ * back to the command-level question, which errs toward charging.
+ */
+export function hasFailureMarkers(output: string): boolean {
+  return output.split("\n").some((l) => FAILURE_MARKER.test(normalizeLine(l)));
+}
+
 export interface InheritedSplit {
   /** Failures this tree introduced — the only ones the task should answer for. */
   failures: { command: string; output: string; introduced: string[] }[];
@@ -76,8 +96,28 @@ export interface InheritedSplit {
   inherited: { command: string; signatures: string[] }[];
 }
 
+export interface ConfirmedFailures extends InheritedSplit {
+  /** Commands that failed once and then produced nothing chargeable on the re-run. */
+  flaky: string[];
+  /**
+   * Failures that survived the re-run but whose every repeated signature is one
+   * this repository has already watched fail and then pass. Not charged, and
+   * not silent either: the worker is told what was excused and why, so a task
+   * that genuinely broke a known-flaky test can still say so.
+   */
+  excused: { command: string; signatures: string[] }[];
+  /**
+   * Individual failures watched to fail and then pass on this same tree — the
+   * signature-level fact `observeFlakySignatures` records for the next task
+   * that meets them. Only from marked output: a whole-tail signature names a
+   * run, not a failure, and remembering one teaches nothing.
+   */
+  flakySignatures: string[];
+}
+
 /**
- * Run the failing commands a second time and keep only what fails again.
+ * Run the failing commands a second time and keep only what fails again —
+ * failure by failure, not command by command.
  *
  * A check can fail for reasons that have nothing to do with the tree it ran in:
  * another worktree's leftover process writing to the same local database, a port
@@ -91,18 +131,32 @@ export interface InheritedSplit {
  * deterministic checks, and the run's own logs attribute most of them to a
  * DynamoDB table shared across worktrees.
  *
+ * The comparison is per signature because a flake generator keeps its command
+ * red while never failing the same way twice: a property test drawing a fresh
+ * input each run, a timing assertion tripping on whichever case the load
+ * landed on. Run bc691359's `deploy-container-images-pinned` reopened its gate
+ * three times on exactly that shape — `cargo test --workspace` red twice in a
+ * row, each time on a pre-existing test its diff never touched. So of a command
+ * that fails twice, only the signatures present in *both* runs are charged; a
+ * command with none in common is flaky, and the disagreements are recorded as
+ * signature-level flakes for the next task that meets them (`knownFlaky` is
+ * that memory, read back in). Unmarked output — a compiler error, a crashed
+ * runner — has no per-failure structure to compare, so failing twice still
+ * charges it whole: the cost of a false charge is the status quo, and the cost
+ * of a false excusal is a real defect waved through.
+ *
  * Only the introduced failures are re-run — inherited ones were already settled
  * against the base and cost nothing to keep — so this spends a second check pass
  * exactly when the alternative is a wasted worker iteration.
  */
-export async function confirmFailures(cwd: string, split: InheritedSplit, base: CheckResult): Promise<InheritedSplit & { flaky: string[] }> {
-  if (!split.failures.length) return { ...split, flaky: [] };
+export async function confirmFailures(cwd: string, split: InheritedSplit, base: CheckResult, knownFlaky: ReadonlySet<string> = new Set()): Promise<ConfirmedFailures> {
+  if (!split.failures.length) return { ...split, flaky: [], excused: [], flakySignatures: [] };
   const rerun = await runDeterministicChecks(
     cwd,
     split.failures.map((f) => f.command)
   );
   const again = splitInheritedFailures(rerun, base);
-  const still = new Set(again.failures.map((f) => f.command));
+  const secondRun = new Map(again.failures.map((f) => [f.command, f]));
   // Re-splitting can move a command from introduced to inherited — a second run
   // that produced only the base's own failures. Fold those in without listing a
   // command twice: `inherited` is printed to the worker as "not yours".
@@ -110,11 +164,34 @@ export async function confirmFailures(cwd: string, split: InheritedSplit, base: 
   for (const i of again.inherited) {
     if (!inherited.some((h) => h.command === i.command)) inherited.push(i);
   }
-  return {
-    failures: again.failures,
-    inherited,
-    flaky: split.failures.filter((f) => !still.has(f.command) && !again.inherited.some((i) => i.command === f.command)).map((f) => f.command),
-  };
+
+  const confirmed: ConfirmedFailures = { failures: [], inherited, flaky: [], excused: [], flakySignatures: [] };
+  for (const first of split.failures) {
+    if (again.inherited.some((i) => i.command === first.command)) continue; // settled above: the base's, not this task's
+    const second = secondRun.get(first.command);
+    if (!second) {
+      confirmed.flaky.push(first.command);
+      if (hasFailureMarkers(first.output)) confirmed.flakySignatures.push(...first.introduced);
+      continue;
+    }
+    if (!hasFailureMarkers(first.output) || !hasFailureMarkers(second.output)) {
+      confirmed.failures.push(second);
+      continue;
+    }
+    const firstSigs = new Set(first.introduced);
+    const secondSigs = new Set(second.introduced);
+    confirmed.flakySignatures.push(...first.introduced.filter((s) => !secondSigs.has(s)));
+    const repeated = second.introduced.filter((s) => firstSigs.has(s));
+    if (!repeated.length) {
+      confirmed.flaky.push(first.command);
+      continue;
+    }
+    const charged = repeated.filter((s) => !knownFlaky.has(s));
+    if (charged.length) confirmed.failures.push({ ...second, introduced: charged });
+    else confirmed.excused.push({ command: second.command, signatures: repeated });
+  }
+  confirmed.flakySignatures = [...new Set(confirmed.flakySignatures)];
+  return confirmed;
 }
 
 /**

@@ -1,6 +1,6 @@
 import type { HookInput } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it } from "vitest";
-import { infraGuardHook, infraMutation } from "./infraGuard.js";
+import { infraGuardHook, infraMutation, unsatisfiableCriteria } from "./infraGuard.js";
 
 const blocked = (cmd: string) => infraMutation(cmd) !== null;
 
@@ -163,5 +163,66 @@ describe("the guard as a PreToolUse hook", () => {
 
   it("opens the gate when an operator genuinely wants provisioning", async () => {
     expect(await infraGuardHook(true)(bash("terraform apply"))).toEqual({});
+  });
+});
+
+/**
+ * The check that ran too late in run bc691359: tier1-three-arm-capture's
+ * criteria required a committed teardown.log showing `terraform destroy`
+ * completing, three workers each rediscovered that no session may run it, and
+ * the escalation reached the operator only after all three had spent their
+ * attempts. The criterion named the command on day one.
+ */
+describe("finding the criteria no worker will be allowed to satisfy", () => {
+  it("catches a denied command quoted in backticks", () => {
+    const found = unsatisfiableCriteria([
+      {
+        id: "tier1-three-arm-capture",
+        acceptanceCriteria: ["teardown.log is committed and shows `terraform destroy` completing with the instances destroyed."],
+      },
+    ]);
+    expect(found).toHaveLength(1);
+    expect(found[0]!.taskId).toBe("tier1-three-arm-capture");
+    expect(found[0]!.what).toBe("`terraform destroy`");
+  });
+
+  it("catches the same command written as prose, up to the end of its sentence", () => {
+    const found = unsatisfiableCriteria([{ id: "t", acceptanceCriteria: ["The pipeline runs terraform apply against staging. A separate doc exists."] }]);
+    expect(found.map((f) => f.what)).toEqual(["`terraform apply`"]);
+  });
+
+  it("does not read a backticked command's words as prose", () => {
+    // The span is removed before the prose scan, so `terraform plan` in
+    // backticks cannot be re-read as "terraform plan output is committed"
+    // and accidentally matched against something later in the sentence.
+    expect(unsatisfiableCriteria([{ id: "t", acceptanceCriteria: ["`terraform plan` output is committed for review, then apply is left to the operator."] }])).toEqual([]);
+  });
+
+  it("lets the verifying verbs through", () => {
+    expect(
+      unsatisfiableCriteria([
+        { id: "a", acceptanceCriteria: ["`terraform validate` and `terraform plan` both exit 0."] },
+        { id: "b", acceptanceCriteria: ["`kubectl apply --dry-run=server` succeeds against the rendered manifests."] },
+        { id: "c", acceptanceCriteria: ["`cargo test --workspace` passes.", "The docker image builds."] },
+      ])
+    ).toEqual([]);
+  });
+
+  it("names every offending criterion, not just the first", () => {
+    const found = unsatisfiableCriteria([
+      { id: "a", acceptanceCriteria: ["`terraform apply` completes.", "`helm install api ./chart` succeeds."] },
+      { id: "b", acceptanceCriteria: ["Nothing suspicious here."] },
+    ]);
+    expect(found.map((f) => [f.taskId, f.what])).toEqual([
+      ["a", "`terraform apply`"],
+      ["a", "`helm install`"],
+    ]);
+  });
+
+  it("scans past an innocent mention of a tool to the guilty one", () => {
+    // "docker" appears first and is harmless; the kubectl later in the same
+    // criterion is not. One tool word must not shadow the next.
+    const found = unsatisfiableCriteria([{ id: "t", acceptanceCriteria: ["The docker image is built, and kubectl delete removes the old deployment"] }]);
+    expect(found.map((f) => f.what)).toEqual(["`kubectl delete`"]);
   });
 });

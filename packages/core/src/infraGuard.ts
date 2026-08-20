@@ -224,3 +224,56 @@ export function infraGuardHook(allow = false) {
     };
   };
 }
+
+/** The tools CHECKS knows, as they appear mid-sentence in a criterion's prose. */
+const TOOL_WORD = /\b(terraform|tofu|pulumi|cdk|helm|kubectl|aws|gcloud|az|docker|podman)\b/g;
+
+/**
+ * The infrastructure mutation a single acceptance criterion names, or null.
+ *
+ * Backticked spans are tried first and whole — that is how a plan quotes a
+ * command, and `terraform destroy` inside one parses exactly as the guard
+ * above would see it at run time. The prose around them is then scanned from
+ * each tool word to the end of its sentence, so "shows terraform destroy
+ * completing" is caught without its surrounding words confusing the parser.
+ */
+export function criterionMutation(criterion: string): { what: string; instead: string } | null {
+  for (const [, span] of criterion.matchAll(/`([^`]+)`/g)) {
+    const m = infraMutation(span!);
+    if (m) return m;
+  }
+  const prose = criterion.replace(/`[^`]*`/g, " ");
+  for (const hit of prose.matchAll(TOOL_WORD)) {
+    const m = infraMutation(prose.slice(hit.index).split(/[.;:!?\n]/, 1)[0]!);
+    if (m) return m;
+  }
+  return null;
+}
+
+/**
+ * The acceptance criteria in this plan that name a command `infraGuardHook`
+ * will deny, found before anything is built.
+ *
+ * This is the check that ran too late in run bc691359: `tier1-three-arm-capture`
+ * required a committed teardown.log "showing `terraform destroy` completing",
+ * three workers each rediscovered that no agent session is permitted to run it,
+ * and the escalation reached the operator only after all three had spent their
+ * attempts. Every fact in that discovery was in the plan on day one — the
+ * criterion named the command, and the guard's deny list is right here.
+ *
+ * Advisory, like everything at the plan gate: a criterion can name a denied
+ * command and still be satisfiable — a runbook that documents the teardown
+ * step is written, not run. The gap text says both readings so the adjudicator
+ * and the operator can tell which one they are looking at, and a re-planned
+ * criterion comes back as a hand-off instead of a dead end.
+ */
+export function unsatisfiableCriteria(tasks: { id: string; acceptanceCriteria: string[] }[]): { taskId: string; criterion: string; what: string }[] {
+  const found: { taskId: string; criterion: string; what: string }[] = [];
+  for (const task of tasks) {
+    for (const criterion of task.acceptanceCriteria) {
+      const m = criterionMutation(criterion);
+      if (m) found.push({ taskId: task.id, criterion, what: m.what });
+    }
+  }
+  return found;
+}
