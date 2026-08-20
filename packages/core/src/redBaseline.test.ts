@@ -86,7 +86,7 @@ function pool(work: (cwd: string) => void) {
   return { pool: agents as unknown as AgentPool, qaPrompts };
 }
 
-async function run(work: (cwd: string) => void, checks: string[] = [CHECK], seed?: (store: Store) => void) {
+async function run(work: (cwd: string) => void, checks: string[] = [CHECK], seed?: (store: Store) => void, deterministicCheckTimeoutMinutes?: number) {
   const { pool: agents, qaPrompts } = pool(work);
   const store = new Store(":memory:");
   seed?.(store);
@@ -94,7 +94,10 @@ async function run(work: (cwd: string) => void, checks: string[] = [CHECK], seed
   const bus = new Bus(store);
   bus.subscribe(({ event }) => void (event.type === "agent.log" && events.push(event.text)));
   const controller = new RunController(store, bus, agents, noGithub, approveAll, repo());
-  const runId = await controller.startRun("build it", RunConfig.parse({ deterministicChecks: checks, qaIterationCap: 1 }));
+  const runId = await controller.startRun(
+    "build it",
+    RunConfig.parse({ deterministicChecks: checks, qaIterationCap: 1, ...(deterministicCheckTimeoutMinutes === undefined ? {} : { deterministicCheckTimeoutMinutes }) })
+  );
   return { task: store.getTask(runId, "task-a")!, qaPrompts, events, store };
 }
 
@@ -220,6 +223,43 @@ describe("a failure the repository already knows is weather", () => {
       [PERSISTENT],
       (store) => observeFlakySignatures(store, "earlier-run-1", ["✖ timing test"])
     );
+
+    expect(task.state).toBe("NEEDS_HUMAN");
+  }, 30_000);
+});
+
+/**
+ * Run bc691359, `deploy-container-images-pinned`: `cargo test --workspace`
+ * finishes in 21 minutes with 196 suites green, and the harness killed it at a
+ * hardcoded 10 — then reported the kill as a failing test, truncated to a tail
+ * of cargo's "Running tests/..." banner. Seven gates and six hours went into
+ * looking for a failing test that never existed, and three separate workers
+ * correctly reported the tree clean and were sent back anyway.
+ */
+describe("a check the harness never let finish", () => {
+  // Slow only where the worker has been: the base comparison stays green, so
+  // nothing else in the pipeline could excuse this.
+  const SLOW = "test -f slow.txt || exit 0; echo 'Running tests/big.rs (target/debug/deps/big-9d1)'; sleep 30";
+
+  it("does not charge the task for a kill, and names the setting that fixes it", async () => {
+    const { task, qaPrompts, events } = await run((cwd) => writeFileSync(path.join(cwd, "slow.txt"), "x\n"), [SLOW], undefined, 0.01);
+
+    // A kill decided nothing, so it cannot be the thing that fails the task.
+    expect(task.state).toBe("MERGED");
+    expect(task.qaIterations).toBe(1); // the QA pass itself, not a check failure
+    expect(qaPrompts).toHaveLength(1);
+    const said = events.find((t) => t.includes("did not finish inside"));
+    expect(said).toContain(SLOW);
+    expect(said).toContain("not a test failure and not charged to this task");
+    // Said to the operator, because the configuration is the only place it is
+    // fixable — a worker reading this can do nothing with it.
+    expect(said).toContain("deterministicCheckTimeoutMinutes");
+  }, 30_000);
+
+  it("still charges a check that finished and was red", async () => {
+    const { task } = await run((cwd) => writeFileSync(path.join(cwd, "feature.ts"), "export const x = 1;\n"), [
+      "test -f feature.ts || exit 0; echo '✖ this one is real' >&2; exit 1",
+    ], undefined, 0.01);
 
     expect(task.state).toBe("NEEDS_HUMAN");
   }, 30_000);

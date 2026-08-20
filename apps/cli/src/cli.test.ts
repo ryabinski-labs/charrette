@@ -1548,6 +1548,19 @@ describe("harness resume — settings the operator changed since the run started
     expect(printed()).toContain("Parallel workers updated from harness.config.json: 1 → 4");
   });
 
+  it("raises the deterministic check timeout on a run whose suite is honestly slower", async () => {
+    // Run bc691359: `cargo test --workspace` finishes green in 21 minutes and
+    // was killed at 10 on every QA iteration. Raising the ceiling is the fix,
+    // and a run already in progress is exactly where it has to land.
+    existing({ deterministicCheckTimeoutMinutes: 10 });
+    h.loadFileConfigMock.mockReturnValue({ config: { deterministicCheckTimeoutMinutes: 45 }, path: "/repo/harness.config.json" });
+
+    await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
+
+    expect(h.storeMethods.patchRunConfig).toHaveBeenCalledWith("run-1", { deterministicCheckTimeoutMinutes: 45 });
+    expect(printed()).toContain("Check timeout updated from harness.config.json: 10 → 45 minute(s)");
+  });
+
   it("updates whether the run waits for CI", async () => {
     existing({ waitForChecks: true });
     h.loadFileConfigMock.mockReturnValue({ config: { waitForChecks: false }, path: "/repo/harness.config.json" });

@@ -1,11 +1,24 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { DEFAULT_CHECK_TIMEOUT_MINUTES } from "@harness/shared";
 
 const execFileP = promisify(execFile);
 
+export interface CheckFailure {
+  command: string;
+  output: string;
+  /**
+   * The harness killed this command at the timeout rather than the command
+   * deciding anything. Nothing it printed is a verdict on the tree — a kill
+   * lands mid-suite, so the tail is whatever the runner happened to be saying
+   * — and it is never charged to a task.
+   */
+  timedOut?: boolean;
+}
+
 export interface CheckResult {
   ok: boolean;
-  failures: { command: string; output: string }[];
+  failures: CheckFailure[];
 }
 
 /**
@@ -18,24 +31,37 @@ export interface CheckResult {
  * and this re-runs on every QA iteration, so the sum was paid repeatedly.
  * Failures keep the configured order regardless of finish order.
  */
-export async function runDeterministicChecks(cwd: string, commands: string[]): Promise<CheckResult> {
+export async function runDeterministicChecks(cwd: string, commands: string[], timeoutMinutes: number = DEFAULT_CHECK_TIMEOUT_MINUTES): Promise<CheckResult> {
+  // Minutes because that is the unit an operator thinks in for a test suite;
+  // milliseconds here so a fractional value stays honest rather than rounding
+  // up to a minute nobody asked for.
+  const timeout = Math.max(1, Math.round(timeoutMinutes * 60 * 1000));
   const results = await Promise.all(
     commands.map(async (command) => {
       try {
-        await execFileP("sh", ["-c", command], { cwd, maxBuffer: 16 * 1024 * 1024, timeout: 10 * 60 * 1000 });
+        await execFileP("sh", ["-c", command], { cwd, maxBuffer: 16 * 1024 * 1024, timeout });
         return null;
       } catch (e) {
         // `??` was wrong here: execFileP attaches `stderr` as an empty string
         // rather than leaving it undefined, so a check that failed without
         // writing anything — `exit 1` in a script, a missing binary — never
         // reached `message` and handed QA a failure with no explanation at all.
-        const err = e as { stdout?: string; stderr?: string; message?: string };
+        const err = e as { stdout?: string; stderr?: string; message?: string; killed?: boolean; signal?: string };
         const output = [err.stdout, err.stderr || err.message].filter(Boolean).join("\n").trim();
+        // Node sets both of these only when it is the one that ended the
+        // process at `timeout`; a command that kills itself exits with a code.
+        if (err.killed && err.signal === "SIGTERM") {
+          return {
+            command,
+            timedOut: true,
+            output: `the harness killed this command after ${timeoutMinutes} minute(s) — it never finished, so nothing below is a verdict on this tree:\n${output.slice(-2000)}`,
+          };
+        }
         return { command, output: output.slice(-4000) };
       }
     })
   );
-  const failures = results.filter((r): r is { command: string; output: string } => r !== null);
+  const failures = results.filter((r): r is CheckFailure => r !== null);
   return { ok: failures.length === 0, failures };
 }
 
@@ -94,6 +120,13 @@ export interface InheritedSplit {
   failures: { command: string; output: string; introduced: string[] }[];
   /** Failures that fail on the base too, named so that nobody is sent to chase them. */
   inherited: { command: string; signatures: string[] }[];
+  /**
+   * Commands the harness killed at the timeout. Not a verdict on anything, so
+   * not charged and not re-run — but not silently dropped either: a check that
+   * never finishes is the operator's problem to fix, in the configuration, and
+   * it has to be visible to be fixed.
+   */
+  timedOut: { command: string; output: string }[];
 }
 
 export interface ConfirmedFailures extends InheritedSplit {
@@ -149,11 +182,14 @@ export interface ConfirmedFailures extends InheritedSplit {
  * against the base and cost nothing to keep — so this spends a second check pass
  * exactly when the alternative is a wasted worker iteration.
  */
-export async function confirmFailures(cwd: string, split: InheritedSplit, base: CheckResult, knownFlaky: ReadonlySet<string> = new Set()): Promise<ConfirmedFailures> {
+export async function confirmFailures(cwd: string, split: InheritedSplit, base: CheckResult, knownFlaky: ReadonlySet<string> = new Set(), timeoutMinutes: number = DEFAULT_CHECK_TIMEOUT_MINUTES): Promise<ConfirmedFailures> {
   if (!split.failures.length) return { ...split, flaky: [], excused: [], flakySignatures: [] };
+  // The same ceiling as the first pass: a re-run allowed to outlive it would
+  // call a check green that the first pass was never given time to finish.
   const rerun = await runDeterministicChecks(
     cwd,
-    split.failures.map((f) => f.command)
+    split.failures.map((f) => f.command),
+    timeoutMinutes
   );
   const again = splitInheritedFailures(rerun, base);
   const secondRun = new Map(again.failures.map((f) => [f.command, f]));
@@ -165,9 +201,18 @@ export async function confirmFailures(cwd: string, split: InheritedSplit, base: 
     if (!inherited.some((h) => h.command === i.command)) inherited.push(i);
   }
 
-  const confirmed: ConfirmedFailures = { failures: [], inherited, flaky: [], excused: [], flakySignatures: [] };
+  // A command that ran to a verdict once and was killed on the re-run says
+  // nothing the second time; carry the kill up rather than charging the first
+  // run for it.
+  const timedOut = [...split.timedOut];
+  for (const t of again.timedOut) {
+    if (!timedOut.some((h) => h.command === t.command)) timedOut.push(t);
+  }
+
+  const confirmed: ConfirmedFailures = { failures: [], inherited, timedOut, flaky: [], excused: [], flakySignatures: [] };
   for (const first of split.failures) {
     if (again.inherited.some((i) => i.command === first.command)) continue; // settled above: the base's, not this task's
+    if (again.timedOut.some((t) => t.command === first.command)) continue; // killed on the re-run: no second opinion to compare
     const second = secondRun.get(first.command);
     if (!second) {
       confirmed.flaky.push(first.command);
@@ -205,9 +250,15 @@ export async function confirmFailures(cwd: string, split: InheritedSplit, base: 
  * fails. A failure that also fails on the base is not evidence about this task.
  */
 export function splitInheritedFailures(current: CheckResult, base: CheckResult): InheritedSplit {
-  const onBase = new Map(base.failures.map((f) => [f.command, new Set(failureSignatures(f.output))]));
-  const split: InheritedSplit = { failures: [], inherited: [] };
+  const onBase = new Map(base.failures.filter((f) => !f.timedOut).map((f) => [f.command, new Set(failureSignatures(f.output))]));
+  const split: InheritedSplit = { failures: [], inherited: [], timedOut: [] };
   for (const failure of current.failures) {
+    // A kill is not evidence. Comparing its tail against the base's asks
+    // whether two interruptions interrupted the same sentence.
+    if (failure.timedOut) {
+      split.timedOut.push({ command: failure.command, output: failure.output });
+      continue;
+    }
     const known = onBase.get(failure.command);
     const signatures = failureSignatures(failure.output);
     const introduced = known ? signatures.filter((s) => !known.has(s)) : signatures;

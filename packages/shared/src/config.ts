@@ -2,6 +2,17 @@ import { z } from "zod";
 import { routingViolations } from "./providers.js";
 
 /**
+ * How long a single deterministic check may run before the harness kills it.
+ *
+ * Ten minutes was hardcoded in the runner, and a repository whose suite honestly
+ * takes longer than that could never be green: run bc691359's `cargo test
+ * --workspace` finishes in 21 minutes with zero failures, so every QA iteration
+ * killed it at ten and reported the kill as a test failure. Six hours and seven
+ * gates went into looking for a failing test that did not exist.
+ */
+export const DEFAULT_CHECK_TIMEOUT_MINUTES = 10;
+
+/**
  * The cheap tier. Named once because four roles reference it and a version
  * string copied five times is four chances to price one of them wrong: the
  * budget table in budget.ts keys on this exact id, and a model absent from that
@@ -931,6 +942,16 @@ export const RunConfig = z.object({
    */
   prMode: z.enum(["single", "per-task"]).default("single"),
   deterministicChecks: z.array(z.string()).default([]),
+  /**
+   * How long any one deterministic check may run before the harness kills it.
+   *
+   * This was hardcoded at ten minutes, which is a ceiling on the repository
+   * rather than on the check: a suite that honestly takes longer can never be
+   * green, and the kill arrives dressed as a test failure, so the worker is
+   * sent to find a failing test that does not exist. Set it above the honest
+   * wall clock of the slowest check in `deterministicChecks`.
+   */
+  deterministicCheckTimeoutMinutes: z.number().positive().default(DEFAULT_CHECK_TIMEOUT_MINUTES),
   /**
    * Wait for the pull request's own checks before calling the run finished.
    *
