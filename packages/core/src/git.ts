@@ -297,13 +297,63 @@ export class WorktreeManager {
    * deliver nothing of the task's own. A three-dot diff is measured from the
    * merge base, so it answers the question that matters — what would landing
    * this branch change? — whatever the topology above it looks like.
+   *
+   * `landed` is the other way that question comes back empty, and until it
+   * existed the two were indistinguishable. A branch whose work is *already on*
+   * the integration branch also changes no file against it — for the best
+   * possible reason — and calling that "nothing has been committed" sends a
+   * worker to find work that is not lost and cannot be re-delivered, because a
+   * branch cannot be un-merged. Run bc691359 lost six days to exactly that: QA
+   * accepted `m1-exit-evidence` eight times, the merges failed on a dirty
+   * integration worktree, the work reached the integration branch anyway, and
+   * every dispatch after that parked it as an empty branch that no answer from
+   * the operator could ever have fixed.
+   *
+   * Ancestry alone does not separate them: a branch that has just been created
+   * is an ancestor of the integration branch too. What separates them is *how*
+   * the tip got there. This harness only ever moves the integration branch by
+   * `merge --no-ff` of a task branch, so its first-parent chain is exactly the
+   * list of commits it has ever pointed at — a branch that delivered nothing
+   * still sits on one of them, and a branch that was merged in hangs off a
+   * second parent and is not on the chain. The sha reported is the integration
+   * commit that carries it: the oldest one that has the tip as an ancestor,
+   * which is the merge that brought it in.
    */
-  async taskBranchDelta(runId: string, taskId: string): Promise<{ commits: number; files: string[] }> {
+  async taskBranchDelta(runId: string, taskId: string): Promise<{ commits: number; files: string[]; landed: string }> {
     const branch = this.branchName(runId, taskId);
     const base = this.integrationBranch(runId);
     const count = await git(this.repoPath, ["rev-list", "--count", `${base}..${branch}`], { serialize: true }).catch(() => "0");
     const files = await git(this.repoPath, ["diff", "--name-only", `${base}...${branch}`], { serialize: true }).catch(() => "");
-    return { commits: Number(count) || 0, files: files.split("\n").filter(Boolean) };
+    return { commits: Number(count) || 0, files: files.split("\n").filter(Boolean), landed: await this.landedSha(branch, base) };
+  }
+
+  /**
+   * The integration-branch commit that already carries this branch, or "".
+   *
+   * Only asked when the branch changes no file against the integration branch,
+   * which is the one case where "it is already in there" and "there was never
+   * anything in it" look the same from the outside.
+   */
+  private async landedSha(branch: string, base: string): Promise<string> {
+    // Asked first because it also answers "does this branch exist?" — an
+    // unresolvable ref fails here, and "not contained" is the right answer for
+    // it. Everything below can then take the branch for granted.
+    const contained = await git(this.repoPath, ["merge-base", "--is-ancestor", branch, base], { serialize: true }).then(
+      () => true,
+      () => false
+    );
+    if (!contained) return "";
+    const tip = await git(this.repoPath, ["rev-parse", branch], { serialize: true });
+    const chain = await git(this.repoPath, ["rev-list", "--first-parent", base], { serialize: true });
+    // On the chain: the tip is a commit the integration branch itself once
+    // pointed at, so this branch is sitting where it was created and has
+    // delivered nothing.
+    if (chain.split("\n").includes(tip)) return "";
+    const carried = await git(this.repoPath, ["rev-list", "--ancestry-path", `${tip}..${base}`], { serialize: true });
+    // Contained, but not a commit the integration branch ever pointed at: it
+    // descends past the tip through something that merged the branch in, so
+    // the path always holds at least that merge. Its oldest commit is it.
+    return carried.split("\n").filter(Boolean).at(-1)!;
   }
 
   /**

@@ -160,7 +160,7 @@ describe("what a task branch actually carries", () => {
     await wt.ensureIntegrationBranch("run1");
     await wt.ensureWorktree("run1", "task1");
 
-    expect(await wt.taskBranchDelta("run1", "task1")).toEqual({ commits: 0, files: [] });
+    expect(await wt.taskBranchDelta("run1", "task1")).toEqual({ commits: 0, files: [], landed: "" });
   });
 
   it("reports the files a real branch would land", async () => {
@@ -170,7 +170,7 @@ describe("what a task branch actually carries", () => {
     const info = await wt.ensureWorktree("run1", "task1");
     commit(info.path, "work.txt", "done\n", "task work");
 
-    expect(await wt.taskBranchDelta("run1", "task1")).toEqual({ commits: 1, files: ["work.txt"] });
+    expect(await wt.taskBranchDelta("run1", "task1")).toEqual({ commits: 1, files: ["work.txt"], landed: "" });
   });
 
   /**
@@ -189,6 +189,71 @@ describe("what a task branch actually carries", () => {
     const delta = await wt.taskBranchDelta("run1", "task1");
     expect(delta.commits).toBe(2);
     expect(delta.files).toEqual([]);
+    // Nothing landed it — it is genuinely empty, not already delivered.
+    expect(delta.landed).toBe("");
+  });
+
+  /**
+   * The other way the diff comes back empty, and the expensive one to confuse.
+   *
+   * Once a branch has been merged into the integration branch it changes no
+   * file against it — for the best possible reason. Run bc691359 read that as
+   * "nothing has been committed" and re-dispatched `m1-exit-evidence` for six
+   * days against a branch that could not be un-merged, through eight QA passes.
+   */
+  it("names the integration commit that already carries a merged branch", async () => {
+    const dir = repo();
+    const wt = new WorktreeManager(dir);
+    await wt.ensureIntegrationBranch("run1");
+    const info = await wt.ensureWorktree("run1", "task1");
+    commit(info.path, "work.txt", "done\n", "task work");
+    const merge = await wt.mergeTaskBranch("run1", "task1");
+    expect(merge.ok).toBe(true);
+
+    const delta = await wt.taskBranchDelta("run1", "task1");
+    expect(delta.files).toEqual([]);
+    expect(delta.landed).toBe(sha(dir, "harness/run1/main"));
+  });
+
+  /**
+   * Ancestry on its own would answer "yes, already merged" for every branch
+   * that has just been created, because it is an ancestor of the integration
+   * branch too. What separates them is that a branch that delivered nothing
+   * sits on a commit the integration branch itself once pointed at.
+   */
+  it("does not mistake a fresh branch for one that already landed", async () => {
+    const dir = repo();
+    const wt = new WorktreeManager(dir);
+    await wt.ensureIntegrationBranch("run1");
+    const first = await wt.ensureWorktree("run1", "task1");
+    commit(first.path, "work.txt", "done\n", "task work");
+    await wt.mergeTaskBranch("run1", "task1");
+
+    // Branched from an integration branch that has moved since the run began.
+    await wt.ensureWorktree("run1", "task2");
+    expect(await wt.taskBranchDelta("run1", "task2")).toEqual({ commits: 0, files: [], landed: "" });
+  });
+
+  /**
+   * A branch that only ever caught up with the integration branch has a merge
+   * commit for a tip, which is not on the integration branch's first-parent
+   * chain — but it is not contained in it either, so ancestry rules it out
+   * before the chain is ever consulted.
+   */
+  it("does not call a catch-up merge a delivery", async () => {
+    const dir = repo();
+    const wt = new WorktreeManager(dir);
+    await wt.ensureIntegrationBranch("run1");
+    const first = await wt.ensureWorktree("run1", "task1");
+    commit(first.path, "work.txt", "done\n", "task work");
+    await wt.mergeTaskBranch("run1", "task1");
+
+    const second = await wt.ensureWorktree("run1", "task2");
+    expect(await wt.catchUpTaskBranch("run1", "task2")).toEqual({ ok: true });
+    const delta = await wt.taskBranchDelta("run1", "task2");
+    expect(delta.files).toEqual([]);
+    expect(delta.landed).toBe("");
+    void second;
   });
 
   /**

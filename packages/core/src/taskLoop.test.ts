@@ -51,6 +51,18 @@ function commitInWorktree(cwd: string, file: string, body: string): void {
   });
 }
 
+/** Lands a task branch on the integration branch without the store hearing about it. */
+function mergeIntoIntegration(dir: string, runId: string, taskId: string): void {
+  const scratch = path.join(`${dir}-wt`, runId, "__landed__");
+  execFileSync("git", ["worktree", "add", scratch, `harness/${runId}/main`], { cwd: dir, stdio: "ignore" });
+  execFileSync(
+    "git",
+    ["-c", "user.email=i@example.invalid", "-c", "user.name=I", "merge", "--no-ff", "--no-edit", `harness/${runId}/${taskId}`],
+    { cwd: scratch, stdio: "ignore" }
+  );
+  execFileSync("git", ["worktree", "remove", "--force", scratch], { cwd: dir, stdio: "ignore" });
+}
+
 const QA_PASS = '```json\n{"verdict":"PASS","summary":"looks right","issues":[]}\n```';
 const QA_FAIL = '```json\n{"verdict":"FAIL","reasons":["the toggle is not wired"],"mustFix":["wire it to the store"]}\n```';
 
@@ -449,6 +461,79 @@ describe("infrastructure the repo's own pipeline cannot deploy", () => {
 });
 
 /**
+ * The same empty diff, for the one reason no worker can do anything about.
+ *
+ * Run bc691359's `m1-exit-evidence` was accepted by QA eight times over six
+ * days. Each accept tried to merge, each merge failed on an integration
+ * worktree a test suite had left dirty, and the work reached the integration
+ * branch anyway — after which the branch changed no file against it, and the
+ * pre-QA gate below read that as "nothing has been committed to this branch".
+ * It parked, the operator reopened it, and it parked again with the identical
+ * message, three times in one morning. Nothing else could happen: a branch
+ * cannot be un-merged, so no worker could produce the commit being asked for
+ * and no answer to the escalation could have changed that.
+ */
+describe("a branch that is empty because its work already landed", () => {
+  it("books it as merged instead of sending the worker back for it", async () => {
+    const dir = repo();
+    const { pool, counts, specs } = rolePool({
+      worker: (spec) => {
+        commitInWorktree(spec.cwd, "work.txt", "done\n");
+        // Whatever landed it — a merge the store never recorded, an operator
+        // resolving the conflict by hand — the branch is on the integration
+        // branch before the gate reads it.
+        mergeIntoIntegration(dir, "run1", "task-a");
+        return "did the work";
+      },
+      qa: () => QA_PASS,
+    });
+    const { controller, store, events, gates, runId } = executing({ repoPath: dir, pool, guidance: "look again" });
+
+    await controller.resume(runId);
+
+    const task = store.getTask(runId, "task-a")!;
+    expect(task.state).toBe("MERGED");
+    // Dispatched once. The loop this fixes dispatched forever.
+    expect(counts.worker).toBe(1);
+    expect(gates).toEqual([]);
+    expect(workerPrompts(specs).join("\n")).not.toContain("nothing has been committed");
+    // Booked against the integration commit that carries it, not the branch tip
+    // and not the integration branch's own pre-existing head.
+    const merged = events.find((e) => e.type === "git.merged");
+    expect(merged).toBeDefined();
+    expect((merged as HarnessEvent & { sha: string }).sha).toBe(
+      execFileSync("git", ["rev-parse", "harness/run1/main"], { cwd: dir, encoding: "utf8" }).trim()
+    );
+    expect(logs(events).some((t) => t.includes("its work has landed, not because it has none"))).toBe(true);
+  });
+
+  /**
+   * And when it landed before the task was ever dispatched — the shape every
+   * reopen of `m1-exit-evidence` had — no worker is paid to find that out.
+   */
+  it("costs nothing when the work landed before the task was dispatched", async () => {
+    const dir = repo();
+    const { pool, counts } = rolePool({ worker: () => "did the work", qa: () => QA_PASS });
+    const built = executing({ repoPath: dir, pool, guidance: "look again" });
+
+    // The branch exists with real work on it and is already on the integration
+    // branch: a task the harness merged without recording it, then reopened.
+    execFileSync("git", ["branch", "harness/run1/main"], { cwd: dir, stdio: "ignore" });
+    execFileSync("git", ["worktree", "add", path.join(`${dir}-wt`, "pre"), "-b", "harness/run1/task-a", "harness/run1/main"], { cwd: dir, stdio: "ignore" });
+    commitInWorktree(path.join(`${dir}-wt`, "pre"), "work.txt", "done\n");
+    execFileSync("git", ["worktree", "remove", "--force", path.join(`${dir}-wt`, "pre")], { cwd: dir, stdio: "ignore" });
+    mergeIntoIntegration(dir, "run1", "task-a");
+
+    await built.controller.resume(built.runId);
+
+    expect(built.store.getTask(built.runId, "task-a")!.state).toBe("MERGED");
+    expect(counts.worker ?? 0).toBe(0);
+    expect(counts.qa ?? 0).toBe(0);
+    expect(built.gates).toEqual([]);
+  });
+});
+
+/**
  * The pre-QA gate sends an empty branch back to the worker, which is right the
  * first few times — the work is usually written and simply not committed here.
  * What it must not do is send it back forever: run da8325bd's empty branches
@@ -479,6 +564,29 @@ describe("a branch that arrives empty over and over", () => {
     // than logged and dropped.
     expect(gates.some((g) => g.why.includes("still empty"))).toBe(true);
     expect(workerPrompts(specs).at(-1)).toContain("check the primary repository's own branch");
+  });
+
+  /**
+   * The counter that ends the loop used to be a local variable, so every
+   * restart of the harness process handed the task a fresh set of attempts.
+   * Run bc691359 restarted many times a day; `m1-exit-evidence` went round
+   * eight times with its recorded iteration count still reading 1.
+   */
+  it("does not start counting again because the process did", async () => {
+    const dir = repo();
+    const { pool, counts } = rolePool({ worker: () => "did the work", qa: () => QA_PASS });
+    const { controller, store, runId } = executing({ repoPath: dir, pool, guidance: "look again", config: { qaIterationCap: 1 } });
+    // What the previous process had already spent on this task before it died.
+    store.updateTask(runId, "task-a", { emptyDeliveries: 4 });
+
+    await controller.resume(runId);
+
+    const task = store.getTask(runId, "task-a")!;
+    expect(task.state).toBe("NEEDS_HUMAN");
+    // The fifth attempt is the one over the cap, so it parks on this dispatch
+    // rather than buying four more.
+    expect(task.errorSummary).toContain("still empty after 5 attempts");
+    expect(counts.worker).toBe(1);
   });
 
   it("counts one commit that changed nothing as one commit", async () => {

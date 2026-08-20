@@ -341,7 +341,8 @@ describe("what the advisor is told about the repository", () => {
     id: "task-a", runId: "r", epicId: "e", title: "A", spec: "s", acceptanceCriteria: ["x"],
     dependsOn: [], state: "WORKING" as const, branch: null, worktreePath: null,
     githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0,
-    assignedSkills: [], errorSummary: null, touchedPaths: [], completionProbe: "", unverified: [], scenarioIds: [], estimatedSize: "M" as const,
+    assignedSkills: [], errorSummary: null, touchedPaths: [], completionProbe: "", unverified: [], scenarioIds: [],
+    emptyDeliveries: 0, conflictFixes: 0, estimatedSize: "M" as const,
   };
 
   it("names the commands the repository actually checks a task with", () => {

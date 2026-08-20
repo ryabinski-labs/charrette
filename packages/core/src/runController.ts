@@ -162,7 +162,7 @@ const CI_FIX_EPIC = { id: "ci-red", title: "Checks the repo's CI failed" };
 const SPEC_FIX_EPIC = { id: "spec-red", title: "Scenarios the specification says are unmet" };
 
 /** A planner's task as it enters the store: everything it said, nothing started yet. */
-function pendingRow(t: PlannedTask): Omit<TaskRow, "runId" | "unverified" | "scenarioIds"> & { scenarioIds: string[] } {
+function pendingRow(t: PlannedTask): Omit<TaskRow, "runId" | "unverified" | "scenarioIds" | "emptyDeliveries" | "conflictFixes"> & { scenarioIds: string[] } {
   return {
     id: t.id,
     epicId: t.epicId,
@@ -1163,7 +1163,7 @@ export class RunController {
       const why = t.errorSummary || this.store.taskStateReason(runId, t.id) || "parked";
       const guidance = await this.askOperator(runId, t.id, why);
       if (guidance === null) continue; // still parked; no transition needed
-      this.store.updateTask(runId, t.id, { qaIterations: 0, respawns: 0, errorSummary: null });
+      this.store.updateTask(runId, t.id, { qaIterations: 0, respawns: 0, emptyDeliveries: 0, conflictFixes: 0, errorSummary: null });
       this.revivalGuidance.set(`${runId}/${t.id}`, `This task was parked (${why.slice(0, 300)}) and the operator reopened it with this guidance — follow it over anything that contradicts it:\n${guidance}\n\nInspect git log in this worktree first: earlier iterations may already contain most of the work.`);
       this.store.transitionTask(runId, t.id, "READY", "the operator answered the escalation; fresh iterations");
       revived++;
@@ -2975,7 +2975,7 @@ export class RunController {
     }
     // The answer buys a whole new set of iterations, not one more attempt: the
     // operator just changed the conditions the old failures happened under.
-    this.store.updateTask(runId, taskId, { qaIterations: 0, respawns: 0, errorSummary: null });
+    this.store.updateTask(runId, taskId, { qaIterations: 0, respawns: 0, emptyDeliveries: 0, conflictFixes: 0, errorSummary: null });
     return guidance;
   }
 
@@ -3339,7 +3339,7 @@ export class RunController {
     // now survives to be read, which is the whole point of persisting it.
     const revived = !hit && task.state === "NEEDS_HUMAN" && this.store.getRun(runId)?.state === "EXECUTING";
     if (revived) {
-      this.store.updateTask(runId, target, { qaIterations: 0, respawns: 0, errorSummary: null });
+      this.store.updateTask(runId, target, { qaIterations: 0, respawns: 0, emptyDeliveries: 0, conflictFixes: 0, errorSummary: null });
       this.store.transitionTask(runId, target, "READY", "reopened by the operator's feedback");
       // …and tell the loop now, rather than leaving the revived task to wait out
       // whatever unrelated task happens to be mid-iteration.
@@ -5261,10 +5261,16 @@ export class RunController {
       });
       return true;
     };
-    /** Merges handed back to the worker so far; past the cap it is the operator's. */
-    let conflictFixes = 0;
-    /** Branches that arrived carrying nothing. Never reset — see EMPTY_DELIVERY_ATTEMPTS. */
-    let emptyDeliveries = 0;
+    /**
+     * Merges handed back to the worker so far, and branches that arrived
+     * carrying nothing. Read from the task rather than started at zero: these
+     * are the two counters that end a loop, and as locals they were reset by
+     * every restart of the harness process — so a task repeating the identical
+     * failure believed each attempt was its first, forever. Written back on
+     * every increment, and reset only where `qaIterations` is.
+     */
+    let conflictFixes = task.conflictFixes;
+    let emptyDeliveries = task.emptyDeliveries;
     /**
      * Why the last iteration was sent back, verbatim — QA's reasons, or the
      * failing check's output.
@@ -5317,6 +5323,23 @@ export class RunController {
     };
     for (;;) {
       task = this.store.getTask(runId, taskId)!;
+      // Before a worker is dispatched at all: is this task's work already on
+      // the integration branch?
+      //
+      // Asked here because the answer makes the whole iteration unnecessary,
+      // and because the state it detects is one no worker can act on. A branch
+      // that has been merged changes no file against the integration branch,
+      // which every gate below reads as "nothing has been committed" — so the
+      // task is sent back to commit a change that is already committed, parks
+      // when it cannot, and parks again identically each time the operator
+      // reopens it. Run bc691359 held `m1-exit-evidence` in that loop for six
+      // days across eight QA passes, and the last three days of it were three
+      // reopens that could only ever have ended the same way.
+      const landed = (await this.wt.taskBranchDelta(runId, taskId)).landed;
+      if (landed) {
+        this.bookAlreadyLanded(runId, taskId, landed, taskId);
+        return;
+      }
       // Wall clock (taskWallClockMinutes): a task looping past its bound is a
       // task going nowhere — ask the operator rather than iterating forever.
       // Their answer resets the clock along with the iteration caps.
@@ -5444,8 +5467,17 @@ export class RunController {
       // far end labelled MERGED — three times in run da8325bd, once for work
       // the operator was told had shipped.
       const delta = await this.wt.taskBranchDelta(runId, taskId);
+      // Landed while this session was running — someone resolved the merge by
+      // hand, or a merge the store never recorded finally took. Booked here for
+      // the same reason it is checked before dispatch: everything below treats
+      // an empty diff as work that never arrived.
+      if (!delta.files.length && delta.landed) {
+        this.bookAlreadyLanded(runId, taskId, delta.landed, workerSession ?? taskId);
+        return;
+      }
       if (!delta.files.length) {
         emptyDeliveries++;
+        this.store.updateTask(runId, taskId, { emptyDeliveries });
         // An empty branch has two very different causes, and until now every
         // message said the first one. A task written against a repository this
         // run does not own delivers nothing *correctly*; telling its worker to
@@ -5851,6 +5883,7 @@ export class RunController {
           continue;
         }
         conflictFixes++;
+        this.store.updateTask(runId, taskId, { conflictFixes });
         const caught = await this.wt.catchUpTaskBranch(runId, taskId);
         // A merge that conflicted one way conflicts the other way too, so a
         // clean catch-up after a conflicted integrate does not happen.
@@ -5872,6 +5905,34 @@ export class RunController {
       qaFeedback = `QA rejected the previous iteration.\nReasons: ${verdict.reasons.join("; ")}\nMust fix:\n${verdict.mustFix.map((m) => `- ${m}`).join("\n")}`;
       lastRejection = `QA rejected iteration ${iterations}.\nReasons: ${verdict.reasons.join("; ")}\nMust fix:\n${verdict.mustFix.map((m) => `- ${m}`).join("\n")}`;
     }
+  }
+
+  /**
+   * Book a task whose branch is already contained in the integration branch.
+   *
+   * Nothing is being claimed about review or quality: the work is on the branch
+   * the run will publish, which is the only thing MERGED has ever meant here,
+   * and the alternative — the state this replaces — was a task cycling forever
+   * against a branch that cannot be un-merged.
+   */
+  private bookAlreadyLanded(runId: string, taskId: string, sha: string, sessionId: string): void {
+    const branch = this.wt.branchName(runId, taskId);
+    const integration = this.wt.integrationBranch(runId);
+    this.store.transitionTask(runId, taskId, "ACCEPTED", `already contained in ${integration}`);
+    this.store.transitionTask(runId, taskId, "MERGED");
+    this.mergedShas.set(`${runId}/${taskId}`, sha);
+    this.bus.publish({ type: "git.merged", runId, taskId, branch, sha, ts: Date.now() });
+    this.bus.publish({
+      type: "agent.log",
+      runId,
+      taskId,
+      sessionId,
+      text:
+        `${branch} is already contained in ${integration} as ${sha.slice(0, 7)} — it changes no file against it because its work has ` +
+        `landed, not because it has none. Booked as merged rather than dispatched again.`,
+      ts: Date.now(),
+    });
+    this.queueIssueSync(runId, taskId);
   }
 
   /**
