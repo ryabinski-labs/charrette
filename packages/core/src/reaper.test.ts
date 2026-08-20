@@ -3,7 +3,7 @@ import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { processesUnder, reapUnder } from "./reaper.js";
+import { processesUnder, reapUnder, toolingMarkers } from "./reaper.js";
 
 function dir(name: string): string {
   return realpathSync(mkdtempSync(path.join(tmpdir(), `harness-${name}-`)));
@@ -126,5 +126,70 @@ describe("orphan reaper", () => {
 
   it("does not throw on a path that does not exist", async () => {
     expect(await reapUnder(path.join(tmpdir(), "harness-does-not-exist-9d3f"), { graceMs: 50 })).toEqual([]);
+  });
+});
+
+describe("telling the session's own tooling apart from its work", () => {
+  const operatorConfig = {
+    "chrome-devtools": { type: "stdio", command: "npx", args: ["-y", "chrome-devtools-mcp@latest"] },
+    "skills-discovery": { type: "stdio", command: "python3", args: ["/Users/dev/.claude/skills/skills_discovery_mcp.py"] },
+  };
+
+  it("recognises an npx-launched MCP server by the package it runs, not by the runtime", () => {
+    // What `ps` shows for `npx -y chrome-devtools-mcp@latest`: the runtime is
+    // node and the version is gone, so the package name is the only thing left
+    // that both strings share.
+    const markers = toolingMarkers(operatorConfig);
+    const listing = "/opt/homebrew/Cellar/node/25.2.1/bin/node /Users/dev/.npm/_npx/15c6/node_modules/.bin/chrome-devtools-mcp";
+    expect(markers.some((m) => listing.includes(m))).toBe(true);
+    expect(markers).not.toContain("npx");
+    expect(markers).not.toContain("node");
+  });
+
+  it("recognises a script-launched MCP server by its path", () => {
+    const markers = toolingMarkers(operatorConfig);
+    expect(markers.some((m) => "python3 /Users/dev/.claude/skills/skills_discovery_mcp.py".includes(m))).toBe(true);
+  });
+
+  it("keeps no marker that would match work as well as tooling", () => {
+    const markers = toolingMarkers({
+      generic: { command: "python3", args: ["-u", "server.py"] },
+      docker: { command: "docker", args: ["run", "-i", "some/image:1"] },
+    });
+    for (const command of ["python3 train.py", "docker compose up", "cargo build --release", "bash bench/scripts/m1-live-smoke.sh"]) {
+      expect(markers.some((m) => command.includes(m))).toBe(false);
+    }
+  });
+
+  it("throws away an absolute runtime path, which is long enough to look distinctive and is not", () => {
+    // `/usr/bin/python3` clears the length and punctuation bars that `python3`
+    // alone does not, and would then mark every python an agent ever ran.
+    expect(toolingMarkers({ a: { command: "/usr/bin/python3", args: ["/opt/homebrew/bin/node"] } })).toEqual([]);
+  });
+
+  it("survives declarations it cannot read", () => {
+    expect(toolingMarkers(undefined, null, "not an object", { broken: null }, { noCommand: {} })).toEqual([]);
+  });
+
+  it("flags a marked process as tooling and still kills it", async () => {
+    const wt = dir("wt");
+    const pid = orphan(wt);
+    await new Promise((r) => setTimeout(r, 300));
+
+    // `sleep` stands in for the MCP server: a marker changes what the kill is
+    // reported as, never whether it happens — tooling must not outlive the
+    // session either.
+    const reaped = await reapUnder(wt, { graceMs: 500, tooling: ["sleep"] });
+    expect(reaped.find((r) => r.pid === pid)!.tooling).toBe(true);
+    expect(alive(pid)).toBe(false);
+  });
+
+  it("leaves an unmarked process reported as work", async () => {
+    const wt = dir("wt");
+    const pid = orphan(wt);
+    await new Promise((r) => setTimeout(r, 300));
+
+    const reaped = await reapUnder(wt, { graceMs: 500, tooling: ["chrome-devtools-mcp"] });
+    expect(reaped.find((r) => r.pid === pid)!.tooling).toBe(false);
   });
 });

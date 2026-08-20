@@ -4,7 +4,7 @@ import type { HarnessEvent } from "@harness/shared";
 
 const { queryMock, reapUnderMock } = vi.hoisted(() => ({ queryMock: vi.fn(), reapUnderMock: vi.fn() }));
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({ query: queryMock }));
-vi.mock("./reaper.js", () => ({ reapUnder: reapUnderMock }));
+vi.mock("./reaper.js", () => ({ reapUnder: reapUnderMock, toolingMarkers: () => [] }));
 
 import { Bus } from "./bus.js";
 import { Store } from "./store.js";
@@ -711,7 +711,7 @@ describe("sweeping the worktree when a session ends", () => {
 
     const res = await pool.run(spec({ reapOnEnd: true }));
 
-    expect(reapUnderMock).toHaveBeenCalledWith("/tmp/worktree");
+    expect(reapUnderMock).toHaveBeenCalledWith("/tmp/worktree", { tooling: [] });
     expect(typed("agent.log").at(-1)).toMatchObject({
       sessionId: res.sessionId,
       text: "killed 2 processes left running in this worktree: 4123 node /very/long/path/to/vitest --watch (SIGKILL); 4124 docker compose up (SIGTERM)",
@@ -720,6 +720,40 @@ describe("sweeping the worktree when a session ends", () => {
     // running is the job it was waiting on, and only the caller can tell that
     // the branch came back empty because of it.
     expect(res.abandoned).toEqual(["node /very/long/path/to/vitest --watch", "docker compose up"]);
+  });
+
+  it("does not report the session's own MCP servers as work it abandoned", async () => {
+    // Run bc691359: `chrome-devtools` is declared by the operator and started
+    // by the SDK in the worktree, so the sweep killed it at the end of every
+    // session. A 19-second session that was blocked on its first tool call and
+    // started nothing still came back holding an abandoned job, and spent the
+    // last of the task's retries on it.
+    scriptedSdk([result()]);
+    reapUnderMock.mockResolvedValue([
+      { pid: 50269, command: "/opt/homebrew/bin/node /Users/dev/.npm/_npx/15c6/node_modules/.bin/chrome-devtools-mcp", signal: "SIGTERM", tooling: true },
+    ]);
+
+    const res = await pool.run(spec({ reapOnEnd: true }));
+
+    // Still killed, and still said so: it must not outlive the session. (The
+    // log clips each command at 60 characters, which is why the operator's copy
+    // of this line stopped at `node /Users/dev/.npm/`.)
+    expect(typed("agent.log").at(-1)).toMatchObject({
+      text: "killed 1 process left running in this worktree: 50269 /opt/homebrew/bin/node /Users/dev/.npm/_npx/15c6/node_modu (SIGTERM)",
+    });
+    expect(res.abandoned).toEqual([]);
+  });
+
+  it("reports the job when the sweep caught tooling and work together", async () => {
+    scriptedSdk([result()]);
+    reapUnderMock.mockResolvedValue([
+      { pid: 48445, command: "/opt/homebrew/bin/node /Users/dev/.npm/_npx/15c6/node_modules/.bin/chrome-devtools-mcp", signal: "SIGTERM", tooling: true },
+      { pid: 49146, command: "bash bench/scripts/m1-live-smoke.sh", signal: "SIGTERM", tooling: false },
+    ]);
+
+    const res = await pool.run(spec({ reapOnEnd: true }));
+
+    expect(res.abandoned).toEqual(["bash bench/scripts/m1-live-smoke.sh"]);
   });
 
   it("uses the singular for one process", async () => {
@@ -770,7 +804,7 @@ describe("sweeping the worktree when a session ends", () => {
 
     await expect(pool.run(spec({ reapOnEnd: true }))).rejects.toThrow("boom");
 
-    expect(reapUnderMock).toHaveBeenCalledWith("/tmp/worktree");
+    expect(reapUnderMock).toHaveBeenCalledWith("/tmp/worktree", { tooling: [] });
   });
 });
 

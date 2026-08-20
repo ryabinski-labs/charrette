@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { query, type HookInput, type HookJSONOutput, type Options, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { AgentRole, providerFor } from "@harness/shared";
@@ -11,7 +14,7 @@ import { humanWait, limitWaitMs, usageLimitOf, type UsageLimit } from "./usageLi
 import { describeReading, keepsTranscript, readRateLimitEvent, readUsageSnapshot, type SubscriptionReading } from "./subscription.js";
 import { harnessBuild } from "./build.js";
 import { infraGuardHook } from "./infraGuard.js";
-import { reapUnder } from "./reaper.js";
+import { reapUnder, toolingMarkers } from "./reaper.js";
 import { rtkHooks } from "./rtk.js";
 import { worktreeGuardHook } from "./worktreeGuard.js";
 
@@ -111,6 +114,37 @@ export function bashHooks(worktree = ""): Options["hooks"] {
   const guard = { matcher: "Bash", hooks: [infraGuardHook(), worktreeGuardHook(worktree), backgroundShellHook()] };
   const rtk = rtkHooks()?.PreToolUse ?? [];
   return { PreToolUse: [guard, ...rtk] };
+}
+
+/** Parsed `mcpServers` per config file, because that file is a third of a megabyte. */
+const operatorServers = new Map<string, unknown>();
+
+/**
+ * What the teardown sweep must not mistake for the session's own work.
+ *
+ * `settingSources: ["user"]` above is what puts the operator's MCP servers in
+ * every session, and the SDK starts them in the session's cwd — the worktree —
+ * on a pipe with no controlling terminal. The sweep hunts for exactly that, so
+ * without this every session ended by reporting its own MCP servers as the job
+ * it had abandoned. Read from the same file the SDK read them from, plus
+ * whatever the spec passed programmatically, so the answer stays correct when
+ * the operator adds a server.
+ *
+ * A missing or unreadable config is not an error: it means no server was
+ * declared there, which is the same answer as a config that declares none.
+ */
+export function sessionToolingMarkers(mcpServers?: unknown, home: string = homedir()): string[] {
+  const file = path.join(home, ".claude.json");
+  if (!operatorServers.has(file)) {
+    let declared: unknown = null;
+    try {
+      declared = (JSON.parse(readFileSync(file, "utf8")) as { mcpServers?: unknown }).mcpServers ?? null;
+    } catch {
+      declared = null;
+    }
+    operatorServers.set(file, declared);
+  }
+  return toolingMarkers(operatorServers.get(file), mcpServers);
 }
 
 export interface AgentSpec {
@@ -1285,11 +1319,17 @@ export class AgentPool {
    * it. A sweep that fails returns nothing, which reads downstream as "the
    * session left nothing running": the conservative answer, and the same one
    * the overwhelming majority of sessions give truthfully.
+   *
+   * Everything killed is logged; only work is returned. The session's own MCP
+   * servers are killed here too — they must not outlive the session — but they
+   * were never the job, and a session that started nothing at all must come
+   * back with nothing, or the caller spends a retry explaining an empty branch
+   * with a process the agent never launched. See `sessionToolingMarkers`.
    */
   private async reap(spec: AgentSpec, sessionId: string): Promise<string[]> {
     if (!spec.reapOnEnd) return [];
     try {
-      const reaped = await reapUnder(spec.cwd);
+      const reaped = await reapUnder(spec.cwd, { tooling: sessionToolingMarkers(spec.mcpServers) });
       if (!reaped.length) return [];
       this.bus.publish({
         type: "agent.log",
@@ -1301,7 +1341,7 @@ export class AgentPool {
           reaped.map((r) => `${r.pid} ${r.command.slice(0, 60)} (${r.signal})`).join("; "),
         ts: Date.now(),
       });
-      return reaped.map((r) => r.command);
+      return reaped.filter((r) => !r.tooling).map((r) => r.command);
     } catch {
       // Nothing a sweep can fail at is worth failing a session over.
       return [];

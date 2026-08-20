@@ -1,6 +1,9 @@
 import type { HookInput } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it } from "vitest";
-import { BASH_TIMEOUT_MS, bashHooks } from "./pool.js";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { BASH_TIMEOUT_MS, bashHooks, sessionToolingMarkers } from "./pool.js";
 
 const bash = (command: string, run_in_background?: boolean, timeout?: number) =>
   ({
@@ -110,5 +113,62 @@ describe("the hooks every agent session runs with", () => {
       expect(await fire(2, bash("npm test"))).toEqual({});
       expect(await fire(2, bash("npx tsx --test src/**/*.test.ts > /tmp/suite.log 2>&1 &"))).toEqual({});
     });
+  });
+});
+
+/**
+ * `settingSources: ["user"]` is what puts the operator's MCP servers inside
+ * every agent session, and the teardown sweep is what kills them. These are the
+ * two halves of run bc691359's false abandoned job: the sweep is right to kill
+ * them, and wrong to call them the work the session left behind.
+ */
+describe("the tooling markers a session's sweep is given", () => {
+  const home = () => realpathSync(mkdtempSync(path.join(tmpdir(), "harness-home-")));
+
+  it("reads the servers the SDK will start from the config the SDK reads them from", () => {
+    const dir = home();
+    writeFileSync(
+      path.join(dir, ".claude.json"),
+      JSON.stringify({
+        mcpServers: { "chrome-devtools": { type: "stdio", command: "npx", args: ["-y", "chrome-devtools-mcp@latest"] } },
+        projects: { "/somewhere": { history: ["a"] } },
+      })
+    );
+
+    expect(sessionToolingMarkers(undefined, dir)).toEqual(["chrome-devtools-mcp"]);
+  });
+
+  it("adds the servers the spec passed programmatically", () => {
+    const dir = home();
+    writeFileSync(path.join(dir, ".claude.json"), JSON.stringify({ mcpServers: {} }));
+
+    expect(sessionToolingMarkers({ local: { command: "node", args: ["./tools/local-mcp.js"] } }, dir)).toEqual(["./tools/local-mcp.js"]);
+  });
+
+  it("treats a config with no servers in it as a config that declares nothing", () => {
+    const dir = home();
+    writeFileSync(path.join(dir, ".claude.json"), JSON.stringify({ projects: {} }));
+    expect(sessionToolingMarkers(undefined, dir)).toEqual([]);
+  });
+
+  it("treats an unreadable config as a config that declares nothing", () => {
+    // No file at all, and a file that is not JSON: both mean the sweep gets no
+    // markers and reports everything it killed as work — the behaviour that
+    // predates this, not a new failure mode.
+    expect(sessionToolingMarkers(undefined, home())).toEqual([]);
+    const broken = home();
+    writeFileSync(path.join(broken, ".claude.json"), "{ not json");
+    expect(sessionToolingMarkers(undefined, broken)).toEqual([]);
+  });
+
+  it("reads the config once per file", () => {
+    const dir = home();
+    writeFileSync(path.join(dir, ".claude.json"), JSON.stringify({ mcpServers: { a: { command: "npx", args: ["some-mcp-server"] } } }));
+    expect(sessionToolingMarkers(undefined, dir)).toEqual(["some-mcp-server"]);
+
+    // A third of a megabyte of project history sits in that file, and the sweep
+    // runs at the end of every session; the second call must not re-read it.
+    rmSync(path.join(dir, ".claude.json"));
+    expect(sessionToolingMarkers(undefined, dir)).toEqual(["some-mcp-server"]);
   });
 });
