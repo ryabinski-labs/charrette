@@ -1157,6 +1157,17 @@ export class RunController {
 
     let revived = 0;
     for (const t of parked) {
+      // Never ask about a task that is already delivered. A parked task whose
+      // branch is on the integration branch has nothing left for an operator to
+      // decide, and asking is not free: run bc691359 put the same question
+      // about `m1-exit-evidence` three times in one morning, each answer
+      // reviving a task that could only park again on the same reading of the
+      // same empty diff.
+      const landed = (await this.wt.taskBranchDelta(runId, t.id)).landed;
+      if (landed) {
+        this.bookAlreadyLanded(runId, t.id, landed, t.id);
+        continue;
+      }
       // Same invariant as the issue comment below: a parked task carries a
       // reason on the row or in its transition event.
       /* v8 ignore next */
