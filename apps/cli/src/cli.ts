@@ -11,6 +11,7 @@ import {
   CONFIG_FILENAME,
   DEFAULT_SKILLS_DIRS,
   detectChecks,
+  verifyChecks,
   expandHome,
   loadFileConfig,
   resolveGitHub,
@@ -436,7 +437,13 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
   } else {
     const detected = detectChecks(repo);
     checks = detected.checks;
-    checksFrom = `auto-detected from ${detected.source}`;
+    // Lifted out of the repo's workflows but not yet run here, and a check that
+    // cannot pass in a fresh worktree parks every task in the run. `harness
+    // init` runs each one before writing it down; this path has no moment at
+    // which it could, so it says so instead of implying they are proven.
+    checksFrom = detected.skipped.length || /CI workflow/.test(detected.source)
+      ? `auto-detected from ${detected.source} — not yet run here; \`harness init\` proves them first`
+      : `auto-detected from ${detected.source}`;
   }
   banner.push(
     checks.length > 0
@@ -1152,24 +1159,62 @@ export function buildProgram(): Command {
     .description(`write ${CONFIG_FILENAME} with the settings this repo would run with`)
     .option("-r, --repo <path>", "target repo (default: the git repo containing the cwd)", process.cwd())
     .option("-f, --force", "overwrite an existing config file", false)
-    .action((opts: { repo: string; force: boolean }) => {
+    .option("--no-verify", "write the detected checks without running them first")
+    .action((opts: { repo: string; force: boolean; verify: boolean }) => {
       const repo = resolveRepoRoot(opts.repo);
       const target = path.join(repo, CONFIG_FILENAME);
       if (existsSync(target) && !opts.force) {
         throw new Error(`${target} already exists. Pass --force to overwrite.`);
       }
       const detected = detectChecks(repo);
+      const out = (line: string) => process.stdout.write(`${line}\n`);
+      out(`Checks from ${detected.source}:`);
+      for (const c of detected.checks) out(`  $ ${c}`);
+      if (!detected.checks.length) out("  none");
+
+      // Run them before writing them down. A candidate that cannot pass on this
+      // machine is not a weaker check — it is red in every worktree, which
+      // blames every task for something none of them can fix and parks the run.
+      // Skippable, because a repo whose suite takes an hour should not have to
+      // sit through it to get a config file.
+      let checks = detected.checks;
+      if (opts.verify && checks.length) {
+        out(`\nRunning each one here first — a check that cannot pass in a fresh worktree parks every task in a run.`);
+        // A check can take ten minutes, so a terminal is shown the one in
+        // flight and then has that line replaced by the verdict. Redirected to
+        // a file there is no cursor to move, so only the verdict is written —
+        // a log full of escape codes is worse than a log with no progress in it.
+        const live = process.stdout.isTTY === true;
+        const verified = verifyChecks(repo, checks, {
+          onStart: (c) => live && process.stdout.write(`  …    ${c}`),
+          onResult: (c, ms, reason) =>
+            process.stdout.write(`${live ? "\r\u001b[2K" : ""}  ${reason === null ? "ok  " : "drop"} ${c}  (${Math.round(ms / 1000)}s)\n`),
+        });
+        checks = verified.kept;
+        if (verified.dropped.length) {
+          out(`\nDropped ${verified.dropped.length} of ${detected.checks.length}:`);
+          for (const d of verified.dropped) out(`  $ ${d.command}\n      ${d.reason}`);
+          out(`Add any of them back by hand if the failure is something you can fix.`);
+        }
+      }
+
       const contents = {
         budget: { runCapUsd: DEFAULT_RUN_CAP },
-        deterministicChecks: detected.checks,
+        deterministicChecks: checks,
         dashboard: true,
         skillsDirs: DEFAULT_SKILLS_DIRS,
       };
       writeFileSync(target, `${JSON.stringify(contents, null, 2)}\n`);
-      process.stdout.write(
-        `Wrote ${target}\n  checks: ${detected.checks.join(", ") || `none (${detected.source})`}\n` +
-          `Edit it and re-run \`harness run "<assignment>"\` — no flags needed.\n`
-      );
+      out(`\nWrote ${target} with ${checks.length} check(s).`);
+      // What the pipeline does that this does not. Silence here reads as full
+      // coverage, and a repo whose CI is mostly shell scripts gets very little.
+      if (detected.skipped.length) {
+        const SHOWN = 12;
+        out(`\n${detected.skipped.length} CI step(s) were read and not lifted — this run will not cover them:`);
+        for (const s of detected.skipped.slice(0, SHOWN)) out(`  ${s.source}\n      ${s.reason}`);
+        if (detected.skipped.length > SHOWN) out(`  … and ${detected.skipped.length - SHOWN} more`);
+      }
+      out(`\nEdit it and re-run \`harness run "<assignment>"\` — no flags needed.`);
     });
 
   return program;
