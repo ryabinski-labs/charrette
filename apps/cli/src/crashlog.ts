@@ -71,6 +71,22 @@ export function recordFatal(e: unknown): void {
 }
 
 /**
+ * Log `e` as a refusal rather than a crash.
+ *
+ * `harness: fatal — run bc691359 is already being driven by harness pid 47427`
+ * is the wrong word for the one case it describes. Nothing failed: a second
+ * harness was told the run was taken and stopped, which is the whole feature.
+ * The message is several lines and every one of them is addressed to the
+ * operator, so it goes to the terminal whole and to the log without a stack —
+ * there is no stack worth keeping for a decision the process made on purpose.
+ */
+export function recordRefusal(e: Error): void {
+  if (done) return;
+  done = true;
+  record("refused", e.message, e.message);
+}
+
+/**
  * Install the handlers. Called at startup, before any command runs, so a
  * failure while resolving the repo is recorded too (on stderr — the log path
  * is not known yet).

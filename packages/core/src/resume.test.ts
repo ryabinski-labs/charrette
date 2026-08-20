@@ -271,7 +271,7 @@ describe("resuming a run whose planning phase failed", () => {
         let resultText = "";
         if (spec.role === "planner") resultText = planning++ === 0 ? DOCS : DAG;
         else if (spec.role === "worker") {
-          writeFileSync(path.join(spec.cwd, "feature.txt"), "work\n");
+          writeFileSync(path.join(spec.cwd, `feature-${path.basename(spec.cwd)}.txt`), "work\n");
           gitIn(spec.cwd, "add", "-A");
           gitIn(spec.cwd, "commit", "-m", "wip");
           resultText = "worker done";
@@ -339,5 +339,72 @@ describe("a task left accepted by a harness process that died", () => {
     // rewriting a task it had in fact finished.
     expect(workerPrompts[0]).toContain("already passed QA");
     expect(workerPrompts[0]).toContain("do not rewrite it");
+  });
+});
+
+describe("two harness processes on one run", () => {
+  /**
+   * Run bc691359 was found with two `harness resume bc691359` processes alive at
+   * once, started an hour and fifty-four minutes apart. The second one's requeue
+   * sweeper — which opens `execute` on the premise that "this controller is the
+   * only runner, so nothing can actually be WORKING" — moved a task the first
+   * was still running from WORKING to READY. Twelve minutes later the first
+   * finished its checks and tried WORKING -> QA, found READY, and threw
+   * InvalidTransition; the catch parked the task as NEEDS_HUMAN. The worker had
+   * already committed the entire job and reported it clean.
+   *
+   * So the second one has to be turned away while the first still holds the run,
+   * and the first has to be left driving.
+   */
+  it("refuses the second, and does not disturb the first", async () => {
+    const repoPath = repo();
+    const store = new Store(":memory:");
+    const bus = new Bus(store);
+    let refusal: Error | null = null;
+    let planning = 0;
+    // The second harness arrives mid-task, which is the only moment the damage
+    // is possible: the first controller is between WORKING and QA.
+    const pool = {
+      async run(spec: AgentSpec): Promise<AgentResult> {
+        let resultText = "";
+        if (spec.role === "planner") resultText = planning++ === 0 ? DOCS : DAG;
+        else if (spec.role === "worker") {
+          if (!refusal) {
+            const second = new RunController(store, bus, pool as unknown as AgentPool, noGithub, gates(), repoPath);
+            await second.resume(spec.runId).catch((e: Error) => {
+              refusal = e;
+            });
+          }
+          writeFileSync(path.join(spec.cwd, `feature-${path.basename(spec.cwd)}.txt`), "work\n");
+          gitIn(spec.cwd, "add", "-A");
+          gitIn(spec.cwd, "commit", "-m", "wip");
+          resultText = "worker done";
+        } else if (spec.role === "qa") resultText = '{"verdict":"PASS"}';
+        else resultText = '{"verdict":"PASS","summary":"all delivered"}';
+        return { sessionId: `s${Math.random()}`, resultText, costUsd: 0, turns: 1, outcome: "done" };
+      },
+    };
+    const first = new RunController(store, bus, pool as unknown as AgentPool, noGithub, gates(), repoPath);
+    const runId = await first.startRun("do a thing", RunConfig.parse({ deterministicChecks: [] }));
+
+    expect(refusal).not.toBeNull();
+    expect(refusal!.name).toBe("RunLocked");
+    expect(refusal!.message).toContain("already being driven by harness pid");
+    // The first run is untouched: both tasks went the whole way, which is what
+    // the second one's sweeper took away when nothing stopped it.
+    expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
+    expect(store.getTask(runId, "task-b")!.state).toBe("MERGED");
+  });
+
+  /** And the run is drivable again the moment the first process lets go. */
+  it("lets the next process in once the first has finished", async () => {
+    const repoPath = repo();
+    const store = new Store(":memory:");
+    const bus = new Bus(store);
+    const first = new RunController(store, bus, failingPool(), noGithub, gates(), repoPath);
+    const runId = await first.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], qaIterationCap: 1 }));
+    const { pool } = healedPool();
+    const second = new RunController(store, bus, pool, noGithub, gates(async () => "try again"), repoPath);
+    await expect(second.resume(runId)).resolves.not.toThrow();
   });
 });

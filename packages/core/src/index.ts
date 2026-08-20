@@ -18,6 +18,7 @@ export * from "./outputCeiling.js";
 export * from "./reaper.js";
 export * from "./github.js";
 export * from "./intake.js";
+export * from "./runLock.js";
 export * from "./pitstop.js";
 export * from "./pool.js";
 export * from "./postmortem.js";

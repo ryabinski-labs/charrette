@@ -29,6 +29,7 @@ import { git, pushRunBranch, repoFileList, WorktreeManager } from "./git.js";
 import { GitHubAdapter, type PrRef } from "./github.js";
 import { unsatisfiableCriteria } from "./infraGuard.js";
 import { runIntake, type IntakeUi } from "./intake.js";
+import { acquireRunLock, type RunLock } from "./runLock.js";
 import { composeDown, isolationBlock, isolationEnv, taskIsolation } from "./isolation.js";
 import { knownFlakySignatures, observeChecks, observeFlakySignatures } from "./memory.js";
 import { parseRunbook, withRunbook, type Runbook } from "./operatorRunbook.js";
@@ -767,9 +768,6 @@ export class RunController {
     private repoPath: string
   ) {
     this.wt = new WorktreeManager(repoPath);
-    // One harness process per project: any session "running" now is a dead
-    // process's leftover, not ours.
-    this.store.sweepDeadSessions();
   }
 
   /**
@@ -1041,10 +1039,19 @@ export class RunController {
   }
 
   async resume(runId: string, intake?: IntakeUi): Promise<void> {
-    await this.wt.pruneAndReconcile();
-    await this.bookLandedParked(runId);
-    await this.reopen(runId);
-    await this.drive(runId, intake);
+    // Before `pruneAndReconcile`, not after: pruning walks the worktrees of a
+    // run another harness may be working in, and booking and reopening both
+    // move task states. Every one of those is the interference the lock exists
+    // to stop, and all three happen before `drive` would have taken it.
+    const unlock = this.lockRun(runId);
+    try {
+      await this.wt.pruneAndReconcile();
+      await this.bookLandedParked(runId);
+      await this.reopen(runId);
+      await this.drive(runId, intake);
+    } finally {
+      unlock();
+    }
   }
 
   /**
@@ -1236,6 +1243,15 @@ export class RunController {
    * open questions are reported instead of asked.
    */
   private async drive(runId: string, intake?: IntakeUi): Promise<void> {
+    // Nothing below this line is safe to run twice at once. The requeue sweeper
+    // in `execute` states the assumption outright — "this controller is the only
+    // runner" — and until run bc691359 was found with two `harness resume`
+    // processes on it, nothing checked. See runLock.ts for what that cost.
+    //
+    // Here rather than at the two call sites because `startRun` and `resume` are
+    // both ways of arriving at the same thing, and here rather than in the
+    // constructor because a controller is also built by commands that only read.
+    const unlock = this.lockRun(runId);
     try {
       await this.driveRun(runId, intake);
     } catch (e) {
@@ -1252,7 +1268,46 @@ export class RunController {
       // process — which is every test, and an operator who never left the
       // dashboard — must not inherit a pause the last drive already honoured.
       this.pauseAsked.delete(runId);
+      // Released here and not on a signal: a process killed outright leaves the
+      // file behind and takes its pid with it, which is exactly what the next
+      // acquire reads as stale.
+      unlock();
     }
+  }
+
+  /**
+   * Hold the run for this controller, and hand back the release.
+   *
+   * Re-entrant on purpose: `resume` takes it and then calls `drive`, which takes
+   * it again. The inner call is a no-op that leaves the outer holder to free it,
+   * so the run stays locked for the whole of `resume` rather than only for the
+   * part of it that dispatches.
+   *
+   * A repository with nowhere to write a lock file is not a reason to refuse to
+   * drive a run — it only means this process cannot prove it is alone. Refusing
+   * is reserved for the one case the lock exists to catch: another harness,
+   * alive, already driving this run.
+   */
+  private lockRun(runId: string): () => void {
+    if (this.locks.has(runId)) return () => {};
+    let lock: RunLock;
+    try {
+      lock = acquireRunLock(path.join(this.repoPath, ".harness"), runId);
+    } catch (e) {
+      if (e instanceof Error && e.name === "RunLocked") throw e;
+      return () => {};
+    }
+    this.locks.set(runId, lock);
+    // Only now is it true that any session still marked "running" is a dead
+    // process's leftover rather than somebody's live work. This used to run in
+    // the constructor, where it was a guess — and a second `harness resume`
+    // built a controller before it was turned away, settling the sessions of
+    // the process that was still using them.
+    this.store.sweepDeadSessions();
+    return () => {
+      this.locks.delete(runId);
+      lock.release();
+    };
   }
 
   private async driveRun(runId: string, intake?: IntakeUi): Promise<void> {
@@ -6322,6 +6377,9 @@ export class RunController {
    * definition no longer paused.
    */
   private readonly pauseAsked = new Set<string>();
+
+  /** Runs this controller is holding; see `lockRun`. */
+  private readonly locks = new Map<string, RunLock>();
 
   /**
    * Stop the run at the next message of every session, and leave it resumable.

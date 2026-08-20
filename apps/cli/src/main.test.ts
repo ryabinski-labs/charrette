@@ -1,18 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { buildProgramMock, parseAsyncMock, installCrashLogMock, recordFatalMock, loadDotEnvMock } = vi.hoisted(() => {
+const { buildProgramMock, parseAsyncMock, installCrashLogMock, recordFatalMock, recordRefusalMock, loadDotEnvMock } = vi.hoisted(() => {
   const parseAsyncMock = vi.fn();
   return {
     parseAsyncMock,
     buildProgramMock: vi.fn(() => ({ parseAsync: parseAsyncMock })),
     installCrashLogMock: vi.fn(),
     recordFatalMock: vi.fn(),
+    recordRefusalMock: vi.fn(),
     loadDotEnvMock: vi.fn(),
   };
 });
 
 vi.mock("./cli.js", () => ({ buildProgram: buildProgramMock }));
-vi.mock("./crashlog.js", () => ({ installCrashLog: installCrashLogMock, recordFatal: recordFatalMock }));
+vi.mock("./crashlog.js", () => ({ installCrashLog: installCrashLogMock, recordFatal: recordFatalMock, recordRefusal: recordRefusalMock }));
 vi.mock("./env.js", () => ({ loadDotEnv: loadDotEnvMock }));
 
 /** The binary runs its work at import, so each case needs its own module instance. */
@@ -30,6 +31,7 @@ describe("the harness binary", () => {
     parseAsyncMock.mockReset();
     installCrashLogMock.mockClear();
     recordFatalMock.mockClear();
+    recordRefusalMock.mockClear();
     loadDotEnvMock.mockClear();
     vi.spyOn(process, "exit").mockImplementation((() => undefined as never) as typeof process.exit);
   });
@@ -73,6 +75,20 @@ describe("the harness binary", () => {
     await runMain();
 
     expect(recordFatalMock).toHaveBeenCalledWith(boom);
+    expect(process.exit).toHaveBeenCalledWith(1);
+  });
+
+  it("reports a run already held by another harness as a refusal, not a crash", async () => {
+    // Same exit code — nothing the operator asked for happened — but "fatal"
+    // would describe a crash, and this process stopped on purpose.
+    const taken = new Error("run bc691359 is already being driven by harness pid 47427");
+    taken.name = "RunLocked";
+    parseAsyncMock.mockRejectedValue(taken);
+
+    await runMain();
+
+    expect(recordRefusalMock).toHaveBeenCalledWith(taken);
+    expect(recordFatalMock).not.toHaveBeenCalled();
     expect(process.exit).toHaveBeenCalledWith(1);
   });
 });

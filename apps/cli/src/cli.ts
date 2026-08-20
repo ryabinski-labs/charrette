@@ -3,7 +3,7 @@ import { createInterface } from "node:readline/promises";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { DEFAULT_CHECK_TIMEOUT_MINUTES, ModelRoutingShape, RunConfig, SubscriptionConfig } from "@harness/shared";
-import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, accountEnv, assembleReport, checkMemoryBanner, detectToolbelt, ensureIgnored, harnessBuild, missingKeys, originSlug, postmortem, renderPostmortem, reportPath, standaloneReport, repoUnusable, wasMerged } from "@harness/core";
+import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, accountEnv, assembleReport, checkMemoryBanner, detectToolbelt, ensureIgnored, harnessBuild, missingKeys, originSlug, postmortem, renderPostmortem, reportPath, runLockHolder, standaloneReport, repoUnusable, wasMerged } from "@harness/core";
 import { Dashboard } from "@harness/dashboard";
 import { promptForNewCap, watchBudgetCommands } from "./budget.js";
 import { promptForAccount } from "./subscription.js";
@@ -1101,6 +1101,12 @@ export function buildProgram(): Command {
       const slug = (await originSlug(repo).catch(() => null)) ?? loadFileConfig(repo).config.githubRepo;
       for (const run of runs) {
         process.stdout.write(`run ${run.id} [${run.state}] $${store.spentUsd(run.id).toFixed(2)} — ${run.assignment.slice(0, 60)}\n`);
+        // Which process is driving it, if any. An EXECUTING run says nothing
+        // about whether anything is actually working it — run bc691359 spent
+        // days in EXECUTING with no harness alive, and then spent an afternoon
+        // in EXECUTING with two.
+        const holder = runLockHolder(path.join(repo, ".harness"), run.id);
+        if (holder) process.stdout.write(`  driven by harness pid ${holder.pid} since ${new Date(holder.startedAt).toISOString()}\n`);
         const dep = store.deployStatus(run.id);
         if (dep && dep.state !== "none") process.stdout.write(`  deploy ${dep.sha.slice(0, 7)}: ${dep.state}${dep.failing.length ? ` — ${dep.failing.join(", ")}` : ""}\n`);
         const prod = store.prodVerdict(run.id);
