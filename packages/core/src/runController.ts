@@ -1022,8 +1022,30 @@ export class RunController {
 
   async resume(runId: string, intake?: IntakeUi): Promise<void> {
     await this.wt.pruneAndReconcile();
+    await this.bookLandedParked(runId);
     await this.reopen(runId);
     await this.drive(runId, intake);
+  }
+
+  /**
+   * Book every parked task whose work is already on the integration branch.
+   *
+   * This runs before `reopen`, and outside it, because `reopen` is the ceremony
+   * for a *finished* run and returns immediately for one still in `EXECUTING` —
+   * which is where a run killed mid-flight sits. Run bc691359 was resumed after
+   * the fix that books an already-landed task and came straight back with
+   * `m1-exit-evidence` parked: the pre-dispatch check never ran because nothing
+   * dispatches a `NEEDS_HUMAN` task, and the check inside `reopen` never ran
+   * because the run was executing, not in review. A parked task is only ever
+   * examined again by something that goes looking for it, so this goes looking
+   * on every resume, whatever state the run is in.
+   */
+  private async bookLandedParked(runId: string): Promise<void> {
+    for (const t of this.store.listTasks(runId)) {
+      if (t.state !== "NEEDS_HUMAN") continue;
+      const landed = (await this.wt.taskBranchDelta(runId, t.id)).landed;
+      if (landed) this.bookAlreadyLanded(runId, t.id, landed, t.id);
+    }
   }
 
   /**
@@ -1157,17 +1179,13 @@ export class RunController {
 
     let revived = 0;
     for (const t of parked) {
-      // Never ask about a task that is already delivered. A parked task whose
-      // branch is on the integration branch has nothing left for an operator to
-      // decide, and asking is not free: run bc691359 put the same question
-      // about `m1-exit-evidence` three times in one morning, each answer
-      // reviving a task that could only park again on the same reading of the
-      // same empty diff.
-      const landed = (await this.wt.taskBranchDelta(runId, t.id)).landed;
-      if (landed) {
-        this.bookAlreadyLanded(runId, t.id, landed, t.id);
-        continue;
-      }
+      // Nothing here asks whether the task already landed: `resume` swept for
+      // that before calling in, and a task it booked is MERGED and not in
+      // `parked` at all. Never ask about a task that is already delivered —
+      // run bc691359 put the same question about `m1-exit-evidence` three
+      // times in one morning, each answer reviving a task that could only park
+      // again on the same reading of the same empty diff.
+      //
       // Same invariant as the issue comment below: a parked task carries a
       // reason on the row or in its transition event.
       /* v8 ignore next */
