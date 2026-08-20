@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { HarnessEvent, RunConfig, RunState, TaskState, RUN_TRANSITIONS, TASK_TRANSITIONS, modelId } from "@harness/shared";
+import { HarnessEvent, RunConfig, RunSpec, RunState, type Runbook, RunbookShape, TaskState, RUN_TRANSITIONS, TASK_TRANSITIONS, modelId } from "@harness/shared";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS runs (
@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   assignedSkills TEXT NOT NULL DEFAULT '[]', errorSummary TEXT,
   touchedPaths TEXT NOT NULL DEFAULT '[]', estimatedSize TEXT NOT NULL DEFAULT 'M',
   completionProbe TEXT NOT NULL DEFAULT '', unverified TEXT NOT NULL DEFAULT '[]',
+  scenarioIds TEXT NOT NULL DEFAULT '[]',
   PRIMARY KEY (runId, id)
 );
 CREATE TABLE IF NOT EXISTS sessions (
@@ -127,6 +128,11 @@ export interface TaskRow {
    * `QaVerdict`'s PASS branch for why this is a field and not prose.
    */
   unverified: string[];
+  /**
+   * The scenarios this task is the one to turn green. See
+   * `PlannedTask.scenarioIds` — empty for the tasks no scenario covers.
+   */
+  scenarioIds: string[];
   /** The planner's size guess, and the only input a pre-run cost estimate has. */
   estimatedSize: "S" | "M" | "L";
 }
@@ -193,6 +199,9 @@ export class Store {
         // Not "unknown" — an old run's rollup must not be held as a draft over a
         // column that did not exist when it was judged.
         unverified: "TEXT NOT NULL DEFAULT '[]'",
+        // Empty is honest for a run planned before the specification phase
+        // existed: no scenario covered it, so none is claimed to.
+        scenarioIds: "TEXT NOT NULL DEFAULT '[]'",
       },
       // Empty rather than 'unknown': the sessions of a run that predates this
       // column are not a build the postmortem should name, and the report says
@@ -428,6 +437,30 @@ export class Store {
   }
 
   /**
+   * The operator's half of the last escalation this task opened.
+   *
+   * A parked task's runbook is written once, into the gate event, and read by
+   * whoever is looking at the gate that day. The completion report reads it
+   * months later and for a different purpose — a task that parked on "this
+   * needs a real deploy and a real magic-link token" is a feature the run did
+   * not deliver, and the steps that would deliver it are already written down.
+   * Recovering them from the event log costs one query and saves an operator
+   * working out for themselves what an agent already worked out.
+   *
+   * Null for every task that never escalated, and for the thousands of gate
+   * rows written before the field existed.
+   */
+  taskRunbook(runId: string, taskId: string): Runbook | null {
+    const row = this.db
+      .prepare("SELECT payload FROM events WHERE runId = ? AND taskId = ? AND type = 'task.gate_opened' ORDER BY seq DESC LIMIT 1")
+      .get(runId, taskId) as { payload: string } | undefined;
+    if (!row) return null;
+    const parsed = JSON.parse(row.payload) as { runbook?: unknown };
+    const result = RunbookShape.safeParse(parsed.runbook);
+    return result.success && result.data.steps.length ? result.data : null;
+  }
+
+  /**
    * Queue a note for the next agent dispatched on a task.
    *
    * This lived in a Map on the controller, which meant a note queued for a task
@@ -470,6 +503,32 @@ export class Store {
   }
 
   /** The validator's judgment of the run, or null when validation never completed. */
+  /**
+   * The run's executable specification, or null for a run that has none.
+   *
+   * Null is a first-class answer and the common one for an older run: it means
+   * no scenario was ever derived, which every caller must be able to tell apart
+   * from "a specification exists and proves nothing".
+   */
+  runSpec(runId: string): RunSpec | null {
+    const row = this.db.prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.spec_ready' ORDER BY seq DESC LIMIT 1").get(runId) as
+      | { payload: string }
+      | undefined;
+    if (!row) return null;
+    const parsed = RunSpec.safeParse((JSON.parse(row.payload) as { spec?: unknown }).spec);
+    return parsed.success ? parsed.data : null;
+  }
+
+  /** What the acceptance gate last said about the merged whole. */
+  acceptanceVerdict(runId: string): { passed: boolean; failing: string[]; named: boolean; blocked: string[]; line: string } | null {
+    const row = this.db.prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.acceptance_verdict' ORDER BY seq DESC LIMIT 1").get(runId) as
+      | { payload: string }
+      | undefined;
+    if (!row) return null;
+    const p = JSON.parse(row.payload) as { passed: boolean; failing?: string[]; named?: boolean; blocked?: string[]; line?: string };
+    return { passed: p.passed, failing: p.failing ?? [], named: p.named ?? true, blocked: p.blocked ?? [], line: p.line ?? "" };
+  }
+
   intentVerdict(runId: string): { verdict: "PASS" | "FAIL"; gaps: string[]; summary: string } | null {
     const row = this.db
       .prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.intent_verdict' ORDER BY seq DESC LIMIT 1")
@@ -883,10 +942,16 @@ export class Store {
 
   // `unverified` is omitted: it is QA's answer, so a task being planned has no
   // value for it, and the column's `'[]'` default is that absence spelled out.
-  insertTasks(runId: string, epics: { id: string; title: string }[], tasks: Omit<TaskRow, "runId" | "unverified">[]): void {
+  // `scenarioIds` is optional rather than omitted: the planner does set it, and
+  // a run with no specification simply has none — same absence, same default.
+  insertTasks(
+    runId: string,
+    epics: { id: string; title: string }[],
+    tasks: (Omit<TaskRow, "runId" | "unverified" | "scenarioIds"> & { scenarioIds?: string[] })[]
+  ): void {
     const insEpic = this.db.prepare("INSERT OR REPLACE INTO epics (id, runId, title, ord) VALUES (?,?,?,?)");
     const insTask = this.db.prepare(
-      "INSERT OR REPLACE INTO tasks (id, runId, epicId, title, spec, acceptanceCriteria, dependsOn, state, branch, worktreePath, githubIssueNumber, prNumber, qaIterations, respawns, assignedSkills, errorSummary, touchedPaths, estimatedSize, completionProbe) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+      "INSERT OR REPLACE INTO tasks (id, runId, epicId, title, spec, acceptanceCriteria, dependsOn, state, branch, worktreePath, githubIssueNumber, prNumber, qaIterations, respawns, assignedSkills, errorSummary, touchedPaths, estimatedSize, completionProbe, scenarioIds) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
     );
     this.txn(() => {
       epics.forEach((e, i) => insEpic.run(e.id, runId, e.title, i));
@@ -896,7 +961,7 @@ export class Store {
           JSON.stringify(t.acceptanceCriteria), JSON.stringify(t.dependsOn), t.state,
           t.branch, t.worktreePath, t.githubIssueNumber, t.prNumber,
           t.qaIterations, t.respawns, JSON.stringify(t.assignedSkills), t.errorSummary,
-          JSON.stringify(t.touchedPaths), t.estimatedSize, t.completionProbe ?? ""
+          JSON.stringify(t.touchedPaths), t.estimatedSize, t.completionProbe ?? "", JSON.stringify(t.scenarioIds ?? [])
         );
       }
     });
@@ -941,6 +1006,7 @@ export class Store {
       // lack it, so this is never reading an absence.
       touchedPaths: JSON.parse(r.touchedPaths as string),
       unverified: JSON.parse(r.unverified as string),
+      scenarioIds: JSON.parse(r.scenarioIds as string),
     } as TaskRow;
   }
 

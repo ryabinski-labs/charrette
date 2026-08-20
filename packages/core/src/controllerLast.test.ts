@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -170,6 +170,53 @@ describe("picking up a run that is already verifying", () => {
 
     expect(store.getRun(runId)!.state).toBe("DONE");
     expect(store.prodVerdict(runId)).toMatchObject({ verdict: "PASS" });
+  });
+
+  /**
+   * Reaching DONE is the last moment anyone is looking, and everything the
+   * report needs decays from here — the integration branch gets pruned and the
+   * base branch moves on, so the diff that says which switches the run left off
+   * becomes a reconstruction rather than a read.
+   */
+  it("writes the completion report the moment the run is actually done", async () => {
+    const dir = repo();
+    const { adapter } = gh({ pulls: MERGED_PR, checks: GREEN_DEPLOY });
+    const { pool } = rolePool({
+      planner: planner(["task-a"]), worker, qa: () => QA_PASS, validator: () => INTENT_PASS,
+      prod: () => '```json\n{"verdict":"PASS","findings":[],"summary":"ok"}\n```',
+    });
+    const { controller, store, events } = build({ repoPath: dir, pool, github: adapter });
+    const runId = await controller.startRun("build a thing", RunConfig.parse({ ...BASE, prodUrl: "https://app.example.com", deployTimeoutMinutes: 1 }));
+
+    expect(store.getRun(runId)!.state).toBe("DONE");
+    const file = path.join(dir, ".harness", "reports", `${runId}.html`);
+    expect(existsSync(file)).toBe(true);
+    const html = readFileSync(file, "utf8");
+    expect(html).toContain("<title>");
+    expect(html).toContain("aria-label=\"This run reached: Verified");
+    expect(events.some((e) => e.type === "agent.log" && e.text.startsWith("completion report written:"))).toBe(true);
+  });
+
+  /**
+   * A run that built the thing, shipped it, and had production agree has
+   * succeeded. Failing it over a page it could not write would be the tail
+   * wagging the dog.
+   */
+  it("does not fail a finished run over a report it could not write", async () => {
+    const dir = repo();
+    // A file where the reports directory needs to be: `mkdirSync` cannot win.
+    mkdirSync(path.join(dir, ".harness"), { recursive: true });
+    writeFileSync(path.join(dir, ".harness", "reports"), "not a directory");
+    const { adapter } = gh({ pulls: MERGED_PR, checks: GREEN_DEPLOY });
+    const { pool } = rolePool({
+      planner: planner(["task-a"]), worker, qa: () => QA_PASS, validator: () => INTENT_PASS,
+      prod: () => '```json\n{"verdict":"PASS","findings":[],"summary":"ok"}\n```',
+    });
+    const { controller, store, events } = build({ repoPath: dir, pool, github: adapter });
+    const runId = await controller.startRun("build a thing", RunConfig.parse({ ...BASE, prodUrl: "https://app.example.com", deployTimeoutMinutes: 1 }));
+
+    expect(store.getRun(runId)!.state).toBe("DONE");
+    expect(events.some((e) => e.type === "agent.log" && e.text.startsWith("the completion report could not be written:"))).toBe(true);
   });
 });
 

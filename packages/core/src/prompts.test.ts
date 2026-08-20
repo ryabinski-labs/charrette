@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { RunSpec } from "@harness/shared";
 import {
   INTERFACE_STANDARD,
   advisorPrompt,
@@ -12,6 +13,9 @@ import {
   qaSystemPrompt,
   skillsBlock,
   workerSystemPrompt,
+  specAnswersPrompt,
+  specPlanBlock,
+  specPrompt,
 } from "./prompts.js";
 
 const fence = "```";
@@ -337,7 +341,7 @@ describe("what the advisor is told about the repository", () => {
     id: "task-a", runId: "r", epicId: "e", title: "A", spec: "s", acceptanceCriteria: ["x"],
     dependsOn: [], state: "WORKING" as const, branch: null, worktreePath: null,
     githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0,
-    assignedSkills: [], errorSummary: null, touchedPaths: [], completionProbe: "", unverified: [], estimatedSize: "M" as const,
+    assignedSkills: [], errorSummary: null, touchedPaths: [], completionProbe: "", unverified: [], scenarioIds: [], estimatedSize: "M" as const,
   };
 
   it("names the commands the repository actually checks a task with", () => {
@@ -503,5 +507,58 @@ describe("the rule that a CI gate must be run against the tree that ships it", (
     const p = qaSystemPrompt();
     expect(p).toContain("FAIL the task if the gate it ships would fail on the branch that ships it");
     expect(p).toContain("service containers, specific runners or privileged features");
+  });
+});
+
+describe("what the specification agent and the planner are told", () => {
+  const spec = (over: Record<string, unknown> = {}) =>
+    RunSpec.parse({
+      feature: "checkout",
+      scenarios: [{ id: "SC-001", requirement: "REQ-001", title: "charges a card", level: "unit", priority: "P0", oracle: "returns 200" }],
+      ...over,
+    });
+
+  it("names the checks the repository already runs, so the scaffold matches them", () => {
+    const p = specPrompt("# Build a checkout", "src/app.ts", ["npm test", "npm run lint"]);
+    expect(p).toContain("The checks this repository already runs");
+    expect(p).toContain("- npm test");
+  });
+
+  it("says nothing about checks when the repository declares none", () => {
+    expect(specPrompt("# Build a checkout", "src/app.ts")).not.toContain("The checks this repository already runs");
+  });
+
+  /**
+   * The link that turns the specification from a document into a plan: without
+   * it a task's "done" is still a sentence an agent adjudicates.
+   */
+  it("hands the planner the scenarios and tells it to claim every one", () => {
+    const block = specPlanBlock(spec());
+    expect(block).toContain("- SC-001 [P0/unit] charges a card (REQ-001)");
+    expect(block).toContain("a scenario no task claims is a promise nobody was asked to keep");
+  });
+
+  it("falls back to the oracle for a scenario nobody titled, and omits an unlinked requirement", () => {
+    const block = specPlanBlock(spec({ scenarios: [{ id: "SC-002", title: "", oracle: "the row is written", level: "unit", priority: "P1" }] }));
+    const line = block.split("\n").find((l) => l.startsWith("- SC-002"))!;
+    // The oracle stands in for the title, and no requirement is named because
+    // this scenario is not linked to one.
+    expect(line).toBe("- SC-002 [P1/unit] the row is written");
+  });
+
+  /**
+   * A blocked scenario is waiting on a question nobody answered. Planning
+   * against it would put a task on the board for work that cannot be specified.
+   */
+  it("says nothing at all when there is no runnable scenario to plan against", () => {
+    expect(specPlanBlock(RunSpec.parse({}))).toBe("");
+    expect(specPlanBlock(spec({ scenarios: [{ id: "SC-001", blocked: true, level: "unit", priority: "P0" }] }))).toBe("");
+  });
+
+  it("gives the agent the operator's answers verbatim, and tells it not to guess the rest", () => {
+    const p = specAnswersPrompt([{ question: "Real Stripe, or sandbox?", answer: "sandbox" }]);
+    expect(p).toContain("Q: Real Stripe, or sandbox?");
+    expect(p).toContain("A: sandbox");
+    expect(p).toContain("do not fill a remaining gap with a guess");
   });
 });

@@ -144,6 +144,13 @@ export const ModelRoutingShape = z.object({
    * advisory prose the worker can ignore, not a verdict that gates anything.
    */
   skillsmith: z.string().default("claude-sonnet-5"),
+  /**
+   * The specification is the standard everything downstream is judged against,
+   * and it is written once per run from a brief nobody has built against yet —
+   * which is the hardest reading task in the run and the cheapest place to be
+   * wrong expensively. Opus, for the same reason the planner is.
+   */
+  spec: z.string().default("claude-opus-5"),
 });
 
 /**
@@ -596,6 +603,40 @@ const UI_WHEN =
   "mobile|ios|android|tablet|touch targets?|safe areas?" +
   ")\\b";
 
+/**
+ * The specification phase, and the gate it feeds.
+ *
+ * `gateRounds` mirrors `intentFixRounds` and the CI gate: a red scenario is
+ * work, not a report, so the run queues fixes and goes back rather than asking
+ * a person. It only reaches the operator once the rounds are spent — which is
+ * the difference between a gate that closes a loop and one that interrupts.
+ */
+export const SpecConfig = z.object({
+  enabled: z.boolean().default(true),
+  /**
+   * How many times a red acceptance gate may send the run back to work before
+   * it escalates. Zero reports the failure and lets the run finish, which is
+   * the advisory behaviour `planIntentCheck` has.
+   */
+  gateRounds: z.number().int().min(0).max(5).default(2),
+  /**
+   * Ask the operator the questions the specification could not answer from the
+   * brief, before the planner sees it.
+   *
+   * The whole reason the specification is written at intake rather than after
+   * planning. Run 40da9337 spent 37 hours and $773 shipping six of seven
+   * integrations as fail-closed stubs because it planned past "real vendor
+   * accounts, sandbox adapters, or fakes only?" — a question `prd-to-tdd`
+   * refuses to answer for itself and records instead.
+   */
+  askOpenQuestions: z.boolean().default(true),
+  /** Wall-clock for the spec session; it reads the repo and writes a test suite. */
+  maxTurns: z.number().int().min(20).max(400).default(140),
+  /** How long the scenario suite may run at the acceptance gate, in minutes. */
+  suiteTimeoutMinutes: z.number().int().min(1).max(120).default(20),
+});
+export type SpecConfig = z.infer<typeof SpecConfig>;
+
 export const RunConfig = z.object({
   // PRD §11.5: default 3. Independent DAG tasks run concurrently, each in its
   // own worktree; runs recorded before the parallel scheduler keep whatever
@@ -720,6 +761,24 @@ export const RunConfig = z.object({
    * thing standing between a hollow plan and a run that faithfully builds it.
    */
   planIntentCheck: z.boolean().default(true),
+  /**
+   * Turn the brief into an executable specification before planning, and hold
+   * the merged run to it.
+   *
+   * Every gate before this one is prose judged by prose: the planner writes
+   * acceptance criteria as sentences, QA reads a diff and decides whether the
+   * sentences are satisfied, and the intent check reads the merged whole and
+   * decides whether it matches. They share a failure mode — agreeing with the
+   * code because they misread the requirement in the same direction it did —
+   * and run da8325bd is what it looks like: one file of twenty-one changed,
+   * QA correctly passing it against a criterion that had genuinely been met.
+   *
+   * A scenario derived from the brief before any code existed cannot make that
+   * mistake. On by default, and honest when it cannot run: a repo with no test
+   * framework produces a specification with no runnable scenario, which is
+   * reported as unproven rather than passed.
+   */
+  spec: SpecConfig.default({}),
   skillsDirs: z.array(z.string()).default([]),
   /**
    * Let the harness write a skill for itself when a task matches nothing.
@@ -847,7 +906,11 @@ export const RunConfig = z.object({
    */
   roleSkills: z
     .record(z.string(), z.array(z.string()))
-    .default({ intake: ["product-manager"], planner: ["product-manager"] }),
+    // `spec` is routed rather than left to scoring: the specification agent
+    // without `prd-to-tdd` is an agent inventing its own idea of what a
+    // scenario is, and the whole point of the phase is that the standard is not
+    // improvised. The other two are advisory — they score well anyway.
+    .default({ intake: ["product-manager"], planner: ["product-manager"], spec: ["prd-to-tdd"] }),
   githubRepo: z.string().optional(),
   /**
    * The branch the run started from. Component PRs target this, not the run's

@@ -98,3 +98,72 @@ suite("the run.ci_retry feed line", () => {
     expect(text).toBe("could not re-run the failed checks on PR #834 — treating the failure as real");
   });
 });
+
+/**
+ * The two events the specification phase writes. Without a case each, the
+ * feed's default renders them as the bare string "run.acceptance_verdict" —
+ * which is the one moment in the run where the operator most needs to be told
+ * which promise broke, spent on telling them an event type exists.
+ */
+suite("the specification feed lines", () => {
+  it("says what the specification actually contains", () => {
+    const describeEv = extractDescribe();
+    const [kind, who, text] = describeEv({
+      type: "run.spec_ready",
+      runId: "r1",
+      spec: { requirements: [{ id: "REQ-001" }, { id: "REQ-002" }], scenarios: [{ id: "SC-001" }], openQuestions: [] },
+      ts: 1,
+    });
+    expect(kind).toBe("state");
+    expect(who).toBe("spec");
+    expect(text).toBe("specification ready — 2 requirement(s), 1 scenario(s)");
+  });
+
+  it("counts the open questions when the brief left some unanswered", () => {
+    const describeEv = extractDescribe();
+    const [, , text] = describeEv({
+      type: "run.spec_ready",
+      runId: "r1",
+      spec: { requirements: [{ id: "REQ-001" }], scenarios: [], openQuestions: [{ id: "OQ-1" }, { id: "OQ-2" }] },
+      ts: 1,
+    });
+    expect(text).toBe("specification ready — 1 requirement(s), 0 scenario(s), 2 open question(s)");
+  });
+
+  /**
+   * A red gate is the run telling the operator it has not kept a promise, so it
+   * is coloured like a failure rather than like a state change.
+   */
+  it("names the failing scenarios, and colours a red gate as an error", () => {
+    const describeEv = extractDescribe();
+    const [kind, who, text] = describeEv({
+      type: "run.acceptance_verdict",
+      runId: "r1",
+      passed: false,
+      failing: ["SC-002"],
+      named: true,
+      blocked: [],
+      line: "1 of 2 gating scenario(s) failing: SC-002",
+      ts: 1,
+    });
+    expect(kind).toBe("error");
+    expect(who).toBe("spec");
+    expect(text).toBe("acceptance: 1 of 2 gating scenario(s) failing: SC-002");
+  });
+
+  it("colours a green gate as an ordinary state line", () => {
+    const describeEv = extractDescribe();
+    const [kind, , text] = describeEv({
+      type: "run.acceptance_verdict",
+      runId: "r1",
+      passed: true,
+      failing: [],
+      named: true,
+      blocked: [],
+      line: "2 gating scenario(s) green",
+      ts: 1,
+    });
+    expect(kind).toBe("state");
+    expect(text).toBe("acceptance: 2 gating scenario(s) green");
+  });
+});

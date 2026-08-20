@@ -804,6 +804,15 @@ function describe(ev) {
       return ["git", ev.taskId, "PR #" + ev.prNumber + " opened \\u2014 yours to merge"];
     case "skills.injected":
       return ["tool", ev.taskId, "skills" + (ev.role ? " \\u2192 " + ev.role : "") + ": " + ev.skills.map((s) => s.name + " (" + s.mode + ")").join(", ")];
+    case "run.spec_ready":
+      return [
+        "state",
+        "spec",
+        "specification ready \\u2014 " + ev.spec.requirements.length + " requirement(s), " + ev.spec.scenarios.length + " scenario(s)" +
+          (ev.spec.openQuestions.length ? ", " + ev.spec.openQuestions.length + " open question(s)" : ""),
+      ];
+    case "run.acceptance_verdict":
+      return [ev.passed ? "state" : "error", "spec", "acceptance: " + ev.line];
     case "skills.forged":
       return ["tool", ev.taskId, ev.action + " skill \\u201c" + ev.name + "\\u201d (~" + ev.tokensApprox + " tokens) \\u2014 " + ev.path];
     default:
