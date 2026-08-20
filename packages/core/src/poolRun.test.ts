@@ -716,6 +716,10 @@ describe("sweeping the worktree when a session ends", () => {
       sessionId: res.sessionId,
       text: "killed 2 processes left running in this worktree: 4123 node /very/long/path/to/vitest --watch (SIGKILL); 4124 docker compose up (SIGTERM)",
     });
+    // Returned as well as logged: this session ended cleanly, so what it left
+    // running is the job it was waiting on, and only the caller can tell that
+    // the branch came back empty because of it.
+    expect(res.abandoned).toEqual(["node /very/long/path/to/vitest --watch", "docker compose up"]);
   });
 
   it("uses the singular for one process", async () => {
@@ -730,25 +734,30 @@ describe("sweeping the worktree when a session ends", () => {
   it("says nothing when there was nothing to kill", async () => {
     scriptedSdk([result()]);
 
-    await pool.run(spec({ reapOnEnd: true }));
+    const res = await pool.run(spec({ reapOnEnd: true }));
 
     expect(typed("agent.log")).toHaveLength(0);
+    expect(res.abandoned).toEqual([]);
   });
 
   it("never sweeps a directory it was not told to", async () => {
     scriptedSdk([result()]);
 
-    await pool.run(spec());
+    const res = await pool.run(spec());
 
     // The repo itself is the operator's working directory, not the harness's.
     expect(reapUnderMock).not.toHaveBeenCalled();
+    expect(res.abandoned).toEqual([]);
   });
 
   it("does not fail a finished session because the sweep failed", async () => {
     scriptedSdk([result()]);
     reapUnderMock.mockRejectedValue(new Error("ps: command not found"));
 
-    await expect(pool.run(spec({ reapOnEnd: true }))).resolves.toMatchObject({ outcome: "done" });
+    // Nothing rather than an unknown: a sweep that could not run is not
+    // evidence that the session abandoned a job, and reporting one would send
+    // the next attempt an explanation of an empty branch that never happened.
+    await expect(pool.run(spec({ reapOnEnd: true }))).resolves.toMatchObject({ outcome: "done", abandoned: [] });
   });
 
   it("still sweeps after a session that crashed", async () => {

@@ -8,6 +8,7 @@ import {
   demoEvidenceReaskPrompt,
   demoSystemPrompt,
   emptyBranchPrompt,
+  abandonedJobPrompt,
   extractJson,
   plannerBreakdownSystemPrompt,
   qaSystemPrompt,
@@ -17,6 +18,7 @@ import {
   specPlanBlock,
   specPrompt,
 } from "./prompts.js";
+import { BASH_TIMEOUT_MS } from "./limits.js";
 
 const fence = "```";
 
@@ -342,7 +344,7 @@ describe("what the advisor is told about the repository", () => {
     dependsOn: [], state: "WORKING" as const, branch: null, worktreePath: null,
     githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0,
     assignedSkills: [], errorSummary: null, touchedPaths: [], completionProbe: "", unverified: [], scenarioIds: [],
-    emptyDeliveries: 0, conflictFixes: 0, estimatedSize: "M" as const,
+    emptyDeliveries: 0, conflictFixes: 0, abandonedJobs: 0, estimatedSize: "M" as const,
   };
 
   it("names the commands the repository actually checks a task with", () => {
@@ -473,6 +475,45 @@ describe("telling a worker its branch delivers nothing", () => {
   it("counts the commits that changed nothing, in the singular and the plural", () => {
     expect(emptyBranchPrompt("b", 1)).toContain("it has 1 commit, and together they change no files.");
     expect(emptyBranchPrompt("b", 3)).toContain("it has 3 commits, and together they change no files.");
+  });
+});
+
+/**
+ * The third mistake, and the only one the harness caused: the worker did commit
+ * nothing, because the command that would have produced something was killed
+ * when its turn ended. Sending it to `git stash list` is advice about work that
+ * does not exist.
+ */
+describe("telling a worker its own job was killed when its session ended", () => {
+  it("names the command, because the worker never saw it die", () => {
+    const p = abandonedJobPrompt("harness/r/task-a", ["bash bench/scripts/m1-live-smoke.sh > /tmp/out.log 2>&1"]);
+
+    expect(p).toContain("`harness/r/task-a` delivers nothing, and this time the harness knows why");
+    expect(p).toContain("- `bash bench/scripts/m1-live-smoke.sh > /tmp/out.log 2>&1`");
+    expect(p).toContain("a command you had started was still running");
+    expect(p).toContain("this was killed part-way through");
+    expect(p).toContain("Whatever it would have produced does not exist");
+    // The advice the other prompt gives is exactly wrong here.
+    expect(p).not.toContain("git stash list");
+  });
+
+  it("uses the plural when the session left more than one running", () => {
+    const p = abandonedJobPrompt("b", ["pnpm build", "docker run --rm x"]);
+
+    expect(p).toContain("commands you had started were still running");
+    expect(p).toContain("these were killed part-way through");
+    expect(p).toContain("Whatever they would have produced does not exist");
+  });
+
+  it("names the session's real Bash timeout rather than a number that can drift from it", () => {
+    expect(abandonedJobPrompt("b", ["x"])).toContain(`already ${Math.round(BASH_TIMEOUT_MS / 60_000)} minutes`);
+  });
+
+  it("truncates a command too long to be worth quoting in full", () => {
+    const p = abandonedJobPrompt("b", [`docker run ${"x".repeat(400)}`]);
+
+    expect(p).toContain(`docker run ${"x".repeat(149)}\``);
+    expect(p).not.toContain("x".repeat(161));
   });
 });
 

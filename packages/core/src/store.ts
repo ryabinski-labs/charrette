@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   completionProbe TEXT NOT NULL DEFAULT '', unverified TEXT NOT NULL DEFAULT '[]',
   scenarioIds TEXT NOT NULL DEFAULT '[]',
   emptyDeliveries INTEGER NOT NULL DEFAULT 0, conflictFixes INTEGER NOT NULL DEFAULT 0,
+  abandonedJobs INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (runId, id)
 );
 CREATE TABLE IF NOT EXISTS sessions (
@@ -152,6 +153,30 @@ export interface TaskRow {
    */
   emptyDeliveries: number;
   conflictFixes: number;
+  /**
+   * Sessions that ended while a process they had started was still running.
+   *
+   * Its own counter and not part of `emptyDeliveries` because it is a
+   * different failure with a different remedy. A worker told to redirect a long
+   * command — `cmd > log 2>&1 &`, which is what the background-shell hook
+   * recommends — and then to poll for it can finish its turn while the command
+   * is still going. The sweep kills what it left running, the branch is empty
+   * because the evidence it was waiting for never arrived, and the generic
+   * empty-branch advice ("your work is here somewhere, go and find it") is
+   * false: there was no work yet. Counted separately so those attempts can be
+   * answered with the instruction that actually helps and are not spent out of
+   * the empty-delivery budget that parks the task.
+   *
+   * Persisted for the same reason `emptyDeliveries` is: a counter that lives
+   * in a variable is reset by every restart of the harness process. Unlike
+   * every other counter on this row it is never reset — not by an operator's
+   * answer, not by reviving a parked task. Those resets exist because an
+   * operator has changed the conditions the old failures happened under, and
+   * this failure has no conditions to change: the remedy is one instruction
+   * ("run it in the foreground, commit as you go"), and whether it has already
+   * been given twice is not a question anybody's guidance re-opens.
+   */
+  abandonedJobs: number;
   /** The planner's size guess, and the only input a pre-run cost estimate has. */
   estimatedSize: "S" | "M" | "L";
 }
@@ -225,6 +250,9 @@ export class Store {
         // that died with the process — see `TaskRow.emptyDeliveries`.
         emptyDeliveries: "INTEGER NOT NULL DEFAULT 0",
         conflictFixes: "INTEGER NOT NULL DEFAULT 0",
+        // Zero is honest for a run whose sessions were swept before anything
+        // distinguished an orphan from a job its own session walked away from.
+        abandonedJobs: "INTEGER NOT NULL DEFAULT 0",
       },
       // Empty rather than 'unknown': the sessions of a run that predates this
       // column are not a build the postmortem should name, and the report says
@@ -965,14 +993,14 @@ export class Store {
 
   // `unverified` is omitted: it is QA's answer, so a task being planned has no
   // value for it, and the column's `'[]'` default is that absence spelled out.
-  // `emptyDeliveries` and `conflictFixes` are omitted for the same reason —
-  // they count what has gone wrong on a task, and nothing has yet.
+  // `emptyDeliveries`, `conflictFixes` and `abandonedJobs` are omitted for the
+  // same reason — they count what has gone wrong on a task, and nothing has yet.
   // `scenarioIds` is optional rather than omitted: the planner does set it, and
   // a run with no specification simply has none — same absence, same default.
   insertTasks(
     runId: string,
     epics: { id: string; title: string }[],
-    tasks: (Omit<TaskRow, "runId" | "unverified" | "scenarioIds" | "emptyDeliveries" | "conflictFixes"> & { scenarioIds?: string[] })[]
+    tasks: (Omit<TaskRow, "runId" | "unverified" | "scenarioIds" | "emptyDeliveries" | "conflictFixes" | "abandonedJobs"> & { scenarioIds?: string[] })[]
   ): void {
     const insEpic = this.db.prepare("INSERT OR REPLACE INTO epics (id, runId, title, ord) VALUES (?,?,?,?)");
     const insTask = this.db.prepare(
@@ -1096,7 +1124,7 @@ export class Store {
   updateTask(
     runId: string,
     taskId: string,
-    patch: Partial<Pick<TaskRow, "branch" | "worktreePath" | "githubIssueNumber" | "prNumber" | "qaIterations" | "respawns" | "errorSummary" | "assignedSkills" | "unverified" | "emptyDeliveries" | "conflictFixes">>
+    patch: Partial<Pick<TaskRow, "branch" | "worktreePath" | "githubIssueNumber" | "prNumber" | "qaIterations" | "respawns" | "errorSummary" | "assignedSkills" | "unverified" | "emptyDeliveries" | "conflictFixes" | "abandonedJobs">>
   ): void {
     const sets: string[] = [];
     const vals: (string | number | null)[] = [];
