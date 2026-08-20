@@ -209,7 +209,7 @@ describe("a sweep that cannot run at all", () => {
     // gets, and it is the one number here nobody passes explicitly.
     const started = Date.now();
     await expect(reapUnder("/tmp/worktree")).resolves.toEqual([
-      { pid: gone, command: "npm test", signal: "SIGTERM" },
+      { pid: gone, command: "npm test", signal: "SIGTERM", tooling: false },
     ]);
     expect(Date.now() - started).toBeGreaterThanOrEqual(1900);
   });

@@ -589,7 +589,7 @@ describe("counting things the operator reads", () => {
     });
     for (const to of ["PLANNING", "PLAN_REVIEW", "EXECUTING", "BUDGET_HOLD"] as const) store.transitionRun("run1", to);
     const reaper = await import("./reaper.js");
-    vi.spyOn(reaper, "reapUnder").mockResolvedValue([{ pid: 1, command: "sleep 99", signal: "SIGKILL" }]);
+    vi.spyOn(reaper, "reapUnder").mockResolvedValue([{ pid: 1, command: "sleep 99", signal: "SIGKILL", tooling: false }]);
 
     await controller.resume("run1");
 

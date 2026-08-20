@@ -482,8 +482,8 @@ describe("clearing the ground a resume is about to work on", () => {
     const runId = seedRun(store, "BUDGET_HOLD");
     const reaper = await import("./reaper.js");
     vi.spyOn(reaper, "reapUnder").mockResolvedValue([
-      { pid: 4123, command: "node vitest --watch", signal: "SIGKILL" },
-      { pid: 4124, command: "docker compose up", signal: "SIGTERM" },
+      { pid: 4123, command: "node vitest --watch", signal: "SIGKILL", tooling: false },
+      { pid: 4124, command: "docker compose up", signal: "SIGTERM", tooling: false },
     ]);
 
     await controller.resume(runId);

@@ -876,7 +876,7 @@ describe("what the operator decides", () => {
  */
 describe("giving the machine back at a pit stop", () => {
   /** What the sweep found, without needing a container runtime to find it. */
-  const swept = async (stacks: string[], processes: { pid: number; command: string; signal: "SIGKILL" | "SIGTERM" }[]) => {
+  const swept = async (stacks: string[], processes: { pid: number; command: string; signal: "SIGKILL" | "SIGTERM"; tooling: boolean }[]) => {
     const isolation = await import("./isolation.js");
     const reaper = await import("./reaper.js");
     vi.spyOn(isolation, "composeDown").mockResolvedValue(stacks);
@@ -891,7 +891,7 @@ describe("giving the machine back at a pit stop", () => {
   };
 
   it("says what it took back, in the singular when there was one of each", async () => {
-    const lines = await swept(["podman:harness-sign-in-0001"], [{ pid: 4131, command: "node server.js", signal: "SIGKILL" }]);
+    const lines = await swept(["podman:harness-sign-in-0001"], [{ pid: 4131, command: "node server.js", signal: "SIGKILL", tooling: false }]);
 
     expect(lines[0]!.text).toBe(
       "swept after pit stop 1: 1 container stack still up and brought down (podman:harness-sign-in-0001); 1 orphaned process killed"
@@ -911,8 +911,8 @@ describe("giving the machine back at a pit stop", () => {
 
   it("reports processes alone when no container was ever started", async () => {
     const lines = await swept([], [
-      { pid: 1, command: "pnpm dev", signal: "SIGKILL" },
-      { pid: 2, command: "postgres", signal: "SIGKILL" },
+      { pid: 1, command: "pnpm dev", signal: "SIGKILL", tooling: false },
+      { pid: 2, command: "postgres", signal: "SIGKILL", tooling: false },
     ]);
 
     expect(lines[0]!.text).toBe("swept after pit stop 1: 2 orphaned processes killed");

@@ -125,6 +125,13 @@ export interface Reaped {
   command: string;
   /** The signal it actually died to: SIGKILL means it ignored the polite one. */
   signal: "SIGTERM" | "SIGKILL";
+  /**
+   * True when this was the session's own tooling rather than work the session
+   * started — an MCP server the SDK launched on its behalf. Killed either way;
+   * the flag only decides what the kill is allowed to explain. See
+   * `toolingMarkers`.
+   */
+  tooling: boolean;
 }
 
 function alive(pid: number): boolean {
@@ -144,7 +151,7 @@ function alive(pid: number): boolean {
  * throws: a sweep that fails is a sweep that found nothing, and no session
  * result may depend on it.
  */
-export async function reapUnder(root: string, opts: { graceMs?: number } = {}): Promise<Reaped[]> {
+export async function reapUnder(root: string, opts: { graceMs?: number; tooling?: string[] } = {}): Promise<Reaped[]> {
   let candidates: Proc[];
   try {
     candidates = await processesUnder(root);
@@ -163,18 +170,90 @@ export async function reapUnder(root: string, opts: { graceMs?: number } = {}): 
   const grace = opts.graceMs ?? 2000;
   await new Promise((resolve) => setTimeout(resolve, grace));
 
+  const markers = opts.tooling ?? [];
+  const isTooling = (command: string): boolean => markers.some((m) => command.includes(m));
+
   const reaped: Reaped[] = [];
   for (const p of candidates) {
     if (!alive(p.pid)) {
-      reaped.push({ pid: p.pid, command: p.command, signal: "SIGTERM" });
+      reaped.push({ pid: p.pid, command: p.command, signal: "SIGTERM", tooling: isTooling(p.command) });
       continue;
     }
     try {
       process.kill(p.pid, "SIGKILL");
-      reaped.push({ pid: p.pid, command: p.command, signal: "SIGKILL" });
+      reaped.push({ pid: p.pid, command: p.command, signal: "SIGKILL", tooling: isTooling(p.command) });
     } catch {
       // Survived both signals and cannot be signalled: not ours. Leave it.
     }
   }
   return reaped;
+}
+
+/**
+ * Runtimes that launch someone else's program. Named because the marker rules
+ * below cannot tell `python3` the MCP launcher from `python3` the job an agent
+ * started — the distinguishing token is always the thing being launched, never
+ * the thing launching it.
+ */
+const RUNTIMES = new Set([
+  "npx", "node", "nodejs", "bun", "bunx", "deno", "python", "python3", "py", "uv", "uvx",
+  "ruby", "perl", "php", "java", "dotnet", "sh", "bash", "zsh", "env", "docker", "podman", "pwsh", "powershell",
+]);
+
+/**
+ * The substrings that identify a session's own tooling in a process listing.
+ *
+ * Every agent session runs with `settingSources: ["user"]`, so the SDK starts
+ * the operator's MCP servers inside the session — with the session's cwd, which
+ * is the worktree, and no controlling terminal. That is precisely the shape the
+ * sweep hunts for, so `chrome-devtools` (`npx -y chrome-devtools-mcp@latest`)
+ * was killed and reported as abandoned work at the end of every single session,
+ * including ones that never ran a command at all. In run bc691359 a
+ * 19-second session that was blocked on its first tool call and started nothing
+ * spent the second and last of `m1-live-block-witness`'s abandoned-job retries
+ * on it.
+ *
+ * The markers are read out of the same declarations the SDK launched the servers
+ * from rather than guessed, so this is not a denylist of things that look like
+ * tooling — it is the list of what this session was actually given. A
+ * declaration that yields no usable marker simply contributes nothing, and its
+ * server goes back to being reported as work: the direction that costs a retry
+ * and a confusing message, not one that hides a real job.
+ */
+export function toolingMarkers(...declarations: unknown[]): string[] {
+  const markers = new Set<string>();
+  for (const decl of declarations) {
+    if (!decl || typeof decl !== "object") continue;
+    for (const server of Object.values(decl as Record<string, unknown>)) {
+      if (!server || typeof server !== "object") continue;
+      const { command, args } = server as { command?: unknown; args?: unknown };
+      const tokens = [command, ...(Array.isArray(args) ? args : [])];
+      for (const token of tokens) {
+        const m = typeof token === "string" ? marker(token) : null;
+        if (m) markers.add(m);
+      }
+    }
+  }
+  return [...markers];
+}
+
+/**
+ * One argument reduced to what would still identify it in `ps`, or nothing.
+ *
+ * Conservative on purpose: a token that is short, or a bare word with no path
+ * or package punctuation in it, is thrown away rather than allowed to match
+ * half the process table. The cost of dropping one is a tooling process
+ * reported as work — today's behaviour. The cost of keeping a loose one is a
+ * killed build reported as tooling, which is silence about the very thing the
+ * abandoned-job path exists to explain.
+ */
+function marker(token: string): string | null {
+  if (!token || token.startsWith("-")) return null;
+  // `pkg@latest` and `@scope/pkg@1.2.3` run from a path that has no version in
+  // it; `@scope/pkg` unversioned has its only `@` at the front and keeps it.
+  const at = token.lastIndexOf("@");
+  const stripped = at > 0 ? token.slice(0, at) : token;
+  if (stripped.length < 6 || !/[/\-_.]/.test(stripped)) return null;
+  if (RUNTIMES.has(path.basename(stripped).toLowerCase())) return null;
+  return stripped;
 }
