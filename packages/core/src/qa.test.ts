@@ -1,3 +1,4 @@
+import { rmSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { confirmFailures, failureSignatures, runDeterministicChecks, splitInheritedFailures, type CheckResult } from "./qa.js";
 
@@ -123,9 +124,9 @@ describe("asking a failing check a second time", () => {
 
   it("does not run anything when there was nothing to confirm", async () => {
     // The common case by a wide margin: a green tree must cost no second pass.
-    const confirmed = await confirmFailures("/tmp", { failures: [], inherited: [{ command: "x", signatures: [] }] }, green);
+    const confirmed = await confirmFailures("/tmp", { failures: [], inherited: [{ command: "x", signatures: [] }], timedOut: [] }, green);
 
-    expect(confirmed).toEqual({ failures: [], inherited: [{ command: "x", signatures: [] }], flaky: [], excused: [], flakySignatures: [] });
+    expect(confirmed).toEqual({ failures: [], inherited: [{ command: "x", signatures: [] }], timedOut: [], flaky: [], excused: [], flakySignatures: [] });
   });
 
   it("moves a command the re-run shows as the base's own into inherited, not flaky", async () => {
@@ -229,5 +230,73 @@ describe("excusing the failures the repository already knows are weather", () =>
     expect(confirmed.excused).toEqual([]);
     expect(confirmed.failures).toHaveLength(1);
     expect(confirmed.failures[0]!.introduced).toEqual(["✖ mine"]);
+  });
+});
+
+describe("a check the harness killed is not a verdict", () => {
+  const green: CheckResult = { ok: true, failures: [] };
+  // 0.01 minutes = 600ms. The unit is minutes because that is what an operator
+  // configures; the runner keeps it in milliseconds so a test can afford one.
+  const tooLong = "echo 'Running tests/slow.rs (target/debug/deps/slow-9d1)'; sleep 30";
+
+  it("marks a command it killed at the timeout, and says so in the output", async () => {
+    const result = await runDeterministicChecks("/tmp", [tooLong], 0.01);
+
+    expect(result.ok).toBe(false);
+    expect(result.failures[0]!.timedOut).toBe(true);
+    expect(result.failures[0]!.output).toContain("killed this command after 0.01 minute(s)");
+    // The tail is kept — it is the only clue to where the check got to — but
+    // introduced by a sentence saying it decided nothing.
+    expect(result.failures[0]!.output).toContain("nothing below is a verdict");
+  });
+
+  it("leaves an ordinary failure unmarked", async () => {
+    const result = await runDeterministicChecks("/tmp", ["echo '✖ real' >&2; false"], 1);
+
+    expect(result.failures[0]!.timedOut).toBeUndefined();
+  });
+
+  it("does not charge a killed check to the task, and does not re-run it", async () => {
+    // The bug this exists for: run bc691359's `cargo test --workspace` passes
+    // in 21 minutes, was killed at 10, and the kill was reported as a failing
+    // test. Seven gates went into looking for a test that was never red.
+    const split = splitInheritedFailures(await runDeterministicChecks("/tmp", [tooLong], 0.01), green);
+
+    expect(split.failures).toEqual([]);
+    expect(split.inherited).toEqual([]);
+    expect(split.timedOut.map((t) => t.command)).toEqual([tooLong]);
+
+    // A second pass would cost another timeout and settle nothing, so there is
+    // nothing to confirm and the kill still arrives at the caller.
+    const started = Date.now();
+    const confirmed = await confirmFailures("/tmp", split, green);
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(confirmed.failures).toEqual([]);
+    expect(confirmed.timedOut.map((t) => t.command)).toEqual([tooLong]);
+  });
+
+  it("does not compare a real failure against a base whose check was killed", async () => {
+    // A kill on the base is not "the base is red here" — comparing its tail to
+    // the worktree's asks whether two interruptions interrupted the same
+    // sentence, and the answer is always no, so the task gets charged.
+    const command = "echo '✖ real' >&2; false";
+    const base = await runDeterministicChecks("/tmp", [tooLong], 0.01);
+    const split = splitInheritedFailures(check(command, "✖ real"), base);
+
+    expect(split.failures.map((f) => f.introduced)).toEqual([["✖ real"]]);
+  });
+
+  it("carries up a kill that only happened on the re-run", async () => {
+    // Ran to a verdict once and was killed the second time: the first run has
+    // no second opinion to be confirmed against, so it is not charged either.
+    const marker = "/tmp/qa-rerun-kill-marker";
+    rmSync(marker, { force: true });
+    const flakeThenHang = `test -e ${marker} && exec sleep 30; : > ${marker}; echo '✖ real' >&2; false`;
+    const first = await runDeterministicChecks("/tmp", [flakeThenHang], 1);
+    const confirmed = await confirmFailures("/tmp", splitInheritedFailures(first, green), green, new Set(), 0.01);
+    rmSync(marker, { force: true });
+
+    expect(confirmed.failures).toEqual([]);
+    expect(confirmed.timedOut.map((t) => t.command)).toEqual([flakeThenHang]);
   });
 });

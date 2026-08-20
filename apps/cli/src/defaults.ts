@@ -222,6 +222,8 @@ export const FileConfig = z
     githubRepo: z.string().optional(),
     prMode: z.enum(["single", "per-task"]).optional(),
     deterministicChecks: z.array(z.string()).optional(),
+    /** Ceiling on any one deterministic check. Distinct from `checkTimeoutMinutes`, which is how long to wait on the repo's own CI. */
+    deterministicCheckTimeoutMinutes: z.number().positive().max(240).optional(),
     waitForChecks: z.boolean().optional(),
     checkTimeoutMinutes: z.number().int().min(1).max(120).optional(),
     prodUrl: z.string().optional(),

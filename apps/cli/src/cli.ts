@@ -520,6 +520,7 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
     githubRepo: github.slug ?? file.githubRepo,
     prMode: file.prMode,
     deterministicChecks: checks,
+    deterministicCheckTimeoutMinutes: file.deterministicCheckTimeoutMinutes,
     waitForChecks: file.waitForChecks,
     checkTimeoutMinutes: file.checkTimeoutMinutes,
     prodUrl: file.prodUrl,
@@ -733,6 +734,14 @@ export function buildProgram(): Command {
       if (existing && file.deterministicChecks && JSON.stringify(file.deterministicChecks) !== JSON.stringify(existing.config.deterministicChecks)) {
         store.patchRunConfig(runId, { deterministicChecks: file.deterministicChecks });
         process.stdout.write(`Checks updated from ${CONFIG_FILENAME}:\n${file.deterministicChecks.map((c) => `  $ ${c}`).join("\n")}\n`);
+      }
+      // A run whose checks are honestly slower than the ceiling can never be
+      // green: run bc691359 killed a 21-minute `cargo test` at 10 for six hours
+      // and charged every kill to whichever task was in flight. Raising this is
+      // the fix, and it has to reach a run already in progress to be one.
+      if (existing && file.deterministicCheckTimeoutMinutes !== undefined && file.deterministicCheckTimeoutMinutes !== existing.config.deterministicCheckTimeoutMinutes) {
+        store.patchRunConfig(runId, { deterministicCheckTimeoutMinutes: file.deterministicCheckTimeoutMinutes });
+        process.stdout.write(`Check timeout updated from ${CONFIG_FILENAME}: ${existing.config.deterministicCheckTimeoutMinutes} → ${file.deterministicCheckTimeoutMinutes} minute(s)\n`);
       }
       if (existing && file.prMode && file.prMode !== existing.config.prMode) {
         store.patchRunConfig(runId, { prMode: file.prMode });

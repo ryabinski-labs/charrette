@@ -4582,7 +4582,7 @@ export class RunController {
     // Serially: these are suites, and a pit stop that runs six of them at once
     // on the machine the operator is using is its own kind of failure.
     for (const command of willRun) {
-      const out = await runDeterministicChecks(wtPath, [command]);
+      const out = await runDeterministicChecks(wtPath, [command], this.store.getRun(runId)!.config.deterministicCheckTimeoutMinutes);
       results.set(command, { ok: out.ok, output: out.failures[0]?.output ?? "" });
     }
     if (runnable.length > willRun.length) {
@@ -5064,7 +5064,7 @@ export class RunController {
           // Same warm install the task worktrees get: without it every check
           // fails on missing dependencies and none of it means anything.
           await seedWorktreeDeps(wtPath);
-          const result = await runDeterministicChecks(wtPath, run.config.deterministicChecks);
+          const result = await runDeterministicChecks(wtPath, run.config.deterministicChecks, run.config.deterministicCheckTimeoutMinutes);
           if (!result.ok) {
             this.bus.publish({
               type: "agent.log",
@@ -5650,7 +5650,7 @@ export class RunController {
       }
 
       // Deterministic checks before QA tokens (PRD §11.1)
-      const checks = await runDeterministicChecks(wt.path, run.config.deterministicChecks);
+      const checks = await runDeterministicChecks(wt.path, run.config.deterministicChecks, run.config.deterministicCheckTimeoutMinutes);
       // Only the failures this task actually introduced are its problem. The
       // rest are the integration branch's, arriving either as the base the
       // worktree branched from or as a catch-up merge, and charging them to
@@ -5661,9 +5661,26 @@ export class RunController {
       // with itself — and a worker sent to fix it spends an iteration finding
       // nothing wrong, while the iteration it spent is what opens a gate.
       const base = checks.ok ? null : await this.baseFailures(runId);
-      const { failures, inherited, flaky, excused, flakySignatures } = checks.ok
-        ? { failures: [], inherited: [], flaky: [], excused: [], flakySignatures: [] }
-        : await confirmFailures(wt.path, splitInheritedFailures(checks, base!), base!, knownFlakySignatures(this.store));
+      const { failures, inherited, timedOut, flaky, excused, flakySignatures } = checks.ok
+        ? { failures: [], inherited: [], timedOut: [], flaky: [], excused: [], flakySignatures: [] }
+        : await confirmFailures(wt.path, splitInheritedFailures(checks, base!), base!, knownFlakySignatures(this.store), run.config.deterministicCheckTimeoutMinutes);
+      if (timedOut.length) {
+        // The check never reached a verdict, so it cannot be one. Charging a
+        // kill sends the worker to find a failing test that does not exist —
+        // run bc691359 spent six hours and seven gates on exactly that — and
+        // the tail it would be shown is whatever the runner was mid-sentence
+        // on when the signal arrived. Say so, to the operator, whose
+        // configuration is the only place this is fixable.
+        const minutes = run.config.deterministicCheckTimeoutMinutes;
+        this.bus.publish({
+          type: "agent.log",
+          runId,
+          taskId,
+          sessionId: workerSession ?? taskId,
+          text: `${timedOut.map((t) => t.command).join(", ")} did not finish inside ${minutes} minute(s) and was killed — not a test failure and not charged to this task. Raise deterministicCheckTimeoutMinutes above the check's honest wall clock, or split it.`,
+          ts: Date.now(),
+        });
+      }
       if (excused.length) {
         // Failed twice, but only with failures this repository has already
         // watched come and go. Charging these is how a gate reopens three
@@ -5741,7 +5758,7 @@ export class RunController {
       // specifically, and the scenarios are already checked at the gate.
       const probeCommand = task.completionProbe || this.scenarioProbe(runId, task);
       if (probeCommand) {
-        const probe = await runDeterministicChecks(wt.path, [probeCommand]);
+        const probe = await runDeterministicChecks(wt.path, [probeCommand], run.config.deterministicCheckTimeoutMinutes);
         // The probe has stopped standing between this task and QA — because it
         // passed, or because the escalation it caused ended with it rewritten.
         let settled = probe.ok;
@@ -5783,7 +5800,7 @@ export class RunController {
             // a worker to satisfy a bar that has already moved is the same
             // wasted round the gate was opened to stop.
             const amended = this.store.getTask(runId, taskId)!.completionProbe;
-            if (amended !== task.completionProbe && (!amended || (await runDeterministicChecks(wt.path, [amended])).ok)) {
+            if (amended !== task.completionProbe && (!amended || (await runDeterministicChecks(wt.path, [amended], run.config.deterministicCheckTimeoutMinutes)).ok)) {
               this.bus.publish({
                 type: "agent.log",
                 runId,
