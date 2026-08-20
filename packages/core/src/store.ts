@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   touchedPaths TEXT NOT NULL DEFAULT '[]', estimatedSize TEXT NOT NULL DEFAULT 'M',
   completionProbe TEXT NOT NULL DEFAULT '', unverified TEXT NOT NULL DEFAULT '[]',
   scenarioIds TEXT NOT NULL DEFAULT '[]',
+  emptyDeliveries INTEGER NOT NULL DEFAULT 0, conflictFixes INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (runId, id)
 );
 CREATE TABLE IF NOT EXISTS sessions (
@@ -133,6 +134,24 @@ export interface TaskRow {
    * `PlannedTask.scenarioIds` — empty for the tasks no scenario covers.
    */
   scenarioIds: string[];
+  /**
+   * How many times this task's branch has arrived carrying nothing, and how
+   * many merges have been handed back to its worker to resolve.
+   *
+   * Persisted for one reason: the caps that read them are the only thing that
+   * ends a loop, and both used to live in a local variable inside the dispatch
+   * function. Every restart of the harness process — and this harness restarts
+   * a great deal — put them back to zero, so a task could repeat the identical
+   * failure indefinitely and each attempt would believe it was the first.
+   * `m1-exit-evidence` went round eight times in run bc691359 with its QA
+   * iteration count still reading 1.
+   *
+   * Reset where `qaIterations` is reset, and only there: an operator who has
+   * just read the failure and said what to do about it has bought the task a
+   * fresh set of attempts, which is a different thing from a machine rebooting.
+   */
+  emptyDeliveries: number;
+  conflictFixes: number;
   /** The planner's size guess, and the only input a pre-run cost estimate has. */
   estimatedSize: "S" | "M" | "L";
 }
@@ -202,6 +221,10 @@ export class Store {
         // Empty is honest for a run planned before the specification phase
         // existed: no scenario covered it, so none is claimed to.
         scenarioIds: "TEXT NOT NULL DEFAULT '[]'",
+        // Zero is honest for a run whose attempts were counted in a variable
+        // that died with the process — see `TaskRow.emptyDeliveries`.
+        emptyDeliveries: "INTEGER NOT NULL DEFAULT 0",
+        conflictFixes: "INTEGER NOT NULL DEFAULT 0",
       },
       // Empty rather than 'unknown': the sessions of a run that predates this
       // column are not a build the postmortem should name, and the report says
@@ -942,12 +965,14 @@ export class Store {
 
   // `unverified` is omitted: it is QA's answer, so a task being planned has no
   // value for it, and the column's `'[]'` default is that absence spelled out.
+  // `emptyDeliveries` and `conflictFixes` are omitted for the same reason —
+  // they count what has gone wrong on a task, and nothing has yet.
   // `scenarioIds` is optional rather than omitted: the planner does set it, and
   // a run with no specification simply has none — same absence, same default.
   insertTasks(
     runId: string,
     epics: { id: string; title: string }[],
-    tasks: (Omit<TaskRow, "runId" | "unverified" | "scenarioIds"> & { scenarioIds?: string[] })[]
+    tasks: (Omit<TaskRow, "runId" | "unverified" | "scenarioIds" | "emptyDeliveries" | "conflictFixes"> & { scenarioIds?: string[] })[]
   ): void {
     const insEpic = this.db.prepare("INSERT OR REPLACE INTO epics (id, runId, title, ord) VALUES (?,?,?,?)");
     const insTask = this.db.prepare(
@@ -1071,7 +1096,7 @@ export class Store {
   updateTask(
     runId: string,
     taskId: string,
-    patch: Partial<Pick<TaskRow, "branch" | "worktreePath" | "githubIssueNumber" | "prNumber" | "qaIterations" | "respawns" | "errorSummary" | "assignedSkills" | "unverified">>
+    patch: Partial<Pick<TaskRow, "branch" | "worktreePath" | "githubIssueNumber" | "prNumber" | "qaIterations" | "respawns" | "errorSummary" | "assignedSkills" | "unverified" | "emptyDeliveries" | "conflictFixes">>
   ): void {
     const sets: string[] = [];
     const vals: (string | number | null)[] = [];

@@ -212,6 +212,7 @@ describe("reopening a run the operator parked", () => {
       advisor: () => "",
       qa: () => QA_PASS,
     });
+    let asked = 0;
     const first = build({ repoPath: dir, pool, gates: { async resolveTaskGate() { return null; } } });
     const runId = await first.controller.startRun(
       "build a thing",
@@ -236,12 +237,13 @@ describe("reopening a run the operator parked", () => {
           return null;
         },
         async resolveTaskGate() {
+          asked++;
           return guidance;
         },
       },
       dir
     );
-    return { controller, store: first.store, runId, specs, events, failing };
+    return { controller, store: first.store, runId, specs, events, failing, dir, asked: () => asked };
   }
 
   it("hands the operator's answer to the task and starts it over with fresh iterations", async () => {
@@ -253,6 +255,30 @@ describe("reopening a run the operator parked", () => {
     const prompts = specs.filter((s) => s.role === "worker" && s.taskId === "task-b").map((s) => s.prompt);
     expect(prompts.at(-1)).toMatch(/parked \([\s\S]*\) and the operator reopened it[\s\S]*8030/);
     expect(store.getTask(runId, "task-b")!.respawns).toBe(0);
+  });
+
+  /**
+   * Run bc691359 asked the operator about `m1-exit-evidence` three times in one
+   * morning. Each answer revived a task whose branch was already on the
+   * integration branch, so it read the same empty diff and parked again. The
+   * question was never answerable; it should never have been asked.
+   */
+  it("books a parked task whose work already landed instead of asking about it", async () => {
+    const { controller, store, runId, dir, asked } = await withAParkedTask("look again");
+    // Whatever landed it, the store never heard: the branch carries real work
+    // and is already on the integration branch while the task sits parked.
+    const wt = path.join(`${dir}-wt`, runId, "task-b");
+    writeFileSync(path.join(wt, "late.txt"), "done\n");
+    execFileSync("git", ["add", "-A"], { cwd: wt, stdio: "ignore" });
+    execFileSync("git", ["-c", "user.email=w@e.invalid", "-c", "user.name=W", "commit", "-m", "late work"], { cwd: wt, stdio: "ignore" });
+    const merge = path.join(`${dir}-wt`, runId, "__integration__");
+    execFileSync("git", ["-c", "user.email=i@e.invalid", "-c", "user.name=I", "merge", "--no-ff", "--no-edit", `harness/${runId}/task-b`], { cwd: merge, stdio: "ignore" });
+
+    await controller.resume(runId);
+
+    expect(store.getTask(runId, "task-b")!.state).toBe("MERGED");
+    // The operator was not asked a question that had no answer.
+    expect(asked()).toBe(0);
   });
 
   it("leaves it parked when the operator still has nothing to add", async () => {

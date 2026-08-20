@@ -128,7 +128,13 @@ export const TASK_TRANSITIONS: Record<TaskState, TaskState[]> = {
   READY: ["WORKING", "NEEDS_HUMAN", "CANCELLED"],
   // WORKING/QA/QA_FAILED -> READY: a task found mid-flight when no agent can be
   // running it (the previous harness process died) is requeued, not abandoned.
-  WORKING: ["QA", "READY", "NEEDS_HUMAN", "CANCELLED"],
+  // WORKING -> ACCEPTED: the pre-QA gate found the branch already contained in
+  // the integration branch. Nothing is being claimed about a review here — the
+  // door exists because the work has demonstrably landed, and the alternative
+  // was the state run bc691359 sat in for six days, where the only legal moves
+  // from WORKING all led back to a worker being asked to commit a change that
+  // was already committed.
+  WORKING: ["QA", "ACCEPTED", "READY", "NEEDS_HUMAN", "CANCELLED"],
   QA: ["ACCEPTED", "QA_FAILED", "READY", "NEEDS_HUMAN", "CANCELLED"],
   QA_FAILED: ["WORKING", "READY", "NEEDS_HUMAN", "CANCELLED"],
   // ACCEPTED -> WORKING: the merge into the integration branch conflicted. The
