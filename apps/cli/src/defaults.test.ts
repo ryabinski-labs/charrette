@@ -9,7 +9,7 @@ vi.mock("node:child_process", async (importOriginal) => {
   return { ...actual, execFileSync: execFileSyncMock };
 });
 
-import { detectChecks, loadFileConfig, resolveGitHub, resolveRepoRoot } from "./defaults.js";
+import { detectChecks, loadFileConfig, resolveGitHub, resolveRepoRoot, verifyChecks } from "./defaults.js";
 
 function tmpRepo(files: Record<string, string> = {}, withGit = true): string {
   const dir = mkdtempSync(path.join(os.tmpdir(), "harness-cli-"));
@@ -57,7 +57,7 @@ describe("detectChecks", () => {
   it("builds as well as tests a Go module, since a Go test run does not compile every package", () => {
     const detected = detectChecks(tmpRepo({ "go.mod": "module example.com/api\n\ngo 1.23\n" }));
 
-    expect(detected).toEqual({ checks: ["go build ./...", "go test ./..."], source: "go.mod" });
+    expect(detected).toEqual({ checks: ["go build ./...", "go test ./..."], source: "go.mod", skipped: [] });
   });
 
   it("names why it found nothing, so the banner can say it", () => {
@@ -324,5 +324,152 @@ describe("resolveGitHub", () => {
     process.env.GITHUB_TOKEN = "ghp_supersecret";
     process.env.HARNESS_GITHUB_REPO = "acme/widgets";
     expect(resolveGitHub(tmpRepo(), undefined).source).not.toContain("ghp_supersecret");
+  });
+});
+
+const PR_WORKFLOW = (jobs: string) => `name: CI\non:\n  pull_request:\njobs:\n${jobs}`;
+
+describe("checks taken from the repository's own pipeline", () => {
+  it("prefers what CI runs over what the language implies", () => {
+    // The two are not equivalent. `Cargo.toml` implies `cargo test`; this
+    // repo's CI also refuses unformatted code and unlicensed dependencies, and
+    // those are the failures a human was reading off pull requests.
+    const repo = tmpRepo({
+      "Cargo.toml": "",
+      ".github/workflows/ci.yml": PR_WORKFLOW(
+        "  fmt:\n    steps:\n      - run: cargo fmt --all --check\n  deny:\n    steps:\n      - run: cargo deny check\n"
+      ),
+    });
+    expect(detectChecks(repo).checks).toEqual(["cargo fmt --all --check", "cargo deny check", "cargo test", "cargo clippy -- -D warnings"]);
+  });
+
+  it("does not pay twice for one answer when CI already covers the tool and verb", () => {
+    const repo = tmpRepo({
+      "Cargo.toml": "",
+      ".github/workflows/ci.yml": PR_WORKFLOW("  t:\n    steps:\n      - run: cargo test --workspace --all-features --locked\n"),
+    });
+    expect(detectChecks(repo).checks).toEqual(["cargo test --workspace --all-features --locked", "cargo clippy -- -D warnings"]);
+  });
+
+  it("names the pipeline in the provenance the banner prints", () => {
+    const repo = tmpRepo({
+      "Cargo.toml": "",
+      ".github/workflows/ci.yml": PR_WORKFLOW("  t:\n    steps:\n      - run: cargo test\n"),
+    });
+    expect(detectChecks(repo).source).toContain("CI workflow");
+  });
+
+  it("carries what it could not lift, so the gap is visible rather than silent", () => {
+    const repo = tmpRepo({
+      "Cargo.toml": "",
+      ".github/workflows/ci.yml": PR_WORKFLOW("  t:\n    steps:\n      - run: cargo test\n      - run: rustup show\n"),
+    });
+    expect(detectChecks(repo).skipped.map((s) => s.reason)).toEqual([expect.stringContaining("not a known verification command")]);
+  });
+
+  it("falls back to the language when the repo has no workflows at all", () => {
+    const repo = tmpRepo({ "Cargo.toml": "" });
+    expect(detectChecks(repo).checks).toEqual(["cargo test", "cargo clippy -- -D warnings"]);
+    expect(detectChecks(repo).source).toBe("Cargo.toml");
+  });
+
+  it("adds nothing from convention when CI already covers every tool and verb", () => {
+    const repo = tmpRepo({
+      "Cargo.toml": "",
+      ".github/workflows/ci.yml": PR_WORKFLOW(
+        "  t:\n    steps:\n      - run: cargo test --locked\n      - run: cargo clippy --all-targets -- -D warnings\n"
+      ),
+    });
+    const detected = detectChecks(repo);
+    expect(detected.checks).toEqual(["cargo test --locked", "cargo clippy --all-targets -- -D warnings"]);
+    expect(detected.source).not.toContain("plus");
+  });
+
+  it("tells a subproject's script apart from the same script at the root", () => {
+    const repo = tmpRepo({
+      "package.json": JSON.stringify({ scripts: { test: "vitest" } }),
+      ".github/workflows/ci.yml": PR_WORKFLOW("  site:\n    steps:\n      - working-directory: site\n        run: npm run test\n"),
+    });
+    // `cd site && npm run test` is not the root suite, so the root suite stays.
+    expect(detectChecks(repo).checks).toEqual(["cd site && npm run test", "npm run test"]);
+  });
+
+  it("carries on past a workflow path it cannot read", () => {
+    const repo = tmpRepo({ "Cargo.toml": "" });
+    mkdirSync(path.join(repo, ".github", "workflows", "broken.yml"), { recursive: true });
+    writeFileSync(path.join(repo, ".github", "workflows", "ci.yml"), PR_WORKFLOW("  t:\n    steps:\n      - run: cargo test\n"));
+    expect(detectChecks(repo).checks).toEqual(["cargo test", "cargo clippy -- -D warnings"]);
+  });
+
+  it("falls back when every workflow is a nightly one no pull request has to satisfy", () => {
+    const repo = tmpRepo({
+      "Cargo.toml": "",
+      ".github/workflows/nightly.yml": 'name: N\non:\n  schedule:\n    - cron: "0 3 * * *"\njobs:\n  t:\n    steps:\n      - run: cargo test\n',
+    });
+    expect(detectChecks(repo).source).toBe("Cargo.toml");
+  });
+});
+
+describe("proving a check can pass here before adopting it", () => {
+  // These have to really run: the whole claim is that a check was watched to
+  // pass on this machine, and a mocked `execFileSync` that returns for
+  // everything would let the suite prove it while proving nothing.
+  beforeEach(async () => {
+    const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    execFileSyncMock.mockImplementation(actual.execFileSync as never);
+  });
+
+  it("keeps one that passes", () => {
+    expect(verifyChecks(tmpRepo(), ["exit 0"]).kept).toEqual(["exit 0"]);
+  });
+
+  it("drops one that fails, and says what it said", () => {
+    // `cargo deny` lifted out of a workflow whose `cargo install` step was
+    // correctly refused as setup. Adopted unproven it is red in every worktree,
+    // and a check red before any task starts parks the whole run.
+    const { kept, dropped } = verifyChecks(tmpRepo(), ["echo 'command not found: cargo-deny' >&2; exit 127"]);
+    expect(kept).toEqual([]);
+    expect(dropped[0]!.reason).toContain("command not found");
+  });
+
+  it("names the command when a failure said nothing at all, rather than handing over a blank reason", () => {
+    expect(verifyChecks(tmpRepo(), ["exit 1"]).dropped[0]!.reason).toContain("exit 1");
+  });
+
+  it("drops one that outlives the time QA would give it, since it would be killed on every task", () => {
+    const { dropped } = verifyChecks(tmpRepo(), ["sleep 5"], { timeoutMs: 200 });
+    expect(dropped[0]!.reason).toContain("did not finish");
+  });
+
+  it("judges each one on its own, so a broken check does not take the rest with it", () => {
+    const { kept, dropped } = verifyChecks(tmpRepo(), ["exit 1", "exit 0"]);
+    expect(kept).toEqual(["exit 0"]);
+    expect(dropped).toHaveLength(1);
+  });
+
+  it("reports a check it could not even start, rather than crashing the command", () => {
+    // No stdout and no stderr to quote: the process never existed. The error
+    // itself is the only thing there is to say.
+    const { kept, dropped } = verifyChecks(path.join(tmpRepo(), "gone"), ["exit 0"]);
+    expect(kept).toEqual([]);
+    expect(dropped[0]!.reason).not.toBe("");
+  });
+
+  it("quotes the failure rather than a warning that happened to come first", () => {
+    const { dropped } = verifyChecks(tmpRepo(), ["echo 'warning: unused import' >&2; echo 'error: the real one' >&2; exit 1"]);
+    expect(dropped[0]!.reason).toBe("error: the real one");
+  });
+
+  it("tells the caller what it is running, for a suite that takes minutes", () => {
+    const started: string[] = [];
+    const finished: (string | null)[] = [];
+    verifyChecks(tmpRepo(), ["exit 0"], { onStart: (c) => started.push(c), onResult: (_c, _ms, reason) => finished.push(reason) });
+    expect(started).toEqual(["exit 0"]);
+    expect(finished).toEqual([null]);
+  });
+
+  it("runs them in the repository, not wherever the CLI was invoked", () => {
+    const repo = tmpRepo({ "marker.txt": "" });
+    expect(verifyChecks(repo, ["test -f marker.txt"]).kept).toEqual(["test -f marker.txt"]);
   });
 });

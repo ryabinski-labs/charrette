@@ -7,6 +7,7 @@ export * from "./darkSwitches.js";
 export * from "./bus.js";
 export * from "./budget.js";
 export * from "./build.js";
+export * from "./ciChecks.js";
 export * from "./coChange.js";
 export * from "./deps.js";
 export * from "./git.js";

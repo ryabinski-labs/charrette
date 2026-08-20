@@ -1,9 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
-import { SUBPROJECT_DIRS } from "@harness/core";
+import { SUBPROJECT_DIRS, scanCiChecks, type CiCheck, type SkippedStep } from "@harness/core";
 import { PitStopConfig, PlanGateConfig, SubscriptionConfig, TaskGateConfig } from "@harness/shared";
 
 export const CONFIG_FILENAME = "harness.config.json";
@@ -40,6 +40,12 @@ export interface DetectedChecks {
   checks: string[];
   /** Human-readable provenance, shown in the run banner. */
   source: string;
+  /**
+   * CI steps that were read and not lifted, with the reason — so a repository
+   * whose pipeline is mostly shell scripts can see that this covered two jobs
+   * of its seven rather than believing it covered them all.
+   */
+  skipped: SkippedStep[];
 }
 
 function readJson(file: string): Record<string, unknown> | null {
@@ -85,7 +91,12 @@ function nodeScriptsIn(repo: string, dir: string): { checks: string[]; pm: strin
   return { checks: picked.map((s) => `${prefix}${pm} run ${s}`), pm };
 }
 
-export function detectChecks(repo: string): DetectedChecks {
+/**
+ * The checks a repository's language convention implies, when nothing better
+ * is available. `pnpm run test` because there is a `test` script; `cargo test`
+ * because there is a `Cargo.toml`.
+ */
+function conventionChecks(repo: string): { checks: string[]; source: string } {
   const root = nodeScriptsIn(repo, "");
   if (root.checks.length > 0) {
     return { checks: root.checks, source: `package.json scripts via ${root.pm}` };
@@ -108,6 +119,137 @@ export function detectChecks(repo: string): DetectedChecks {
     return { checks: ["go build ./...", "go test ./..."], source: "go.mod" };
   }
   return { checks: [], source: "no conventional checks found" };
+}
+
+/** Every workflow file in `.github/workflows`, or none if the directory is absent. */
+export function readWorkflows(repo: string): { path: string; text: string }[] {
+  const dir = path.join(repo, ".github", "workflows");
+  let names: string[];
+  try {
+    names = readdirSync(dir).filter((n) => /\.ya?ml$/i.test(n));
+  } catch {
+    return [];
+  }
+  const files: { path: string; text: string }[] = [];
+  for (const name of names.sort()) {
+    try {
+      files.push({ path: `.github/workflows/${name}`, text: readFileSync(path.join(dir, name), "utf8") });
+    } catch {
+      // A workflow that cannot be read is one fewer check, not a failed run.
+    }
+  }
+  return files;
+}
+
+/** The tool and verb a check is about — `cargo test`, `pnpm run lint`, `go build`. */
+function intent(command: string): string {
+  // The directory is part of it. A monorepo runs `npm run test` at the root and
+  // `cd site && npm run test` in the site, and those are two suites over two
+  // trees — collapsing them drops one of them on the floor.
+  const cd = /^cd\s+(\S+)\s*&&\s*/.exec(command);
+  const words = command.slice(cd ? cd[0].length : 0).split(/\s+/).filter((w) => !w.startsWith("-"));
+  // `pnpm run lint` and `pnpm run test` are two different checks; `cargo test`
+  // and `cargo build` already differ at the verb.
+  return `${cd ? cd[1] : ""}\u0000${words.slice(0, words[1] === "run" ? 3 : 2).join(" ")}`;
+}
+
+/**
+ * Infer deterministic checks from the target repo so a bare `harness run` still
+ * gives QA a hard signal.
+ *
+ * The repository's own pipeline comes first, because that is the thing the
+ * run's pull request will actually be graded by: a check the harness runs in a
+ * worktree and CI does not is a check nobody asked for, and a check CI runs and
+ * the harness does not is a red pull request found by a human. Convention fills
+ * the gaps — a `cargo test` for a repo whose CI only lints — but never
+ * duplicates a tool and verb CI already covers, since running `cargo test` and
+ * `cargo test --workspace --all-features --locked` in the same worktree pays
+ * twice for one answer.
+ *
+ * Nothing here asks whether the machine can run what it names. `harness init`
+ * does, by running them; see `verifyChecks`.
+ */
+export function detectChecks(repo: string): DetectedChecks {
+  const convention = conventionChecks(repo);
+  const ci = scanCiChecks(readWorkflows(repo));
+  if (ci.checks.length === 0) return { ...convention, skipped: ci.skipped };
+
+  const covered = new Set(ci.checks.map((c: CiCheck) => intent(c.command)));
+  const extra = convention.checks.filter((c) => !covered.has(intent(c)));
+  const source =
+    `${ci.checks.length} step(s) from ${new Set(ci.checks.map((c: CiCheck) => c.source.split(" › ")[0])).size} CI workflow(s)` +
+    (extra.length ? `, plus ${extra.length} from ${convention.source}` : "");
+  return { checks: [...ci.checks.map((c: CiCheck) => c.command), ...extra], source, skipped: ci.skipped };
+}
+
+export interface VerifiedChecks {
+  kept: string[];
+  dropped: { command: string; reason: string }[];
+}
+
+/**
+ * Run each candidate check once against the repository as it stands, and keep
+ * the ones that actually work here.
+ *
+ * This is the gate the whole feature rests on. Lifting a command out of a
+ * workflow says what CI does; it says nothing about whether this machine can do
+ * it. `cargo deny` and `cargo audit` are installed by a `cargo install` step
+ * that was correctly refused as setup. `npm run test:e2e` wants browsers. A
+ * coverage run that takes twelve minutes will be killed by QA's own ten-minute
+ * timeout on every task, forever, and be recorded as a failure each time.
+ *
+ * Every one of those is a check that is red before any task starts, which is
+ * the single failure that parks an entire run — every task inherits it, every
+ * task is blamed for it, and none of them can fix it. So a candidate is adopted
+ * only after it has been watched to pass, here, in the time QA will give it,
+ * and the ones that did not are printed with the reason rather than dropped
+ * quietly.
+ *
+ * Green on the repo's current tree is not a promise it stays green: a run's
+ * tasks change the code, and a check is meant to be able to go red. What this
+ * rules out is the check that could never have passed.
+ */
+export function verifyChecks(
+  repo: string,
+  checks: string[],
+  opts: { timeoutMs?: number; onStart?: (command: string) => void; onResult?: (command: string, ms: number, reason: string | null) => void } = {}
+): VerifiedChecks {
+  const timeoutMs = opts.timeoutMs ?? 10 * 60 * 1000;
+  const kept: string[] = [];
+  const dropped: { command: string; reason: string }[] = [];
+  for (const command of checks) {
+    opts.onStart?.(command);
+    const started = Date.now();
+    let reason: string | null = null;
+    try {
+      execFileSync("sh", ["-c", command], { cwd: repo, stdio: ["ignore", "pipe", "pipe"], timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 });
+    } catch (e) {
+      const err = e as { signal?: string; stderr?: Buffer | string; stdout?: Buffer | string; message: string };
+      // `err.message` is the fallback rather than a phrase of our own, because
+      // the cases with no output are the ones with nothing else to go on: a
+      // check that exited 1 in silence, or one that never started because the
+      // directory it was pointed at is not there.
+      const output = [err.stdout, err.stderr].map((b) => (b ? b.toString() : "")).join("\n").trim();
+      reason =
+        err.signal === "SIGTERM"
+          ? `did not finish in ${Math.round(timeoutMs / 60000)} minute(s) — QA would kill it on every task`
+          : firstLine(output) || firstLine(err.message);
+    }
+    const ms = Date.now() - started;
+    opts.onResult?.(command, ms, reason);
+    if (reason === null) kept.push(command);
+    else dropped.push({ command, reason });
+  }
+  return { kept, dropped };
+}
+
+/** The line of output an operator would look at first. */
+function firstLine(text: string): string {
+  const line = text
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l !== "" && !/^warning:/i.test(l));
+  return (line ?? "").slice(0, 160);
 }
 
 /**

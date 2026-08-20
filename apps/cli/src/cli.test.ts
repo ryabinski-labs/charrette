@@ -77,7 +77,15 @@ const h = vi.hoisted(() => {
     repoUnusableMock: vi.fn(async () => null as string | null),
     checkMemoryBannerMock: vi.fn(() => [] as string[]),
     originSlugMock: vi.fn(async () => "acme/widgets" as string | null),
-    detectChecksMock: vi.fn(() => ({ checks: ["npm test"], source: "package.json" })),
+    verifyChecksMock: vi.fn(
+    (_repo: string, checks: string[]): { kept: string[]; dropped: { command: string; reason: string }[] } => ({ kept: checks, dropped: [] })
+  ),
+  detectChecksMock: vi.fn(
+    (): { checks: string[]; source: string; skipped: { source: string; reason: string }[] } => ({
+      checks: ["npm test"],
+      source: "package.json",
+      skipped: [],
+    })),
     loadFileConfigMock: vi.fn(() => ({ config: {} as Record<string, unknown>, path: null as string | null })),
     resolveGitHubMock: vi.fn(
       (): { token?: string; slug?: string; source: string } => ({
@@ -161,6 +169,7 @@ vi.mock("./defaults.js", async (importOriginal) => {
   return {
     ...actual,
     detectChecks: h.detectChecksMock,
+    verifyChecks: h.verifyChecksMock,
     loadFileConfig: h.loadFileConfigMock,
     resolveGitHub: h.resolveGitHubMock,
     resolveRepoRoot: h.resolveRepoRootMock,
@@ -298,7 +307,8 @@ beforeEach(() => {
   h.repoUnusableMock.mockReset().mockResolvedValue(null);
   h.checkMemoryBannerMock.mockReset().mockReturnValue([]);
   h.originSlugMock.mockReset().mockResolvedValue("acme/widgets");
-  h.detectChecksMock.mockReset().mockReturnValue({ checks: ["npm test"], source: "package.json" });
+  h.detectChecksMock.mockReset().mockReturnValue({ checks: ["npm test"], source: "package.json", skipped: [] });
+  h.verifyChecksMock.mockReset().mockImplementation((_repo: string, checks: string[]) => ({ kept: checks, dropped: [] }));
   h.loadFileConfigMock.mockReset().mockReturnValue({ config: {}, path: null });
   h.resolveGitHubMock.mockReset().mockReturnValue({ token: "gh-tok", slug: "acme/widgets", source: "git remote" });
   h.resolveRepoRootMock.mockReset().mockImplementation((p: string) => p);
@@ -343,6 +353,17 @@ describe("harness run — resolving what the run will actually do", () => {
     expect(banner).toContain("github     acme/widgets   (git remote)");
     expect(banner).toContain("prs        one rollup PR for the whole run   (default)");
     expect(banner).toContain("tools      none detected on PATH");
+  });
+
+  it("says checks taken from CI have not been run here yet, because an unproven one parks the run", async () => {
+    // `harness init` runs each candidate before writing it down. This path has
+    // no moment at which it could, and a banner that reads the same either way
+    // implies a guarantee it did not make.
+    h.detectChecksMock.mockReturnValue({ checks: ["cargo deny check"], source: "1 step(s) from 1 CI workflow(s)", skipped: [] });
+
+    await cli("run", "build a thing", "--repo", "/repo");
+
+    expect(printed()).toContain("not yet run here; `harness init` proves them first");
   });
 
   it("says nothing about models when every role is on its default", async () => {
@@ -473,7 +494,7 @@ describe("harness run — resolving what the run will actually do", () => {
   });
 
   it("says so when auto-detection finds nothing to run", async () => {
-    h.detectChecksMock.mockReturnValue({ checks: [], source: "no test script" });
+    h.detectChecksMock.mockReturnValue({ checks: [], source: "no test script", skipped: [] });
 
     await cli("run", "x", "--repo", "/repo", "--no-dashboard");
 
@@ -2359,7 +2380,7 @@ describe("harness dashboard", () => {
 
 describe("harness init", () => {
   it("writes the settings this repo would run with", async () => {
-    h.detectChecksMock.mockReturnValue({ checks: ["npm test", "npm run lint"], source: "package.json" });
+    h.detectChecksMock.mockReturnValue({ checks: ["npm test", "npm run lint"], source: "package.json", skipped: [] });
 
     await cli("init", "--repo", "/repo");
 
@@ -2372,15 +2393,114 @@ describe("harness init", () => {
       skillsDirs: expect.any(Array),
     });
     expect(body.endsWith("\n")).toBe(true);
-    expect(printed()).toContain("Wrote /repo/harness.config.json\n  checks: npm test, npm run lint");
+    expect(printed()).toContain("Wrote /repo/harness.config.json with 2 check(s).");
   });
 
   it("names the reason when it found no checks to write", async () => {
-    h.detectChecksMock.mockReturnValue({ checks: [], source: "no test script in package.json" });
+    h.detectChecksMock.mockReturnValue({ checks: [], source: "no test script in package.json", skipped: [] });
 
     await cli("init", "--repo", "/repo");
 
-    expect(printed()).toContain("checks: none (no test script in package.json)");
+    expect(printed()).toContain("Checks from no test script in package.json");
+    expect(printed()).toContain("  none");
+  });
+
+  it("runs each check before writing it down", async () => {
+    h.detectChecksMock.mockReturnValue({ checks: ["cargo deny check"], source: "1 step(s) from 1 CI workflow(s)", skipped: [] });
+
+    await cli("init", "--repo", "/repo");
+
+    expect(h.verifyChecksMock).toHaveBeenCalledWith("/repo", ["cargo deny check"], expect.anything());
+  });
+
+  it("does not write a check it could not get to pass here", async () => {
+    // The failure this exists to stop. `cargo deny` is real in CI because a
+    // `cargo install` step put it there; adopted unproven it is red in every
+    // worktree, blames every task for it, and parks the run.
+    h.detectChecksMock.mockReturnValue({ checks: ["cargo test", "cargo deny check"], source: "2 step(s) from 1 CI workflow(s)", skipped: [] });
+    h.verifyChecksMock.mockReturnValue({ kept: ["cargo test"], dropped: [{ command: "cargo deny check", reason: "command not found: cargo-deny" }] });
+
+    await cli("init", "--repo", "/repo");
+
+    const [, body] = h.writeFileSyncMock.mock.calls[0] as [string, string];
+    expect(JSON.parse(body).deterministicChecks).toEqual(["cargo test"]);
+    expect(printed()).toContain("command not found: cargo-deny");
+  });
+
+  it("takes the checks unproven when told to skip the running", async () => {
+    h.detectChecksMock.mockReturnValue({ checks: ["cargo test"], source: "1 step(s) from 1 CI workflow(s)", skipped: [] });
+
+    await cli("init", "--repo", "/repo", "--no-verify");
+
+    expect(h.verifyChecksMock).not.toHaveBeenCalled();
+    const [, body] = h.writeFileSyncMock.mock.calls[0] as [string, string];
+    expect(JSON.parse(body).deterministicChecks).toEqual(["cargo test"]);
+  });
+
+  it("says which one it is running and how it went, for a suite that takes minutes", async () => {
+    h.detectChecksMock.mockReturnValue({ checks: ["cargo test", "cargo deny check"], source: "2 step(s) from 1 CI workflow(s)", skipped: [] });
+    h.verifyChecksMock.mockImplementation((_repo: string, checks: string[], opts?: unknown) => {
+      const o = opts as { onStart?: (c: string) => void; onResult?: (c: string, ms: number, r: string | null) => void };
+      o?.onStart?.(checks[0]!);
+      o?.onResult?.(checks[0]!, 1200, null);
+      o?.onStart?.(checks[1]!);
+      o?.onResult?.(checks[1]!, 800, "command not found");
+      return { kept: [checks[0]!], dropped: [{ command: checks[1]!, reason: "command not found" }] };
+    });
+
+    await cli("init", "--repo", "/repo");
+
+    expect(printed()).toContain("ok   cargo test  (1s)");
+    expect(printed()).toContain("drop cargo deny check  (1s)");
+  });
+
+  it("rewrites the in-flight line in a terminal, and writes only verdicts to a log", async () => {
+    // Redirected to a file there is no cursor to move, and a log full of escape
+    // codes is worse than a log with no progress in it.
+    const tty = process.stdout.isTTY;
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+    try {
+      h.detectChecksMock.mockReturnValue({ checks: ["cargo test"], source: "1 step(s) from 1 CI workflow(s)", skipped: [] });
+      h.verifyChecksMock.mockImplementation((_repo: string, checks: string[], opts?: unknown) => {
+        const o = opts as { onStart?: (c: string) => void; onResult?: (c: string, ms: number, r: string | null) => void };
+        o?.onStart?.(checks[0]!);
+        o?.onResult?.(checks[0]!, 500, null);
+        return { kept: checks, dropped: [] };
+      });
+
+      await cli("init", "--repo", "/repo");
+
+      expect(printed()).toContain("\u001b[2K");
+      expect(printed()).toContain("…    cargo test");
+    } finally {
+      Object.defineProperty(process.stdout, "isTTY", { value: tty, configurable: true });
+    }
+  });
+
+  it("names the CI steps it could not lift, so the gap is not read as coverage", async () => {
+    h.detectChecksMock.mockReturnValue({
+      checks: ["cargo test"],
+      source: "1 step(s) from 1 CI workflow(s)",
+      skipped: [{ source: "ci.yml › fmt › cargo fmt --check", reason: "14-line shell script — only a single command can be lifted safely" }],
+    });
+
+    await cli("init", "--repo", "/repo");
+
+    expect(printed()).toContain("ci.yml › fmt › cargo fmt --check");
+    expect(printed()).toContain("this run will not cover them");
+  });
+
+  it("stops after a dozen of them rather than printing a hundred nobody reads", async () => {
+    h.detectChecksMock.mockReturnValue({
+      checks: [],
+      source: "0 step(s) from 1 CI workflow(s)",
+      skipped: Array.from({ length: 15 }, (_, i) => ({ source: `ci.yml › job${i} › step`, reason: "setup" })),
+    });
+
+    await cli("init", "--repo", "/repo");
+
+    expect(printed()).toContain("… and 3 more");
+    expect(printed()).not.toContain("job13");
   });
 
   it("refuses to overwrite an existing config", async () => {
