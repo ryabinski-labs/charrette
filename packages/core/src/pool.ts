@@ -48,6 +48,15 @@ export { BASH_TIMEOUT_MS };
  * A plain `cmd > log 2>&1 &` inside one Bash call returns immediately and is
  * untracked by the CLI, so it neither times out nor raises a notification —
  * which is what the denial recommends.
+ *
+ * With one condition attached, because recommending it without one produced its
+ * own failure: the session ends when the turn ends, and `reap` kills everything
+ * still running in the worktree at that moment. A worker that redirects a long
+ * command, polls it a few times and then finishes its turn has its own job
+ * killed and delivers an empty branch — run bc691359's `m1-live-block-witness`,
+ * where the harness killed the container build the worker was waiting on and
+ * then counted the branch against it. So the denial says what the form costs as
+ * well as what it buys.
  */
 export function backgroundShellHook() {
   return async (input: HookInput): Promise<HookJSONOutput> => {
@@ -59,7 +68,7 @@ export function backgroundShellHook() {
           hookEventName: "PreToolUse",
           permissionDecision: "deny",
           permissionDecisionReason:
-            "Blocked: run_in_background kills this session. The CLI reports a finished background task through a channel this session cannot receive, and the session dies the moment the command exits — losing your uncommitted work, not just the command's output. Nothing you can do inside the session recovers it. Run the command in the foreground instead; if it is genuinely long-running, redirect it in a single call — `cmd > /tmp/out.log 2>&1 &` — and read the log with a later Bash call. That form is not tracked, raises no notification, and is safe.",
+            "Blocked: run_in_background kills this session. The CLI reports a finished background task through a channel this session cannot receive, and the session dies the moment the command exits — losing your uncommitted work, not just the command's output. Nothing you can do inside the session recovers it. Run the command in the foreground instead; if it is genuinely long-running, redirect it in a single call — `cmd > /tmp/out.log 2>&1 &` — and read the log with a later Bash call. That form is not tracked, raises no notification, and is safe. One condition: do not end your turn while that command is still running. This session ends when your turn does, and everything still running in this directory is killed at that moment — so block on it first (`wait`, or a polling loop inside a single Bash call that only returns once it has exited), and commit anything worth keeping before you finish.",
         },
       };
     }
@@ -255,6 +264,16 @@ export interface AgentResult {
   outcome: "done" | "error" | "killed";
   /** Set when the SDK ended the session abnormally (max turns, max budget, …). */
   errorDetail?: string;
+  /**
+   * Commands that were still running in this session's worktree when it ended,
+   * and were killed by the sweep. Empty for almost every session; when it is
+   * not, the session finished its turn while something it had started was still
+   * going, and whatever that command was about to produce does not exist.
+   *
+   * Optional so a caller constructing a result by hand — every test double in
+   * the suite — means what the absence says: this session left nothing running.
+   */
+  abandoned?: string[];
 }
 
 /**
@@ -854,6 +873,8 @@ export class AgentPool {
     let deliberateExit = false;
     /** The account this session was spawned under; a switch is measured against it. */
     const spawnedAs = this.subscription.name;
+    /** What the teardown sweep killed — see `reap` and `AgentResult.abandoned`. */
+    let abandoned: string[] = [];
     let abnormal = "";
     // Tokens seen on assistant messages since the last `result` booked the bill.
     //
@@ -1236,7 +1257,7 @@ export class AgentPool {
       clearInterval(stallTimer);
       stream.close();
       if (liveKey && this.live.get(liveKey)?.stream === stream) this.live.delete(liveKey);
-      await this.reap(spec, sessionId);
+      abandoned = await this.reap(spec, sessionId);
     }
     this.endSession(spec, sessionId, priorTurns + turns, cost, abnormal ? "error" : "done", abnormal);
     return {
@@ -1247,23 +1268,29 @@ export class AgentPool {
       turns,
       outcome: abnormal ? "error" : "done",
       errorDetail: abnormal || undefined,
+      abandoned,
     };
   }
 
   /**
-   * Kill whatever the session left running in its worktree.
+   * Kill whatever the session left running in its worktree, and say what it was.
    *
    * Runs on every exit — clean, crashed, aborted, budget-killed — because the
    * orphans that mattered came from exactly the sessions that did not end
-   * cleanly. Best-effort and unawaited by anything that reports a result: a
-   * sweep is a tidy-up, and a task whose code is already committed must not
-   * fail on it.
+   * cleanly. Best-effort: a sweep is a tidy-up, and a task whose code is already
+   * committed must not fail on it. What it killed is returned rather than only
+   * logged, because for a session that ended *cleanly* the list is not tidy-up
+   * at all — it is the job that session was waiting on, and the caller is the
+   * only thing in a position to know that the branch came back empty because of
+   * it. A sweep that fails returns nothing, which reads downstream as "the
+   * session left nothing running": the conservative answer, and the same one
+   * the overwhelming majority of sessions give truthfully.
    */
-  private async reap(spec: AgentSpec, sessionId: string): Promise<void> {
-    if (!spec.reapOnEnd) return;
+  private async reap(spec: AgentSpec, sessionId: string): Promise<string[]> {
+    if (!spec.reapOnEnd) return [];
     try {
       const reaped = await reapUnder(spec.cwd);
-      if (!reaped.length) return;
+      if (!reaped.length) return [];
       this.bus.publish({
         type: "agent.log",
         runId: spec.runId,
@@ -1274,8 +1301,10 @@ export class AgentPool {
           reaped.map((r) => `${r.pid} ${r.command.slice(0, 60)} (${r.signal})`).join("; "),
         ts: Date.now(),
       });
+      return reaped.map((r) => r.command);
     } catch {
       // Nothing a sweep can fail at is worth failing a session over.
+      return [];
     }
   }
 

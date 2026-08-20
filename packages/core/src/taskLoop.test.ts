@@ -610,6 +610,119 @@ describe("a branch that arrives empty over and over", () => {
 });
 
 /**
+ * The empty branch the harness caused itself.
+ *
+ * The background-shell denial tells a worker to redirect a long command —
+ * `cmd > log 2>&1 &` — and poll for it; the teardown sweep then kills
+ * everything still running in the worktree the moment the turn ends. Run
+ * bc691359's `m1-live-block-witness` did exactly what it was told, ended its
+ * session 49 seconds in with the container build still going, and had that
+ * build killed and the empty branch counted against it. Five of those and it
+ * parked on a question about work that had never been allowed to finish.
+ */
+describe("a branch that is empty because the session killed its own job", () => {
+  it("re-dispatches with the instruction that helps, and does not charge the attempt", async () => {
+    const dir = repo();
+    const { pool, specs, counts } = rolePool({
+      worker: (spec, nth) => {
+        // First attempt: started the smoke script, polled it, ended the turn.
+        if (nth === 1) return { resultText: "waiting on the build", abandoned: ["bash bench/scripts/m1-live-smoke.sh > /tmp/m1-live-smoke-run.log 2>&1"] };
+        commitInWorktree(spec.cwd, "verdict.md", "witnessed\n");
+        return "ran it in the foreground and committed the evidence";
+      },
+      qa: () => QA_PASS,
+    });
+    const { controller, store, events, gates, runId } = executing({ repoPath: dir, pool });
+
+    await controller.resume(runId);
+
+    const task = store.getTask(runId, "task-a")!;
+    expect(task.state).toBe("MERGED");
+    // The attempt the harness caused is not spent out of the budget that parks
+    // the task, and the operator was never asked about it.
+    expect(task.emptyDeliveries).toBe(0);
+    expect(task.abandonedJobs).toBe(1);
+    expect(gates).toEqual([]);
+    expect(counts.worker).toBe(2);
+    // And the worker was told what actually happened, not sent to look for work
+    // it never lost.
+    const second = workerPrompts(specs)[1]!;
+    expect(second).toContain("m1-live-smoke.sh");
+    expect(second).toContain("in the foreground");
+    expect(second).not.toContain("git stash list");
+    expect(logs(events).some((t) => t.includes("does not count as an empty delivery (1 of 2)"))).toBe(true);
+  });
+
+  it("stops forgiving it, so a worker that keeps doing it still reaches the operator", async () => {
+    const dir = repo();
+    const { pool, counts } = rolePool({
+      worker: () => ({ resultText: "still waiting", abandoned: ["pnpm build > /tmp/b.log 2>&1", "docker run --rm ghcr.io/x/y"] }),
+      qa: () => QA_PASS,
+    });
+    const { controller, store, runId } = executing({ repoPath: dir, pool, guidance: "look again", config: { qaIterationCap: 1 } });
+
+    await controller.resume(runId);
+
+    const task = store.getTask(runId, "task-a")!;
+    expect(task.state).toBe("NEEDS_HUMAN");
+    expect(task.errorSummary).toContain("still empty after 5 attempts");
+    // Two forgiven, then five counted: the bound holds and the loop ends.
+    expect(task.abandonedJobs).toBe(2);
+    expect(counts.worker).toBe(7);
+  });
+
+  /**
+   * The counter is on the task row rather than in a variable for the same
+   * reason `emptyDeliveries` is: run bc691359 restarted the harness many times
+   * a day, and a forgiveness budget that resets with the process is not a bound.
+   */
+  it("does not hand out a fresh set of forgiven attempts because the process restarted", async () => {
+    const dir = repo();
+    const { pool, counts } = rolePool({
+      worker: () => ({ resultText: "still waiting", abandoned: ["pnpm build > /tmp/b.log 2>&1"] }),
+      qa: () => QA_PASS,
+    });
+    const { controller, store, runId } = executing({ repoPath: dir, pool, guidance: "look again", config: { qaIterationCap: 1 } });
+    // What the previous process had already forgiven before it died.
+    store.updateTask(runId, "task-a", { abandonedJobs: 2, emptyDeliveries: 4 });
+
+    await controller.resume(runId);
+
+    const task = store.getTask(runId, "task-a")!;
+    expect(task.state).toBe("NEEDS_HUMAN");
+    expect(task.errorSummary).toContain("still empty after 5 attempts");
+    expect(counts.worker).toBe(1);
+  });
+
+  /**
+   * A task written against a repository this run does not own is empty for a
+   * reason no instruction to this worker can change, and the leftover process
+   * is beside the point. Forgiving it would send the worker back for another go
+   * at nothing instead of naming the repository the work belongs to.
+   */
+  it("does not forgive it when the task belongs to another repository", async () => {
+    const dir = repo();
+    const sibling = path.join(path.dirname(dir), "other-repo");
+    const { pool, specs } = rolePool({
+      worker: () => ({ resultText: "still waiting", abandoned: ["terraform apply > /tmp/t.log 2>&1"] }),
+      qa: () => QA_PASS,
+    });
+    const { controller, store, runId } = executing({
+      repoPath: dir,
+      pool,
+      guidance: "raise it as its own run",
+      config: { qaIterationCap: 1 },
+      tasks: [{ id: "task-a", spec: `In \`${sibling}/\`, add the delivery_log table to the SAM template.` }],
+    });
+
+    await controller.resume(runId);
+
+    expect(store.getTask(runId, "task-a")!.abandonedJobs).toBe(0);
+    expect(workerPrompts(specs)[1]!).toContain("a repository this run does not own");
+  });
+});
+
+/**
  * The same empty branch, for the other reason.
  *
  * Run 7ef8fb4d's `api-delivery-table-infra` was written against a sibling

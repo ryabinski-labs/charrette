@@ -1,6 +1,7 @@
 import type { PlannedEpic, PlannedTask, RunSpec } from "@harness/shared";
 import { PATCH_COVERAGE_FLOOR, PROJECT_COVERAGE_FLOOR } from "./ciScan.js";
 import { TaskRow } from "./store.js";
+import { BASH_TIMEOUT_MS } from "./limits.js";
 
 /**
  * Prompt assembly (PERF-1): stable content first — role prompt, then skills,
@@ -487,6 +488,37 @@ This is almost never a problem with the work itself — the work is usually writ
 Only if you find that the work genuinely was never done should you build it, starting from the task's acceptance criteria.
 
 Commit before you finish. A summary describing changes that are not committed on this branch is the failure you are reading about.`;
+}
+
+/**
+ * The empty-branch prompt for a session that walked away from its own job.
+ *
+ * Deliberately not `emptyBranchPrompt`. That one's whole premise is "the work
+ * is written and simply not on this branch", and it sends the worker to
+ * `git status`, `git log` and `git stash` to find it. Here there is nothing
+ * to find: the command that would have produced the evidence was killed
+ * mid-flight when the session ended, so the honest thing to say is what
+ * happened and what the shape of the next attempt has to be.
+ *
+ * It names the commands because the worker cannot see them — the sweep runs
+ * after its last turn, so from inside the session the job simply stopped
+ * existing between one poll and the next.
+ */
+export function abandonedJobPrompt(branch: string, commands: string[]): string {
+  const list = commands.map((c) => `- \`${c.slice(0, 160)}\``).join("\n");
+  return `Your branch \`${branch}\` delivers nothing, and this time the harness knows why.
+
+You ended your turn while ${commands.length === 1 ? "a command you had started was" : "commands you had started were"} still running. Your session ends when your turn ends, and everything still running in this worktree is killed at that moment — so ${commands.length === 1 ? "this was" : "these were"} killed part-way through:
+
+${list}
+
+Whatever ${commands.length === 1 ? "it" : "they"} would have produced does not exist, which is why there is nothing on the branch. This is not a mistake in the work and there is nothing to go looking for.
+
+Do it this way instead:
+
+1. Run the long command **in the foreground**, in a single Bash call. The Bash timeout in this session is already ${Math.round(BASH_TIMEOUT_MS / 60_000)} minutes; you do not need to background anything that finishes inside that.
+2. If it genuinely runs longer than the Bash timeout, you may redirect it — \`cmd > /tmp/out.log 2>&1 &\` — but you must then **block on it in the foreground before your turn ends**: \`wait\`, or a polling loop inside one Bash call that only returns once the command has exited. Never end a turn with your own job still running.
+3. Commit the moment there is anything worth committing. Partial evidence on the branch beats complete evidence that was killed before you could write it down — and if a later step is interrupted, the earlier commits still count.`;
 }
 
 /**

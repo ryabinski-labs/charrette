@@ -75,6 +75,7 @@ import {
   demoPrompt,
   demoSystemPrompt,
   emptyBranchPrompt,
+  abandonedJobPrompt,
   extractJson,
   extractSection,
   operatorFeedbackMessage,
@@ -162,7 +163,7 @@ const CI_FIX_EPIC = { id: "ci-red", title: "Checks the repo's CI failed" };
 const SPEC_FIX_EPIC = { id: "spec-red", title: "Scenarios the specification says are unmet" };
 
 /** A planner's task as it enters the store: everything it said, nothing started yet. */
-function pendingRow(t: PlannedTask): Omit<TaskRow, "runId" | "unverified" | "scenarioIds" | "emptyDeliveries" | "conflictFixes"> & { scenarioIds: string[] } {
+function pendingRow(t: PlannedTask): Omit<TaskRow, "runId" | "unverified" | "scenarioIds" | "emptyDeliveries" | "conflictFixes" | "abandonedJobs"> & { scenarioIds: string[] } {
   return {
     id: t.id,
     epicId: t.epicId,
@@ -287,6 +288,24 @@ const MERGEABILITY_SETTLE_MINUTES = 0.5;
  * answer.
  */
 const EMPTY_DELIVERY_ATTEMPTS = 4;
+
+/**
+ * Empty deliveries the harness forgives because it caused them.
+ *
+ * A worker told to redirect a long command and poll for it — which is what the
+ * background-shell denial recommends — can finish its turn while the command is
+ * still going, and the teardown sweep kills it. The branch is then empty for a
+ * reason that is nothing to do with the work, and the generic empty-branch
+ * advice sends the worker looking for code that was never written.
+ *
+ * So the first attempts that end this way buy a re-dispatch with the
+ * instruction that actually helps, and are not spent out of the budget above.
+ * Bounded, and bounded low: two goes at "run it in the foreground and commit as
+ * you learn things" is a worker that has been told plainly. A third means
+ * something else is wrong, and the empty-delivery path — which ends at the
+ * operator — is the right place for it.
+ */
+const ABANDONED_JOB_ATTEMPTS = 2;
 
 /**
  * Turns the demo agent gets to repair its evidence, resumed with the product
@@ -5300,6 +5319,8 @@ export class RunController {
      */
     let conflictFixes = task.conflictFixes;
     let emptyDeliveries = task.emptyDeliveries;
+    /** Read from the task, and written back, for exactly the reasons above. */
+    let abandonedJobs = task.abandonedJobs;
     /**
      * Why the last iteration was sent back, verbatim — QA's reasons, or the
      * failing check's output.
@@ -5403,6 +5424,14 @@ export class RunController {
       // notices when something indirect got through, while there is still a
       // named task and a live session to attribute it to.
       const primaryBefore = await this.wt.primaryHead();
+      /**
+       * What the worker left running and the teardown sweep killed.
+       *
+       * Reset every iteration: it describes the session that just ended, and a
+       * stale list would explain this attempt's empty branch with the last
+       * attempt's mistake.
+       */
+      let abandoned: string[] = [];
       try {
         const worker = await this.pool.run({
           runId,
@@ -5431,6 +5460,7 @@ export class RunController {
         });
         workerSummary = worker.resultText;
         workerSession = worker.sdkSessionId ?? workerSession;
+        abandoned = worker.abandoned ?? [];
         if (worker.outcome === "error" && worker.errorDetail?.includes("error_max_turns")) {
           workerTurns = Math.min(400, Math.ceil(workerTurns * 1.5));
           this.raiseCeiling(runId, "workerMaxTurns", workerTurns);
@@ -5505,6 +5535,47 @@ export class RunController {
         return;
       }
       if (!delta.files.length) {
+        const foreign = foreignRepoPaths(task, this.repoPath);
+        // An empty branch the harness can explain from its own records, before
+        // anything charges the task for it.
+        //
+        // The sweep that ends a session kills everything still running in the
+        // worktree, and a worker that redirected a long command and polled for
+        // it — the form the background-shell denial recommends — ends its turn
+        // with that command still going. Run bc691359's `m1-live-block-witness`
+        // did exactly that: `bench/scripts/m1-live-smoke.sh > log 2>&1 &`, a
+        // Monitor loop, "Still building — no action needed", and the session
+        // closed `done` 49 seconds in. The harness then killed the script and
+        // its `docker run`, read the empty branch, and counted the fifth empty
+        // delivery. Eight of those and the task parked on a question the
+        // operator had no way to answer, about work that had never been allowed
+        // to finish.
+        //
+        // Counting that as the worker failing to commit is wrong twice over: it
+        // spends a budget that exists to catch a worker writing outside its
+        // worktree, and the advice it hands back — go and find your work — is
+        // about work that does not exist yet. Not applied to a foreign-repo
+        // task: that branch is empty for a reason no instruction to this worker
+        // can change, and saying otherwise sends it back for another go at
+        // nothing.
+        if (abandoned.length && !foreign.length && abandonedJobs < ABANDONED_JOB_ATTEMPTS) {
+          abandonedJobs++;
+          this.store.updateTask(runId, taskId, { abandonedJobs });
+          this.bus.publish({
+            type: "agent.log",
+            runId,
+            taskId,
+            sessionId: workerSession ?? taskId,
+            text:
+              `nothing to review, and the session caused it: it ended while ${abandoned.length} process${abandoned.length === 1 ? "" : "es"} it had started ` +
+              `${abandoned.length === 1 ? "was" : "were"} still running, so the sweep killed ${abandoned.length === 1 ? "it" : "them"} (${abandoned.map((c) => c.slice(0, 60)).join("; ")}). ` +
+              `Re-dispatching with instructions to run it in the foreground; this does not count as an empty delivery (${abandonedJobs} of ${ABANDONED_JOB_ATTEMPTS}).`,
+            ts: Date.now(),
+          });
+          qaFeedback = abandonedJobPrompt(this.wt.branchName(runId, taskId), abandoned);
+          lastRejection = `The session ended while its own long-running command was still going, so it was killed and the branch came back empty: ${abandoned[0]!.slice(0, 200)}`;
+          continue;
+        }
         emptyDeliveries++;
         this.store.updateTask(runId, taskId, { emptyDeliveries });
         // An empty branch has two very different causes, and until now every
@@ -5514,7 +5585,6 @@ export class RunController {
         // from. Plans are checked for this before a worker runs, so reaching
         // here means a run planned before that check, or a repo named in a
         // shape the check does not read.
-        const foreign = foreignRepoPaths(task, this.repoPath);
         if (emptyDeliveries > EMPTY_DELIVERY_ATTEMPTS) {
           this.park(
             runId,
