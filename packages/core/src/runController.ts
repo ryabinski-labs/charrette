@@ -4,7 +4,21 @@ import { appendFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } f
 import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
-import { Plan, PlanBatch, PlanBreakdown, PlannedEpic, PlannedTask, QaVerdict, RunConfig, TaskState, briefToAssignment, validatePlanDag } from "@harness/shared";
+import {
+  Plan,
+  PlanBatch,
+  PlanBreakdown,
+  PlannedEpic,
+  PlannedTask,
+  QaVerdict,
+  RunConfig,
+  RunSpec,
+  TaskState,
+  blockingQuestions,
+  briefToAssignment,
+  gating,
+  validatePlanDag,
+} from "@harness/shared";
 import { indexSkills, matchSkills, verifyHash, type IndexedSkill } from "@harness/skills-mcp";
 import { Bus } from "./bus.js";
 import { BudgetExceeded } from "./budget.js";
@@ -17,6 +31,9 @@ import { runIntake, type IntakeUi } from "./intake.js";
 import { composeDown, isolationBlock, isolationEnv, taskIsolation } from "./isolation.js";
 import { observeChecks } from "./memory.js";
 import { parseRunbook, withRunbook, type Runbook } from "./operatorRunbook.js";
+import { acceptanceVerdict, scenarioCommand, scenarioProbeCommand, suiteRunFrom, type AcceptanceVerdict } from "./acceptance.js";
+import { renderCompletionReport } from "./completionReport.js";
+import { assembleReport, reportPath } from "./reportRun.js";
 import { ceilingNote, grantedTokens, requestTokens, sdkCeiling } from "./outputCeiling.js";
 import { missingKeys } from "./providerClients.js";
 import { reapUnder } from "./reaper.js";
@@ -88,6 +105,10 @@ import {
   workerResumePrompt,
   workerSystemPrompt,
   workerTaskPrompt,
+  specAnswersPrompt,
+  specPlanBlock,
+  specPrompt,
+  specSystemPrompt,
 } from "./prompts.js";
 import {
   accountEnv,
@@ -130,8 +151,18 @@ const INTENT_FIX_EPIC = { id: "intent-gaps", title: "Gaps the intent check found
 /** Where CI-fix tasks land on the board. */
 const CI_FIX_EPIC = { id: "ci-red", title: "Checks the repo's CI failed" };
 
+/**
+ * Where acceptance-gate fixes land.
+ *
+ * Its own epic for the same reason the intent gaps have one: a failing scenario
+ * is a property of the merged whole rather than of whichever task last touched
+ * the file, and a pit stop grouping by epic should show them together as "the
+ * promises this run has not kept".
+ */
+const SPEC_FIX_EPIC = { id: "spec-red", title: "Scenarios the specification says are unmet" };
+
 /** A planner's task as it enters the store: everything it said, nothing started yet. */
-function pendingRow(t: PlannedTask): Omit<TaskRow, "runId" | "unverified"> {
+function pendingRow(t: PlannedTask): Omit<TaskRow, "runId" | "unverified" | "scenarioIds"> & { scenarioIds: string[] } {
   return {
     id: t.id,
     epicId: t.epicId,
@@ -151,6 +182,9 @@ function pendingRow(t: PlannedTask): Omit<TaskRow, "runId" | "unverified"> {
     touchedPaths: t.touchedPaths,
     estimatedSize: t.estimatedSize,
     completionProbe: usableProbe(t.completionProbe),
+    // The promises this task is the one to make good on. See
+    // `PlannedTask.scenarioIds` — empty is honest and common.
+    scenarioIds: t.scenarioIds,
   };
 }
 
@@ -178,6 +212,10 @@ const ROLE_SKILL_LENS: Record<string, string> = {
   // Pulls the operator's own production-validation and QA playbooks in, so the
   // live check is run the way they would run it rather than improvised.
   prod: "production prod live deployed deployment validate validation smoke health monitoring uptime QA end-to-end e2e verify evidence release",
+  // Matched against the brief, so the lens has to carry the vocabulary the
+  // brief will not: an operator asking for a checkout flow never writes the
+  // words "acceptance criteria" or "test level".
+  spec: "TDD test-driven acceptance criteria requirements specification executable specification scenario oracle falsifiable BDD ATDD test plan red phase unit integration contract",
 };
 
 /**
@@ -828,7 +866,158 @@ export class RunController {
     mkdirSync(dir, { recursive: true });
     writeFileSync(path.join(dir, "BRIEF.md"), `${assignment}\n`);
     this.store.setRunAssignment(runId, assignment);
+    // Before PLANNING, because the whole value of specifying at intake is that
+    // the operator is still here: `prd-to-tdd` refuses to invent an oracle for
+    // anything the brief leaves open and records the gap instead, and this is
+    // the last moment those gaps can be answered by the person who has them.
+    await this.specify(runId, assignment, ui);
     this.store.transitionRun(runId, "PLANNING", "brief agreed");
+  }
+
+  /**
+   * Turn the agreed brief into failing tests, on the branch every task will be
+   * cut from.
+   *
+   * The integration branch rather than a scratch directory: task branches are
+   * cut from it, so a specification committed here is inherited by every worker
+   * in the run and ships in the pull request — which is what makes the tests a
+   * deliverable rather than a harness artifact that evaporates when the run
+   * ends.
+   *
+   * Never throws. A run whose specification could not be written is a run
+   * without this gate, which is exactly the run every harness before this one
+   * was; failing intake over it would trade a working run for no run.
+   */
+  private async specify(runId: string, assignment: string, ui: IntakeUi): Promise<void> {
+    const run = this.store.getRun(runId)!;
+    if (!run.config.spec.enabled) return;
+    try {
+      // The branch first: nothing has created it yet at intake, and it is the
+      // whole point of writing the specification here — task branches are cut
+      // from it, so every worker inherits the failing tests and the pull
+      // request carries them.
+      await this.wt.ensureIntegrationBranch(runId);
+      const dir = await this.wt.ensureIntegrationWorktree(runId);
+      const skills = this.selectSkills(indexSkills(run.config.skillsDirs), "spec", assignment, run.config);
+      const sessionId = randomUUID();
+      const spec = await this.specSession(runId, sessionId, dir, assignment, skills, run);
+      if (!spec) return;
+
+      const answered = await this.askSpecQuestions(runId, spec, ui);
+      const final = answered.length ? ((await this.specSession(runId, randomUUID(), dir, assignment, skills, run, answered, sessionId)) ?? spec) : spec;
+
+      this.bus.publish({ type: "run.spec_ready", runId, spec: final, ts: Date.now() });
+      await this.commitSpec(runId, dir, final);
+      this.bus.publish({
+        type: "agent.log",
+        runId,
+        sessionId: "spec",
+        text: `specification: ${final.requirements.length} requirement(s), ${final.scenarios.length} scenario(s), ${gating(final).length} of them gating${final.openQuestions.length ? `, ${final.openQuestions.length} open question(s)` : ""}`,
+        ts: Date.now(),
+      });
+    } catch (e) {
+      if (stopsTheRun(e)) throw e;
+      this.bus.publish({
+        type: "agent.log",
+        runId,
+        sessionId: "spec",
+        text: `no specification was written, so the acceptance gate has nothing to hold this run to: ${String(e).slice(0, 300)}`,
+        ts: Date.now(),
+      });
+    }
+  }
+
+  /** One pass of the specification agent — the first, or the one after answers. */
+  private async specSession(
+    runId: string,
+    sessionId: string,
+    cwd: string,
+    assignment: string,
+    skills: { name: string; path: string; sha256: string; content?: string }[],
+    run: RunRow,
+    answers: { question: string; answer: string }[] = [],
+    resume?: string
+  ): Promise<RunSpec | null> {
+    const result = await this.pool.run({
+      runId,
+      sessionId,
+      role: "spec",
+      model: run.config.models.spec,
+      systemPrompt: specSystemPrompt(toolbeltBlock(detectToolbelt(run.config.externalTools)), skillsBlock(skills)),
+      skills: skills.map((s) => s.name),
+      prompt: answers.length ? specAnswersPrompt(answers) : specPrompt(assignment, await repoFileList(cwd), run.config.deterministicChecks),
+      cwd,
+      resume,
+      maxTurns: run.config.spec.maxTurns,
+      budgetCheck: () => this.checkStops(runId),
+    });
+    // `extractJson` throws when there is no object at all, and `safeParse`
+    // reports one that is not a specification. Both are the same fact — no
+    // answer arrived — and both must return rather than throw: the caller's
+    // fallback to the specification it already had is the difference between a
+    // run whose second pass was unreadable and a run with no gate at all.
+    let parsed;
+    try {
+      parsed = RunSpec.safeParse(extractJson(result.resultText));
+    } catch (e) {
+      parsed = { success: false as const, error: { issues: [{ message: String(e).slice(0, 200) }] } };
+    }
+    if (parsed.success) return parsed.data;
+    this.bus.publish({
+      type: "agent.log",
+      runId,
+      sessionId: "spec",
+      text: `the specification agent's answer could not be read, so this run has no acceptance gate: ${parsed.error.issues.map((i) => i.message).join("; ").slice(0, 200)}`,
+      ts: Date.now(),
+    });
+    return null;
+  }
+
+  /**
+   * Put the specification's open questions to the operator, through the same
+   * transport that just interviewed them.
+   *
+   * This is the reason the specification is written at intake at all. Run
+   * 40da9337 spent 37 hours and $773.55 shipping six of seven integrations as
+   * fail-closed stubs because it planned past "real vendor accounts, sandbox
+   * adapters, or fakes only?" — a question nobody was ever asked. Returns the
+   * answers, empty when there is nobody to ask or nothing worth asking.
+   */
+  private async askSpecQuestions(runId: string, spec: RunSpec, ui: IntakeUi): Promise<{ question: string; answer: string }[]> {
+    const run = this.store.getRun(runId)!;
+    const questions = run.config.spec.askOpenQuestions ? blockingQuestions(spec) : [];
+    if (!questions.length) return [];
+    const answers: { question: string; answer: string }[] = [];
+    for (const q of questions) {
+      this.bus.publish({ type: "intake.question", runId, sessionId: "spec", question: q.question, options: [], ts: Date.now() });
+      const answer = (await ui.ask({ question: q.question, detail: q.detail, options: [] })).trim();
+      this.bus.publish({ type: "intake.answered", runId, sessionId: "spec", question: q.question, answer, ts: Date.now() });
+      if (answer) answers.push({ question: q.question, answer });
+    }
+    return answers;
+  }
+
+  /**
+   * Commit the specification to the integration branch, so every task branch
+   * inherits it and the pull request carries it.
+   *
+   * Best-effort by design: a specification that could not be committed is still
+   * a specification the gate can run, because the gate runs in a worktree of
+   * this same branch. What is lost is the deliverable, not the check.
+   */
+  private async commitSpec(runId: string, dir: string, spec: RunSpec): Promise<void> {
+    try {
+      await git(dir, ["add", "-A"]);
+      const staged = await git(dir, ["diff", "--cached", "--name-only"]);
+      if (!staged.trim()) return;
+      await git(dir, [
+        "commit",
+        "-m",
+        `spec: ${spec.scenarios.length} failing scenario(s) for ${spec.feature || "this run"}\n\nWritten from the agreed brief before planning. Every P0/P1 scenario here blocks the run until it is green.`,
+      ]);
+    } catch (e) {
+      this.bus.publish({ type: "agent.log", runId, sessionId: "spec", text: `the specification was written but not committed: ${String(e).slice(0, 200)}`, ts: Date.now() });
+    }
   }
 
   async resume(runId: string, intake?: IntakeUi): Promise<void> {
@@ -1189,6 +1378,19 @@ export class RunController {
         run = this.store.getRun(runId)!;
       }
       if (run.state === "INTEGRATING") {
+        // Before the prose check and before any pull request: the scenarios the
+        // operator's own brief was turned into, run against the merged whole.
+        // First because it is the only mechanical answer available here — there
+        // is no point paying a validator to form a view about a branch whose
+        // own acceptance tests are red, and a worker sent back over a named
+        // failing scenario has something to aim at that a gap sentence cannot
+        // give it.
+        const specFixes = await this.queueScenarioFixes(runId);
+        if (specFixes.length) {
+          this.store.transitionRun(runId, "EXECUTING", `closing ${specFixes.length} failing scenario(s) the specification requires`);
+          run = this.store.getRun(runId)!;
+          continue;
+        }
         // Last step before any PR exists: does the merged whole do what was asked?
         // Task-level QA cannot answer that — it judged each task against its own
         // criteria, never the sum against the intent. Only after the verdict do the
@@ -1256,7 +1458,40 @@ export class RunController {
       if (!published) await this.republishUnmergeable(runId);
       const closed = await this.verify(runId);
       const now = this.store.getRun(runId)!;
-      if (closed && now.state === "VERIFYING") this.store.transitionRun(runId, "DONE", this.outcome(runId).line);
+      if (closed && now.state === "VERIFYING") {
+        this.store.transitionRun(runId, "DONE", this.outcome(runId).line);
+        await this.writeReport(runId);
+      }
+    }
+  }
+
+  /**
+   * The page a person reads once the run is over.
+   *
+   * Written here rather than left to `harness report`, because the moment a run
+   * reaches DONE is the last moment anyone is looking. Everything the report
+   * needs is legible now and decays from here: the integration branch gets
+   * pruned, the base branch moves on, and the diff that says which switches the
+   * run left off becomes a reconstruction rather than a read.
+   *
+   * DONE only, deliberately. Every earlier state is a run that is still going
+   * somewhere, and a completion report for a run that has not completed is the
+   * kind of confident summary this whole feature exists to argue against. The
+   * CLI can still be pointed at any run by hand, and says which state it found.
+   *
+   * Never throws. A run that did the work, shipped it and had production agree
+   * has succeeded; failing it over a report it could not write would be the
+   * tail wagging the dog.
+   */
+  private async writeReport(runId: string): Promise<void> {
+    try {
+      const report = await assembleReport({ store: this.store, repoPath: this.repoPath, runId, merged: true, origin: "done", now: Date.now() });
+      const file = reportPath(this.repoPath, runId);
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, renderCompletionReport(report));
+      this.bus.publish({ type: "agent.log", runId, sessionId: "integrator", text: `completion report written: ${file} — ${report.ledger.headline}`, ts: Date.now() });
+    } catch (e) {
+      this.bus.publish({ type: "agent.log", runId, sessionId: "integrator", text: `the completion report could not be written: ${String(e).slice(0, 200)}`, ts: Date.now() });
     }
   }
 
@@ -1479,6 +1714,7 @@ export class RunController {
     const queued: PlannedTask[] = gaps.map((gap, i) => ({
       id: `intent-fix-${round}-${i + 1}`,
       epicId: INTENT_FIX_EPIC.id,
+      scenarioIds: [],
       title: `Close intent gap: ${gap.split("\n")[0]!.slice(0, 80)}`,
       spec: `The run finished and a validation agent read the whole merged tree against the operator's original intent. It found this gap:\n\n${gap}\n\nWhat it concluded overall:\n${verdict.summary}\n\nClose that gap in the integration branch you are working from — it already contains every merged task, so the code the gap refers to is here. Fix the gap itself, not the surrounding design: the rest of this tree was reviewed and accepted, and a rewrite costs more than the gap did. If the gap turns out not to be real, say so in your summary with the file and line that settle it rather than changing code to satisfy it.`,
       acceptanceCriteria: [gap.split("\n")[0]!.slice(0, 300), "The claim the gap makes is no longer true of this tree, demonstrated by a check or a test that fails without the change"],
@@ -1527,6 +1763,152 @@ export class RunController {
    * when the rounds are spent (that is `ciPitStop`'s moment), or when the
    * re-run alone turned the branch green.
    */
+  /**
+   * Run the specification's scenarios against everything the run merged.
+   *
+   * The first gate in this harness that is not an agent's opinion. Every other
+   * check on the way out — QA's verdict, the intent check, the pit-stop
+   * reviewers — is a model reading a diff and forming a view, and they share a
+   * failure mode: agreeing with the code because they misread the requirement
+   * in the same direction it did. These scenarios were written from the brief
+   * before any code existed and cannot make that mistake.
+   *
+   * Runs in a worktree of the integration branch, which is the merged whole and
+   * also where the specification itself was committed. Null when this run has
+   * no specification — which every caller must tell apart from a pass.
+   */
+  private async checkAcceptance(runId: string): Promise<AcceptanceVerdict | null> {
+    const run = this.store.getRun(runId)!;
+    const spec = this.store.runSpec(runId);
+    if (!run.config.spec.enabled || !spec) return null;
+
+    const command = spec.commands.all.trim();
+    const verdict = command
+      ? await this.runSuite(runId, spec, command, run.config.spec.suiteTimeoutMinutes)
+      : acceptanceVerdict(spec, { exitCode: 0, output: "", error: "the specification named no command that runs its scenarios" });
+
+    this.bus.publish({
+      type: "run.acceptance_verdict",
+      runId,
+      passed: verdict.passed,
+      failing: verdict.failing,
+      named: verdict.named,
+      blocked: verdict.blocked,
+      line: verdict.line,
+      ts: Date.now(),
+    });
+    return verdict;
+  }
+
+  /** One run of the scenario suite, in a worktree of the merged branch. */
+  private async runSuite(runId: string, spec: RunSpec, command: string, timeoutMinutes: number): Promise<AcceptanceVerdict> {
+    let dir: string;
+    // Only reachable across processes: this run's own EXECUTING phase created
+    // and cached this worktree, so within one process it is already there. A
+    // resume whose worktree was pruned underneath it is the real case, and it
+    // must read as unproven rather than as a pass.
+    /* v8 ignore start */
+    try {
+      dir = await this.wt.ensureIntegrationWorktree(runId);
+    } catch (e) {
+      return acceptanceVerdict(spec, { exitCode: 1, output: "", error: `the merged branch could not be checked out: ${String(e).slice(0, 200)}` });
+    }
+    /* v8 ignore stop */
+    try {
+      const { stdout, stderr } = await execFileP("sh", ["-c", command], { cwd: dir, maxBuffer: 16 * 1024 * 1024, timeout: timeoutMinutes * 60_000 });
+      return acceptanceVerdict(spec, { exitCode: 0, output: `${stdout}\n${stderr}` });
+    } catch (e) {
+      return acceptanceVerdict(spec, suiteRunFrom(e as { code?: number; killed?: boolean }, timeoutMinutes));
+    }
+  }
+
+  /**
+   * Turn a red acceptance gate into work, the way `queueCiFixes` turns a red CI
+   * into work.
+   *
+   * The same shape and for the same reason: a failing scenario is a promise the
+   * run made and has not kept, which is work, not a report. One task per failing
+   * scenario, carrying its oracle and the requirement behind it, chained so they
+   * cannot conflict. The caller sends the run back to EXECUTING and the next
+   * pass through INTEGRATING re-merges and asks again.
+   *
+   * Returns the queued task ids — empty when the gate passed, when there is no
+   * specification, when the rounds are spent, or when the suite went red
+   * without naming a scenario, which is a thing to tell a person rather than a
+   * thing to hand a worker.
+   */
+  private async queueScenarioFixes(runId: string): Promise<string[]> {
+    const run = this.store.getRun(runId)!;
+    const verdict = await this.checkAcceptance(runId);
+    if (!verdict || verdict.passed) return [];
+    const spec = this.store.runSpec(runId)!;
+
+    this.bus.publish({ type: "agent.log", runId, sessionId: "integrator", text: `acceptance: ${verdict.line}`, ts: Date.now() });
+    if (!run.config.spec.gateRounds || !verdict.failing.length) return [];
+
+    const tasks = this.store.listTasks(runId);
+    const rounds = new Set(tasks.map((t) => /^spec-fix-(\d+)-/.exec(t.id)?.[1]).filter(Boolean));
+    if (rounds.size >= run.config.spec.gateRounds) return [];
+    const round = rounds.size + 1;
+
+    // The same bound the intent gaps and the CI checks use, for the same
+    // reason: enough for a real failure list, few enough that a broken suite
+    // cannot re-plan the run. Anything dropped is said out loud.
+    const MAX_SCENARIOS = 10;
+    const failing = verdict.failing.slice(0, MAX_SCENARIOS);
+    const byId = new Map(spec.scenarios.map((sc) => [sc.id, sc]));
+    const requirement = (id: string) => spec.requirements.find((r) => r.id === byId.get(id)?.requirement);
+
+    const queued: PlannedTask[] = failing.map((id: string, i: number) => {
+      const sc = byId.get(id)!;
+      const req = requirement(id);
+      return {
+        id: `spec-fix-${round}-${i + 1}`,
+        epicId: SPEC_FIX_EPIC.id,
+        title: `Make ${id} pass: ${(sc.title || sc.oracle).split("\n")[0]!.slice(0, 70)}`,
+        spec:
+          `The scenario \`${id}\` is failing against the merged branch. It was written from the operator's brief before any code existed, so it is the promise, not an opinion about the code.\n\n` +
+          `What it checks: ${sc.oracle || sc.title}\n` +
+          (req ? `The requirement behind it: ${req.text}\n` : "") +
+          (sc.testRef ? `The test: ${sc.testRef}\n` : "") +
+          `\nMake it pass by changing the product, not the test. If the scenario itself is wrong — it asserts something the brief never asked for, or asserts it in a way the design cannot satisfy — say so plainly and escalate rather than editing the assertion to match the code. A scenario edited to fit the implementation proves nothing at all, and it is the one failure this whole phase exists to prevent.`,
+        acceptanceCriteria: [`${id} passes: ${sc.oracle || sc.title}`, "No scenario that was passing before this change is failing after it"],
+        // Chained, so two fixes cannot land on the same file concurrently.
+        dependsOn: i === 0 ? [] : [`spec-fix-${round}-${i}`],
+        touchedPaths: [],
+        completionProbe: usableProbe(scenarioCommand(spec.commands, [id])),
+        scenarioIds: [id],
+        estimatedSize: "S",
+      };
+    });
+
+    if (verdict.failing.length > MAX_SCENARIOS) {
+      this.bus.publish({
+        type: "agent.log",
+        runId,
+        sessionId: "integrator",
+        text: `${verdict.failing.length - MAX_SCENARIOS} more failing scenario(s) were not queued this round: ${verdict.failing.slice(MAX_SCENARIOS).join(", ")}`,
+        ts: Date.now(),
+      });
+    }
+    this.store.insertTasks(runId, [SPEC_FIX_EPIC], queued.map(pendingRow));
+    await this.fileIssues(runId);
+    return queued.map((t) => t.id);
+  }
+
+  /**
+   * The scenarios this task was written to turn green, as one command.
+   *
+   * Empty for a task no scenario covers, for a run with no specification, and
+   * for a repository whose specification named no way to select a subset — all
+   * three read as "this task has no scenario check", never as "run everything".
+   * Holding one task to the whole suite would fail it over work nobody has
+   * started, which teaches a worker to go and edit somebody else's files.
+   */
+  private scenarioProbe(runId: string, task: TaskRow): string {
+    return usableProbe(scenarioProbeCommand(this.store.runSpec(runId), task.scenarioIds));
+  }
+
   private async queueCiFixes(runId: string): Promise<string[]> {
     const run = this.store.getRun(runId)!;
     if (!run.config.waitForChecks || !this.github.enabled || !run.config.ciFixRounds) return [];
@@ -1570,6 +1952,7 @@ export class RunController {
       return {
         id: `ci-fix-${round}-${i + 1}`,
         epicId: CI_FIX_EPIC.id,
+        scenarioIds: [],
         title: `Fix red CI check: ${check.slice(0, 80)}`,
         spec:
           `The run's pull request #${prNumber} is red: the repo's own CI check "${check}" failed on the merged branch, after a re-run — this is not flake.\n\n` +
@@ -3191,6 +3574,7 @@ export class RunController {
         skills: this.planSkills(runId).map((s) => s.name),
         prompt:
           `Assignment:\n${run.assignment}\n` +
+          specPlanBlock(this.store.runSpec(runId) ?? RunSpec.parse({})) +
           (feedback ? `\nOperator feedback on the previous plan:\n${feedback}\n` : "") +
           (attempt > 1 ? `\nYour previous attempt was rejected: ${lastReason}\n` : "") +
           `\nSurvey the repository at your working directory, then emit the <prd> and <conventions> blocks.`,
@@ -3277,7 +3661,7 @@ export class RunController {
               ? plannerContinuePrompt(epics, tasks, perMessage)
               : repair
                 ? plannerRepairPrompt(lastOutput, lastReason, lastTruncated)
-                : `Assignment:\n${run.assignment}\n${feedback ? `\nOperator feedback on the previous plan:\n${feedback}\n` : ""}\n\nYou have already surveyed the repository and written these documents. Do not use any tools.\n\n<prd>\n${docs.prdMarkdown}\n</prd>\n\n<conventions>\n${docs.conventionsMarkdown}\n</conventions>\n${
+                : `Assignment:\n${run.assignment}\n${specPlanBlock(this.store.runSpec(runId) ?? RunSpec.parse({}))}${feedback ? `\nOperator feedback on the previous plan:\n${feedback}\n` : ""}\n\nYou have already surveyed the repository and written these documents. Do not use any tools.\n\n<prd>\n${docs.prdMarkdown}\n</prd>\n\n<conventions>\n${docs.conventionsMarkdown}\n</conventions>\n${
                     files
                       ? `\n<repository-files>\n${files}\n</repository-files>\n\nThese are the files that exist today. Put the real ones under \`touchedPaths\` — a path you invent for a file that already exists is a task pointed at nothing, and two tasks naming the same file by different paths will collide instead of depending on each other. Only invent a path for a file the assignment genuinely requires and the repository does not have.\n`
                       : ""
@@ -5180,8 +5564,16 @@ export class RunController {
       // this task alone, so there is no base to compare it against and nothing
       // to inherit — it either passes on this branch or the task is not
       // finished. Most tasks have none, and cost nothing here.
-      if (task.completionProbe) {
-        const probe = await runDeterministicChecks(wt.path, [task.completionProbe]);
+      //
+      // A task the specification covers has one whether or not the planner
+      // thought of it: its scenarios are the promises this task was written to
+      // keep, and running them here is what stops a scenario failure from
+      // travelling all the way to the acceptance gate before anyone notices.
+      // The planner's own probe wins when it wrote one — it is about this task
+      // specifically, and the scenarios are already checked at the gate.
+      const probeCommand = task.completionProbe || this.scenarioProbe(runId, task);
+      if (probeCommand) {
+        const probe = await runDeterministicChecks(wt.path, [probeCommand]);
         // The probe has stopped standing between this task and QA — because it
         // passed, or because the escalation it caused ended with it rewritten.
         let settled = probe.ok;
@@ -5193,9 +5585,9 @@ export class RunController {
           qaFeedback =
             `This task's completion probe still fails. The probe is the task's own definition of done, and it does not depend on ` +
             `which files you happened to edit — it passes when the job is complete everywhere and fails while any of it is left:\n\n` +
-            `$ ${task.completionProbe}\n${output}\n\n` +
+            `$ ${probeCommand}\n${output}\n\n` +
             `Do not change or delete the probe. Finish the work it is looking for. If you believe the probe itself is wrong, say so plainly in your summary and explain why, rather than editing it.`;
-          lastRejection = `The completion probe failed: ${task.completionProbe}\n${output.slice(-1500)}`;
+          lastRejection = `The completion probe failed: ${probeCommand}\n${output.slice(-1500)}`;
           const iterations = task.qaIterations + 1;
           this.store.updateTask(runId, taskId, { qaIterations: iterations });
           this.bus.publish({
@@ -5203,7 +5595,7 @@ export class RunController {
             runId,
             taskId,
             sessionId: workerSession ?? taskId,
-            text: `completion probe failed: ${task.completionProbe}`,
+            text: `completion probe failed: ${probeCommand}`,
             ts: Date.now(),
           });
           if (iterations >= run.config.qaIterationCap) {

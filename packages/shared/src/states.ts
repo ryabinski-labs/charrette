@@ -64,6 +64,12 @@ export const AgentRole = z.enum([
   // own role so the ledger shows what forging costs, and so its sessions can
   // never be mistaken for the worker they were forging for.
   "skillsmith",
+  // Turns the agreed brief into an executable specification — requirements,
+  // falsifiable scenarios, and the failing tests that put the run in the red
+  // phase — before the planner writes a single task. Its own role because it
+  // spends before any task exists, and because what it produces is the standard
+  // every later gate is judged against rather than more of the same judgment.
+  "spec",
 ]);
 export type AgentRole = z.infer<typeof AgentRole>;
 

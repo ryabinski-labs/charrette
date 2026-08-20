@@ -3,7 +3,7 @@ import { createInterface } from "node:readline/promises";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { ModelRoutingShape, RunConfig, SubscriptionConfig } from "@harness/shared";
-import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, accountEnv, checkMemoryBanner, detectToolbelt, ensureIgnored, harnessBuild, missingKeys, originSlug, postmortem, renderPostmortem, repoUnusable } from "@harness/core";
+import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, accountEnv, assembleReport, checkMemoryBanner, detectToolbelt, ensureIgnored, harnessBuild, missingKeys, originSlug, postmortem, renderCompletionReport, renderPostmortem, reportPath, repoUnusable, wasMerged } from "@harness/core";
 import { Dashboard } from "@harness/dashboard";
 import { promptForNewCap, watchBudgetCommands } from "./budget.js";
 import { promptForAccount } from "./subscription.js";
@@ -977,6 +977,43 @@ export function buildProgram(): Command {
         return;
       }
       process.stdout.write(`${renderPostmortem(postmortem(store, runId))}\n`);
+    });
+
+  program
+    .command("report")
+    .argument("[runId]", "the run to report on (default: the most recent)")
+    .description("what the run delivered, which of it is live, and what turns on the rest — written as one HTML page")
+    .option("-r, --repo <path>", "target repo (default: the git repo containing the cwd)", process.cwd())
+    .option("-o, --out <path>", "where to write it (default: .harness/reports/<runId>.html)")
+    .action(async (runIdArg: string | undefined, opts: { repo: string; out?: string }) => {
+      const repo = resolveRepoRoot(opts.repo);
+      const store = readOnlyStore(repo);
+      const runId = store ? (runIdArg ?? store.listRuns()[0]?.id) : undefined;
+      const run = store && runId ? store.getRun(runId) : undefined;
+      if (!store || !runId || !run) {
+        process.stdout.write(runIdArg ? `No run ${runIdArg} in this repo.\n` : "No runs yet.\n");
+        if (runIdArg) process.exitCode = 1;
+        return;
+      }
+      const slug = (await originSlug(repo).catch(() => null)) ?? loadFileConfig(repo).config.githubRepo;
+      // Ask GitHub whether the pull request actually merged, rather than
+      // repeating the run's last memory of itself. A run that stopped at
+      // PR_REVIEW and was merged by a human afterwards recorded nothing about
+      // it, and the report's headline is the strongest claim on the page.
+      const gh = resolveGitHub(repo, slug);
+      const adapter = new GitHubAdapter(gh.token, gh.slug);
+      const merged = await wasMerged(store, runId, adapter.enabled ? (pr) => adapter.mergedSha(pr) : undefined);
+      const report = await assembleReport({ store, repoPath: repo, runId, merged, slug, origin: "cli", now: Date.now() });
+      const out = opts.out ?? reportPath(repo, runId);
+      mkdirSync(path.dirname(out), { recursive: true });
+      writeFileSync(out, renderCompletionReport(report));
+      const { counts } = report.ledger;
+      process.stdout.write(
+        `${report.ledger.headline}\n\n` +
+          `  live ${counts.live}   dark ${counts.dark}   unproven ${counts.unproven}   not delivered ${counts["not-delivered"]}\n` +
+          `  ${report.ledger.switches.length} switch${report.ledger.switches.length === 1 ? "" : "es"} the run could not throw\n\n` +
+          `  ${out}\n`
+      );
     });
 
   program

@@ -26,6 +26,16 @@ export const PlannedTask = z.object({
    * where "done" means a search comes back empty.
    */
   completionProbe: z.string().default(""),
+  /**
+   * The scenarios this task is the one to turn green, by id.
+   *
+   * The link that makes the specification a plan rather than a document. Without
+   * it a task's "done" is still prose adjudicated by an agent; with it, the
+   * worker is handed the exact checks it has to satisfy and QA runs them rather
+   * than forming a view. Empty for a task no scenario covers — scaffolding,
+   * refactors, a dependency bump — which is honest and common.
+   */
+  scenarioIds: z.array(z.string()).default([]),
   estimatedSize: z.enum(["S", "M", "L"]),
 });
 export type PlannedTask = z.infer<typeof PlannedTask>;

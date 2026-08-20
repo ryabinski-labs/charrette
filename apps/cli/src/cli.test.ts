@@ -65,6 +65,9 @@ const h = vi.hoisted(() => {
     BusMock: vi.fn(),
     AgentPoolMock: vi.fn(),
     GitHubAdapterMock: vi.fn(),
+    // The report command asks the adapter whether it can reach GitHub at all
+    // before handing the merge check a way to ask.
+    githubMethods: { enabled: false, mergedSha: vi.fn(async () => null as string | null) },
     RunControllerMock: vi.fn(),
     DashboardMock: vi.fn(),
     detectToolbeltMock: vi.fn(() => [] as { name: string }[]),
@@ -100,6 +103,21 @@ const h = vi.hoisted(() => {
     // is picking the right run and saying so when there is none.
     postmortemMock: vi.fn((_store: unknown, runId: string) => ({ runId })),
     renderPostmortemMock: vi.fn((p: { runId: string }) => `Run ${p.runId} [state] — assignment`),
+    // What the page says is settled in completionReport.test.ts and what goes
+    // on it in deliveryLedger.test.ts. What the CLI owes is picking the run,
+    // reading the right diff, choosing where to write, and saying where it
+    // went — and, when the diff could not be read at all, refusing to let that
+    // pass as "nothing was found".
+    // What the page says is settled in completionReport.test.ts, what goes on
+    // it in deliveryLedger.test.ts, and the assembly in reportRun.test.ts.
+    // What the CLI owes is picking the run, resolving which repository it is,
+    // choosing where to write, and saying where it went.
+    wasMergedMock: vi.fn(async () => false),
+    assembleReportMock: vi.fn(async () => ({
+      ledger: { headline: "Nothing from this run has shipped.", counts: { live: 0, dark: 3, unproven: 1, "not-delivered": 2 }, switches: [{ name: "A_KEY" }] },
+    })),
+    reportPathMock: vi.fn((repo: string, runId: string) => `${repo}/.harness/reports/${runId}.html`),
+    renderCompletionReportMock: vi.fn(() => "<title>report</title>"),
   };
 });
 
@@ -132,6 +150,10 @@ vi.mock("@harness/core", () => ({
   originSlug: h.originSlugMock,
   postmortem: h.postmortemMock,
   renderPostmortem: h.renderPostmortemMock,
+  wasMerged: h.wasMergedMock,
+  assembleReport: h.assembleReportMock,
+  reportPath: h.reportPathMock,
+  renderCompletionReport: h.renderCompletionReportMock,
 }));
 vi.mock("@harness/dashboard", () => ({ Dashboard: h.DashboardMock }));
 vi.mock("./defaults.js", async (importOriginal) => {
@@ -257,7 +279,9 @@ beforeEach(() => {
     subscribe: (fn: (e: { event: Record<string, unknown> }) => void) => void h.subscribers.push(fn),
   }));
   h.AgentPoolMock.mockReset();
-  h.GitHubAdapterMock.mockReset();
+  h.githubMethods.enabled = false;
+  h.githubMethods.mergedSha.mockReset().mockResolvedValue(null);
+  h.GitHubAdapterMock.mockReset().mockImplementation(() => h.githubMethods);
   h.RunControllerMock.mockReset().mockImplementation((...args: unknown[]) => {
     h.controllerArgs.push(args);
     return h.controllerMethods;
@@ -1816,6 +1840,126 @@ describe("harness regroup", () => {
  * The answer — an intake question asked and never answered — was two lines of
  * it, and nothing in the product would have shown it.
  */
+describe("harness report", () => {
+  const aRun = (over: Record<string, unknown> = {}) => ({
+    id: "run-1",
+    state: "PR_REVIEW",
+    assignment: "build it",
+    integrationBranch: "harness/run-1/main",
+    createdAt: 1_000,
+    config: { baseBranch: "main" },
+    ...over,
+  });
+
+  it("reports the most recent run when given no id, and says where it went", async () => {
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "PR_REVIEW", assignment: "build it" }]);
+    h.storeMethods.getRun.mockReturnValue(aRun());
+
+    await cli("report", "--repo", "/repo");
+
+    expect(printed()).toContain("Nothing from this run has shipped.");
+    expect(printed()).toContain("live 0   dark 3   unproven 1   not delivered 2");
+    expect(printed()).toContain("1 switch the run could not throw");
+    expect(printed()).toContain("/repo/.harness/reports/run-1.html");
+    expect(h.writeFileSyncMock).toHaveBeenCalledWith("/repo/.harness/reports/run-1.html", "<title>report</title>");
+  });
+
+  it("tells the assembler which repository this is and whether anyone merged it", async () => {
+    h.storeMethods.getRun.mockReturnValue(aRun());
+    h.originSlugMock.mockResolvedValue("ryabinski-labs/icelandcopilot-companion");
+    h.wasMergedMock.mockResolvedValue(true);
+
+    await cli("report", "run-1", "--repo", "/repo");
+
+    expect(h.assembleReportMock).toHaveBeenCalledWith(
+      expect.objectContaining({ repoPath: "/repo", runId: "run-1", slug: "ryabinski-labs/icelandcopilot-companion", merged: true, origin: "cli" })
+    );
+  });
+
+  /**
+   * A run that stopped at PR_REVIEW and was merged by a human afterwards
+   * recorded nothing about it, and the headline is the strongest claim on the
+   * page — so the command asks GitHub rather than repeating the run's own
+   * last memory of itself.
+   */
+  it("gives the merge check a way to ask GitHub when a repository is configured", async () => {
+    h.storeMethods.getRun.mockReturnValue(aRun());
+    h.githubMethods.enabled = true;
+
+    await cli("report", "run-1", "--repo", "/repo");
+
+    expect(h.wasMergedMock).toHaveBeenCalledWith(expect.anything(), "run-1", expect.any(Function));
+  });
+
+  it("asks nobody when the repository has no GitHub behind it", async () => {
+    h.storeMethods.getRun.mockReturnValue(aRun());
+    h.githubMethods.enabled = false;
+
+    await cli("report", "run-1", "--repo", "/repo");
+
+    expect(h.wasMergedMock).toHaveBeenCalledWith(expect.anything(), "run-1", undefined);
+  });
+
+  it("falls back to the configured repository when the checkout has no remote", async () => {
+    h.storeMethods.getRun.mockReturnValue(aRun());
+    h.originSlugMock.mockRejectedValue(new Error("no origin"));
+    h.loadFileConfigMock.mockReturnValue({ config: { githubRepo: "acme/widgets" }, path: "" });
+
+    await cli("report", "run-1", "--repo", "/repo");
+
+    expect(h.assembleReportMock).toHaveBeenCalledWith(expect.objectContaining({ slug: "acme/widgets" }));
+  });
+
+  it("writes where it is told to", async () => {
+    h.storeMethods.getRun.mockReturnValue(aRun());
+
+    await cli("report", "run-1", "--repo", "/repo", "--out", "/tmp/elsewhere.html");
+
+    expect(h.writeFileSyncMock).toHaveBeenCalledWith("/tmp/elsewhere.html", "<title>report</title>");
+    expect(h.mkdirSyncMock).toHaveBeenCalledWith("/tmp", { recursive: true });
+  });
+
+  it("does not say 1 switches", async () => {
+    h.storeMethods.getRun.mockReturnValue(aRun());
+    h.assembleReportMock.mockResolvedValueOnce({
+      ledger: { headline: "h", counts: { live: 1, dark: 0, unproven: 0, "not-delivered": 0 }, switches: [{ name: "a" }, { name: "b" }] },
+    });
+
+    await cli("report", "run-1", "--repo", "/repo");
+
+    expect(printed()).toContain("2 switches the run could not throw");
+  });
+
+  it("says so when the repo has never been run", async () => {
+    // No database at all: `readOnlyStore` returns null rather than creating one.
+    h.existsSyncMock.mockReturnValue(false);
+
+    await cli("report", "--repo", "/repo");
+
+    expect(printed()).toBe("No runs yet.\n");
+  });
+
+  it("says so for a repo that has a database and nothing in it", async () => {
+    h.existsSyncMock.mockReturnValue(true);
+    h.storeMethods.listRuns.mockReturnValue([]);
+
+    await cli("report", "--repo", "/repo");
+
+    expect(printed()).toBe("No runs yet.\n");
+  });
+
+  it("names the run it could not find, and fails, so a chained command does not run on nothing", async () => {
+    h.storeMethods.getRun.mockReturnValue(undefined);
+    process.exitCode = undefined;
+
+    await cli("report", "nope", "--repo", "/repo");
+
+    expect(printed()).toBe("No run nope in this repo.\n");
+    expect(process.exitCode).toBe(1);
+    process.exitCode = undefined;
+  });
+});
+
 describe("harness postmortem", () => {
   it("explains the most recent run when given no id", async () => {
     h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "PR_REVIEW", assignment: "build it" }]);

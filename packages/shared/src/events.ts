@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { RunSpec } from "./spec.js";
 import { AgentRole, GateKind, GateState, RunState, TaskState } from "./states.js";
 
 const base = { runId: z.string(), ts: z.number().int() };
@@ -140,6 +141,24 @@ export const HarnessEvent = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("task.feedback"), taskId: z.string(), text: z.string(), delivery: z.enum(["live", "queued", "revived"]) }),
   // The validator's answer to "did the merged result do what the operator asked?",
   // recorded before any pull request is opened.
+  /**
+   * The run's executable specification, as the spec agent left it. Carried on
+   * the log rather than in a table because it is written once and read by
+   * everything after — the plan, the task gates, the acceptance gate and the
+   * completion report — and the log is already the thing a resumed process
+   * rebuilds its world from.
+   */
+  z.object({ ...base, type: z.literal("run.spec_ready"), spec: RunSpec }),
+  z.object({
+    ...base,
+    type: z.literal("run.acceptance_verdict"),
+    passed: z.boolean(),
+    failing: z.array(z.string()).default([]),
+    /** False when the suite went red and its output named no scenario. */
+    named: z.boolean().default(true),
+    blocked: z.array(z.string()).default([]),
+    line: z.string().default(""),
+  }),
   z.object({ ...base, type: z.literal("run.intent_verdict"), verdict: z.enum(["PASS", "FAIL"]), gaps: z.array(z.string()).default([]), summary: z.string().default("") }),
   // The same judgment, made of the plan instead of the result, at the gate where
   // acting on it costs a re-plan rather than a run.

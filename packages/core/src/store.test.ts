@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
-import { RunConfig, type TaskState } from "@harness/shared";
+import { RunConfig, RunSpec, type TaskState } from "@harness/shared";
 import { Bus } from "./bus.js";
 import { InvalidTransition, Store } from "./store.js";
 import { costUsd } from "./budget.js";
@@ -349,5 +349,65 @@ describe("what previous runs in this repository cost", () => {
     store.insertTasks("run1", [{ id: "e1", title: "E" }], [merged("a", "XL" as "L")]);
 
     expect(store.runCosts()).toEqual([{ weight: 2, spentUsd: 0 }]);
+  });
+});
+
+describe("the run's specification, read back", () => {
+  const runWith = () => {
+    const store = new Store(":memory:");
+    const bus = new Bus(store);
+    store.createRun({
+      id: "run-1",
+      repoPath: "/tmp/repo",
+      assignment: "build it",
+      state: "CREATED",
+      prdPath: null,
+      planHash: null,
+      integrationBranch: "harness/run-1/main",
+      config: RunConfig.parse({}),
+    });
+    return { store, bus };
+  };
+
+  /**
+   * Null is a first-class answer: "no scenario was ever derived" and "a
+   * specification exists and proves nothing" are opposite facts.
+   */
+  it("is null for a run that was never specified", () => {
+    const { store } = runWith();
+    expect(store.runSpec("run-1")).toBeNull();
+    expect(store.acceptanceVerdict("run-1")).toBeNull();
+  });
+
+  it("reads back the last specification written", () => {
+    const { store, bus } = runWith();
+    bus.publish({ type: "run.spec_ready", runId: "run-1", spec: RunSpec.parse({ feature: "one", scenarios: [{ id: "SC-001" }] }), ts: 1 });
+    bus.publish({ type: "run.spec_ready", runId: "run-1", spec: RunSpec.parse({ feature: "two", scenarios: [{ id: "SC-002" }] }), ts: 2 });
+    expect(store.runSpec("run-1")!.feature).toBe("two");
+  });
+
+  /**
+   * A row this build cannot read is not a specification. Returning a
+   * half-parsed one would hand the acceptance gate a standard nobody wrote.
+   */
+  it("is null for a row written by a build whose shape this one cannot read", () => {
+    const { store } = runWith();
+    store.db
+      .prepare("INSERT INTO events (runId, type, payload, ts) VALUES (?,?,?,?)")
+      .run("run-1", "run.spec_ready", JSON.stringify({ spec: { scenarios: "not a list" } }), 1);
+    expect(store.runSpec("run-1")).toBeNull();
+  });
+
+  it("reads the acceptance verdict back whole", () => {
+    const { store, bus } = runWith();
+    bus.publish({ type: "run.acceptance_verdict", runId: "run-1", passed: false, failing: ["SC-001"], named: true, blocked: ["SC-009"], line: "one failing", ts: 1 });
+    expect(store.acceptanceVerdict("run-1")).toEqual({ passed: false, failing: ["SC-001"], named: true, blocked: ["SC-009"], line: "one failing" });
+  });
+
+  /** A row from before these fields existed reads as the absence they describe. */
+  it("fills in what an older row does not carry", () => {
+    const { store } = runWith();
+    store.db.prepare("INSERT INTO events (runId, type, payload, ts) VALUES (?,?,?,?)").run("run-1", "run.acceptance_verdict", JSON.stringify({ passed: true }), 1);
+    expect(store.acceptanceVerdict("run-1")).toEqual({ passed: true, failing: [], named: true, blocked: [], line: "" });
   });
 });
