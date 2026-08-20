@@ -227,6 +227,34 @@ export function reportTitle(report: CompletionReport): string {
   return `${report.project}: All Lights On`;
 }
 
+/**
+ * The report as a file a person opens, rather than as content to be embedded.
+ *
+ * `renderCompletionReport` deliberately emits no `<!doctype>`, `<html>` or
+ * `<head>`: an artifact host supplies its own skeleton and the content goes in
+ * the body. A file on disk has no such host, and without the skeleton two
+ * things go wrong that no test in this repository could have caught.
+ *
+ * Chrome parses it in quirks mode, and — the one that actually matters — with
+ * no `<meta name="viewport">` a phone lays the page out at 980px and scales the
+ * result down. Every `max-width: 620px` rule in the stylesheet is then dead
+ * code: run 1e7d3df3's report, measured on an emulated iPhone viewport, drew
+ * the four-rung ladder and the four-cell instrument panel at 980px and shrank
+ * them to fit 390px of glass.
+ *
+ * So the writer wraps and the renderer does not. Publishing this document to a
+ * host that adds its own skeleton is still correct: a second `<!doctype>` in
+ * the body is ignored rather than re-triggering quirks mode, and a duplicate
+ * viewport tag resolves to the same value.
+ */
+export function standaloneReport(report: CompletionReport): string {
+  return (
+    `<!doctype html>\n<html lang="en">\n<meta charset="utf-8">\n` +
+    `<meta name="viewport" content="width=device-width,initial-scale=1">\n` +
+    `${renderCompletionReport(report)}\n</html>\n`
+  );
+}
+
 export function renderCompletionReport(report: CompletionReport): string {
   const { ledger } = report;
   const dark = ledger.entries.filter((e) => e.status === "dark" || e.status === "not-delivered");
@@ -267,17 +295,17 @@ export function renderCompletionReport(report: CompletionReport): string {
   --surface-alt: #E6E8F1;
   --ink:         #14161F;
   --ink-soft:    #545A6B;
-  --ink-faint:   #878DA0;
+  --ink-faint:   #62687B;
   --rule:        #D4D8E4;
   --rule-soft:   #E4E7EF;
   --accent:      #3A45B8;
   --accent-wash: #E2E4F6;
-  --live:        #1C7A50;
+  --live:        #1B794F;
   --live-wash:   #DDEFE5;
   --off:         #B03D26;
   --off-wash:    #F7E2DC;
-  --unproven:    #6A7186;
-  --absent:      #8A8FA0;
+  --unproven:    #61687D;
+  --absent:      #636879;
   --shadow:      0 1px 2px rgba(20,22,31,.05), 0 10px 28px -18px rgba(20,22,31,.35);
 }
 @media (prefers-color-scheme: dark) {
@@ -287,7 +315,7 @@ export function renderCompletionReport(report: CompletionReport): string {
     --surface-alt: #1F2331;
     --ink:         #E6E9F2;
     --ink-soft:    #9DA4B8;
-    --ink-faint:   #6D7488;
+    --ink-faint:   #838A9E;
     --rule:        #2B3040;
     --rule-soft:   #222633;
     --accent:      #8B93F0;
@@ -297,7 +325,7 @@ export function renderCompletionReport(report: CompletionReport): string {
     --off:         #E08573;
     --off-wash:    #351C16;
     --unproven:    #9299AD;
-    --absent:      #767C90;
+    --absent:      #848A9E;
     --shadow:      0 1px 2px rgba(0,0,0,.35), 0 10px 28px -18px rgba(0,0,0,.8);
   }
 }
@@ -307,7 +335,7 @@ export function renderCompletionReport(report: CompletionReport): string {
   --surface-alt: #1F2331;
   --ink:         #E6E9F2;
   --ink-soft:    #9DA4B8;
-  --ink-faint:   #6D7488;
+  --ink-faint:   #838A9E;
   --rule:        #2B3040;
   --rule-soft:   #222633;
   --accent:      #8B93F0;
@@ -317,7 +345,7 @@ export function renderCompletionReport(report: CompletionReport): string {
   --off:         #E08573;
   --off-wash:    #351C16;
   --unproven:    #9299AD;
-  --absent:      #767C90;
+  --absent:      #848A9E;
   --shadow:      0 1px 2px rgba(0,0,0,.35), 0 10px 28px -18px rgba(0,0,0,.8);
 }
 
@@ -333,7 +361,7 @@ body {
   padding: 0 20px 100px;
   -webkit-font-smoothing: antialiased;
 }
-.wrap { max-width: 760px; margin: 0 auto; }
+.wrap { max-width: 760px; margin: 0 auto; display: block; }
 
 h1, h2, h3 { font-family: "Familjen Grotesk", "Helvetica Neue", Arial, sans-serif; text-wrap: balance; line-height: 1.1; margin: 0; }
 code, pre, .num, .mono { font-family: "JetBrains Mono", ui-monospace, Menlo, monospace; }
@@ -496,7 +524,7 @@ pre code { background: none; padding: 0; font-size: 13px; line-height: 1.5; whit
 }
 </style>
 
-<div class="wrap">
+<main class="wrap">
 
 <header class="masthead">
   <div class="eyebrow">${escapeHtml(report.project)} · run ${escapeHtml(report.runId.slice(0, 8))} · ${escapeHtml(dateOf(report.generatedAt))}</div>
@@ -595,5 +623,5 @@ ${
   </ul>
 </div>
 
-</div>`;
+</main>`;
 }
