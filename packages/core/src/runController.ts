@@ -27,9 +27,10 @@ import { coChangeIndex, coChangeNote } from "./coChange.js";
 import { nextDispatch } from "./dispatchOrder.js";
 import { git, pushRunBranch, repoFileList, WorktreeManager } from "./git.js";
 import { GitHubAdapter, type PrRef } from "./github.js";
+import { unsatisfiableCriteria } from "./infraGuard.js";
 import { runIntake, type IntakeUi } from "./intake.js";
 import { composeDown, isolationBlock, isolationEnv, taskIsolation } from "./isolation.js";
-import { observeChecks } from "./memory.js";
+import { knownFlakySignatures, observeChecks, observeFlakySignatures } from "./memory.js";
 import { parseRunbook, withRunbook, type Runbook } from "./operatorRunbook.js";
 import { acceptanceVerdict, scenarioCommand, scenarioProbeCommand, suiteRunFrom, type AcceptanceVerdict } from "./acceptance.js";
 import { standaloneReport } from "./completionReport.js";
@@ -1564,8 +1565,40 @@ export class RunController {
    */
   private async checkPlanIntent(runId: string): Promise<{ block: string; gaps: string[] }> {
     const run = this.store.getRun(runId)!;
-    if (!run.config.planIntentCheck) return { block: "", gaps: [] };
     const tasks = this.store.listTasks(runId);
+    // Free and deterministic, so it runs before — and regardless of — the model
+    // check: a criterion naming a command `infraGuardHook` denies is a task no
+    // worker can finish, and run bc691359 spent three workers rediscovering one.
+    const denied = unsatisfiableCriteria(tasks);
+    const deniedGaps = denied.map(
+      (d) =>
+        `Task ${d.taskId}'s criterion names ${d.what}, which every agent session is denied — the harness produces reviewed configuration and never provisions. If satisfying it needs that command to actually run, no worker can ever pass it and the task will spend its attempts and escalate; rewrite it as a hand-off the operator executes. If it only asks for a document that names the command, it is satisfiable as written — say which reading this is. Criterion: "${d.criterion.slice(0, 300)}"`
+    );
+    if (denied.length) {
+      this.bus.publish({
+        type: "agent.log",
+        runId,
+        sessionId: "plan-gate",
+        text: `${denied.length} acceptance criteri${denied.length === 1 ? "on names" : "a name"} a command the infrastructure guard denies to every session: ${denied.map((d) => `${d.taskId} (${d.what})`).join(", ")}`,
+        ts: Date.now(),
+      });
+    }
+    const render = (gaps: string[]): string =>
+      !gaps.length
+        ? ""
+        : [
+            "",
+            "",
+            "What this plan would not deliver, read against your assignment:",
+            ...gaps.map((g) => `  - ${g}`),
+            "",
+            "Every task here can pass its own acceptance criteria and still leave the",
+            "above missing — or, where a criterion names a denied command, can never",
+            "pass it at all. Those criteria are the whole contract a worker builds to",
+            "and QA checks. Rejecting sends this back to the planner with the list",
+            "attached; approving accepts it as the scope.",
+          ].join("\n");
+    if (!run.config.planIntentCheck) return { block: render(deniedGaps), gaps: deniedGaps };
     try {
       const result = await this.pool.run({
         runId,
@@ -1583,27 +1616,16 @@ export class RunController {
       });
       const verdict = IntentVerdict.parse(extractJson(result.resultText));
       this.bus.publish({ type: "run.plan_intent_verdict", runId, verdict: verdict.verdict, gaps: verdict.gaps, summary: verdict.summary, ts: Date.now() });
-      if (verdict.verdict === "PASS" || !verdict.gaps.length) return { block: "", gaps: [] };
-      return {
-        gaps: verdict.gaps,
-        block: [
-          "",
-          "",
-          "What this plan would not deliver, read against your assignment:",
-          ...verdict.gaps.map((g) => `  - ${g}`),
-          "",
-          "Every task here can pass its own acceptance criteria and still leave the",
-          "above missing, because those criteria are the whole contract a worker",
-          "builds to and QA checks. Rejecting sends this back to the planner with",
-          "the list attached; approving accepts it as the scope.",
-        ].join("\n"),
-      };
+      const gaps = verdict.verdict === "PASS" ? deniedGaps : [...deniedGaps, ...verdict.gaps];
+      return { block: render(gaps), gaps };
     } catch (e) {
       if (stopsTheRun(e)) throw e;
       // A plan that could not be checked is still a plan the operator may
-      // approve. Say the check did not happen rather than implying it passed.
+      // approve. Say the check did not happen rather than implying it passed —
+      // and the denied-command findings stand either way: they never depended
+      // on the check that failed.
       this.bus.publish({ type: "agent.log", runId, sessionId: "validator", text: `the plan-intent check did not complete: ${String(e).slice(0, 300)}`, ts: Date.now() });
-      return { block: "\n\nThe plan-intent check did not complete, so nothing has compared this plan to your assignment.", gaps: [] };
+      return { block: `${render(deniedGaps)}\n\nThe plan-intent check did not complete, so nothing has compared this plan to your assignment.`, gaps: deniedGaps };
     }
   }
 
@@ -5639,9 +5661,23 @@ export class RunController {
       // with itself — and a worker sent to fix it spends an iteration finding
       // nothing wrong, while the iteration it spent is what opens a gate.
       const base = checks.ok ? null : await this.baseFailures(runId);
-      const { failures, inherited, flaky } = checks.ok
-        ? { failures: [], inherited: [], flaky: [] }
-        : await confirmFailures(wt.path, splitInheritedFailures(checks, base!), base!);
+      const { failures, inherited, flaky, excused, flakySignatures } = checks.ok
+        ? { failures: [], inherited: [], flaky: [], excused: [], flakySignatures: [] }
+        : await confirmFailures(wt.path, splitInheritedFailures(checks, base!), base!, knownFlakySignatures(this.store));
+      if (excused.length) {
+        // Failed twice, but only with failures this repository has already
+        // watched come and go. Charging these is how a gate reopens three
+        // times on a timing test the task never touched — say what was
+        // excused instead, so a worker that DID break one can still object.
+        this.bus.publish({
+          type: "agent.log",
+          runId,
+          taskId,
+          sessionId: workerSession ?? taskId,
+          text: `${excused.map((e) => e.command).join(", ")} failed twice, but only on failures this repository has watched fail and then pass before — known flaky, not charged to this task: ${excused.flatMap((e) => e.signatures).join(" · ").slice(0, 500)}`,
+          ts: Date.now(),
+        });
+      }
       if (flaky.length) {
         this.bus.publish({
           type: "agent.log",
@@ -5671,6 +5707,7 @@ export class RunController {
         inherited,
         flaky,
       });
+      if (flakySignatures.length) observeFlakySignatures(this.store, runId, flakySignatures);
       if (failures.length) {
         const detail = failures.map((f) => `$ ${f.command}\n${f.output}`).join("\n\n");
         const notYours = inherited.length

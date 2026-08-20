@@ -2,7 +2,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { checkMemoryBanner, observe, observeChecks, recall } from "./memory.js";
+import { checkMemoryBanner, knownFlakySignatures, observe, observeChecks, observeFlakySignatures, recall } from "./memory.js";
 import { Store } from "./store.js";
 
 const DAY = 86_400_000;
@@ -233,5 +233,37 @@ describe("telling the next run what this repo did to these checks", () => {
     const s = store();
     check(s, "pnpm test", "failed");
     expect(checkMemoryBanner(s, ["pnpm test"], NOW)[0]).toContain("watched happen");
+  });
+});
+
+describe("remembering the individual failures that came and went", () => {
+  it("records each signature as a flaky sighting", () => {
+    const s = store();
+    observeFlakySignatures(s, "run-1", ["✖ timing test", "✖ proptest draw"], NOW);
+    // Same instant, so recency cannot order them — sort for a stable read.
+    expect(recall(s, "signature").map((o) => [o.subject, o.verdict, o.observations]).sort()).toEqual([
+      ["✖ proptest draw", "flaky", 1],
+      ["✖ timing test", "flaky", 1],
+    ]);
+  });
+
+  it("does not excuse on an anecdote: one sighting is not a known flake", () => {
+    const s = store();
+    observeFlakySignatures(s, "run-1", ["✖ timing test"], NOW);
+    expect(knownFlakySignatures(s)).toEqual(new Set());
+  });
+
+  it("knows a signature after it has been watched come and go twice", () => {
+    const s = store();
+    observeFlakySignatures(s, "run-1", ["✖ timing test"], NOW - DAY);
+    observeFlakySignatures(s, "run-2", ["✖ timing test"], NOW);
+    expect(knownFlakySignatures(s)).toEqual(new Set(["✖ timing test"]));
+  });
+
+  it("only counts what was watched to be flaky, whatever else lands under the kind", () => {
+    const s = store();
+    observe(s, { kind: "signature", subject: "✖ solid failure", verdict: "failed", detail: "", runId: "run-1" }, NOW - DAY);
+    observe(s, { kind: "signature", subject: "✖ solid failure", verdict: "failed", detail: "", runId: "run-2" }, NOW);
+    expect(knownFlakySignatures(s)).toEqual(new Set());
   });
 });

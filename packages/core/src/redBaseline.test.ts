@@ -8,6 +8,7 @@ import { Bus } from "./bus.js";
 import type { GitHubAdapter } from "./github.js";
 import type { AgentPool, AgentResult, AgentSpec } from "./pool.js";
 import { RunController, type GateHandler } from "./runController.js";
+import { observeFlakySignatures, recall } from "./memory.js";
 import { Store } from "./store.js";
 
 const DOCS = "<prd>\n# PRD\n</prd>\n<conventions>\nc\n</conventions>";
@@ -85,15 +86,16 @@ function pool(work: (cwd: string) => void) {
   return { pool: agents as unknown as AgentPool, qaPrompts };
 }
 
-async function run(work: (cwd: string) => void, checks: string[] = [CHECK]) {
+async function run(work: (cwd: string) => void, checks: string[] = [CHECK], seed?: (store: Store) => void) {
   const { pool: agents, qaPrompts } = pool(work);
   const store = new Store(":memory:");
+  seed?.(store);
   const events: string[] = [];
   const bus = new Bus(store);
   bus.subscribe(({ event }) => void (event.type === "agent.log" && events.push(event.text)));
   const controller = new RunController(store, bus, agents, noGithub, approveAll, repo());
   const runId = await controller.startRun("build it", RunConfig.parse({ deterministicChecks: checks, qaIterationCap: 1 }));
-  return { task: store.getTask(runId, "task-a")!, qaPrompts, events };
+  return { task: store.getTask(runId, "task-a")!, qaPrompts, events, store };
 }
 
 /**
@@ -162,6 +164,62 @@ describe("a check that fails for a reason outside the tree", () => {
     const { task } = await run((cwd) => writeFileSync(path.join(cwd, "feature.ts"), "export const x = 1;\n"), [
       "test -f feature.ts || exit 0; echo '✖ this one is real' >&2; exit 1",
     ]);
+
+    expect(task.state).toBe("NEEDS_HUMAN");
+  }, 30_000);
+});
+
+/**
+ * The shape neither the base comparison nor the command-level re-run can see,
+ * from run bc691359: `deploy-container-images-pinned` reopened its gate three
+ * times on `cargo test --workspace`, red twice in a row each cycle — but each
+ * time on a different pre-existing test its diff never touched. A property
+ * test on a fresh draw and a timing assertion under load keep a command red
+ * while never failing the same way twice.
+ */
+describe("a check that fails twice without ever failing the same way", () => {
+  // Red only where the worker has been, and a different failing "test" every
+  // run: the marker files count how many times it has been asked.
+  const GENERATOR = "test -f flaky.txt || exit 0; n=$(ls d.* 2>/dev/null | wc -l | tr -d ' '); touch d.$n; echo \"✖ draw $n\" >&2; exit 1";
+
+  it("is not charged: nothing failed twice, and the draws are remembered as flaky", async () => {
+    const { task, events, store } = await run((cwd) => writeFileSync(path.join(cwd, "flaky.txt"), "x\n"), [GENERATOR]);
+
+    expect(task.state).toBe("MERGED");
+    expect(task.qaIterations).toBe(1); // the QA pass itself, not a check failure
+    expect(events.some((t) => /failed once and passed on a re-run — not charged to this task/.test(t))).toBe(true);
+    // The failure the re-run did not reproduce is now a signature-level fact
+    // this repository keeps, for the next task that meets it.
+    expect(recall(store, "signature").map((o) => [o.subject, o.verdict])).toEqual([["✖ draw 0", "flaky"]]);
+  }, 30_000);
+});
+
+describe("a failure the repository already knows is weather", () => {
+  // Persistent wherever the worker has been — it fails the re-run too, which
+  // is exactly what a timing assertion does while the machine is loaded.
+  const PERSISTENT = "test -f feature.ts || exit 0; echo '✖ timing test' >&2; exit 1";
+
+  it("is excused when every repeated failure has been watched come and go twice before", async () => {
+    const { task, events } = await run(
+      (cwd) => writeFileSync(path.join(cwd, "feature.ts"), "export const x = 1;\n"),
+      [PERSISTENT],
+      (store) => {
+        observeFlakySignatures(store, "earlier-run-1", ["✖ timing test"]);
+        observeFlakySignatures(store, "earlier-run-2", ["✖ timing test"]);
+      }
+    );
+
+    expect(task.state).toBe("MERGED");
+    expect(task.qaIterations).toBe(1);
+    expect(events.some((t) => /known flaky, not charged to this task: ✖ timing test/.test(t))).toBe(true);
+  }, 30_000);
+
+  it("is still charged on one prior sighting — an anecdote excuses nothing", async () => {
+    const { task } = await run(
+      (cwd) => writeFileSync(path.join(cwd, "feature.ts"), "export const x = 1;\n"),
+      [PERSISTENT],
+      (store) => observeFlakySignatures(store, "earlier-run-1", ["✖ timing test"])
+    );
 
     expect(task.state).toBe("NEEDS_HUMAN");
   }, 30_000);

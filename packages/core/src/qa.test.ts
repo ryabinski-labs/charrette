@@ -77,6 +77,7 @@ describe("telling a task's own failures from the ones it inherited", () => {
       "--- FAIL: TestThing",
       "FAILED tests/test_x.py::test_y",
       "1) Suite name",
+      "test ops::pm::detects_argument_split ... FAILED",
     ]) {
       expect(failureSignatures(`some preamble\n${line}\ntrailing noise`), line).toContain(line);
     }
@@ -93,11 +94,23 @@ describe("asking a failing check a second time", () => {
   const green: CheckResult = { ok: true, failures: [] };
   const split = (command: string, output: string) => splitInheritedFailures(check(command, output), green);
 
-  it("drops a failure that does not survive the re-run", async () => {
+  it("drops a failure that does not survive the re-run, and remembers which failure it was", async () => {
     const confirmed = await confirmFailures("/tmp", split("true", "✖ flake"), green);
 
     expect(confirmed.failures).toEqual([]);
     expect(confirmed.flaky).toEqual(["true"]);
+    // The signature-level fact, for the repository's memory: this named
+    // failure was watched to fail and then pass on the same tree.
+    expect(confirmed.flakySignatures).toEqual(["✖ flake"]);
+  });
+
+  it("does not turn a vanished unmarked failure into a signature memory", async () => {
+    // A whole-tail signature names a run of output, not a failure. Remembering
+    // one would excuse nothing real later and bloat the table now.
+    const confirmed = await confirmFailures("/tmp", split("true", "segfault during startup"), green);
+
+    expect(confirmed.flaky).toEqual(["true"]);
+    expect(confirmed.flakySignatures).toEqual([]);
   });
 
   it("keeps one that fails again, with the fresh output", async () => {
@@ -112,7 +125,7 @@ describe("asking a failing check a second time", () => {
     // The common case by a wide margin: a green tree must cost no second pass.
     const confirmed = await confirmFailures("/tmp", { failures: [], inherited: [{ command: "x", signatures: [] }] }, green);
 
-    expect(confirmed).toEqual({ failures: [], inherited: [{ command: "x", signatures: [] }], flaky: [] });
+    expect(confirmed).toEqual({ failures: [], inherited: [{ command: "x", signatures: [] }], flaky: [], excused: [], flakySignatures: [] });
   });
 
   it("moves a command the re-run shows as the base's own into inherited, not flaky", async () => {
@@ -138,5 +151,83 @@ describe("asking a failing check a second time", () => {
     const confirmed = await confirmFailures("/tmp", first, base);
 
     expect(confirmed.inherited.map((i) => i.command).sort()).toEqual([command, "true"]);
+  });
+});
+
+/**
+ * The shape that reopened run bc691359's `deploy-container-images-pinned` gate
+ * three times: `cargo test --workspace` red twice in a row, each time on a
+ * different pre-existing test the task's diff never touched. Command-level
+ * confirmation cannot see that — the command DID fail twice — so the question
+ * is asked failure by failure.
+ */
+describe("confirming failure by failure, not command by command", () => {
+  const green: CheckResult = { ok: true, failures: [] };
+  const split = (command: string, output: string) => splitInheritedFailures(check(command, output), green);
+
+  it("calls a command flaky when its two failures have nothing in common", async () => {
+    // First run failed one test, the re-run fails a different one: a property
+    // test on a fresh draw, a timing assertion tripping elsewhere. Nothing
+    // failed twice, so nothing is charged.
+    const confirmed = await confirmFailures("/tmp", split("echo '✖ beta' >&2; false", "✖ alpha"), green);
+
+    expect(confirmed.failures).toEqual([]);
+    expect(confirmed.flaky).toEqual(["echo '✖ beta' >&2; false"]);
+    expect(confirmed.flakySignatures).toEqual(["✖ alpha"]);
+  });
+
+  it("charges only the failures present in both runs, on the fresh output", async () => {
+    const command = "printf '✖ real\\n✖ another draw\\n' >&2; false";
+    const confirmed = await confirmFailures("/tmp", split(command, "✖ real\n✖ first draw"), green);
+
+    expect(confirmed.failures).toHaveLength(1);
+    expect(confirmed.failures[0]!.introduced).toEqual(["✖ real"]);
+    expect(confirmed.failures[0]!.output).toContain("another draw");
+    // Both one-run-only failures were watched to come and go.
+    expect(confirmed.flakySignatures).toEqual(["✖ first draw"]);
+  });
+
+  it("still charges unmarked output that fails twice, however much it differs", async () => {
+    // A compiler error carries no per-test lines, so two runs of the same real
+    // defect can differ anywhere. Failing twice keeps the charge — the cost of
+    // a false charge is the status quo; a false excusal waves a defect through.
+    const confirmed = await confirmFailures("/tmp", split("echo 'panic at 0x2' >&2; false", "panic at 0x1"), green);
+
+    expect(confirmed.flaky).toEqual([]);
+    expect(confirmed.failures).toHaveLength(1);
+  });
+
+  it("still charges when only one of the two runs had per-test markers", async () => {
+    // First run failed a named test, the re-run could not even compile: those
+    // are not comparable failure by failure, and neither run is innocent.
+    const confirmed = await confirmFailures("/tmp", split("echo 'error TS2551 somewhere' >&2; false", "✖ named test"), green);
+
+    expect(confirmed.flaky).toEqual([]);
+    expect(confirmed.failures).toHaveLength(1);
+  });
+});
+
+describe("excusing the failures the repository already knows are weather", () => {
+  const green: CheckResult = { ok: true, failures: [] };
+  const split = (command: string, output: string) => splitInheritedFailures(check(command, output), green);
+
+  it("does not charge a failure that repeats when every repeat is a known flake", async () => {
+    const command = "echo '✖ timing test' >&2; false";
+    const confirmed = await confirmFailures("/tmp", split(command, "✖ timing test"), green, new Set(["✖ timing test"]));
+
+    expect(confirmed.failures).toEqual([]);
+    expect(confirmed.flaky).toEqual([]);
+    // Excused is not silent: the worker is told what was set aside, so a task
+    // that genuinely broke a known-flaky test can still say so.
+    expect(confirmed.excused).toEqual([{ command, signatures: ["✖ timing test"] }]);
+  });
+
+  it("charges what is left after the known flakes are set aside", async () => {
+    const command = "printf '✖ timing test\\n✖ mine\\n' >&2; false";
+    const confirmed = await confirmFailures("/tmp", split(command, "✖ timing test\n✖ mine"), green, new Set(["✖ timing test"]));
+
+    expect(confirmed.excused).toEqual([]);
+    expect(confirmed.failures).toHaveLength(1);
+    expect(confirmed.failures[0]!.introduced).toEqual(["✖ mine"]);
   });
 });

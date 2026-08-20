@@ -54,7 +54,7 @@ const PASS = '```json\n{"verdict":"PASS","summary":"every clause has a task"}\n`
  * check answers. Rejecting keeps the run inside the planning loop, which is
  * where the feedback under test goes.
  */
-function harness(validator: string | (() => AgentResult), approve = false) {
+function harness(validator: string | (() => AgentResult), approve = false, dag = REAL_DAG) {
   const repo = mkdtempSync(path.join(tmpdir(), "harness-plan-intent-"));
   const store = new Store(":memory:");
   const bus = new Bus(store);
@@ -66,7 +66,7 @@ function harness(validator: string | (() => AgentResult), approve = false) {
     async run(spec: AgentSpec): Promise<AgentResult> {
       specs.push(spec);
       const base = { sessionId: `s${specs.length}`, costUsd: 0, turns: 1, outcome: "done" as const };
-      if (spec.role === "planner") return { ...base, resultText: planning++ === 0 ? DOCS : REAL_DAG };
+      if (spec.role === "planner") return { ...base, resultText: planning++ === 0 ? DOCS : dag };
       if (typeof validator === "function") return validator();
       if (spec.prompt.includes("<plan>")) feedback.push("checked");
       return { ...base, resultText: validator };
@@ -103,7 +103,7 @@ describe("asking whether the plan could deliver the assignment", () => {
     expect(summaries[0]).toContain("deterministic mock for all seven vendor categories");
     expect(summaries[0]).toContain("`originateDebit` can throw and the task still passes");
     // Why the list matters, so it does not read as style advice.
-    expect(summaries[0]).toContain("those criteria are the whole contract");
+    expect(summaries[0]).toContain("criteria are the whole contract");
   }, 30_000);
 
   it("sends the shortfall back to the planner when the operator rejects", async () => {
@@ -157,6 +157,101 @@ describe("asking whether the plan could deliver the assignment", () => {
     await controller.startRun("build a thing", RunConfig.parse({})).catch(() => undefined);
 
     expect(summaries[0]).not.toContain("What this plan would not deliver");
+  }, 30_000);
+});
+
+/**
+ * The deterministic half of the same gate: run bc691359's
+ * tier1-three-arm-capture required a committed teardown.log showing
+ * `terraform destroy` completing — a command `infraGuardHook` denies to every
+ * session — and three workers each spent their attempts rediscovering that.
+ * The criterion named the command on the day the plan was written.
+ */
+describe("flagging the criteria no worker will be allowed to satisfy", () => {
+  const INFRA_DAG =
+    "```json\n" +
+    JSON.stringify({
+      epics: [{ id: "epic-e", title: "E", summary: "s" }],
+      tasks: [
+        {
+          id: "tier1-capture",
+          epicId: "epic-e",
+          title: "Capture the three arms",
+          spec: "Run the benchmark and commit the bundles.",
+          acceptanceCriteria: ["teardown.log is committed and shows `terraform destroy` completing with the instances destroyed."],
+          dependsOn: [],
+          touchedPaths: [],
+          estimatedSize: "M",
+        },
+      ],
+    }) +
+    "\n```";
+
+  it("flags the criterion even with the model check turned off, spending nothing", async () => {
+    const { controller, specs, summaries } = harness(FAIL, true, INFRA_DAG);
+    await controller.startRun("benchmark it", RunConfig.parse({ planIntentCheck: false })).catch(() => undefined);
+
+    expect(specs.some((s) => s.role === "validator")).toBe(false);
+    expect(summaries[0]).toContain("What this plan would not deliver");
+    expect(summaries[0]).toContain("`terraform destroy`");
+    expect(summaries[0]).toContain("every agent session is denied");
+  }, 30_000);
+
+  it("keeps the flag when the model check passes — the two halves answer different questions", async () => {
+    const { controller, summaries } = harness(PASS, true, INFRA_DAG);
+    await controller.startRun("benchmark it", RunConfig.parse({})).catch(() => undefined);
+
+    expect(summaries[0]).toContain("`terraform destroy`");
+  }, 30_000);
+
+  it("counts plural offenders as plural", async () => {
+    const dag = INFRA_DAG.replace(
+      '"acceptanceCriteria":["teardown.log is committed and shows `terraform destroy` completing with the instances destroyed."]',
+      '"acceptanceCriteria":["`terraform apply` completes.","`terraform destroy` completes."]'
+    );
+    const store = new Store(":memory:");
+    const logs: string[] = [];
+    const bus = new Bus(store);
+    bus.subscribe(({ event }) => void (event.type === "agent.log" && logs.push((event as { text: string }).text)));
+    const repo2 = mkdtempSync(path.join(tmpdir(), "harness-plan-intent-"));
+    let planning = 0;
+    const agents = {
+      async run(spec: AgentSpec): Promise<AgentResult> {
+        const base = { sessionId: "s", costUsd: 0, turns: 1, outcome: "done" as const };
+        if (spec.role === "planner") return { ...base, resultText: planning++ === 0 ? DOCS : dag };
+        return { ...base, resultText: PASS };
+      },
+    } as unknown as AgentPool;
+    const gates: GateHandler = {
+      async resolvePlanGate() {
+        return { approved: true, feedback: "" };
+      },
+      async resolveBudgetGate() {
+        return null;
+      },
+    };
+    const controller = new RunController(store, bus, agents, new GitHubAdapter(undefined, undefined), gates, repo2);
+    await controller.startRun("benchmark it", RunConfig.parse({})).catch(() => undefined);
+
+    expect(logs.some((t) => t.startsWith("2 acceptance criteria name a command the infrastructure guard denies"))).toBe(true);
+  }, 30_000);
+
+  it("keeps the flag when the model check dies — the finding never depended on it", async () => {
+    const { controller, summaries } = harness(() => {
+      throw new Error("session died");
+    }, true, INFRA_DAG);
+    await controller.startRun("benchmark it", RunConfig.parse({})).catch(() => undefined);
+
+    expect(summaries[0]).toContain("`terraform destroy`");
+    expect(summaries[0]).toContain("did not complete, so nothing has compared this plan to your assignment");
+  }, 30_000);
+
+  it("lists the denied command alongside the model's own gaps", async () => {
+    const { controller, summaries } = harness(FAIL, true, INFRA_DAG);
+    await controller.startRun("benchmark it", RunConfig.parse({})).catch(() => undefined);
+
+    expect(summaries[0]).toContain("`terraform destroy`");
+    expect(summaries[0]).toContain("deterministic mock for all seven vendor categories");
   }, 30_000);
 });
 

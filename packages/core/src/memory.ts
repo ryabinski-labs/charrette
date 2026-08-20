@@ -114,6 +114,38 @@ export function observeChecks(
   for (const subject of run.flaky) observe(store, { kind: "check", subject, verdict: "flaky", detail: "", runId: run.runId }, now);
 }
 
+/**
+ * Record the individual failures a check run watched fail and then pass.
+ *
+ * The `check` rows above remember that a *command* was flaky, which is the
+ * right grain for the banner and the wrong one for charging: `cargo test
+ * --workspace` names three thousand tests, and one timing assertion among them
+ * being weather does not make the other 2999 unreliable. These rows remember
+ * the failure itself — the normalized signature line — so a later task that
+ * meets the same signature twice in a row can be told "this repository has
+ * watched that one come and go before" instead of being charged for it.
+ *
+ * Same discipline as everything else in this file: only what was watched. A
+ * signature lands here when it failed and then passed on the same tree, never
+ * because anything judged it flaky-looking.
+ */
+export function observeFlakySignatures(store: Store, runId: string, signatures: string[], now = Date.now()): void {
+  for (const subject of signatures) observe(store, { kind: "signature", subject, verdict: "flaky", detail: "", runId }, now);
+}
+
+/**
+ * The failure signatures this repository has watched fail-then-pass at least
+ * `minObservations` times. Two by default: one sighting is an anecdote, and a
+ * signature excused on an anecdote is a real defect waved through on one.
+ */
+export function knownFlakySignatures(store: Store, minObservations = 2): Set<string> {
+  return new Set(
+    recall(store, "signature")
+      .filter((o) => o.verdict === "flaky" && o.observations >= minObservations)
+      .map((o) => o.subject)
+  );
+}
+
 /** Everything this repository has been observed to do, most recent first. */
 export function recall(store: Store, kind: string): Observation[] {
   return store.db
