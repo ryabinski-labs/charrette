@@ -1282,6 +1282,13 @@ export function buildProgram(): Command {
         const verified = verifyChecks(repo, checks, {
           timeoutMs: checkTimeout * 60 * 1000,
           onStart: (c) => live && process.stdout.write(`  …    ${c}`),
+          // Without this a retried check looks hung: the same line sits there
+          // for twice as long and nothing says a second run is under way. It
+          // is also the only place the first failure is ever shown, and a
+          // check that passes on the retry is worth knowing about — it is
+          // flaky, and it will be flaky during the run too.
+          onRetry: (c, reason) =>
+            process.stdout.write(`${live ? "\r\u001b[2K" : ""}  retry ${c}  (first attempt: ${reason})\n${live ? `  …    ${c}` : ""}`),
           onResult: (c, ms, reason) =>
             process.stdout.write(`${live ? "\r\u001b[2K" : ""}  ${reason === null ? "ok  " : "drop"} ${c}  (${Math.round(ms / 1000)}s)\n`),
         });

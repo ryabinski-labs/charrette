@@ -188,8 +188,8 @@ export interface VerifiedChecks {
 }
 
 /**
- * Run each candidate check once against the repository as it stands, and keep
- * the ones that actually work here.
+ * Run each candidate check against the repository as it stands, and keep the
+ * ones that actually work here.
  *
  * This is the gate the whole feature rests on. Lifting a command out of a
  * workflow says what CI does; it says nothing about whether this machine can do
@@ -215,39 +215,81 @@ export interface VerifiedChecks {
  * Green on the repo's current tree is not a promise it stays green: a run's
  * tasks change the code, and a check is meant to be able to go red. What this
  * rules out is the check that could never have passed.
+ *
+ * Once is not enough to convict. A check that fails is run a second time and
+ * only dropped if it fails again, because the cost of the two mistakes is not
+ * the same: a flake kept is a check that goes red on one task and gets fixed,
+ * while a flake dropped is a repository silently left with no test gate at
+ * all for every run after it.
  */
 export function verifyChecks(
   repo: string,
   checks: string[],
-  opts: { timeoutMs?: number; onStart?: (command: string) => void; onResult?: (command: string, ms: number, reason: string | null) => void } = {}
+  opts: {
+    timeoutMs?: number;
+    onStart?: (command: string) => void;
+    onResult?: (command: string, ms: number, reason: string | null) => void;
+    onRetry?: (command: string, reason: string) => void;
+  } = {}
 ): VerifiedChecks {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_CHECK_TIMEOUT_MINUTES * 60 * 1000;
   const kept: string[] = [];
   const dropped: { command: string; reason: string }[] = [];
   for (const command of checks) {
     opts.onStart?.(command);
-    const started = Date.now();
-    let reason: string | null = null;
-    try {
-      execFileSync("sh", ["-c", command], { cwd: repo, stdio: ["ignore", "pipe", "pipe"], timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 });
-    } catch (e) {
-      const err = e as { signal?: string; stderr?: Buffer | string; stdout?: Buffer | string; message: string };
-      // `err.message` is the fallback rather than a phrase of our own, because
-      // the cases with no output are the ones with nothing else to go on: a
-      // check that exited 1 in silence, or one that never started because the
-      // directory it was pointed at is not there.
-      const output = [err.stdout, err.stderr].map((b) => (b ? b.toString() : "")).join("\n").trim();
-      reason =
-        err.signal === "SIGTERM"
-          ? `did not finish in ${Math.round(timeoutMs / 60000)} minute(s) — QA would kill it on every task. Raise deterministicCheckTimeoutMinutes above its honest wall clock, or split it`
-          : failureLine(output) || failureLine(err.message);
+    let { reason, ms } = attempt(repo, command, timeoutMs);
+    // A second look, because one sample is not evidence about a suite that
+    // binds ports, starts containers or races the machine it is sharing. waf's
+    // `cargo test --workspace --all-features` passed in 304s, failed in 454s
+    // during an init run alongside a worker in the same repo, and passed again
+    // in 430s afterwards — slower and red, which is what contention looks like.
+    // It was deleted from the config on that one sample, so the repository was
+    // left with no test check at all and nothing on screen said so.
+    //
+    // Not retried on a timeout: that verdict is about wall clock, a suite too
+    // slow once is too slow twice, and a second run buys a repeat of the same
+    // answer for another full ceiling of waiting — 45 minutes, by default.
+    if (reason !== null && !isTimeout(reason)) {
+      opts.onRetry?.(command, reason);
+      ({ reason, ms } = attempt(repo, command, timeoutMs));
     }
-    const ms = Date.now() - started;
     opts.onResult?.(command, ms, reason);
     if (reason === null) kept.push(command);
     else dropped.push({ command, reason });
   }
   return { kept, dropped };
+}
+
+/** Marks the one verdict a second run cannot revise. See `verifyChecks`. */
+function isTimeout(reason: string): boolean {
+  return reason.startsWith("did not finish in ");
+}
+
+/**
+ * One run of one check: how long it took, and why it failed if it did.
+ *
+ * The duration is this attempt's alone rather than a total across retries,
+ * because it is read as the wall clock QA is going to spend on the check —
+ * adding a failed first attempt to it would argue for a timeout nobody needs.
+ */
+function attempt(repo: string, command: string, timeoutMs: number): { reason: string | null; ms: number } {
+  const started = Date.now();
+  let reason: string | null = null;
+  try {
+    execFileSync("sh", ["-c", command], { cwd: repo, stdio: ["ignore", "pipe", "pipe"], timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 });
+  } catch (e) {
+    const err = e as { signal?: string; stderr?: Buffer | string; stdout?: Buffer | string; message: string };
+    // `err.message` is the fallback rather than a phrase of our own, because
+    // the cases with no output are the ones with nothing else to go on: a
+    // check that exited 1 in silence, or one that never started because the
+    // directory it was pointed at is not there.
+    const output = [err.stdout, err.stderr].map((b) => (b ? b.toString() : "")).join("\n").trim();
+    reason =
+      err.signal === "SIGTERM"
+        ? `did not finish in ${Math.round(timeoutMs / 60000)} minute(s) — QA would kill it on every task. Raise deterministicCheckTimeoutMinutes above its honest wall clock, or split it`
+        : failureLine(output) || failureLine(err.message);
+  }
+  return { reason, ms: Date.now() - started };
 }
 
 /**

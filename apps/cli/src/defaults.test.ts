@@ -465,6 +465,48 @@ describe("proving a check can pass here before adopting it", () => {
   });
 
   /**
+   * waf's `cargo test --workspace --all-features` passed in 304s, failed in
+   * 454s during an init run alongside a worker in the same repo, and passed
+   * again in 430s afterwards. On that one sample it was deleted from the
+   * config, leaving the repository with no test check at all.
+   */
+  it("keeps a check that fails once and passes when it is run again", () => {
+    const repo = tmpRepo();
+    const { kept, dropped } = verifyChecks(repo, ["test -f attempted && exit 0; touch attempted; exit 1"]);
+    expect(kept).toEqual(["test -f attempted && exit 0; touch attempted; exit 1"]);
+    expect(dropped).toEqual([]);
+  });
+
+  it("tells the caller a check is being run again, and why", () => {
+    const retried: [string, string][] = [];
+    verifyChecks(tmpRepo(), ["test -f attempted && exit 0; touch attempted; echo 'error: port in use' >&2; exit 1"], {
+      onRetry: (c, reason) => retried.push([c, reason]),
+    });
+    expect(retried).toEqual([["test -f attempted && exit 0; touch attempted; echo 'error: port in use' >&2; exit 1", "error: port in use"]]);
+  });
+
+  it("drops a check that fails the second time too, quoting the second failure", () => {
+    // The confirming run is the one that convicts, so its reason is the one
+    // an operator is shown.
+    const { kept, dropped } = verifyChecks(tmpRepo(), [
+      "test -f attempted && { echo 'error: still broken' >&2; exit 1; }; touch attempted; echo 'error: broken' >&2; exit 1",
+    ]);
+    expect(kept).toEqual([]);
+    expect(dropped[0]!.reason).toBe("error: still broken");
+  });
+
+  it("does not run a check again after a timeout, since a slow suite is slow twice", () => {
+    // A second run buys a repeat of the same answer for another full ceiling
+    // of waiting — 45 minutes, by default.
+    const retried: string[] = [];
+    const started = Date.now();
+    const { dropped } = verifyChecks(tmpRepo(), ["sleep 5"], { timeoutMs: 200, onRetry: (c) => retried.push(c) });
+    expect(retried).toEqual([]);
+    expect(dropped[0]!.reason).toContain("did not finish in");
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  /**
    * The reason `cargo test --workspace --all-features` was dropped from waf's
    * config was `running 6 tests` — the first line a test binary prints, and
    * true of every run of it that ever passed. An operator reading that cannot

@@ -2614,6 +2614,46 @@ describe("harness init", () => {
     expect(printed()).toContain("drop cargo deny check  (1s)");
   });
 
+  it("says a check is being run again, so a retry does not read as a hang", async () => {
+    // Without this the same line sits there for twice as long and nothing
+    // says a second run is under way. It is also the only place the first
+    // failure is shown for a check that then passes — which is worth knowing,
+    // because it is flaky and it will be flaky during the run too.
+    h.detectChecksMock.mockReturnValue({ checks: ["cargo test"], source: "1 step(s) from 1 CI workflow(s)", skipped: [] });
+    h.verifyChecksMock.mockImplementation((_repo: string, checks: string[], opts?: unknown) => {
+      const o = opts as { onStart?: (c: string) => void; onRetry?: (c: string, r: string) => void; onResult?: (c: string, ms: number, r: string | null) => void };
+      o?.onStart?.(checks[0]!);
+      o?.onRetry?.(checks[0]!, "error: address already in use");
+      o?.onResult?.(checks[0]!, 900, null);
+      return { kept: checks, dropped: [] };
+    });
+
+    await cli("init", "--repo", "/repo");
+
+    expect(printed()).toContain("retry cargo test  (first attempt: error: address already in use)");
+  });
+
+  it("redraws the in-flight line after announcing a retry in a terminal", async () => {
+    const tty = process.stdout.isTTY;
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+    try {
+      h.detectChecksMock.mockReturnValue({ checks: ["cargo test"], source: "1 step(s) from 1 CI workflow(s)", skipped: [] });
+      h.verifyChecksMock.mockImplementation((_repo: string, checks: string[], opts?: unknown) => {
+        const o = opts as { onStart?: (c: string) => void; onRetry?: (c: string, r: string) => void; onResult?: (c: string, ms: number, r: string | null) => void };
+        o?.onStart?.(checks[0]!);
+        o?.onRetry?.(checks[0]!, "error: address already in use");
+        o?.onResult?.(checks[0]!, 900, null);
+        return { kept: checks, dropped: [] };
+      });
+
+      await cli("init", "--repo", "/repo");
+
+      expect(printed()).toContain("(first attempt: error: address already in use)\n  \u2026    cargo test");
+    } finally {
+      Object.defineProperty(process.stdout, "isTTY", { value: tty, configurable: true });
+    }
+  });
+
   it("rewrites the in-flight line in a terminal, and writes only verdicts to a log", async () => {
     // Redirected to a file there is no cursor to move, and a log full of escape
     // codes is worse than a log with no progress in it.
