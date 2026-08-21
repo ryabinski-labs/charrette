@@ -464,6 +464,47 @@ describe("proving a check can pass here before adopting it", () => {
     expect(dropped[0]!.reason).toBe("error: the real one");
   });
 
+  /**
+   * The reason `cargo test --workspace --all-features` was dropped from waf's
+   * config was `running 6 tests` — the first line a test binary prints, and
+   * true of every run of it that ever passed. An operator reading that cannot
+   * tell whether the check is broken or the tree is, which is the only thing
+   * the line is there to tell them. The failure is hundreds of lines further
+   * down, past every test that passed.
+   */
+  it("quotes the line that says what failed, not the line the runner opened with", () => {
+    const { dropped } = verifyChecks(tmpRepo(), [
+      "echo 'running 6 tests'; echo 'test parses_a_rule ... ok'; echo 'test blocks_a_request ... FAILED'; exit 1",
+    ]);
+    expect(dropped[0]!.reason).toBe("test blocks_a_request ... FAILED");
+  });
+
+  it("quotes the error a compiler stopped on, not the tally it printed after", () => {
+    // First rather than last: `error[E0308]` names the thing to go and fix,
+    // where `could not compile` names only that it happened.
+    const { dropped } = verifyChecks(tmpRepo(), [
+      "echo 'Compiling revetment-core v0.1.0'; echo 'error[E0308]: mismatched types' >&2; echo 'error: could not compile due to 1 previous error' >&2; exit 101",
+    ]);
+    expect(dropped[0]!.reason).toBe("error[E0308]: mismatched types");
+  });
+
+  it("falls back to the opening line when nothing in the output reads as a diagnosis", () => {
+    // A check can fail without ever saying so in words this recognises. The
+    // opening line is then the only thing there is, and it beats a blank.
+    const { dropped } = verifyChecks(tmpRepo(), ["echo 'something went sideways'; exit 3"]);
+    expect(dropped[0]!.reason).toBe("something went sideways");
+  });
+
+  it("does not mistake a lower-case failure in prose for the diagnosis", () => {
+    // `FAILED` and `FAIL` are shouted by cargo, go, jest and vitest. A
+    // lower-case one is usually a test name or a log line, and picking it
+    // would put the wrong line in front of the operator.
+    const { dropped } = verifyChecks(tmpRepo(), [
+      "echo 'test handles_a_failed_lookup ... ok'; echo 'error: the real one' >&2; exit 1",
+    ]);
+    expect(dropped[0]!.reason).toBe("error: the real one");
+  });
+
   it("tells the caller what it is running, for a suite that takes minutes", () => {
     const started: string[] = [];
     const finished: (string | null)[] = [];

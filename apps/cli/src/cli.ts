@@ -380,6 +380,25 @@ function positive(value: string, flag: string): number {
   return n;
 }
 
+/**
+ * The cap already written down for this repo, or nothing if there is none.
+ *
+ * Deliberately forgiving where the rest of the CLI is strict. Every other
+ * reader of the config file wants a parse failure — a typo that silently does
+ * nothing is the bug that costs the most. This one is called on the way to
+ * overwriting the file, and refusing to rewrite a file because it could not
+ * first be read is backwards: a config truncated by a Ctrl-C mid-write is
+ * exactly what `init --force` is for. So an unreadable file yields no cap and
+ * the write goes ahead with the default.
+ */
+function existingRunCap(repo: string): number | undefined {
+  try {
+    return loadFileConfig(repo).config.budget?.runCapUsd;
+  } catch {
+    return undefined;
+  }
+}
+
 function port(value: string): number {
   const n = Number(value);
   if (!Number.isInteger(n) || n < 1 || n > 65535) throw new Error(`--port must be 1-65535, got "${value}"`);
@@ -1216,7 +1235,8 @@ export function buildProgram(): Command {
       "how long any one check may run, here and in the run this writes",
       String(DEFAULT_CHECK_TIMEOUT_MINUTES)
     )
-    .action((opts: { repo: string; force: boolean; verify: boolean; checkTimeout: string }) => {
+    .option("--run-cap <usd>", `run budget cap in USD (default: the cap already in the file, else ${DEFAULT_RUN_CAP})`)
+    .action((opts: { repo: string; force: boolean; verify: boolean; checkTimeout: string; runCap?: string }) => {
       const repo = resolveRepoRoot(opts.repo);
       const target = path.join(repo, CONFIG_FILENAME);
       if (existsSync(target) && !opts.force) {
@@ -1232,6 +1252,14 @@ export function buildProgram(): Command {
       if (!Number.isFinite(checkTimeout) || checkTimeout <= 0) {
         throw new Error(`--check-timeout wants a positive number of minutes, not ${opts.checkTimeout}.`);
       }
+      // A repo inits more than once — its CI changes, and this is the command
+      // that catches the config up. The cap in the file is not a detected
+      // value like the checks are; it is a number somebody chose, sometimes
+      // mid-run through the budget gate, and overwriting it with the default
+      // is silent in the worst way. The file still looks right afterwards, and
+      // the next run stops at thirty dollars for a reason nothing on screen
+      // explains. waf's cap had been raised to 2000 and a re-init put it back.
+      const runCapUsd = opts.runCap === undefined ? existingRunCap(repo) ?? DEFAULT_RUN_CAP : positive(opts.runCap, "--run-cap");
       const detected = detectChecks(repo);
       const out = (line: string) => process.stdout.write(`${line}\n`);
       out(`Checks from ${detected.source}:`);
@@ -1266,7 +1294,7 @@ export function buildProgram(): Command {
       }
 
       const contents = {
-        budget: { runCapUsd: DEFAULT_RUN_CAP },
+        budget: { runCapUsd },
         deterministicChecks: checks,
         // Written whenever it is not the default, so the ceiling the checks
         // were proved under is the one QA gives them. Left out when it is the

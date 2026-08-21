@@ -2458,6 +2458,54 @@ describe("harness init", () => {
     expect(printed()).toContain("Wrote /repo/harness.config.json with 2 check(s).");
   });
 
+  /**
+   * `init` is run more than once — a repo's CI changes and this is the command
+   * that catches the config up. Before this it wrote the default cap every
+   * time, so a re-init silently undid whatever the operator or the budget gate
+   * had settled on. waf's cap had been raised to 2000 mid-run; a re-init put
+   * it back to 30, and the file still looked right afterwards.
+   */
+  it("keeps the cap already in the file rather than resetting it to the default", async () => {
+    h.detectChecksMock.mockReturnValue({ checks: ["cargo test"], source: "package.json", skipped: [] });
+    h.loadFileConfigMock.mockReturnValue({ config: { budget: { runCapUsd: 2000 } }, path: "/repo/harness.config.json" });
+
+    await cli("init", "--repo", "/repo", "--force");
+
+    const [, body] = h.writeFileSyncMock.mock.calls[0] as [string, string];
+    expect(JSON.parse(body).budget).toEqual({ runCapUsd: 2000 });
+  });
+
+  it("takes a cap named on the command line over the one in the file", async () => {
+    h.detectChecksMock.mockReturnValue({ checks: ["cargo test"], source: "package.json", skipped: [] });
+    h.loadFileConfigMock.mockReturnValue({ config: { budget: { runCapUsd: 2000 } }, path: "/repo/harness.config.json" });
+
+    await cli("init", "--repo", "/repo", "--force", "--run-cap", "500");
+
+    const [, body] = h.writeFileSyncMock.mock.calls[0] as [string, string];
+    expect(JSON.parse(body).budget).toEqual({ runCapUsd: 500 });
+  });
+
+  it("refuses a cap that is not a positive number, rather than writing it down", async () => {
+    h.detectChecksMock.mockReturnValue({ checks: ["cargo test"], source: "package.json", skipped: [] });
+
+    await expect(cli("init", "--repo", "/repo", "--run-cap", "lots")).rejects.toThrow("--run-cap must be a positive number");
+  });
+
+  it("still rewrites a config file too broken to read, since that is what --force is for", async () => {
+    // A config truncated by a Ctrl-C mid-write is exactly the file an operator
+    // reaches for `init --force` to repair. Refusing because the old cap could
+    // not be read first would be backwards.
+    h.detectChecksMock.mockReturnValue({ checks: ["cargo test"], source: "package.json", skipped: [] });
+    h.loadFileConfigMock.mockImplementation(() => {
+      throw new Error("/repo/harness.config.json is not valid JSON: Unexpected end of JSON input");
+    });
+
+    await cli("init", "--repo", "/repo", "--force");
+
+    const [, body] = h.writeFileSyncMock.mock.calls[0] as [string, string];
+    expect(JSON.parse(body).budget).toEqual({ runCapUsd: 30 });
+  });
+
   it("names the reason when it found no checks to write", async () => {
     h.detectChecksMock.mockReturnValue({ checks: [], source: "no test script in package.json", skipped: [] });
 

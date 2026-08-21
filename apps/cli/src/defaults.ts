@@ -240,7 +240,7 @@ export function verifyChecks(
       reason =
         err.signal === "SIGTERM"
           ? `did not finish in ${Math.round(timeoutMs / 60000)} minute(s) — QA would kill it on every task. Raise deterministicCheckTimeoutMinutes above its honest wall clock, or split it`
-          : firstLine(output) || firstLine(err.message);
+          : failureLine(output) || failureLine(err.message);
     }
     const ms = Date.now() - started;
     opts.onResult?.(command, ms, reason);
@@ -250,13 +250,47 @@ export function verifyChecks(
   return { kept, dropped };
 }
 
-/** The line of output an operator would look at first. */
-function firstLine(text: string): string {
-  const line = text
+/**
+ * Lines that say a run failed, as the runners this scans actually spell it.
+ * Case is part of the convention — `FAILED` and `FAIL` are shouted by cargo,
+ * go, jest and vitest, while a lower-case "fail" in prose is usually a test
+ * name or a log message and picking it would be worse than picking nothing.
+ */
+const DIAGNOSIS = [
+  /\bFAILED\b/,
+  /^FAIL\b/,
+  /^error(\[|:|\s)/i,
+  /^failures?:/i,
+  /panicked at/,
+  /^[\u2715\u2717\u00d7]\s/,
+  /\bAssertionError\b/,
+];
+
+/**
+ * The line of output an operator would look at first.
+ *
+ * Not the first line printed. A test runner opens with scaffolding — `running
+ * 6 tests`, `Compiling`, a progress bar — and the line that says what broke is
+ * hundreds of lines further down, past every test that passed. Reporting the
+ * opening line told the operator a check had been dropped and nothing at all
+ * about why, which is the one thing they need to decide whether to fix it or
+ * leave it out: `cargo test --workspace --all-features` was dropped from waf's
+ * config with the reason `running 6 tests`.
+ *
+ * So the first line that reads as a diagnosis wins, and the opening line is
+ * the fallback for output that has none — a check that exited 1 in silence, or
+ * one that never started because the directory it was pointed at is not there.
+ * First rather than last because the first is the cause and the last is the
+ * tally: `error[E0308]: mismatched types` names the thing to go and fix, where
+ * `could not compile due to 1 previous error` names only that it happened.
+ */
+function failureLine(text: string): string {
+  const lines = text
     .split("\n")
     .map((l) => l.trim())
-    .find((l) => l !== "" && !/^warning:/i.test(l));
-  return (line ?? "").slice(0, 160);
+    .filter((l) => l !== "" && !/^warning:/i.test(l));
+  const diagnosis = lines.find((l) => DIAGNOSIS.some((p) => p.test(l)));
+  return (diagnosis ?? lines[0] ?? "").slice(0, 160);
 }
 
 /**
