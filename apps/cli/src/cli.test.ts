@@ -2486,6 +2486,54 @@ describe("harness init", () => {
     expect(printed()).toContain("Wrote /repo/harness.config.json with 2 check(s).");
   });
 
+  /**
+   * `init` is run more than once — a repo's CI changes and this is the command
+   * that catches the config up. Before this it wrote the default cap every
+   * time, so a re-init silently undid whatever the operator or the budget gate
+   * had settled on. waf's cap had been raised to 2000 mid-run; a re-init put
+   * it back to 30, and the file still looked right afterwards.
+   */
+  it("keeps the cap already in the file rather than resetting it to the default", async () => {
+    h.detectChecksMock.mockReturnValue({ checks: ["cargo test"], source: "package.json", skipped: [] });
+    h.loadFileConfigMock.mockReturnValue({ config: { budget: { runCapUsd: 2000 } }, path: "/repo/harness.config.json" });
+
+    await cli("init", "--repo", "/repo", "--force");
+
+    const [, body] = h.writeFileSyncMock.mock.calls[0] as [string, string];
+    expect(JSON.parse(body).budget).toEqual({ runCapUsd: 2000 });
+  });
+
+  it("takes a cap named on the command line over the one in the file", async () => {
+    h.detectChecksMock.mockReturnValue({ checks: ["cargo test"], source: "package.json", skipped: [] });
+    h.loadFileConfigMock.mockReturnValue({ config: { budget: { runCapUsd: 2000 } }, path: "/repo/harness.config.json" });
+
+    await cli("init", "--repo", "/repo", "--force", "--run-cap", "500");
+
+    const [, body] = h.writeFileSyncMock.mock.calls[0] as [string, string];
+    expect(JSON.parse(body).budget).toEqual({ runCapUsd: 500 });
+  });
+
+  it("refuses a cap that is not a positive number, rather than writing it down", async () => {
+    h.detectChecksMock.mockReturnValue({ checks: ["cargo test"], source: "package.json", skipped: [] });
+
+    await expect(cli("init", "--repo", "/repo", "--run-cap", "lots")).rejects.toThrow("--run-cap must be a positive number");
+  });
+
+  it("still rewrites a config file too broken to read, since that is what --force is for", async () => {
+    // A config truncated by a Ctrl-C mid-write is exactly the file an operator
+    // reaches for `init --force` to repair. Refusing because the old cap could
+    // not be read first would be backwards.
+    h.detectChecksMock.mockReturnValue({ checks: ["cargo test"], source: "package.json", skipped: [] });
+    h.loadFileConfigMock.mockImplementation(() => {
+      throw new Error("/repo/harness.config.json is not valid JSON: Unexpected end of JSON input");
+    });
+
+    await cli("init", "--repo", "/repo", "--force");
+
+    const [, body] = h.writeFileSyncMock.mock.calls[0] as [string, string];
+    expect(JSON.parse(body).budget).toEqual({ runCapUsd: 30 });
+  });
+
   it("names the reason when it found no checks to write", async () => {
     h.detectChecksMock.mockReturnValue({ checks: [], source: "no test script in package.json", skipped: [] });
 
@@ -2592,6 +2640,46 @@ describe("harness init", () => {
 
     expect(printed()).toContain("ok   cargo test  (1s)");
     expect(printed()).toContain("drop cargo deny check  (1s)");
+  });
+
+  it("says a check is being run again, so a retry does not read as a hang", async () => {
+    // Without this the same line sits there for twice as long and nothing
+    // says a second run is under way. It is also the only place the first
+    // failure is shown for a check that then passes — which is worth knowing,
+    // because it is flaky and it will be flaky during the run too.
+    h.detectChecksMock.mockReturnValue({ checks: ["cargo test"], source: "1 step(s) from 1 CI workflow(s)", skipped: [] });
+    h.verifyChecksMock.mockImplementation((_repo: string, checks: string[], opts?: unknown) => {
+      const o = opts as { onStart?: (c: string) => void; onRetry?: (c: string, r: string) => void; onResult?: (c: string, ms: number, r: string | null) => void };
+      o?.onStart?.(checks[0]!);
+      o?.onRetry?.(checks[0]!, "error: address already in use");
+      o?.onResult?.(checks[0]!, 900, null);
+      return { kept: checks, dropped: [] };
+    });
+
+    await cli("init", "--repo", "/repo");
+
+    expect(printed()).toContain("retry cargo test  (first attempt: error: address already in use)");
+  });
+
+  it("redraws the in-flight line after announcing a retry in a terminal", async () => {
+    const tty = process.stdout.isTTY;
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+    try {
+      h.detectChecksMock.mockReturnValue({ checks: ["cargo test"], source: "1 step(s) from 1 CI workflow(s)", skipped: [] });
+      h.verifyChecksMock.mockImplementation((_repo: string, checks: string[], opts?: unknown) => {
+        const o = opts as { onStart?: (c: string) => void; onRetry?: (c: string, r: string) => void; onResult?: (c: string, ms: number, r: string | null) => void };
+        o?.onStart?.(checks[0]!);
+        o?.onRetry?.(checks[0]!, "error: address already in use");
+        o?.onResult?.(checks[0]!, 900, null);
+        return { kept: checks, dropped: [] };
+      });
+
+      await cli("init", "--repo", "/repo");
+
+      expect(printed()).toContain("(first attempt: error: address already in use)\n  \u2026    cargo test");
+    } finally {
+      Object.defineProperty(process.stdout, "isTTY", { value: tty, configurable: true });
+    }
   });
 
   it("rewrites the in-flight line in a terminal, and writes only verdicts to a log", async () => {
