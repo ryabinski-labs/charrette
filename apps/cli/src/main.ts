@@ -32,7 +32,7 @@
  * the only way to find out whether `harness resume` still worked was to run it.
  */
 import { buildProgram } from "./cli.js";
-import { installCrashLog, recordFatal } from "./crashlog.js";
+import { installCrashLog, recordFatal, recordRefusal } from "./crashlog.js";
 import { loadDotEnv } from "./env.js";
 
 installCrashLog();
@@ -45,6 +45,10 @@ loadDotEnv();
 buildProgram()
   .parseAsync()
   .catch((e: unknown) => {
-    recordFatal(e);
+    // A run already held by another harness process is a refusal, not a crash;
+    // see `recordRefusal`. Same exit code — nothing the operator asked for
+    // happened — but the message says what it is.
+    if (e instanceof Error && e.name === "RunLocked") recordRefusal(e);
+    else recordFatal(e);
     process.exit(1);
   });

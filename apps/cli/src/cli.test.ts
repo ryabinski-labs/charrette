@@ -111,6 +111,9 @@ const h = vi.hoisted(() => {
     // The report's content is settled in postmortem.test.ts; what the CLI owes
     // is picking the right run and saying so when there is none.
     postmortemMock: vi.fn((_store: unknown, runId: string) => ({ runId })),
+    // Whether a harness process is holding the run. Its own behaviour is
+    // settled in runLock.test.ts; what `status` owes is saying so.
+    runLockHolderMock: vi.fn(() => null as { pid: number; startedAt: number } | null),
     renderPostmortemMock: vi.fn((p: { runId: string }) => `Run ${p.runId} [state] — assignment`),
     // What the page says is settled in completionReport.test.ts and what goes
     // on it in deliveryLedger.test.ts. What the CLI owes is picking the run,
@@ -159,6 +162,7 @@ vi.mock("@harness/core", () => ({
   originSlug: h.originSlugMock,
   postmortem: h.postmortemMock,
   renderPostmortem: h.renderPostmortemMock,
+  runLockHolder: h.runLockHolderMock,
   wasMerged: h.wasMergedMock,
   assembleReport: h.assembleReportMock,
   reportPath: h.reportPathMock,
@@ -2166,6 +2170,30 @@ describe("harness status", () => {
     expect(shown).toContain("  auth [MERGED] qa=2 PR#7");
     expect(shown).toContain("  pack [WORKING] qa=0\n");
     expect(shown).toContain("    https://github.com/acme/widgets/pull/7  Auth");
+  });
+
+  /**
+   * EXECUTING says nothing about whether anything is working the run: bc691359
+   * sat in it for days with no harness alive, and spent an afternoon in it with
+   * two — which is how a task that had already committed its work got parked.
+   */
+  it("names the harness process holding the run", async () => {
+    h.runLockHolderMock.mockReturnValue({ pid: 47427, startedAt: Date.parse("2026-08-21T07:19:46Z") });
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "EXECUTING", assignment: "a" }]);
+    h.storeMethods.listTasks.mockReturnValue([]);
+
+    await cli("status", "--repo", "/repo");
+
+    expect(printed()).toContain("  driven by harness pid 47427 since 2026-08-21T07:19:46.000Z");
+  });
+
+  it("says nothing about a driver when no harness holds the run", async () => {
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "EXECUTING", assignment: "a" }]);
+    h.storeMethods.listTasks.mockReturnValue([]);
+
+    await cli("status", "--repo", "/repo");
+
+    expect(printed()).not.toContain("driven by harness pid");
   });
 
   it("lists a rollup PR once, not once per task", async () => {

@@ -219,6 +219,37 @@ describe("crashlog", () => {
     expect(exitCodes).toEqual([143]);
   });
 
+  /**
+   * The refusal a second `harness resume` gets. It is several lines, all of
+   * them instructions, and calling it "fatal" would describe a crash that did
+   * not happen — the process stopped because the run was already taken.
+   */
+  it("records a run already held as a refusal, not a crash, and keeps every line", async () => {
+    const { armCrashLog, recordRefusal } = await freshCrashLog();
+    armCrashLog(stateDir);
+    const e = new Error("run bc691359 is already being driven by harness pid 47427\nStop the other one first:  kill -INT 47427");
+    e.name = "RunLocked";
+
+    recordRefusal(e);
+
+    expect(stderr.join("")).toContain("harness: refused —");
+    expect(stderr.join("")).toContain("kill -INT 47427");
+    const written = readFileSync(logFile(), "utf8");
+    expect(written).toContain("refused run bc691359 is already being driven");
+    // No stack: nothing here is a defect to go looking for later.
+    expect(written).not.toContain("at ");
+  });
+
+  it("keeps the first reason when a refusal follows a crash", async () => {
+    const { armCrashLog, recordFatal, recordRefusal } = await freshCrashLog();
+    armCrashLog(stateDir);
+    recordFatal(new Error("crashed first"));
+
+    recordRefusal(new Error("and then the lock said no"));
+
+    expect(readFileSync(logFile(), "utf8")).not.toContain("and then the lock said no");
+  });
+
   it("is safe to arm more than once — the last state dir wins", async () => {
     const { armCrashLog, recordFatal } = await freshCrashLog();
     const second = mkdtempSync(path.join(tmpdir(), "harness-crashlog-2-"));
