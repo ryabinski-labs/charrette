@@ -2058,10 +2058,29 @@ export class RunController {
           text: `re-ran the failed jobs on #${prNumber} before diagnosing — a flake that passes on the second go is not work`,
           ts: Date.now(),
         });
+        const red = ci; // the verdict that sent us here, before the re-ask
         await this.awaitChecks(runId);
         // Non-null by the same construction as `prNumber` above: a status was
         // on the record before the re-run, and events only accumulate.
-        ci = this.store.ciStatus(runId)!;
+        const after = this.store.ciStatus(runId)!;
+        // A re-run answers "was that only flake?" only when it settles, and
+        // `awaitChecks` does not always get to settle: GitHub going unreadable
+        // ends its wait, and the newest `run.ci_status` is then the `pending`
+        // it published while waiting. `ciStatus` is last-event-wins, so that
+        // pending does not merely fail to answer — it overwrites the red this
+        // function was called about, and reads below as "nothing is failing".
+        //
+        // Run bc691359 exited down that path. `test`, `coverage (project
+        // floor)` and two bench gates had failed on #334; the failed jobs were
+        // re-run; the next ask came back unreadable a minute later; and the
+        // pending left behind stood the run down. Neither of its two fix
+        // rounds was spent, `ciPitStop` found nothing to escalate, and the run
+        // reported "1 pull request open for review; CI still running" over a
+        // branch that is red to this day.
+        //
+        // Not knowing is not a pass. Only a settled answer overturns the one
+        // already on the record.
+        ci = after.state === "pending" ? red : after;
         if (ci.state !== "failing") return [];
       }
     }

@@ -220,6 +220,40 @@ describe("a CI that outlives the wait budget", () => {
     expect(store.getRun(runId)!.state).toBe("PAUSED");
     expect(store.ciStatus(runId)).toMatchObject({ state: "pending" });
   });
+
+  it("keeps the red verdict when the re-run's re-ask never settles, instead of reading the wait's own 'pending' as a pass", async () => {
+    const repo = repoWithOrigin();
+    // Run bc691359, and the most expensive minute in it. #334 had gone red on
+    // `test` and `coverage (project floor)`, the failed jobs were re-run, and
+    // then GitHub went unreadable — once part-way through the next waiting
+    // round, and again at the start of the round after it, which is the answer
+    // that ends the wait. What that left as the newest `run.ci_status` was the
+    // `pending` the wait itself had just published, and `ciStatus` is
+    // last-event-wins: the red was not merely unconfirmed, it was gone. Both
+    // fix rounds went unspent, the pit stop had nothing to escalate, and the
+    // run reported "1 pull request open for review; CI still running" over a
+    // branch that is red to this day.
+    const { adapter, rerunAsked } = fakeGitHub(
+      [
+        { state: "failing", failing: ["test"], total: 20 }, // the wait's real answer
+        { state: "pending", failing: [], total: 20 }, // re-run went out; jobs re-queued
+        null, // unreadable part-way through — the round ends on "pending"
+        null, // unreadable again, and this one ends the wait unsettled
+        { state: "passing", failing: [], total: 20 }, // the fix task lands
+      ],
+      { logs: [{ name: "test", log: "FAIL: coverage 61.2% is under the 75% floor" }] }
+    );
+    const { store, runId, logs } = await build(adapter, pool(), repo);
+
+    expect(rerunAsked()).toBe(1);
+    expect(logs.join("\n")).toMatch(/has not settled after another 1 minute/);
+    // The point of the whole exercise: the red outlived the blip and became work.
+    const fixes = ciFixTasks(store, runId);
+    expect(fixes.map((t) => t.id)).toEqual(["ci-fix-1-1"]);
+    expect(fixes[0]!.spec).toContain("under the 75% floor");
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    expect(store.ciStatus(runId)).toMatchObject({ state: "passing" });
+  });
 });
 
 describe("a red check that survives its re-run", () => {
