@@ -4991,11 +4991,28 @@ export class RunController {
         ...epics.map((e) => ({ id: e.id, title: e.title, summary: "" })),
         ...breakdown.epics.filter((e) => !epics.some((x) => x.id === e.id)),
       ];
+      // A CANCELLED task still owns its id — a re-plan that reuses it would
+      // take a real task's branch and issue history, so it stays in the graph
+      // and the duplicate-id check keeps seeing it. Its `dependsOn` edges do
+      // not survive with it. Cancelling a task never rewrote the graph around
+      // it, so those edges routinely point at PENDING tasks, and a re-plan
+      // drops PENDING tasks by design: validating the two together makes every
+      // dropped task look like a dangling reference from a task that was never
+      // going to run again, and throws out an otherwise valid plan whole.
+      //
+      // Run bc691359 hit this on its third re-plan attempt in a row. Six
+      // cancelled tasks held edges into the queue; the planner returned exactly
+      // what the operator asked for and the whole thing was refused with
+      // `task ci-e2e-operator-journey depends on unknown task cp-embed-spa`.
+      // The more of a run's history is cancelled, the less it can be re-planned
+      // — which is backwards, since a run accumulates cancellations precisely
+      // by being re-planned.
+      const constraining = keep.map((t) => (t.state === "CANCELLED" ? { ...t, dependsOn: [] } : t));
       const errors = validatePlanDag({
         prdMarkdown: "x",
         conventionsMarkdown: "x",
         epics: epicUnion,
-        tasks: [...keep, ...breakdown.tasks],
+        tasks: [...constraining, ...breakdown.tasks],
       });
       if (errors.length) throw new Error(`re-planned DAG is invalid: ${errors.join("; ")}`);
       // The pit stop can re-plan into the same out-of-scope mistake the first

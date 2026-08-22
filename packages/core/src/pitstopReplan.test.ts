@@ -294,6 +294,58 @@ describe("re-planning what has not been built", () => {
     expect(specs.filter((s) => s.role === "worker").at(-1)!.prompt).toContain("make the two sides agree");
   });
 
+  /**
+   * A cancelled task's `dependsOn` is history, not a constraint. Cancelling a
+   * task does not rewrite the graph around it, so its edges go on pointing at
+   * whatever was queued at the time — and a re-plan drops queued tasks by
+   * design. Validating the two together refuses a perfectly good plan for a
+   * reference that only a task nobody will ever run still holds, and it gets
+   * worse the more the run has been re-planned, because that is where the
+   * cancellations come from. Run bc691359's third re-plan attempt in a row
+   * died this way: `task ci-e2e-operator-journey depends on unknown task
+   * cp-embed-spa`, both of them already out of the picture.
+   */
+  it("re-plans past the dangling edges of a task that was already cancelled", async () => {
+    const dir = repo();
+    let stops = 0;
+    const { pool } = rolePool({
+      planner: plannerSaying(
+        // `task-gate` keeps the two below it queued rather than running, so
+        // what the re-plans see is deterministic.
+        dag([
+          { id: "task-a" },
+          { id: "task-gate", dependsOn: ["task-a"] },
+          { id: "task-b", dependsOn: ["task-gate"] },
+          { id: "task-cancelled", dependsOn: ["task-b"] },
+        ]),
+        // First re-plan: `task-cancelled` is dropped and cancelled, still
+        // holding its edge to `task-b`, which the planner re-states — so the
+        // run now looks like every re-planned run does.
+        dag([{ id: "task-d" }, { id: "task-b", dependsOn: ["task-d"] }]),
+        // Second: `task-b` goes too, and a stale edge out of a cancelled task
+        // is the only thing that still names it.
+        dag([{ id: "task-e" }])
+      ),
+      worker,
+      qa: () => QA_PASS,
+      validator: () => '```json\n{"verdict":"PASS","gaps":[],"summary":"ok"}\n```',
+      demo: () => DEMO_OK,
+      reviewer: () => REVIEW_OK,
+    });
+    const { controller, store, events } = build({
+      repoPath: dir,
+      pool,
+      decide: () => (stops++ < 2 ? { action: "replan", feedback: "change it" } : { action: "continue", feedback: "" }),
+    });
+
+    const runId = await controller.startRun("build a thing", RunConfig.parse({ ...BASE, pitStop: { every: { tasks: 1 } } }));
+
+    expect(events.filter((e) => e.type === "agent.log" && /could not re-plan/.test(e.text)).map((e) => (e as { text: string }).text)).toEqual([]);
+    expect(store.getTask(runId, "task-cancelled")!.state).toBe("CANCELLED");
+    expect(store.getTask(runId, "task-b")!.state).toBe("CANCELLED");
+    expect(store.getTask(runId, "task-e")!.state).toBe("MERGED");
+  });
+
   it("refuses a re-plan that would collide with work already merged", async () => {
     const dir = repo();
     let replanned = false;
