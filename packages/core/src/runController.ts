@@ -5938,6 +5938,16 @@ export class RunController {
         }
       }
 
+      // Re-read before QA is briefed. `task` was read when this iteration
+      // began, and between there and here sit the worker session and five
+      // operator gates — which is exactly when someone amends the criteria,
+      // because a gate is where they are looking at the task. Grading the
+      // work against a bar the operator has already moved wastes the round
+      // the amendment existed to save, and reports a failure against wording
+      // that no longer stands. The probe is re-read for the same reason a few
+      // lines above; the criteria deserve the same freshness, and so does
+      // `touchedPaths`, which the drift note below reads.
+      task = this.store.getTask(runId, taskId)!;
       this.store.transitionTask(runId, taskId, "QA");
       const diffStat = await git(wt.path, ["diff", "--stat", `${this.wt.integrationBranch(runId)}...HEAD`]).catch(() => "unavailable");
       // What the plan expected this task to touch, against what it did. A
