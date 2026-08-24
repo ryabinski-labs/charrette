@@ -1140,6 +1140,30 @@ export class RunController {
   }
 
   /**
+   * Put a task back to a clean slate of attempts.
+   *
+   * Every counter here answers the same question — "how many times has this
+   * task already tried, and should it be allowed another?" — so they are reset
+   * together or not at all. `store.ts` states that invariant on
+   * `emptyDeliveries`; this is where it is kept.
+   *
+   * Two things buy a task fresh iterations. An operator who has read the
+   * failure and said what to do about it changed the conditions the old
+   * failures happened under. And a task cancelled as `unreachable` was never
+   * judged on its own work at all — it was collateral damage of a parked
+   * dependency, and by the time that dependency is merged the ground it failed
+   * on has moved. Run bc691359 reopened `cp-no-third-party-test` four days
+   * after cancelling it and dispatched it carrying two QA strikes from a life
+   * that ended before the work it was waiting for existed; its first honest
+   * failure would have parked it.
+   */
+  private freshIterations(runId: string, taskId: string): void {
+    this.store.updateTask(runId, taskId, {
+      qaIterations: 0, respawns: 0, emptyDeliveries: 0, conflictFixes: 0, errorSummary: null,
+    });
+  }
+
+  /**
    * Tasks cancelled as "unreachable" whose blockers have since resolved: every
    * dependency is merged, or is itself in the returned set. This is the run
    * where a parked dependency was later revived and merged, but its cancelled
@@ -1219,7 +1243,7 @@ export class RunController {
       const why = t.errorSummary || this.store.taskStateReason(runId, t.id) || "parked";
       const guidance = await this.askOperator(runId, t.id, why);
       if (guidance === null) continue; // still parked; no transition needed
-      this.store.updateTask(runId, t.id, { qaIterations: 0, respawns: 0, emptyDeliveries: 0, conflictFixes: 0, errorSummary: null });
+      this.freshIterations(runId, t.id);
       this.revivalGuidance.set(`${runId}/${t.id}`, `This task was parked (${why.slice(0, 300)}) and the operator reopened it with this guidance — follow it over anything that contradicts it:\n${guidance}\n\nInspect git log in this worktree first: earlier iterations may already contain most of the work.`);
       this.store.transitionTask(runId, t.id, "READY", "the operator answered the escalation; fresh iterations");
       revived++;
@@ -1230,6 +1254,9 @@ export class RunController {
       // operator just revived a parked task its "unreachable" reason pointed at.
       // The scheduler re-cancels any whose dependencies are in fact still parked.
       if (revivable.has(t.id) || (revived && this.store.taskStateReason(runId, t.id).startsWith("unreachable"))) {
+        // The cancellation reason is read above, from the transition event
+        // rather than the row, so clearing `errorSummary` here cannot affect it.
+        this.freshIterations(runId, t.id);
         this.store.transitionTask(runId, t.id, "PENDING", "dependencies reopened");
       }
     }
@@ -3119,7 +3146,7 @@ export class RunController {
     }
     // The answer buys a whole new set of iterations, not one more attempt: the
     // operator just changed the conditions the old failures happened under.
-    this.store.updateTask(runId, taskId, { qaIterations: 0, respawns: 0, emptyDeliveries: 0, conflictFixes: 0, errorSummary: null });
+    this.freshIterations(runId, taskId);
     return guidance;
   }
 
@@ -3483,7 +3510,7 @@ export class RunController {
     // now survives to be read, which is the whole point of persisting it.
     const revived = !hit && task.state === "NEEDS_HUMAN" && this.store.getRun(runId)?.state === "EXECUTING";
     if (revived) {
-      this.store.updateTask(runId, target, { qaIterations: 0, respawns: 0, emptyDeliveries: 0, conflictFixes: 0, errorSummary: null });
+      this.freshIterations(runId, target);
       this.store.transitionTask(runId, target, "READY", "reopened by the operator's feedback");
       // …and tell the loop now, rather than leaving the revived task to wait out
       // whatever unrelated task happens to be mid-iteration.
