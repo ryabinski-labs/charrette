@@ -25,7 +25,15 @@ function store(): Store {
 
 const opened = (
   s: Store,
-  over: Partial<{ stop: number; epicIds: string[]; mergedCount: number; spentUsd: number; ts: number; summoned: boolean }>
+  over: Partial<{
+    stop: number;
+    epicIds: string[];
+    mergedCount: number;
+    spentUsd: number;
+    ts: number;
+    summoned: boolean;
+    askedAt: number;
+  }>
 ) =>
   s.appendEvent({
     type: "run.pitstop_opened",
@@ -38,6 +46,7 @@ const opened = (
     artifactsDir: "/repo/.harness/run1/pitstops/1",
     demoStarted: true,
     summoned: over.summoned ?? false,
+    askedAt: over.askedAt ?? 0,
     ts: over.ts ?? 5_000,
   });
 
@@ -162,6 +171,50 @@ describe("pendingPitStopRequest", () => {
     opened(s, { stop: 1, summoned: true });
     asked(s, "and another thing");
     expect(s.pendingPitStopRequest("run1")).toMatchObject({ question: "and another thing" });
+  });
+
+  /**
+   * The stop that opens is not always the stop that was asked for.
+   *
+   * A pit stop is picked up, runs a demo and every reviewer lens, and publishes
+   * `run.pitstop_opened` ten or twenty minutes later. A cadence stop already in
+   * that window when the operator asks a question used to swallow the request on
+   * the way past: the stop carried the epic's framing, asked nothing about what
+   * the operator typed, and left `pendingPitStopRequest` null so no later stop
+   * would ask it either. Nothing in the run said the question had been dropped.
+   *
+   * Run bc691359: seq 69990 asked at 05:11:38 why nothing owned bench.yml, seq
+   * 70000 opened the config-canon cadence stop at 05:23:36, and the question was
+   * gone. The two red CI checks it was about had no owner and no channel left.
+   */
+  it("survives a cadence stop that opened without carrying it", () => {
+    const s = store();
+    asked(s, "nothing owns bench.yml and two checks stay red");
+    opened(s, { stop: 30, epicIds: ["config-canon"], summoned: false, ts: 9_000 });
+    expect(s.pendingPitStopRequest("run1")).toMatchObject({
+      question: "nothing owns bench.yml and two checks stay red",
+    });
+  });
+
+  /**
+   * The same window, but the stop in flight *was* summoned — by an earlier
+   * question. It answers that one and retires that one; the question typed
+   * while its demo ran is owed a stop of its own.
+   */
+  it("survives a summoned stop that was carrying an older question", () => {
+    const s = store();
+    s.appendEvent({ type: "run.pitstop_requested", runId: "run1", question: "the first thing", ts: 1_000 });
+    s.appendEvent({ type: "run.pitstop_requested", runId: "run1", question: "the second thing", ts: 2_000 });
+    // Picked up at 1_000 — before the second question existed.
+    opened(s, { stop: 2, summoned: true, askedAt: 1_000, ts: 3_000 });
+    expect(s.pendingPitStopRequest("run1")).toMatchObject({ question: "the second thing" });
+  });
+
+  it("is retired by the summoned stop that was carrying it", () => {
+    const s = store();
+    s.appendEvent({ type: "run.pitstop_requested", runId: "run1", question: "why no login page?", ts: 1_000 });
+    opened(s, { stop: 2, summoned: true, askedAt: 1_000, ts: 3_000 });
+    expect(s.pendingPitStopRequest("run1")).toBeNull();
   });
 });
 

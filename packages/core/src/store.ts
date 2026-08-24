@@ -764,10 +764,13 @@ export class Store {
    * lost in precisely the window it has to survive.
    *
    * Three event types, one pass, last-one-wins: a request is pending until
-   * either a stop opens (it consumed the request) or the operator cancels it.
-   * Asking twice is therefore idempotent — the second request replaces the
-   * first's question rather than queueing a second stop — which is the behaviour
-   * an operator who clicks again because nothing visibly happened expects.
+   * either the stop that carried it opens or the operator cancels it. Asking
+   * twice is therefore idempotent — the second request replaces the first's
+   * question rather than queueing a second stop — which is the behaviour an
+   * operator who clicks again because nothing visibly happened expects.
+   *
+   * "The stop that carried it", not "any stop": see the `run.pitstop_opened`
+   * branch below for why the difference is the whole point.
    */
   pendingPitStopRequest(runId: string): { question: string; ts: number } | null {
     const rows = this.db
@@ -778,6 +781,28 @@ export class Store {
       .all(runId) as { type: string; payload: string }[];
     let pending: { question: string; ts: number } | null = null;
     for (const r of rows) {
+      if (r.type === "run.pitstop_opened") {
+        // A stop retires the request it carried, and only that one. It is
+        // published after the demo and the reviewers — ten or twenty minutes
+        // after the stop was picked up — so "whatever is pending now" is not
+        // the same set as "what this stop is asking". A question typed inside
+        // that window belongs to the *next* stop and must survive this one.
+        //
+        // `askedAt` is the request instant this stop carried; 0 means it
+        // carried none, which is every cadence stop. Events written before the
+        // field existed have no instant to compare, so they keep the old
+        // behaviour and retire a pending request iff they were summoned — which
+        // is what they meant.
+        const p = JSON.parse(r.payload) as { askedAt?: number; summoned?: boolean };
+        // A stop nobody asked for carried no question and so answers none. It
+        // used to retire one anyway, which is the bug.
+        if (!p.summoned) continue;
+        // A summoned stop retires the request it was picked up with. `askedAt`
+        // is that instant; a stop written before the field existed does not say,
+        // and the only safe reading of an unadorned summoned stop is the old one.
+        if (!p.askedAt || (pending !== null && p.askedAt >= pending.ts)) pending = null;
+        continue;
+      }
       if (r.type !== "run.pitstop_requested") {
         pending = null;
         continue;

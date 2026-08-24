@@ -278,6 +278,92 @@ describe("asking for a pit stop", () => {
   });
 });
 
+/**
+ * The window between a stop being picked up and that stop opening.
+ *
+ * A pit stop runs a demo and every reviewer lens before it publishes
+ * `run.pitstop_opened` — ten or twenty minutes on a real run. Publishing that
+ * event is also what retires the operator's pending request, and it used to
+ * retire whatever was pending at publish time rather than the request the stop
+ * was carrying. So a question typed while a cadence stop was mid-demo was
+ * swallowed by a stop that never asked it, and no later stop asked it either:
+ * `pendingPitStopRequest` was already null.
+ *
+ * Run bc691359, 2026-08-25: seq 69990 asked at 05:11:38 why nothing in the run
+ * owned `.github/workflows/bench.yml`, seq 70000 opened the config-canon cadence
+ * stop at 05:23:36 with `summoned: false`, and the question was gone. The two red
+ * CI checks it was about were left with no owner and no channel to get one.
+ */
+describe("asking while a stop is already running", () => {
+  async function askedMidDemo() {
+    const dir = repo();
+    const holder: { controller?: RunController; store?: Store; runId?: string; asked?: string } = {};
+    const { pool, specs } = rolePool({
+      planner,
+      worker: (spec, nth) => {
+        commit(spec.cwd, `w-${path.basename(spec.cwd)}-${nth}.txt`);
+        return "did the work";
+      },
+      qa: () => QA_PASS,
+      validator: () => INTENT_PASS,
+      // The cadence stop is already in flight. This is its demo — the request
+      // arrives now, after the stop was picked up and before it opens.
+      demo: (spec) => {
+        if (!holder.asked && holder.controller) {
+          holder.runId = holder.store!.listRuns()[0]!.id;
+          holder.asked = holder.controller.requestPitStop(holder.runId, QUESTION);
+        }
+        return demoOk(spec);
+      },
+      reviewer: () => REVIEW_OK,
+      pm: () => PM_ANSWER,
+    });
+    const built = build(dir, pool);
+    holder.controller = built.controller;
+    holder.store = built.store;
+    const runId = await built.controller.startRun(
+      "build a thing",
+      RunConfig.parse({
+        deterministicChecks: [],
+        waitForChecks: false,
+        maxParallelWorkers: 1,
+        pitStop: { every: "epic" },
+      })
+    );
+    return { ...built, specs, runId, asked: holder.asked };
+  }
+
+  it("does not let the stop that was already running swallow the question", async () => {
+    const { events, store, runId, asked, specs, stops } = await askedMidDemo();
+
+    expect(asked).toMatch(/^pit stop requested/);
+    const opened = events.filter((e) => e.type === "run.pitstop_opened") as (HarnessEvent & {
+      summoned: boolean;
+      askedAt: number;
+    })[];
+    // The cadence stop opened, and it says plainly that it carried no question.
+    // That is the field the retirement rule reads.
+    const cadence = opened.find((e) => !e.summoned)!;
+    expect(cadence).toBeTruthy();
+    expect(cadence.askedAt).toBe(0);
+
+    // Either the question got its own stop, or it is still standing and owed
+    // one. What must never happen is the third case: retired unasked.
+    const summoned = opened.find((e) => e.summoned);
+    if (summoned) {
+      expect(summoned.askedAt).toBeGreaterThan(0);
+      // It bought a stop of its own — a second demo — and that demo was driven
+      // by the question rather than by the epic the first one covered.
+      const demos = specs.filter((sp) => sp.role === "demo");
+      expect(demos.length).toBeGreaterThan(1);
+      expect(demos.at(-1)!.prompt).toContain(QUESTION);
+      expect(stops.some((st) => st.reason === "you asked for a look at the product")).toBe(true);
+    } else {
+      expect(store.pendingPitStopRequest(runId)).toMatchObject({ question: QUESTION });
+    }
+  });
+});
+
 describe("the guards on asking", () => {
   const bare = () => {
     const store = new Store(":memory:");

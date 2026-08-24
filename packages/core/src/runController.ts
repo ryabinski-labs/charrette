@@ -4237,7 +4237,12 @@ export class RunController {
       // No `epicIds`: this stop covers no epic boundary, and claiming one would
       // silently cancel the real pit stop that epic is owed — the same reason
       // `resumePitStop` leaves it empty.
-      return { reason: "you asked for a look at the product", epicIds: [], question: asked.question };
+      return {
+        reason: "you asked for a look at the product",
+        epicIds: [],
+        question: asked.question,
+        askedAt: asked.ts,
+      };
     }
     if (run.config.pitStop.every === "never") return null;
     const merged = this.store.mergedTaskIds(runId);
@@ -4353,6 +4358,10 @@ export class RunController {
       // answered the question, and the request should survive to be answered by
       // whatever restarts the run.
       summoned: Boolean(question),
+      // Which request this stop retires. Without it the publish below retires
+      // whatever is pending *now*, which after a twenty-minute demo is not
+      // necessarily the question this stop was picked up to ask.
+      askedAt: due.askedAt ?? 0,
       ts: Date.now(),
     });
 

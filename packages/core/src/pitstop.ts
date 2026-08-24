@@ -52,6 +52,14 @@ export interface PitStopDue {
    * the same generic look the automatic stops take.
    */
   question?: string;
+  /**
+   * When that question was asked — the request event's `ts`.
+   *
+   * Carried through to `run.pitstop_opened` so the stop retires the request it
+   * is actually answering and not one that arrived while its demo was running.
+   * Undefined for every trigger that nobody asked for.
+   */
+  askedAt?: number;
 }
 
 /**
