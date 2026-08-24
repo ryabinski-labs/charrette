@@ -897,6 +897,37 @@ export class Store {
   }
 
   /**
+   * The run-level gates that were opened and never closed.
+   *
+   * A gate is a question with a promise awaiting the answer, so it is normally
+   * resolved by the same call that opened it. A process that dies while one is
+   * open takes that promise with it, and nothing on the next start goes looking:
+   * the `run.gate_opened` stands in the event store with no `run.gate_resolved`
+   * after it, and every reader — the dashboard, `postmortem`, a watcher — reports
+   * a gate nobody will ever answer, forever.
+   *
+   * Run bc691359 carried six of them. The one that cost something: seq 66181
+   * opened a subscription gate at 100% of the weekly window, seq 66180 parked the
+   * run in LIMIT_HOLD, the operator exported a different token and resumed, and
+   * seq 66204 took the run back to EXECUTING at 20:35:56 without ever closing the
+   * gate. Two hours later the run was healthy and its own record still said it
+   * was waiting on an answer.
+   */
+  openRunGates(runId: string): { gateId: string; kind: string }[] {
+    const rows = this.db
+      .prepare("SELECT type, payload FROM events WHERE runId = ? AND type IN ('run.gate_opened','run.gate_resolved') ORDER BY seq")
+      .all(runId) as { type: string; payload: string }[];
+    const open = new Map<string, string>();
+    for (const row of rows) {
+      const e = JSON.parse(row.payload) as { gateId?: string; kind?: string };
+      if (!e.gateId) continue;
+      if (row.type === "run.gate_opened") open.set(e.gateId, e.kind ?? "");
+      else open.delete(e.gateId);
+    }
+    return [...open].map(([gateId, kind]) => ({ gateId, kind }));
+  }
+
+  /**
    * How many times a skill — rather than a person — has sent this run's plan
    * back over the intent check's gaps.
    *

@@ -129,7 +129,7 @@ function build(opts: { repoPath: string; pool: AgentPool; gates?: Partial<GateHa
     ...opts.gates,
   };
   const controller = new RunController(store, bus, opts.pool, new GitHubAdapter(undefined, undefined), gates, opts.repoPath);
-  return { controller, store, events };
+  return { controller, store, events, bus };
 }
 
 const worker = (spec: AgentSpec, nth: number) => (commitInWorktree(spec.cwd, `w-${path.basename(spec.cwd)}-${nth}.txt`), "did the work");
@@ -461,5 +461,56 @@ describe("picking a parked run back up", () => {
     expect(parked.store.getRun(runId)!.state).toBe("PR_REVIEW");
     expect(parked.store.getTask(runId, "task-a")!.state).toBe("MERGED");
     expect(parked.events.some((e) => e.type === "run.state_changed" && e.from === "LIMIT_HOLD" && e.to === "EXECUTING")).toBe(true);
+  });
+
+  it("closes the gate the dead process was holding when it was killed", async () => {
+    // A gate and its hold are two records of one fact, written by the same
+    // call: `askSubscription` parks the run, then awaits the answer. Kill the
+    // process while it waits and only the parking survives — the promise that
+    // would have written `run.gate_resolved` dies with it. A handler that
+    // throws reaches the same place by the same route.
+    //
+    // Run bc691359, 2026-08-24: seq 66181 opened a subscription gate at 100% of
+    // the weekly window, seq 66180 parked the run, the operator exported a
+    // different token and resumed, and seq 66204 took the run back to EXECUTING
+    // at 20:35:56 without ever closing the gate. Two hours later the run was
+    // healthy and its own record still said it was waiting on an answer — and
+    // so did every reader computing open gates from the event store.
+    const { pool } = watchingPool(ROLES, { reportOn: "worker", readings: [weekly(96)] });
+    const parked = build({
+      repoPath: repo(),
+      pool,
+      gates: { async resolveSubscriptionGate() { return { action: "park" }; } },
+    });
+    await parked.controller.startRun("build a thing", config()).catch(() => undefined);
+    const runId = parked.store.listRuns()[0]!.id;
+    expect(parked.store.getRun(runId)!.state).toBe("LIMIT_HOLD");
+
+    // The state a killed process leaves behind, written straight to the store
+    // because that is the only thing that survives it: the gate is opened, the
+    // run is parked, and the answer never arrives.
+    parked.bus.publish({
+      type: "run.gate_opened",
+      runId,
+      gateId: "1546f6e3",
+      kind: "subscription",
+      payload: { summary: "100% of the weekly limit" },
+      ts: Date.now(),
+    });
+    const abandoned = parked.store.openRunGates(runId).filter((g) => g.kind === "subscription");
+    expect(abandoned.map((g) => g.gateId)).toEqual(["1546f6e3"]);
+
+    await parked.controller.resume(runId).catch(() => undefined);
+
+    // Resuming is the answer — the operator is demonstrably at the keyboard —
+    // so the gate they settled must not still be asking.
+    expect(parked.store.openRunGates(runId).map((g) => g.gateId)).not.toContain(abandoned[0]!.gateId);
+    // Attributed to them, never to a decider: `budgetAutoRaises` counts
+    // non-operator approvals, and a resume must not spend an auto-raise round.
+    const closed = parked.events.find(
+      (e) => e.type === "run.gate_resolved" && (e as { gateId?: string }).gateId === abandoned[0]!.gateId
+    ) as { decidedBy?: string; feedback?: string } | undefined;
+    expect(closed?.decidedBy).toBe("operator");
+    expect(closed?.feedback).toBe("resumed from subscription hold");
   });
 });

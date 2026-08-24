@@ -5,6 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import {
+  GateKind,
   Plan,
   PlanBatch,
   PlanBreakdown,
@@ -1403,6 +1404,7 @@ export class RunController {
     } else if (run.state === "BUDGET_HOLD") {
       // The cap that parked it is still in force: execution re-opens the budget
       // gate on the first check, giving the operator another chance to raise it.
+      this.closeAbandonedGates(runId, "budget", "resumed from budget hold");
       this.store.transitionRun(runId, "EXECUTING", "resumed from budget hold");
       run = this.store.getRun(runId)!;
     } else if (run.state === "LIMIT_HOLD") {
@@ -1413,6 +1415,7 @@ export class RunController {
       // has just read the account to find out which. If the plan is still spent
       // the gate opens again immediately, which is the honest outcome — nothing
       // was lost by trying.
+      this.closeAbandonedGates(runId, "subscription", "resumed from subscription hold");
       this.store.transitionRun(runId, "EXECUTING", "resumed from subscription hold");
       run = this.store.getRun(runId)!;
     }
@@ -6586,6 +6589,43 @@ export class RunController {
    * its own copy of the same question.
    */
   private subscriptionChain: Promise<void> = Promise.resolve();
+
+  /**
+   * Close the gates the previous process left open when it died holding one.
+   *
+   * A hold state and its gate are two records of one fact, written by the same
+   * call: `askSubscription` parks the run and then awaits an answer. Kill the
+   * process while it waits and only the parking survives — the awaited promise
+   * dies with it, so `run.gate_resolved` is never written. `resume` then lifts
+   * the hold and the gate is left standing, and because nothing ever revisits an
+   * opened gate, it is answered by nobody for the life of the run.
+   *
+   * Resuming *is* the answer: the operator is at the keyboard, they either
+   * pointed the run at another account or waited out the window, and the
+   * preflight read above has already re-measured which. So the gate is closed
+   * as approved and attributed to them — never to a decider, or the auto-raise
+   * rounds in `budgetAutoRaises` would count a resume as a skill's decision and
+   * spend the operator's remaining rounds on nothing.
+   *
+   * Only gates of the kind that produced this hold: a subscription resume says
+   * nothing about an open plan gate, and closing one it did not answer would
+   * trade a stale record for a false one.
+   */
+  private closeAbandonedGates(runId: string, kind: z.infer<typeof GateKind>, feedback: string): void {
+    for (const gate of this.store.openRunGates(runId)) {
+      if (gate.kind !== kind) continue;
+      this.bus.publish({
+        type: "run.gate_resolved",
+        runId,
+        gateId: gate.gateId,
+        kind,
+        resolution: "approved",
+        feedback,
+        decidedBy: "operator",
+        ts: Date.now(),
+      });
+    }
+  }
 
   private publishReading(runId: string, reading: SubscriptionReading): void {
     this.bus.publish({
