@@ -590,6 +590,38 @@ export class Store {
   }
 
   /**
+   * What the plan gate's intent check said about the plan itself.
+   *
+   * Distinct from `intentVerdict` in the only way that matters: this one read a
+   * list of tasks, not a tree. It is what the dashboard has to show for the
+   * hours before anything merges, and it must be labelled as being about the
+   * plan — a plan that covers the assignment is not a product that does.
+   */
+  planIntentVerdict(runId: string): { verdict: string; gaps: string[] } | null {
+    const row = this.db
+      .prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.plan_intent_verdict' ORDER BY seq DESC LIMIT 1")
+      .get(runId) as { payload: string } | undefined;
+    if (!row) return null;
+    const parsed = JSON.parse(row.payload) as { verdict: string; gaps?: string[] };
+    return { verdict: parsed.verdict, gaps: parsed.gaps ?? [] };
+  }
+
+  /**
+   * How many events of a type landed after a point.
+   *
+   * The intent posture needs it for one question: how many merges the tree has
+   * taken on since the last thing that read it. A verdict is a statement about
+   * the tree it was given, and the run keeps merging underneath it.
+   */
+  eventCountSince(runId: string, type: string, seq: number): number {
+    return (
+      this.db.prepare("SELECT COUNT(*) c FROM events WHERE runId = ? AND type = ? AND seq > ?").get(runId, type, seq) as {
+        c: number;
+      }
+    ).c;
+  }
+
+  /**
    * The intake conversation as far as it got, in order, with `answer: null` for
    * a question the operator never came back to.
    *

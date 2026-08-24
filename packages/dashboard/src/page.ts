@@ -94,6 +94,83 @@ export const PAGE_HTML = `<!doctype html>
   .bar.warn i { background:var(--amber); box-shadow:0 0 8px color-mix(in srgb, var(--amber) 60%, transparent); }
   .bar.hot i { background:var(--red); box-shadow:0 0 8px color-mix(in srgb, var(--red) 60%, transparent); }
 
+  /*
+   * The second meter: how far the run is from the thing it was asked to build.
+   *
+   * The money meter answers "what has this cost". An operator four days into a
+   * run is asking two questions and the header only ever answered one of them,
+   * which is how run bc691359 sat at "EXECUTING $1538 of $3000" for twenty
+   * three merges with four unowned gaps standing against its assignment and
+   * nowhere on the page saying so.
+   *
+   * It sits immediately left of the spend and shares its type scale, so the
+   * pair reads as one instrument: how close, then how much.
+   */
+  .imeter { margin-left:auto; text-align:right; min-width:200px; border:1px solid transparent;
+            border-radius:6px; padding:0 .4rem; margin-right:-.4rem; }
+  .imeter:not([hidden]) + .meter { margin-left:1.5rem; }
+  /* Inline, not stacked: the spend beside it is number-then-bar-then-note, and a
+     label on its own line would put the two meters on different baselines and
+     stop them reading as one instrument. */
+  .imeter .lbl { color:var(--faint); font-weight:600; font-size:.6rem; letter-spacing:.16em;
+                 text-transform:uppercase; font-family:var(--mono); margin-right:.35rem; }
+  .imeter b { font-variant-numeric:tabular-nums; font-family:var(--mono); font-size:.9rem;
+              color:var(--mute); }
+  .imeter small { color:var(--dim); font-size:.72rem; display:block; }
+  .imeter[data-stance="met"] b { color:var(--green); }
+  .imeter[data-stance="closing"] b { color:var(--amber); }
+  .imeter[data-stance="unowned"] b { color:var(--red); }
+  /* Unmeasured is not a score. It gets the same faint treatment as every other
+     "nobody has looked" state on this page, and never a colour that grades it. */
+  .imeter[data-stance="unjudged"] b, .imeter[data-stance="plan-only"] b { color:var(--dim); }
+  .imeter[role="button"] { cursor:pointer; }
+  .imeter[role="button"]:hover, .imeter[role="button"]:focus-visible { border-color:var(--line2); outline:none; }
+
+  /*
+   * The completion bar shares .bar's shape with the spend beside it, and none
+   * of its colouring. For money a full bar is bad; for delivery a full bar is
+   * the goal, so it stays green the whole way up rather than warming to red.
+   */
+  .imeter .bar i { background:var(--green); box-shadow:0 0 8px color-mix(in srgb, var(--green) 55%, transparent); }
+  .imeter .bar.idle i { background:repeating-linear-gradient(135deg, var(--line2) 0 2px, transparent 2px 5px);
+                        box-shadow:none; width:100%; }
+  /* The check's count sits beside the bar, never inside it \u2014 a gap the run is
+     not closing is not a smaller percentage, it is a different fact. */
+  .imeter small.bad { color:var(--red); }
+  .imeter small.warn { color:var(--amber); }
+
+  /* One row per thing the assignment asked for. */
+  #intent .ms { display:flex; align-items:baseline; gap:.5rem; font-size:.72rem; padding:.24rem 0; }
+  #intent .ms .t { flex:1; min-width:0; color:var(--mute); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #intent .ms.full .t { color:var(--dim); }
+  #intent .ms .b { flex:none; width:72px; height:4px; background:var(--sunken); border-radius:3px;
+                   overflow:hidden; box-shadow:inset 0 0 0 1px var(--line); align-self:center; }
+  #intent .ms .b i { display:block; height:100%; background:var(--green); transition:width .4s; }
+  #intent .ms .n { flex:none; font-family:var(--mono); font-size:.66rem; color:var(--dim);
+                   font-variant-numeric:tabular-nums; min-width:2.6rem; text-align:right; }
+  #intent .ms.held .n { color:var(--red); }
+  /* The check's half of the panel, ruled off from the work's half. The two
+     answer different questions and a reader must not run one into the other. */
+  #intentgapbox { border-top:1px solid var(--line); margin-top:.7rem; padding-top:.1rem; }
+  #intent h3 { font-size:.62rem; text-transform:uppercase; letter-spacing:.12em; color:var(--faint);
+               margin:.7rem 0 .35rem; font-weight:600; }
+  #intent h3 .n { color:var(--red); font-family:var(--mono); letter-spacing:0; }
+
+  /* The gap list behind the meter. */
+  #intent .lead { color:var(--mute); font-size:.78rem; line-height:1.5; margin:0 0 .5rem; }
+  #intent .gap { display:flex; gap:.5rem; align-items:baseline; padding:.4rem 0;
+                 border-top:1px solid var(--line); font-size:.76rem; line-height:1.45; }
+  #intent .gap:first-of-type { border-top:none; }
+  #intent .gap .chip { flex:none; font-family:var(--mono); font-size:.6rem; letter-spacing:.08em;
+                       text-transform:uppercase; border:1px solid var(--line2); border-radius:3px;
+                       padding:.05rem .3rem; color:var(--dim); }
+  #intent .gap.g-closed .chip { color:var(--green); border-color:color-mix(in srgb, var(--green) 45%, transparent); }
+  #intent .gap.g-live .chip { color:var(--amber); border-color:color-mix(in srgb, var(--amber) 45%, transparent); }
+  #intent .gap.g-parked .chip, #intent .gap.g-open .chip { color:var(--red); border-color:color-mix(in srgb, var(--red) 45%, transparent); }
+  #intent .gap.g-closed .txt { color:var(--dim); }
+  #intent .gap .txt { min-width:0; }
+  #intent .gap .who { color:var(--faint); font-family:var(--mono); font-size:.66rem; }
+
   /* The landmark <main> sits between body's flex column and .shell, so it is
      the flex item now — and a block box at flex:0 1 auto sizes to its content,
      which makes .shell's flex:1 resolve against nothing. body is
@@ -435,6 +512,14 @@ export const PAGE_HTML = `<!doctype html>
        first one stops every agent in the run and an operator reaching for
        "Notify me" should not be able to do that by missing. -->
   <button id="pause" class="ghost" hidden>Pause</button>
+  <!-- Left of the spend, because the order the operator reads them in is the
+       order the question comes in: how close is this, and what is it costing. -->
+  <div class="imeter" id="intentmeter" hidden>
+    <span class="lbl">intent</span>
+    <b id="intentnum">&hellip;</b>
+    <div class="bar" id="intentbar" role="img" aria-label="Work delivered against the assignment"><i></i></div>
+    <small id="intentnote"></small>
+  </div>
   <div class="meter">
     <b id="spend">$0.00</b> <span id="cap" style="color:var(--dim)" tabindex="-1"></span><input id="capinput" type="number" step="1" min="0" aria-label="New run budget cap in USD" hidden>
     <div class="bar" id="bar"><i></i></div>
@@ -544,6 +629,23 @@ export const PAGE_HTML = `<!doctype html>
         </div>
         <small class="price" id="summon-price"></small>
         <small class="price err" id="summon-note"></small>
+      </div>
+    </div>
+    <!--
+      What the header meter is a summary of. Collapsed by default: it is the
+      answer to a question the meter has already stated, and an operator whose
+      run is on intent should not have to scroll past the reasons it is not.
+    -->
+    <div class="panel" id="intent" style="display:none">
+      <h2>Against your intent <span class="count" id="intentcount"></span></h2>
+      <p class="lead" id="intentline"></p>
+      <div id="intentms"></div>
+      <div id="intentgapbox" style="display:none">
+        <h3 id="intentgaphead">The intent check</h3>
+        <p class="lead" id="intentgapline"></p>
+        <details id="intentdetails"><summary id="intentsummary">The gaps</summary>
+          <div id="intentgaps"></div>
+        </details>
       </div>
     </div>
     <div class="panel">
@@ -917,6 +1019,148 @@ function renderHeader() {
   $("spendnote").textContent = running
     ? running + " agent" + (running > 1 ? "s" : "") + " running \\u2014 cost books when each finishes"
     : "priced at API list rates";
+}
+
+/* ---------- intent ---------- */
+
+/*
+ * How much of what was asked for is built, and what the check says is still
+ * missing from it \u2014 two numbers side by side, neither one moving the other.
+ *
+ * Every figure here is computed in intentPosture.ts and arrives on /api/state
+ * already decided. That is deliberate: this script is a string inside a
+ * template literal, so nothing typechecks it and no coverage reaches it, and
+ * arithmetic that has to be right does not belong in it. The page's only jobs
+ * are to draw the answer and to never overstate it.
+ */
+const GAP_CHIP = { closed: "closed", "in-flight": "in flight", parked: "parked", unowned: "no owner" };
+const GAP_CLASS = { closed: "g-closed", "in-flight": "g-live", parked: "g-parked", unowned: "g-open" };
+
+/* Rebuilt only when it changed \u2014 a re-render several times a minute would
+   otherwise take the operator's selection out of a gap they were reading. */
+let intentSig = "";
+
+function intentRun() {
+  // One run, one assignment. An aggregate across runs would be a claim about no
+  // particular intent, which is the same reason the cap is only editable at one.
+  return runs.length === 1 && runs[0].intent ? runs[0] : null;
+}
+
+/* The count beside the bar. Never a percentage: a gap the run is not closing is
+   not a smaller number, it is a different fact about the same tree. */
+function intentGapNote(it) {
+  if (it.judged === "nothing") return { text: "not judged yet", tone: "" };
+  if (it.judged === "plan") {
+    return it.gaps.length
+      ? { text: "plan: " + it.gaps.length + " not covered", tone: "warn" }
+      : { text: "plan covers it", tone: "" };
+  }
+  const parts = [];
+  if (!it.gaps.length) parts.push(it.stance === "met" ? "no gaps open" : "checked, and it disagreed");
+  else parts.push(it.gaps.length + (it.gaps.length === 1 ? " gap open" : " gaps open"));
+  if (it.unowned && !it.roundsLeft) parts.push("no rounds left");
+  if (it.staleMerges) parts.push(it.staleMerges + " merges since");
+  // Red is "nothing is happening to this"; amber is "something is, and it needs
+  // you". A run closing its gaps properly should not read like one that stopped.
+  return { text: parts.join(" \u00b7 "), tone: it.unowned ? "bad" : it.parked ? "warn" : "" };
+}
+
+function renderIntent() {
+  const run = intentRun();
+  const meter = $("intentmeter");
+  const panel = $("intent");
+  if (!run) {
+    meter.hidden = true;
+    panel.style.display = "none";
+    intentSig = "";
+    return;
+  }
+  const it = run.intent;
+  const sig = JSON.stringify(it);
+  meter.hidden = false;
+  meter.dataset.stance = it.stance;
+  if (sig === intentSig) return;
+  intentSig = sig;
+
+  // The bar is the work; nothing the check says is allowed to move it.
+  const pct = it.percent;
+  $("intentnum").textContent = pct === null ? "no plan yet" : pct + "% delivered";
+  const bar = $("intentbar");
+  bar.className = "bar" + (pct === null ? " idle" : "");
+  bar.firstChild.style.width = (pct === null ? 0 : pct) + "%";
+  bar.setAttribute("aria-label", it.deliveryHeadline);
+
+  const note = intentGapNote(it);
+  const noteBox = $("intentnote");
+  noteBox.textContent = note.text;
+  noteBox.className = note.tone;
+  // Both sentences, for anyone who hovers rather than clicks.
+  meter.title = it.deliveryHeadline + "\\n\\n" + it.headline;
+
+  const openable = it.milestones.length > 0 || it.gaps.length > 0;
+  if (openable) {
+    meter.setAttribute("role", "button");
+    meter.tabIndex = 0;
+  } else {
+    meter.removeAttribute("role");
+    meter.tabIndex = -1;
+  }
+  panel.style.display = openable ? "" : "none";
+  if (!openable) return;
+
+  $("intentcount").textContent = pct === null ? "" : pct + "%";
+  $("intentline").textContent = it.deliveryHeadline;
+
+  const box = $("intentms");
+  box.textContent = "";
+  for (const m of it.milestones) {
+    const done = m.done === m.total;
+    const row = el("div", "ms" + (done ? " full" : "") + (m.parked ? " held" : ""));
+    row.append(el("span", "t", m.title));
+    const track = el("div", "b");
+    const fill = el("i");
+    fill.style.width = m.percent + "%";
+    track.append(fill);
+    row.append(track);
+    row.append(el("span", "n", m.done + "/" + m.total));
+    row.title = m.parked
+      ? m.parked + " task(s) here are parked and waiting on you"
+      : m.title + " \u2014 " + m.done + " of " + m.total + " merged";
+    box.append(row);
+  }
+
+  // The check's half, below the work's half and visibly separate from it.
+  const gapbox = $("intentgapbox");
+  gapbox.style.display = it.gaps.length ? "" : "none";
+  if (!it.gaps.length) return;
+  $("intentgaphead").textContent =
+    it.judged === "plan" ? "What the plan gate said" : "What the last check said";
+  $("intentgapline").textContent = it.headline;
+  $("intentsummary").textContent =
+    it.judged === "plan" ? "What the plan did not cover" : "What the last check said is missing";
+  const gaps = $("intentgaps");
+  gaps.textContent = "";
+  for (const g of it.gaps) {
+    const row = el("div", "gap " + GAP_CLASS[g.status]);
+    row.append(el("span", "chip", GAP_CHIP[g.status]));
+    const txt = el("span", "txt", g.text);
+    if (g.taskId) {
+      txt.append(document.createTextNode(" "));
+      txt.append(el("span", "who", g.taskId));
+    }
+    row.append(txt);
+    gaps.append(row);
+  }
+}
+
+/* The meter is the summary; this is the rest of it. Scrolling the panel into
+   view matters more than opening the gap list \u2014 the sidebar is long and the
+   panel is above the fold only on a short run. */
+function openIntent() {
+  const panel = $("intent");
+  if (panel.style.display === "none") return;
+  if ($("intentgapbox").style.display !== "none") $("intentdetails").open = true;
+  panel.scrollIntoView({ block: "nearest", behavior: "smooth" });
 }
 
 /** When the last running session stopped being reported; 0 while one is. */
@@ -2413,7 +2657,7 @@ async function refresh() {
     notify("Subscription nearly spent", sg.summary + " — the run is paused and waiting for you", "subscription");
   }
   if (!sg) subShown = null;
-  renderHeader(); renderNow(); renderFeedback(); renderSummon(); renderPause(); renderPaused(); renderBoard(); renderPrs(); renderRunInfo();
+  renderHeader(); renderIntent(); renderNow(); renderFeedback(); renderSummon(); renderPause(); renderPaused(); renderBoard(); renderPrs(); renderRunInfo();
   for (const run of runs) stream(run.id);
 }
 
@@ -2561,6 +2805,8 @@ $("fb-task").addEventListener("change", () => {
   fbChosen = $("fb-task").value;
   if (fbChosen) { $("fb-note").style.color = ""; $("fb-note").textContent = ""; }
 });
+$("intentmeter").addEventListener("click", openIntent);
+$("intentmeter").addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openIntent(); } });
 $("pause").addEventListener("click", clickPause);
 $("summon-ask").addEventListener("click", armSummon);
 $("summon-go").addEventListener("click", () => postPitStop({ question: $("fb-text").value.trim() }));

@@ -1333,3 +1333,82 @@ describe("live model routing", () => {
     expect(res.status).toBe(403);
   });
 });
+
+/**
+ * The header's intent meter is the only thing on the page that answers "is this
+ * still the thing I asked for", and it answers it from two facts that must
+ * arrive separately: how much of the plan is merged, and what the last intent
+ * check said is missing from what that produced.
+ */
+describe("what the run is delivering against its assignment", () => {
+  const started: Dashboard[] = [];
+  afterEach(async () => {
+    for (const d of started.splice(0)) await d.stop();
+  });
+
+  function seeded(withVerdict: boolean): Store {
+    const store = new Store(":memory:");
+    store.createRun({
+      id: "run1", repoPath: "/tmp/x", assignment: "a", state: "EXECUTING", prdPath: null, planHash: null,
+      integrationBranch: "harness/run1/main", config: RunConfig.parse({}),
+    });
+    const row = (id: string, epicId: string, title: string) => ({
+      id, epicId, title, spec: "", acceptanceCriteria: [], dependsOn: [], state: "PENDING" as const,
+      branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0,
+      respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [], completionProbe: "",
+      estimatedSize: "M" as const,
+    });
+    store.insertTasks("run1", [{ id: "engine", title: "M1: the engine" }], [
+      row("t1", "engine", "First"),
+      row("t2", "engine", "Second"),
+      row("intent-fix-1-1", "engine", "Close intent gap: ingestion is absent"),
+    ]);
+    for (const id of ["t1", "intent-fix-1-1"]) {
+      for (const st of ["READY", "WORKING", "QA", "ACCEPTED", "MERGED"] as const) store.transitionTask("run1", id, st);
+    }
+    const bus = new Bus(store);
+    bus.publish({ type: "git.merged", runId: "run1", taskId: "t1", branch: "harness/run1/t1", sha: "a", ts: 1 });
+    if (withVerdict) {
+      bus.publish({ type: "run.intent_verdict", runId: "run1", verdict: "FAIL", gaps: ["ingestion is absent", "nothing schedules the worker"], summary: "s", ts: 2 });
+      bus.publish({ type: "git.merged", runId: "run1", taskId: "intent-fix-1-1", branch: "harness/run1/f", sha: "b", ts: 3 });
+    }
+    return store;
+  }
+
+  async function intentOf(store: Store) {
+    const dash = new Dashboard(store, new Bus(store));
+    started.push(dash);
+    const url = await dash.start();
+    const res = await fetch(new URL("/api/state", url), { headers: { authorization: `Bearer ${dash.token}`, connection: "close" } });
+    const body = (await res.json()) as { runs: { intent: Record<string, unknown> }[] };
+    return body.runs[0]!.intent as Record<string, never> & {
+      percent: number; delivered: number; total: number; judged: string; staleMerges: number;
+      gaps: { text: string; status: string; taskId: string | null }[]; closed: number; unowned: number;
+    };
+  }
+
+  it("measures the work against the plan's milestones before any check has run", async () => {
+    const intent = await intentOf(seeded(false));
+    expect(intent.percent).toBe(67);
+    expect(intent.delivered).toBe(2);
+    expect(intent.total).toBe(3);
+    // No check has read the tree, and that is said rather than scored.
+    expect(intent.judged).toBe("nothing");
+    expect(intent.gaps).toEqual([]);
+  });
+
+  it("carries the check's gaps, whether each has a task, and how far the tree moved since", async () => {
+    const intent = await intentOf(seeded(true));
+    // The completion figure is unchanged by the failing check beside it.
+    expect(intent.percent).toBe(67);
+    expect(intent.judged).toBe("tree");
+    expect(intent.closed).toBe(1);
+    expect(intent.unowned).toBe(1);
+    expect(intent.gaps.map((g) => [g.status, g.taskId])).toEqual([
+      ["closed", "intent-fix-1-1"],
+      ["unowned", null],
+    ]);
+    // One merge landed after the verdict, so the verdict is one merge stale.
+    expect(intent.staleMerges).toBe(1);
+  });
+});

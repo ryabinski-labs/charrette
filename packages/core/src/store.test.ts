@@ -454,3 +454,53 @@ describe("the run's specification, read back", () => {
     expect(store.acceptanceVerdict("run-1")).toEqual({ passed: true, failing: [], named: true, blocked: [], line: "" });
   });
 });
+
+/**
+ * The two readers the intent meter needs. Both exist because the posture is a
+ * statement about a moment: which verdict is the newest, and how much the tree
+ * moved after it was taken.
+ */
+describe("what the intent check left behind", () => {
+  it("has no plan verdict to report until the plan gate has judged one", () => {
+    const store = makeStore();
+    makeRun(store);
+    expect(store.planIntentVerdict("run1")).toBeNull();
+  });
+
+  it("reports the newest plan verdict, not the one that was re-planned away", () => {
+    const store = makeStore();
+    makeRun(store);
+    const bus = new Bus(store);
+    bus.publish({ type: "run.plan_intent_verdict", runId: "run1", verdict: "FAIL", gaps: ["no controller"], summary: "", ts: 1 });
+    bus.publish({ type: "run.plan_intent_verdict", runId: "run1", verdict: "PASS", gaps: [], summary: "", ts: 2 });
+    expect(store.planIntentVerdict("run1")).toEqual({ verdict: "PASS", gaps: [] });
+  });
+
+  it("reads a verdict recorded by a build that wrote no gap list", () => {
+    // Not hypothetical: the event schema defaults `gaps` today, so every verdict
+    // this harness writes has one. A run resumed from a database written before
+    // it did must still produce a posture rather than a crash.
+    const store = makeStore();
+    makeRun(store);
+    store.db
+      .prepare("INSERT INTO events (runId, taskId, sessionId, type, payload, ts) VALUES (?, NULL, NULL, ?, ?, ?)")
+      .run("run1", "run.plan_intent_verdict", JSON.stringify({ verdict: "FAIL" }), 1);
+    expect(store.planIntentVerdict("run1")).toEqual({ verdict: "FAIL", gaps: [] });
+  });
+
+  it("counts how far the tree moved after a point, which is what makes a verdict stale", () => {
+    const store = makeStore();
+    makeRun(store);
+    const bus = new Bus(store);
+    bus.publish({ type: "git.merged", runId: "run1", taskId: "t1", branch: "harness/run1/t1", sha: "a", ts: 1 });
+    bus.publish({ type: "run.intent_verdict", runId: "run1", verdict: "FAIL", gaps: ["g"], summary: "", ts: 2 });
+    bus.publish({ type: "git.merged", runId: "run1", taskId: "t2", branch: "harness/run1/t2", sha: "b", ts: 3 });
+    bus.publish({ type: "git.merged", runId: "run1", taskId: "t3", branch: "harness/run1/t3", sha: "c", ts: 4 });
+
+    const at = store.lastEventSeq("run1", "run.intent_verdict");
+    // The merge before the verdict is part of what it read; the two after it
+    // are the tree it never saw.
+    expect(store.eventCountSince("run1", "git.merged", at)).toBe(2);
+    expect(store.eventCountSince("run1", "git.merged", 0)).toBe(3);
+  });
+});
