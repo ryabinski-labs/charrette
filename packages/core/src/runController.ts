@@ -4465,7 +4465,7 @@ export class RunController {
         runId,
         role: "demo" as const,
         model: run.config.models.demo,
-        systemPrompt: demoSystemPrompt(dir, toolbeltBlock(detectToolbelt(run.config.externalTools)), skillsBlock(skills)),
+        systemPrompt: demoSystemPrompt(dir, wtPath, toolbeltBlock(detectToolbelt(run.config.externalTools)), skillsBlock(skills)),
         skills: skills.map((s) => s.name),
         cwd: wtPath,
         disallowedTools: ["WebSearch"],

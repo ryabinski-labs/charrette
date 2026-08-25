@@ -283,7 +283,7 @@ describe("what the demo agent photographs", () => {
   it("captures both widths and the states, because a lens reads it afterwards", () => {
     // The pit stop's design reviewer never runs the product. Everything it can
     // say about the interface comes out of this directory.
-    const p = demoSystemPrompt("/tmp/artifacts");
+    const p = demoSystemPrompt("/tmp/artifacts", "/tmp/wt");
     expect(p).toMatch(/at desktop width and again at mobile width/);
     expect(p).toMatch(/capture the empty and error states/);
     expect(p).toMatch(/A surface you described but did not capture is a surface nobody reviewed/);
@@ -293,7 +293,7 @@ describe("what the demo agent photographs", () => {
     // A pit stop shipped a 1082x2202 white rectangle as evidence of a mobile
     // page. The agent knew — it said so, four paragraphs into its summary — and
     // listed the file anyway.
-    const p = demoSystemPrompt("/tmp/artifacts");
+    const p = demoSystemPrompt("/tmp/artifacts", "/tmp/wt");
     expect(p).toMatch(/LOOK AT EVERY SCREENSHOT YOU TAKE, with Read, before you list it/);
     expect(p).toMatch(/one flat colour is a failed capture/);
     // Told how to fix it, not just that it is forbidden: both failures the
@@ -305,7 +305,7 @@ describe("what the demo agent photographs", () => {
   });
 
   it("asks for the claim each file backs, not a list of filenames", () => {
-    const p = demoSystemPrompt("/tmp/artifacts");
+    const p = demoSystemPrompt("/tmp/artifacts", "/tmp/wt");
     expect(p).toContain('"artifacts":[{"file":string,"shows":string}]');
     expect(p).toMatch(/what a reader learns by opening that file/);
     expect(p).toMatch(/A file you cannot write a claim for is a file that proves nothing/);
