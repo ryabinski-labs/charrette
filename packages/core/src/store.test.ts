@@ -580,3 +580,79 @@ describe("which budget raises came from a decider", () => {
     expect(store.budgetAutoRaises("run1")).toBe(0);
   });
 });
+
+describe("a gate the task outlived", () => {
+  const task = (id: string) => ({
+    id, epicId: "e1", title: id.toUpperCase(), spec: "s", acceptanceCriteria: ["ok"], dependsOn: [],
+    state: "PENDING" as const, branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null,
+    qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [], completionProbe: "", estimatedSize: "M" as const,
+  });
+  const gated = (id: string) => {
+    const store = makeStore();
+    makeRun(store);
+    store.insertTasks("run1", [{ id: "e1", title: "Epic" }], [task(id)]);
+    return store;
+  };
+  const resolutions = (store: Store) =>
+    store.eventsSince("run1", 0).map((e) => e.event).filter((e) => e.type === "task.gate_resolved") as { decidedBy: string; parked: boolean }[];
+
+  it("is closed when the work it was asking about merges", () => {
+    // Run bc691359's `intent-fix-1-6`: it gated on merge conflicts, was requeued
+    // 37 minutes later without anyone answering, went round the loop again and
+    // merged. The gate stood open for 7.8 days afterwards, and every reader that
+    // computes open gates from the event log kept telling the operator that a
+    // shipped task was blocking them.
+    const store = gated("a");
+    store.appendEvent({ type: "task.gate_opened", runId: "run1", taskId: "a", why: "merge conflicts", recommendation: "", iterations: 3, ts: Date.now() });
+    for (const to of ["READY", "WORKING", "ACCEPTED", "MERGED"] as const) store.transitionTask("run1", "a", to);
+
+    expect(resolutions(store)).toHaveLength(1);
+    expect(resolutions(store)[0]).toMatchObject({ decidedBy: "merged", parked: false, guidance: "" });
+  });
+
+  it("says what actually ended it, rather than crediting a person who never saw it", () => {
+    const store = gated("a");
+    store.appendEvent({ type: "task.gate_opened", runId: "run1", taskId: "a", why: "stuck", recommendation: "", iterations: 3, ts: Date.now() });
+    store.transitionTask("run1", "a", "CANCELLED");
+
+    expect(resolutions(store)[0]!.decidedBy).toBe("cancelled");
+  });
+
+  it("is not closed twice when somebody did answer it", () => {
+    const store = gated("a");
+    store.appendEvent({ type: "task.gate_opened", runId: "run1", taskId: "a", why: "stuck", recommendation: "", iterations: 3, ts: Date.now() });
+    store.appendEvent({ type: "task.gate_resolved", runId: "run1", taskId: "a", parked: false, guidance: "do X", decidedBy: "operator", ts: Date.now() });
+    for (const to of ["READY", "WORKING", "ACCEPTED", "MERGED"] as const) store.transitionTask("run1", "a", to);
+
+    expect(resolutions(store).map((r) => r.decidedBy)).toEqual(["operator"]);
+  });
+
+  it("closes only the gate that is still open, when a task gated more than once", () => {
+    // A task can gate, be answered, and gate again. Only the last exchange is
+    // unfinished, and only it is the one to close.
+    const store = gated("a");
+    store.appendEvent({ type: "task.gate_opened", runId: "run1", taskId: "a", why: "first", recommendation: "", iterations: 3, ts: Date.now() });
+    store.appendEvent({ type: "task.gate_resolved", runId: "run1", taskId: "a", parked: false, guidance: "do X", decidedBy: "operator", ts: Date.now() });
+    store.appendEvent({ type: "task.gate_opened", runId: "run1", taskId: "a", why: "second", recommendation: "", iterations: 3, ts: Date.now() });
+    for (const to of ["READY", "WORKING", "ACCEPTED", "MERGED"] as const) store.transitionTask("run1", "a", to);
+
+    expect(resolutions(store).map((r) => r.decidedBy)).toEqual(["operator", "merged"]);
+  });
+
+  it("writes nothing for a task that never escalated at all", () => {
+    const store = gated("a");
+    for (const to of ["READY", "WORKING", "ACCEPTED", "MERGED"] as const) store.transitionTask("run1", "a", to);
+
+    expect(resolutions(store)).toHaveLength(0);
+  });
+
+  it("leaves another task's open gate alone", () => {
+    const store = makeStore();
+    makeRun(store);
+    store.insertTasks("run1", [{ id: "e1", title: "Epic" }], [task("a"), task("b")]);
+    store.appendEvent({ type: "task.gate_opened", runId: "run1", taskId: "b", why: "stuck", recommendation: "", iterations: 3, ts: Date.now() });
+    for (const to of ["READY", "WORKING", "ACCEPTED", "MERGED"] as const) store.transitionTask("run1", "a", to);
+
+    expect(resolutions(store)).toHaveLength(0);
+  });
+});

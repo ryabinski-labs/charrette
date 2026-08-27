@@ -1187,6 +1187,43 @@ export class Store {
         this.db.prepare("UPDATE tasks SET state = ? WHERE runId = ? AND id = ?").run(to, runId, taskId);
       }
     );
+    // A task that reached the end has no question outstanding, whatever its gate
+    // was asking — the work it was asking about is merged or abandoned.
+    if (to === "MERGED" || to === "CANCELLED") this.closeStrandedGate(runId, taskId, to);
+  }
+
+  /**
+   * Close a gate the task outlived.
+   *
+   * `task.gate_opened` and `task.gate_resolved` are two records of one exchange,
+   * and only the second is written by the promise the gate is awaiting. Anything
+   * that ends that promise without an answer — a requeue, a resume, the process
+   * dying — leaves the first behind with nothing to close it. Run bc691359
+   * merged three tasks that way: `intent-fix-1-6` gated on merge conflicts, was
+   * requeued 37 minutes later, went round the loop again and merged, and for the
+   * 7.8 days since, every reader computing open gates from the event log has
+   * told its operator that a shipped task is blocking. The same fact makes the
+   * run's own postmortem understate itself, because a gate with no `closed`
+   * contributes nothing to the time the run spent waiting.
+   *
+   * Not `parked`: the task did not stop here. Recorded as decided by the state
+   * it reached, so the log says what actually ended the question rather than
+   * crediting a person who never saw it.
+   */
+  private closeStrandedGate(runId: string, taskId: string, to: TaskState): void {
+    const last = this.db
+      .prepare("SELECT type FROM events WHERE runId = ? AND taskId = ? AND type IN ('task.gate_opened','task.gate_resolved') ORDER BY seq DESC LIMIT 1")
+      .get(runId, taskId) as { type: string } | undefined;
+    if (last?.type !== "task.gate_opened") return;
+    this.appendEvent({
+      type: "task.gate_resolved",
+      runId,
+      taskId,
+      parked: false,
+      guidance: "",
+      decidedBy: to === "MERGED" ? "merged" : "cancelled",
+      ts: Date.now(),
+    });
   }
 
   /**
