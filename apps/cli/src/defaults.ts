@@ -457,6 +457,15 @@ export const FileConfig = z
     dashboard: z.boolean().optional(),
     dashboardPort: z.number().int().min(1).max(65535).optional(),
     chat: z.boolean().optional(),
+    /**
+     * Who answers the intake agent, when it is not the person who typed the
+     * command. `{"intake":{"decidedBy":"product-manager"}}` is what makes a run
+     * startable with nobody at the terminal without giving up the conversation
+     * that turns a one-line seed into a brief.
+     */
+    intake: z
+      .object({ decidedBy: z.string().min(1).optional(), autoAnswerRounds: z.number().int().min(0).max(50).optional() })
+      .optional(),
   })
   .strict();
 export type FileConfig = z.infer<typeof FileConfig>;

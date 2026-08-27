@@ -669,6 +669,45 @@ export const SpecConfig = z.object({
 });
 export type SpecConfig = z.infer<typeof SpecConfig>;
 
+
+/**
+ * Who answers the intake agent when it asks a question.
+ *
+ * Intake is the one conversation in a run addressed to a human, which is why it
+ * is the one thing that stops a run being startable unattended. Before this the
+ * choice was binary: hold the conversation with a person, or skip it and plan
+ * straight off the one-line seed. Skipping is not the cheap option it looks
+ * like — run 40da9337 planned past "real vendor accounts, sandbox adapters, or
+ * fakes only?" and spent 37 hours and $773 shipping six of seven integrations
+ * as fail-closed stubs.
+ *
+ * A skill named here answers instead, in the operator's place, with the
+ * repository in front of it. It may refuse any question, and refusing is the
+ * documented right answer for anything turning on money, credentials, a
+ * commitment to somebody outside the run, or a preference the repo cannot
+ * evidence. A refused question goes to the person if there is one and is
+ * recorded as unanswered if there is not — which is strictly better than the
+ * silent assumption it replaces.
+ */
+export const IntakeConfig = z.object({
+  /**
+   * `"operator"` — the default — is the behaviour that has always been here:
+   * the questions go to whoever started the run, and with nobody there the
+   * conversation does not happen at all.
+   */
+  decidedBy: z.string().min(1).default("operator"),
+  /**
+   * How many questions the decider may settle before the rest go to a person.
+   *
+   * An intake agent still asking its thirteenth question has not understood the
+   * repository, and the bound is what turns that into somebody's problem rather
+   * than an unbounded bill. `0` refuses every question, which is
+   * `decidedBy: "operator"` with extra steps.
+   */
+  autoAnswerRounds: z.number().int().min(0).max(50).default(12),
+});
+export type IntakeConfig = z.infer<typeof IntakeConfig>;
+
 export const RunConfig = z.object({
   // PRD §11.5: default 3. Independent DAG tasks run concurrently, each in its
   // own worktree; runs recorded before the parallel scheduler keep whatever
@@ -811,6 +850,7 @@ export const RunConfig = z.object({
    * reported as unproven rather than passed.
    */
   spec: SpecConfig.default({}),
+  intake: IntakeConfig.default({}),
   skillsDirs: z.array(z.string()).default([]),
   /**
    * Let the harness write a skill for itself when a task matches nothing.

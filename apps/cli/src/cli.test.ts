@@ -836,6 +836,84 @@ describe("harness run — intake", () => {
     expect(h.chatCloseMock).toHaveBeenCalledOnce();
   });
 
+  it("names a decider that answers intake in the operator's place", async () => {
+    await cli("run", "build the thing", "--repo", "/repo", "--no-dashboard", "--chat", "--intake-decider", "product-manager");
+
+    // Matched loosely, as the account and model cases are: the config is parsed
+    // on the way through, so it comes back carrying the schema's defaults too.
+    expect(h.controllerMethods.startRun).toHaveBeenCalledWith(
+      "build the thing",
+      expect.objectContaining({ intake: expect.objectContaining({ decidedBy: "product-manager" }) }),
+      // No chat, even though `--chat` was asked for: a decider is named and
+      // there is no TTY, so there is nobody at the terminal to hold up the
+      // other end of the conversation. That is the whole point of the flag.
+      undefined
+    );
+    expect(printed()).toContain("product-manager answers what you are not here to answer");
+  });
+
+  it("takes the decider from the config file when the flag is not given", async () => {
+    h.loadFileConfigMock.mockReturnValue({ config: { intake: { decidedBy: "critical-challenger" } }, path: "/repo/harness.json" });
+
+    await cli("run", "build the thing", "--repo", "/repo", "--no-dashboard", "--chat");
+
+    // Matched loosely, as the account and model cases are: the config is parsed
+    // on the way through, so it comes back carrying the schema's defaults too.
+    expect(h.controllerMethods.startRun).toHaveBeenCalledWith(
+      "build the thing",
+      expect.objectContaining({ intake: expect.objectContaining({ decidedBy: "critical-challenger" }) }),
+      // No chat, even though `--chat` was asked for: a decider is named and
+      // there is no TTY, so there is nobody at the terminal to hold up the
+      // other end of the conversation. That is the whole point of the flag.
+      undefined
+    );
+  });
+
+  it("lets the flag win over the file, as --model and --account do", async () => {
+    h.loadFileConfigMock.mockReturnValue({ config: { intake: { decidedBy: "critical-challenger" } }, path: "/repo/harness.json" });
+
+    await cli("run", "build the thing", "--repo", "/repo", "--no-dashboard", "--chat", "--intake-decider", "product-manager");
+
+    // Matched loosely, as the account and model cases are: the config is parsed
+    // on the way through, so it comes back carrying the schema's defaults too.
+    expect(h.controllerMethods.startRun).toHaveBeenCalledWith(
+      "build the thing",
+      expect.objectContaining({ intake: expect.objectContaining({ decidedBy: "product-manager" }) }),
+      // No chat, even though `--chat` was asked for: a decider is named and
+      // there is no TTY, so there is nobody at the terminal to hold up the
+      // other end of the conversation. That is the whole point of the flag.
+      undefined
+    );
+  });
+
+  it("does not open a terminal transport when there is no terminal and a decider is named", async () => {
+    // The unattended path this whole feature exists for: a cron, a CI job, a
+    // harness started by another harness. `TerminalChat` would block forever on
+    // the first question, and the run would look hung while it waited for
+    // somebody who was never going to arrive.
+    const tty = process.stdin.isTTY;
+    Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true });
+    try {
+      await cli("run", "build the thing", "--repo", "/repo", "--no-dashboard", "--chat", "--intake-decider", "product-manager");
+      expect(h.TerminalChatMock).not.toHaveBeenCalled();
+      // Intake still happens — the decider is the transport.
+      expect(h.controllerMethods.startRun).toHaveBeenCalledWith("build the thing", expect.any(Object), undefined);
+    } finally {
+      Object.defineProperty(process.stdin, "isTTY", { value: tty, configurable: true });
+    }
+  });
+
+  it("still opens the terminal transport at a terminal, decider or not", async () => {
+    const tty = process.stdin.isTTY;
+    Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+    try {
+      await cli("run", "build the thing", "--repo", "/repo", "--no-dashboard", "--chat", "--intake-decider", "product-manager");
+      expect(h.TerminalChatMock).toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(process.stdin, "isTTY", { value: tty, configurable: true });
+    }
+  });
+
   it("takes the assignment but still talks it through when --chat is given", async () => {
     await cli("run", "build the thing", "--repo", "/repo", "--no-dashboard", "--chat");
 

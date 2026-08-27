@@ -8,12 +8,41 @@ import { AgentPool } from "./pool.js";
 import { extractJson, intakeSystemPrompt, resumedIntakeBlock } from "./prompts.js";
 
 /**
+ * An answer to an intake question, and who gave it.
+ *
+ * A bare string is the operator: that is what the terminal has always returned
+ * and what every reader assumed. Anything that is not a person says so, so the
+ * transcript can distinguish a decision a human made from one a model made —
+ * and from a question that reached nobody at all, which is the case that has
+ * historically been indistinguishable from an answer and cost the most.
+ */
+export type IntakeAnswer = string | { answer: string; decidedBy?: string };
+
+/** The words, whoever said them. */
+export function answerText(answer: IntakeAnswer): string {
+  return typeof answer === "string" ? answer : answer.answer;
+}
+
+/** Who said them. A transport that does not say is the operator, as it always was. */
+export function answerBy(answer: IntakeAnswer): string {
+  return typeof answer === "string" ? "operator" : answer.decidedBy || "operator";
+}
+
+/**
  * Transport for the intake conversation. The terminal implements this with
  * readline; the same interface is what a dashboard chat panel would implement.
  */
 export interface IntakeUi {
-  /** Put one question to the operator and resolve with their answer as free text. */
-  ask(question: IntakeQuestion): Promise<string>;
+  /**
+   * Put one question to the operator and resolve with their answer as free text.
+   *
+   * The object form exists so a transport that is not a person can say so. A
+   * terminal returns a bare string and means "the operator said this"; an
+   * agent-backed transport returns who decided, and the difference is recorded
+   * on `intake.answered` rather than being flattened away. Both forms are
+   * accepted forever — a transport outside this repo does not have to change.
+   */
+  ask(question: IntakeQuestion): Promise<IntakeAnswer>;
   /** Prose the agent emits between questions. */
   say(text: string): void;
   /**
@@ -161,7 +190,8 @@ export async function runIntake(pool: AgentPool, bus: Bus, req: IntakeRequest): 
         options: question.options.map((o) => o.label),
         ts: Date.now(),
       });
-      const answer = await req.ui.ask(question);
+      const given = await req.ui.ask(question);
+      const answer = answerText(given);
       // Their answer goes back to the agent, so from here they are waiting again.
       req.ui.working?.(true);
       transcript.push({ question: question.question, answer, rationale: "" });
@@ -171,6 +201,7 @@ export async function runIntake(pool: AgentPool, bus: Bus, req: IntakeRequest): 
         sessionId,
         question: question.question,
         answer: answer.slice(0, 500),
+        decidedBy: answerBy(given),
         ts: Date.now(),
       });
       return { content: [{ type: "text" as const, text: answer }] };

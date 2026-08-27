@@ -29,7 +29,8 @@ import { nextDispatch } from "./dispatchOrder.js";
 import { git, pushRunBranch, repoFileList, WorktreeManager } from "./git.js";
 import { GitHubAdapter, type PrRef } from "./github.js";
 import { unsatisfiableCriteria } from "./infraGuard.js";
-import { runIntake, type IntakeUi } from "./intake.js";
+import { answerBy, answerText, runIntake, type IntakeUi } from "./intake.js";
+import { AgentIntake } from "./intakeDecider.js";
 import { acquireRunLock, type RunLock } from "./runLock.js";
 import { composeDown, isolationBlock, isolationEnv, taskIsolation } from "./isolation.js";
 import { knownFlakySignatures, observeChecks, observeFlakySignatures } from "./memory.js";
@@ -807,7 +808,8 @@ export class RunController {
     // with. `drive` sets it again from the frozen config, which is what a
     // resumed run reads.
     this.applyCheckpointCadence(runId);
-    if (intake) await this.intake(runId, assignment, intake);
+    const ui = this.intakeUi(runId, assignment, intake);
+    if (ui) await this.intake(runId, assignment, ui);
     await this.drive(runId);
     return runId;
   }
@@ -869,6 +871,42 @@ export class RunController {
     // dispatched yet — so it is applied straight to the pool and the run starts
     // on the account the operator chose.
     if (next) this.applySubscription(runId);
+  }
+
+  /**
+   * The transport intake actually talks to, which is not always the one the
+   * caller passed.
+   *
+   * `intake.decidedBy` names a skill that answers in the operator's place. It
+   * wraps the operator's transport rather than replacing it: a question the
+   * decider will not settle goes to the person if there is one, and only when
+   * there is nobody at all is it recorded as unanswered.
+   *
+   * The consequence worth stating is the one at the top of `startRun`: with a
+   * decider named, a run started with no terminal still holds its intake
+   * conversation. That is the whole feature. Before it, unattended meant
+   * planning straight off the one-line seed.
+   *
+   * Looked up by name rather than by the lexical matcher, exactly as the pit
+   * stop's and the task gate's deciders are: the skill was named to be the one
+   * answering, and what the seed happens to sound like is a different question.
+   */
+  private intakeUi(runId: string, seed: string, operator?: IntakeUi): IntakeUi | undefined {
+    const run = this.store.getRun(runId)!;
+    const { decidedBy, autoAnswerRounds } = run.config.intake;
+    if (decidedBy === "operator") return operator;
+    const skills = indexSkills(run.config.skillsDirs).filter((s) => s.name === decidedBy && verifyHash(s));
+    return new AgentIntake(this.pool, this.bus, {
+      runId,
+      seed,
+      repoPath: this.repoPath,
+      decidedBy,
+      rounds: autoAnswerRounds,
+      model: run.config.models.intake,
+      skillsBlock: skillsBlock(skills),
+      skills: skills.map((s) => s.name),
+      operator,
+    });
   }
 
   /** Gate 0: turn the seed into an agreed brief, on the run's ledger and budget. */
@@ -1020,8 +1058,9 @@ export class RunController {
     const answers: { question: string; answer: string }[] = [];
     for (const q of questions) {
       this.bus.publish({ type: "intake.question", runId, sessionId: "spec", question: q.question, options: [], ts: Date.now() });
-      const answer = (await ui.ask({ question: q.question, detail: q.detail, options: [] })).trim();
-      this.bus.publish({ type: "intake.answered", runId, sessionId: "spec", question: q.question, answer, ts: Date.now() });
+      const given = await ui.ask({ question: q.question, detail: q.detail, options: [] });
+      const answer = answerText(given).trim();
+      this.bus.publish({ type: "intake.answered", runId, sessionId: "spec", question: q.question, answer, decidedBy: answerBy(given), ts: Date.now() });
       if (answer) answers.push({ question: q.question, answer });
     }
     return answers;
@@ -1378,8 +1417,9 @@ export class RunController {
       // never got an answer, and shipped six of seven integrations as stubs.
       const prior = this.store.intakeTranscript(runId);
       const open = prior.filter((p) => p.answer === null);
-      if (intake) {
-        await this.intake(runId, run.assignment, intake, prior);
+      const ui = this.intakeUi(runId, run.assignment, intake);
+      if (ui) {
+        await this.intake(runId, run.assignment, ui, prior);
       } else {
         // Headless resume — there is nobody to ask. Plan from the assignment as
         // before, but never let the open question be the thing nobody mentions.

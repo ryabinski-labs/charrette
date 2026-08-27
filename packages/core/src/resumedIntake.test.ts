@@ -33,7 +33,7 @@ function conversation(): Store {
   });
   const ask = (question: string) => bus.publish({ type: "intake.question", runId: "run-1", sessionId: "s1", question, options: [], ts: 1 });
   const answer = (question: string, text: string) =>
-    bus.publish({ type: "intake.answered", runId: "run-1", sessionId: "s1", question, answer: text, ts: 2 });
+    bus.publish({ type: "intake.answered", runId: "run-1", sessionId: "s1", question, answer: text, decidedBy: "operator", ts: 2 });
 
   ask("What should be the authoritative backlog for this build?");
   answer("What should be the authoritative backlog for this build?", "use gh cli");

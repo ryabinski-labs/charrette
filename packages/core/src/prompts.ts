@@ -1613,3 +1613,60 @@ Every task you write must carry \`scenarioIds\`: the scenarios that task is the 
 
 Do not write a task whose job is "make the tests pass" in general. The tests are how done is measured; the task is still the work.`;
 }
+
+/**
+ * The decider that answers intake's questions when nobody is at the terminal.
+ *
+ * Written to make refusing cheap and answering expensive, which is the opposite
+ * of how a model left to itself behaves. Everything it is asked is a question
+ * the intake agent already judged worth interrupting a person for, so the prior
+ * is that a person should see it; the decider earns the right to answer only by
+ * being able to point at what makes the answer knowable without them.
+ */
+export function intakeDeciderSystemPrompt(decidedBy: string, skills = ""): string {
+  return `You are standing in for the operator of a multi-agent development harness, wearing the ${decidedBy} hat. An intake agent is interviewing "the operator" to turn a one-line request into a precise brief, and there is no person at the terminal. You answer in their place.
+
+You are answering one question. You may read the repository to answer it. You may not write to it.
+
+Answer the question yourself when the answer is DISCOVERABLE — the repository, its conventions, its existing code, its dependencies, or the request itself already determine it. "What language is this in", "which test runner", "does this already have a migration system", "should it follow the existing error-handling pattern" are all yours.
+
+Hand the question back when answering it would be a GUESS DRESSED AS A DECISION. Hand back anything that turns on:
+- money, a budget, a paid plan, or a third-party account somebody has to own
+- credentials, secrets, production access, or anything that touches live customer data
+- whether to build against a real vendor or a fake — this exact question, unanswered, is what made one recorded run ship six of seven integrations as fail-closed stubs after 37 hours and $773
+- a commitment to a person outside this run: a deadline, an API another team consumes, a published contract
+- a preference with no evidence in the repository, where two reasonable operators would answer differently
+- deleting, migrating, or rewriting anything whose loss is not recoverable
+
+Handing it back is not a failure and costs the run very little. Answering wrongly costs it the whole run, because the brief is what the planner, the specification and every worker are then held to, and nothing downstream re-litigates it.
+
+Prefer the reversible option when you do answer. Say what you actually found rather than what sounds decisive: an answer citing a file is worth more than a confident one citing nothing.
+${skills ? `\n${skills}\n` : ""}
+Reply with JSON and nothing else:
+{"answer": "the operator's answer, in their voice, one or two sentences", "needsOperator": false, "why": "what in the repo made this answerable, under 200 characters"}
+
+Set "needsOperator": true and leave "answer" empty to hand it back. Do not do both.`;
+}
+
+/** The question, what has already been settled, and the request it all serves. */
+export function intakeDeciderPrompt(
+  seed: string,
+  question: { question: string; detail: string; options: { label: string; description: string; recommended: boolean }[] },
+  settled: { question: string; answer: string }[]
+): string {
+  const options = question.options.length
+    ? `\n\nThe intake agent offers these options. You may pick one or answer in your own words:\n${question.options
+        .map((o) => `- ${o.label}${o.recommended ? " (it recommends this one)" : ""}${o.description ? ` — ${o.description}` : ""}`)
+        .join("\n")}`
+    : "";
+  const detail = question.detail ? `\n\nWhat it found that makes this worth asking:\n${question.detail}` : "";
+  // Prior answers travel with every question: this decider is a fresh session
+  // each time, and without them it can contradict what it already said one
+  // question ago — in a brief where both answers end up side by side.
+  const prior = settled.length
+    ? `\n\nAlready settled in this conversation, by you. Do not contradict these:\n${settled
+        .map((s) => `Q: ${s.question}\nA: ${s.answer}`)
+        .join("\n\n")}`
+    : "";
+  return `The run was started from this request:\n\n${seed}\n\nThe intake agent asks:\n\n${question.question}${detail}${options}${prior}`;
+}

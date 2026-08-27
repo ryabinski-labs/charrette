@@ -70,7 +70,7 @@ describe("why a run produced what it produced", () => {
   it("names the intake question nobody answered", () => {
     const { store, bus } = run();
     bus.publish({ type: "intake.question", runId: "run-1", sessionId: "s", question: "Which backlog?", options: [], ts: 1 });
-    bus.publish({ type: "intake.answered", runId: "run-1", sessionId: "s", question: "Which backlog?", answer: "gh", ts: 2 });
+    bus.publish({ type: "intake.answered", runId: "run-1", sessionId: "s", question: "Which backlog?", answer: "gh", decidedBy: "operator", ts: 2 });
     bus.publish({ type: "intake.question", runId: "run-1", sessionId: "s", question: OPEN_QUESTION, options: [], ts: 3 });
 
     const p = postmortem(store, "run-1");
