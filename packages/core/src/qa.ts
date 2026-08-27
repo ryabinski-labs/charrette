@@ -47,17 +47,32 @@ export async function runDeterministicChecks(cwd: string, commands: string[], ti
         // writing anything — `exit 1` in a script, a missing binary — never
         // reached `message` and handed QA a failure with no explanation at all.
         const err = e as { stdout?: string; stderr?: string; message?: string; killed?: boolean; signal?: string };
-        const output = [err.stdout, err.stderr || err.message].filter(Boolean).join("\n").trim();
+        // Sliced per stream, not after the join. `cargo test` writes its
+        // progress to stderr and its assertions to stdout, and Node hands back
+        // each stream whole, so the concatenation is [every assertion][every
+        // "Running tests/..." line] and a tail of it is reliably all progress
+        // and no verdict. On run bc691359 that is precisely what a task gate,
+        // its advisor and three worker sessions were shown of a failing
+        // workspace suite: the last few Running lines, and none of the
+        // assertion above them. Splitting the budget costs the same characters
+        // and keeps the end of both.
+        const tails = (budget: number) =>
+          [err.stdout, err.stderr || err.message]
+            .filter((part): part is string => Boolean(part))
+            .map((part) => part.trim().slice(-budget))
+            .filter(Boolean)
+            .join("\n");
+        const output = tails(2000);
         // Node sets both of these only when it is the one that ended the
         // process at `timeout`; a command that kills itself exits with a code.
         if (err.killed && err.signal === "SIGTERM") {
           return {
             command,
             timedOut: true,
-            output: `the harness killed this command after ${timeoutMinutes} minute(s) — it never finished, so nothing below is a verdict on this tree:\n${output.slice(-2000)}`,
+            output: `the harness killed this command after ${timeoutMinutes} minute(s) — it never finished, so nothing below is a verdict on this tree:\n${tails(1000)}`,
           };
         }
-        return { command, output: output.slice(-4000) };
+        return { command, output };
       }
     })
   );

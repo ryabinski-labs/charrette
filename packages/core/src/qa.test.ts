@@ -28,6 +28,42 @@ describe("deterministic checks", () => {
  * break, spends its whole iteration cap on them, and parks — with correct work
  * sitting in the worktree.
  */
+describe("a failure whose tool talks on both streams", () => {
+  // `cargo test` writes "Running tests/..." to stderr and its assertions to
+  // stdout, and Node hands back each stream whole. Keeping the tail of the two
+  // concatenated therefore keeps the end of stderr and nothing else — on run
+  // bc691359 a task gate, its advisor and three worker sessions were shown the
+  // last few Running lines of a failing workspace suite and none of the
+  // assertion above them, and the task spent 45 minutes of wall clock on it.
+  const noisy = `printf 'test docs::numbers_match ... FAILED\\nassertion failed: 48.47%% != 48.49%%\\n'; i=0; while [ $i -lt 400 ]; do printf 'Running tests/filler_%s.rs (target/debug/deps/filler-abcdef0123456789)\\n' "$i" >&2; i=$((i+1)); done; exit 1`;
+
+  it("keeps the end of stdout as well as the end of stderr", async () => {
+    const result = await runDeterministicChecks("/tmp", [noisy]);
+    expect(result.ok).toBe(false);
+    const output = result.failures[0]!.output;
+    // The half that says what is wrong.
+    expect(output).toContain("assertion failed: 48.47% != 48.49%");
+    // And the half that says where it got to, which is all the old tail was.
+    expect(output).toContain("Running tests/filler_399.rs");
+  });
+
+  it("still spends no more characters than it used to", async () => {
+    const result = await runDeterministicChecks("/tmp", [noisy]);
+    expect(result.failures[0]!.output.length).toBeLessThanOrEqual(4001);
+  });
+
+  it("keeps both ends of a command the harness had to kill, too", async () => {
+    const result = await runDeterministicChecks(
+      "/tmp",
+      [`printf 'the last thing the suite said\\n'; printf 'progress\\n' >&2; sleep 30`],
+      0.02
+    );
+    expect(result.failures[0]!.timedOut).toBe(true);
+    expect(result.failures[0]!.output).toContain("never finished");
+    expect(result.failures[0]!.output).toContain("the last thing the suite said");
+  });
+});
+
 describe("telling a task's own failures from the ones it inherited", () => {
   const RED_BASE = [
     "✖ card provider rejects an expired token (196.264417ms)",
