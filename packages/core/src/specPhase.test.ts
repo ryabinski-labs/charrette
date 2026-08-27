@@ -200,6 +200,78 @@ describe("writing the specification before anything is planned", () => {
     expect(store.runSpec(store.listRuns()[0]!.id)!.scenarios[0]!.blocked).toBe(false);
   });
 
+  /**
+   * Run 5122c83a asked its operator eleven questions, was answered on six, and
+   * then could not resume the session that had asked them:
+   * `No conversation found with session ID: 05a48a8b-…`. A single-attempt fold
+   * discards every answer at that point and keeps the draft that raised the
+   * questions — so the run planned against eight `blocked` scenarios, which
+   * `specPlanBlock` filters out of what the planner is ever shown. Six of the
+   * eight were settled by answers sitting in the event store the whole time.
+   *
+   * The answers cost an interruption of a person. They get a second attempt.
+   */
+  it("re-folds the answers in a cold session when the warm one is gone", async () => {
+    const dir = repo();
+    const blocked = specJson({
+      requirements: [{ id: "REQ-001", text: "take payment", priority: "P0", blockedBy: ["OQ-1"] }],
+      openQuestions: [{ id: "OQ-1", question: "Real Stripe account, or sandbox?", detail: "the brief does not say", blocks: ["REQ-001"] }],
+      scenarios: [{ id: "SC-001", requirement: "REQ-001", title: "takes payment", level: "unit", priority: "P0", oracle: "o", testRef: "", blocked: true }],
+    });
+    const { pool, specs } = rolePool({
+      intake: BRIEF,
+      // 1: raises the question. 2: the resumed fold, whose session died — the
+      // CLI returns nothing to parse. 3: the cold retry, which answers.
+      spec: (_s, nth) => (nth === 1 ? blocked : nth === 2 ? "" : specJson()),
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS : dag([{ id: "task-a", scenarioIds: ["SC-001"] }])),
+      worker,
+      qa: () => QA_PASS,
+      validator: () => INTENT_PASS,
+    });
+    const { controller, store } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a checkout", RunConfig.parse(BASE), operator("the sandbox"));
+
+    const passes = specs.filter((s) => s.role === "spec");
+    expect(passes).toHaveLength(3);
+    // The retry is cold by construction — there is no session left to resume —
+    // so it is told where the specification it is updating actually lives.
+    expect(passes[2]!.resume).toBeUndefined();
+    expect(passes[2]!.prompt).toContain("the sandbox");
+    expect(passes[2]!.prompt).toContain("tdd/checkout.tdd.yaml");
+    // And the gate is the folded specification, not the draft that asked.
+    const spec = store.runSpec(store.listRuns()[0]!.id)!;
+    expect(spec.scenarios[0]!.blocked).toBe(false);
+    expect(spec.openQuestions).toEqual([]);
+  });
+
+  /** Both folds failing is the draft — but never quietly. */
+  it("says how much the gate lost when neither fold can be read", async () => {
+    const dir = repo();
+    const blocked = specJson({
+      requirements: [{ id: "REQ-001", text: "take payment", priority: "P0", blockedBy: ["OQ-1"] }],
+      openQuestions: [{ id: "OQ-1", question: "Real Stripe account, or sandbox?", detail: "", blocks: ["REQ-001"] }],
+      scenarios: [{ id: "SC-001", requirement: "REQ-001", title: "takes payment", level: "unit", priority: "P0", oracle: "o", testRef: "", blocked: true }],
+    });
+    const { pool, specs } = rolePool({
+      intake: BRIEF,
+      spec: (_s, nth) => (nth === 1 ? blocked : ""),
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS : dag([{ id: "task-a" }])),
+      worker,
+      qa: () => QA_PASS,
+      validator: () => INTENT_PASS,
+    });
+    const { controller, store, events } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a checkout", RunConfig.parse(BASE), operator("the sandbox"));
+
+    expect(specs.filter((s) => s.role === "spec")).toHaveLength(3);
+    const spec = store.runSpec(store.listRuns()[0]!.id)!;
+    expect(spec.scenarios[0]!.blocked).toBe(true);
+    const log = events.filter((e) => e.type === "agent.log").map((e) => (e as { text: string }).text);
+    expect(log.some((t) => t.includes("1 open question(s)") && t.includes("1 scenario(s) stay blocked"))).toBe(true);
+  });
+
   it("never asks about a nice-to-have", async () => {
     const dir = repo();
     const { pool } = rolePool({

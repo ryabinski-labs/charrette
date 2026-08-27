@@ -1577,11 +1577,11 @@ Remember which questions are worth asking: the operator is here now and will not
  * has already written — is still in context, and re-deriving the specification
  * from cold would be paying twice for a worse answer.
  */
-export function specAnswersPrompt(answers: { question: string; answer: string }[]): string {
+export function specAnswersPrompt(answers: { question: string; answer: string }[], artifactPath?: string): string {
   return `The operator answered your open questions:
 
 ${answers.map((a) => `Q: ${a.question}\nA: ${a.answer}`).join("\n\n")}
-
+${artifactPath ? `\nThis is a fresh session and the specification is not in your context. Read \`${artifactPath}\` in this working directory before you do anything else — you wrote it, it is the specification these answers are about, and it is the one you are updating.\n` : ""}
 Update the specification against those answers: give the requirements they unblock real oracles, unblock the scenarios that were waiting on them, and re-run \`validate\`. Anything they did not settle stays an open question — do not fill a remaining gap with a guess now that most of them are answered.
 
 Then emit the same JSON object as before, complete and current.`;

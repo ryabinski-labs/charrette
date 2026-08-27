@@ -972,7 +972,7 @@ export class RunController {
       if (!spec) return;
 
       const answered = await this.askSpecQuestions(runId, spec, ui);
-      const final = answered.length ? ((await this.specSession(runId, randomUUID(), dir, assignment, skills, run, answered, sessionId)) ?? spec) : spec;
+      const final = answered.length ? await this.specWithAnswers(runId, dir, assignment, skills, run, answered, sessionId, spec) : spec;
 
       this.bus.publish({ type: "run.spec_ready", runId, spec: final, ts: Date.now() });
       await this.commitSpec(runId, dir, final);
@@ -995,6 +995,56 @@ export class RunController {
     }
   }
 
+  /**
+   * Fold the operator's answers back into the specification, twice if it takes
+   * twice.
+   *
+   * Resuming the session that wrote the specification is the cheap pass: it
+   * still holds the artifact, the reasoning behind every blocked scenario, and
+   * why it refused to invent the oracle. But that session is not guaranteed to
+   * be there. It can end abnormally *after* answering, and the CLI then has no
+   * conversation to resume — at which point a single-attempt fold discards
+   * every answer and keeps the draft that raised the questions.
+   *
+   * That is not hypothetical. Run 5122c83a asked the operator eleven questions
+   * at intake, was answered on six of them, failed to resume
+   * `05a48a8b-aa86-474d-989d-0608fe5c74d5`, and planned against the pre-answer
+   * specification: eight scenarios left `blocked` and therefore filtered out of
+   * what the planner is ever shown, six of them settled by answers that were
+   * sitting in the event store the whole time. The answers are the expensive
+   * part of this exchange — they cost an interruption of a person — so they get
+   * a second attempt in a fresh session pointed at the artifact on disk.
+   *
+   * Returns the draft unchanged when both passes fail, and says so loudly:
+   * a run whose gate silently omits what the operator just decided is worse
+   * than one that never asked.
+   */
+  private async specWithAnswers(
+    runId: string,
+    dir: string,
+    assignment: string,
+    skills: { name: string; path: string; sha256: string; content?: string }[],
+    run: RunRow,
+    answers: { question: string; answer: string }[],
+    resume: string,
+    draft: RunSpec
+  ): Promise<RunSpec> {
+    const resumed = await this.specSession(runId, randomUUID(), dir, assignment, skills, run, answers, resume);
+    if (resumed) return resumed;
+    const fresh = await this.specSession(runId, randomUUID(), dir, assignment, skills, run, answers, undefined, draft.artifactPath);
+    if (fresh) return fresh;
+    this.bus.publish({
+      type: "agent.log",
+      runId,
+      sessionId: "spec",
+      text:
+        `the operator answered ${answers.length} open question(s) and neither fold could be read, so the gate is the draft that asked them: ` +
+        `${draft.scenarios.filter((s) => s.blocked).length} scenario(s) stay blocked and the planner will not be shown them`,
+      ts: Date.now(),
+    });
+    return draft;
+  }
+
   /** One pass of the specification agent — the first, or the one after answers. */
   private async specSession(
     runId: string,
@@ -1004,7 +1054,8 @@ export class RunController {
     skills: { name: string; path: string; sha256: string; content?: string }[],
     run: RunRow,
     answers: { question: string; answer: string }[] = [],
-    resume?: string
+    resume?: string,
+    artifactPath?: string
   ): Promise<RunSpec | null> {
     const result = await this.pool.run({
       runId,
@@ -1013,7 +1064,7 @@ export class RunController {
       model: run.config.models.spec,
       systemPrompt: specSystemPrompt(toolbeltBlock(detectToolbelt(run.config.externalTools)), skillsBlock(skills)),
       skills: skills.map((s) => s.name),
-      prompt: answers.length ? specAnswersPrompt(answers) : specPrompt(assignment, await repoFileList(cwd), run.config.deterministicChecks),
+      prompt: answers.length ? specAnswersPrompt(answers, artifactPath) : specPrompt(assignment, await repoFileList(cwd), run.config.deterministicChecks),
       cwd,
       resume,
       maxTurns: run.config.spec.maxTurns,
