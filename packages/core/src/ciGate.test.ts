@@ -254,6 +254,34 @@ describe("a CI that outlives the wait budget", () => {
     expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
     expect(store.ciStatus(runId)).toMatchObject({ state: "passing" });
   });
+
+  it("keeps the red verdict when the re-run comes back with no checks attached at all", async () => {
+    // The other way the same minute goes wrong, and the one the `pending` fix
+    // above does not cover. `awaitChecks` publishes `state: "none"` when the
+    // head carries no check runs — and its own comment says why that is not a
+    // pass: "'None' is not a pass — it is the absence of the only check that
+    // judges the merge." A re-run answers by re-queueing jobs, and for the
+    // moments before GitHub re-attaches them the head honestly has none. Read
+    // as an answer, that discards the red exactly as the `pending` did.
+    const { adapter, rerunAsked } = fakeGitHub(
+      [
+        { state: "failing", failing: ["test"], total: 20 }, // the wait's real answer
+        { state: "none", failing: [], total: 0 }, // re-run went out; nothing re-attached yet
+        null, // unreadable part-way through — the round ends on "none"
+        null, // unreadable again, and this one ends the wait unsettled
+        { state: "passing", failing: [], total: 20 }, // the fix task lands
+      ],
+      { logs: [{ name: "test", log: "FAIL: coverage 61.2% is under the 75% floor" }] }
+    );
+    const { store, runId } = await build(adapter, pool(), repoWithOrigin());
+
+    expect(rerunAsked()).toBe(1);
+    // Without the guard this is an empty list: "none" is not "failing", the
+    // round returns early, and the red is gone with the fix rounds unspent.
+    const fixes = ciFixTasks(store, runId);
+    expect(fixes.map((t) => t.id)).toEqual(["ci-fix-1-1"]);
+    expect(fixes[0]!.spec).toContain("under the 75% floor");
+  });
 });
 
 describe("a red check that survives its re-run", () => {

@@ -539,3 +539,44 @@ describe("which of a run's gates are still asking", () => {
     expect(store.openRunGates("run1")).toEqual([{ gateId: "e2f1", kind: "" }]);
   });
 });
+
+/**
+ * How many budget raises a *skill* made, which is the number the auto-raise
+ * bound is spent against.
+ *
+ * The distinction is the whole point: a run gets three automatic raises before
+ * the next one goes to a person, and anything a person did must not come out of
+ * that allowance. Two words mean a person — `operator`, who answered, and
+ * `resume`, which is `closeAbandonedGates` shutting a gate the process died
+ * holding. Neither is a decider deciding.
+ */
+describe("which budget raises came from a decider", () => {
+  function raise(store: Store, bus: Bus, gateId: string, decidedBy: string): void {
+    bus.publish({ type: "run.gate_opened", runId: "run1", gateId, kind: "budget", payload: {}, ts: 1 });
+    bus.publish({ type: "run.gate_resolved", runId: "run1", gateId, kind: "budget", resolution: "approved", feedback: "", decidedBy, ts: 2 });
+  }
+
+  it("counts a skill's approval and neither of the two words that mean a person", () => {
+    const store = makeStore();
+    makeRun(store);
+    const bus = new Bus(store);
+
+    raise(store, bus, "g1", "product-manager");
+    raise(store, bus, "g2", "operator");
+    // A resume closing a gate nobody was left to answer. Counting it would
+    // spend an auto-raise round on a raise no decider ever made.
+    raise(store, bus, "g3", "resume");
+
+    expect(store.budgetAutoRaises("run1")).toBe(1);
+  });
+
+  it("does not count a gate a decider refused", () => {
+    const store = makeStore();
+    makeRun(store);
+    const bus = new Bus(store);
+    bus.publish({ type: "run.gate_opened", runId: "run1", gateId: "g4", kind: "budget", payload: {}, ts: 1 });
+    bus.publish({ type: "run.gate_resolved", runId: "run1", gateId: "g4", kind: "budget", resolution: "rejected", feedback: "", decidedBy: "product-manager", ts: 2 });
+
+    expect(store.budgetAutoRaises("run1")).toBe(0);
+  });
+});
