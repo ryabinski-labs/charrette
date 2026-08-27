@@ -42,6 +42,24 @@ const REAL_DAG =
   }) +
   "\n```";
 
+/** A second breakdown sharing no id with REAL_DAG, so persisting it supersedes every task. */
+const dagOf = (...ids: string[]) =>
+  "```json\n" +
+  JSON.stringify({
+    epics: [{ id: "epic-e", title: "E", summary: "s" }],
+    tasks: ids.map((id) => ({
+      id,
+      epicId: "epic-e",
+      title: id,
+      spec: `Implement ${id}.`,
+      acceptanceCriteria: ["x"],
+      dependsOn: [],
+      touchedPaths: [],
+      estimatedSize: "M",
+    })),
+  }) +
+  "\n```";
+
 const GAPS = [
   "provider-layer's only criterion asks for a deterministic mock for all seven vendor categories, and no task requires a call to any vendor. The assignment says 'including all the integrations'; this plan delivers seven interfaces.",
   "ach-origination is named for originating debits but every criterion is about local validation state, so `originateDebit` can throw and the task still passes.",
@@ -54,7 +72,7 @@ const PASS = '```json\n{"verdict":"PASS","summary":"every clause has a task"}\n`
  * check answers. Rejecting keeps the run inside the planning loop, which is
  * where the feedback under test goes.
  */
-function harness(validator: string | (() => AgentResult), approve = false, dag = REAL_DAG) {
+function harness(validator: string | (() => AgentResult), approve = false, dag: string | ((nth: number) => string) = REAL_DAG) {
   const repo = mkdtempSync(path.join(tmpdir(), "harness-plan-intent-"));
   const store = new Store(":memory:");
   const bus = new Bus(store);
@@ -66,7 +84,10 @@ function harness(validator: string | (() => AgentResult), approve = false, dag =
     async run(spec: AgentSpec): Promise<AgentResult> {
       specs.push(spec);
       const base = { sessionId: `s${specs.length}`, costUsd: 0, turns: 1, outcome: "done" as const };
-      if (spec.role === "planner") return { ...base, resultText: planning++ === 0 ? DOCS : dag };
+      if (spec.role === "planner") {
+        const nth = planning++;
+        return { ...base, resultText: typeof dag === "function" ? dag(nth) : nth === 0 ? DOCS : dag };
+      }
       if (typeof validator === "function") return validator();
       if (spec.prompt.includes("<plan>")) feedback.push("checked");
       return { ...base, resultText: validator };
@@ -115,6 +136,28 @@ describe("asking whether the plan could deliver the assignment", () => {
     const replan = specs.filter((s) => s.role === "planner").at(-1)!;
     expect(replan.prompt).toContain("I want the vendors real.");
     expect(replan.prompt).toContain("deterministic mock for all seven vendor categories");
+  }, 30_000);
+
+  it("judges the plan that stands, not the one it replaced", async () => {
+    // `persistPlan` cancels a superseded task rather than deleting it, exactly
+    // so the validator stops reading two plans as one. But a cancelled row is
+    // still a row `listTasks` returns, and nothing honoured the cancellation:
+    // run 5122c83a's second intent check was handed 146 tasks where its plan
+    // held 92, and reported the differences between the two drafts as
+    // contradictions inside one.
+    const second = dagOf("ledger-service", "payout-worker");
+    // Two rounds and then nothing the planner phase can use, so the rejecting
+    // gate above does not loop forever.
+    const script = [DOCS, REAL_DAG, DOCS, second];
+    const { controller, specs } = harness(FAIL, false, (nth) => script[nth] ?? "");
+
+    await controller.startRun("build a thing", RunConfig.parse({})).catch(() => undefined);
+
+    const checks = specs.filter((s) => s.role === "validator");
+    expect(checks).toHaveLength(2);
+    expect(checks[1]!.prompt).toContain("ledger-service");
+    expect(checks[1]!.prompt).not.toContain("provider-layer");
+    expect(checks[1]!.prompt).not.toContain("ach-origination");
   }, 30_000);
 
   it("says nothing when the plan covers the assignment", async () => {

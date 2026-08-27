@@ -1773,7 +1773,7 @@ export class RunController {
    */
   private async checkPlanIntent(runId: string): Promise<{ block: string; gaps: string[] }> {
     const run = this.store.getRun(runId)!;
-    const tasks = this.store.listTasks(runId);
+    const tasks = this.livePlan(runId);
     // Free and deterministic, so it runs before — and regardless of — the model
     // check: a criterion naming a command `infraGuardHook` denies is a task no
     // worker can finish, and run bc691359 spent three workers rediscovering one.
@@ -4245,9 +4245,32 @@ export class RunController {
    * moment it can change a decision: after approval the only cost signal is a
    * budget gate, which arrives as an interruption with the money already spent.
    */
+  /**
+   * The plan as it stands, without the one it replaced.
+   *
+   * `persistPlan` cancels a superseded task rather than deleting it, on the
+   * reasoning written there: the row is the only record that a branch, a
+   * worktree and an issue ever existed, and keeping it reserves the id. That
+   * was the fix for run b65127b0, whose validator read 139 tasks where the plan
+   * held 86 and failed it for being "two full, independently-numbered task sets
+   * pasted together".
+   *
+   * But cancelling a row does not hide it from `listTasks`, and nothing that
+   * asks "what does this plan build?" ever honoured the cancellation. Run
+   * 5122c83a's second intent check was handed 146 tasks — the 92 its replan
+   * emitted plus the 54 that replan superseded — and reported the differences
+   * between the two as contradictions inside one plan: "two incompatible
+   * DynamoDB single-table designs" was one cancelled design and one live one,
+   * and two of its six gaps cited tasks that no longer existed. The estimate
+   * and the denied-criteria scan at the same gate were counting them too.
+   */
+  private livePlan(runId: string): TaskRow[] {
+    return this.store.listTasks(runId).filter((t) => t.state !== "CANCELLED");
+  }
+
   private planSummary(runId: string): string {
     const run = this.store.getRun(runId)!;
-    const tasks = this.store.listTasks(runId);
+    const tasks = this.livePlan(runId);
     const lines = tasks.map((t) => `- [${t.id}] ${t.title} (deps: ${t.dependsOn.join(", ") || "none"})`).join("\n");
     const estimate = estimatePlan(tasks, this.store.runCosts(runId));
     // What the plan intends to fake, before anyone is paid to build it. Empty
