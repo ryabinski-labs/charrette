@@ -48,6 +48,13 @@ CREATE TABLE IF NOT EXISTS events (
   type TEXT NOT NULL, payload TEXT NOT NULL, ts INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_run ON events(runId, seq);
+-- Type-filtered reads, which the dashboard does four times per run per poll.
+-- Without this every one of them walks the run's whole event range: the worst
+-- is the plan-intent verdict, an ORDER BY seq DESC LIMIT 1 on a type whose
+-- only row is among the oldest in the run, so it scans essentially everything
+-- before it finds one. On a run with 80k events, five seconds apart, on the
+-- same loopback the watcher is also polling.
+CREATE INDEX IF NOT EXISTS idx_events_run_type ON events(runId, type, seq);
 CREATE TABLE IF NOT EXISTS ledger (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   runId TEXT NOT NULL, taskId TEXT, sessionId TEXT NOT NULL, model TEXT NOT NULL,
