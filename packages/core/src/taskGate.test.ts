@@ -547,8 +547,36 @@ const PROBE_DAG =
   }) +
   "\n```";
 
+/**
+ * A task held to two criteria that cannot both be true: the suite has to be
+ * green, and the one file that can make it green may not be touched. This is
+ * run bc691359's `multipart-mediatype-and-flag-plumbing` with the incidentals
+ * removed — its advisor found the cause exactly, named the commit and the two
+ * lines, and then wrote "only the operator can resolve it", because that was
+ * the only thing the contract let it say.
+ */
+const CRITERIA_DAG =
+  "```json\n" +
+  JSON.stringify({
+    epics: [{ id: "epic-e", title: "E", summary: "s" }],
+    tasks: [
+      {
+        id: "task-a",
+        epicId: "epic-e",
+        title: "A",
+        spec: "s",
+        acceptanceCriteria: ["the workspace suite is green", "no file outside crates/parser is modified"],
+        dependsOn: [],
+        touchedPaths: [],
+        completionProbe: "",
+        estimatedSize: "S",
+      },
+    ],
+  }) +
+  "\n```";
+
 /** PROBE_DAG, a worker that writes `feature.txt`, and an advisor under test. */
-function probePool(advisorJson: (round: number) => string) {
+function probePool(advisorJson: (round: number) => string, dag = PROBE_DAG) {
   const workerPrompts: string[] = [];
   const advisorPrompts: string[] = [];
   const advisorSystems: string[] = [];
@@ -557,7 +585,7 @@ function probePool(advisorJson: (round: number) => string) {
   const pool = {
     async run(spec: AgentSpec): Promise<AgentResult> {
       let resultText = "";
-      if (spec.role === "planner") resultText = planning++ === 0 ? DOCS : PROBE_DAG;
+      if (spec.role === "planner") resultText = planning++ === 0 ? DOCS : dag;
       else if (spec.role === "worker") {
         workerPrompts.push(spec.prompt);
         writeFileSync(path.join(spec.cwd, "feature.txt"), `attempt ${workerPrompts.length}\n`);
@@ -962,5 +990,215 @@ describe("the task-escalation gate, answered by a skill", () => {
     expect(workerPrompts).toHaveLength(1);
     expect(store.getTask(runId, "task-a")!.state).toBe("NEEDS_HUMAN");
     expect(store.taskGateAutoAnswers(runId, "task-a")).toBe(0);
+  });
+});
+
+describe("acceptance criteria that cannot all be met", () => {
+  const AMENDED = ["the workspace suite is green", "no file outside crates/parser is modified, except docs/passrate.md"];
+  const advice = (extra: string) =>
+    `\`\`\`json\n{"recommendation":"the two criteria contradict","checked":[],"needsOperator":false,"why":"one forbade the only file that satisfies the other"${extra}}\n\`\`\``;
+  const criteriaOf = (store: Store, runId: string) => store.getTask(runId, "task-a")!.acceptanceCriteria;
+  const amendments = (store: Store, runId: string) =>
+    store.eventsSince(runId, 0).map((e) => e.event).filter((e) => e.type === "task.criteria_amended") as {
+      from: string[];
+      to: string[];
+      by: string;
+      why: string;
+    }[];
+
+  it("are amended by the decider, because the probe was never what QA reads", async () => {
+    // The failure this exists for. Rewriting the probe cannot help — QA grades
+    // against the criteria, and it is right to distrust a worker who says they
+    // were withdrawn, so the only thing that ends the loop is moving them where
+    // QA actually looks.
+    const { pool, workerPrompts } = probePool(() => advice(`,"criteria":${JSON.stringify(AMENDED)}`), CRITERIA_DAG);
+    const { store, runId } = await run(gates(async () => null), pool, { taskGate: { decidedBy: "product-manager" } });
+
+    expect(criteriaOf(store, runId)).toEqual(AMENDED);
+    expect(amendments(store, runId)).toHaveLength(1);
+    expect(amendments(store, runId)[0]).toMatchObject({ by: "product-manager", to: AMENDED });
+    expect(amendments(store, runId)[0]!.from).toEqual(["the workspace suite is green", "no file outside crates/parser is modified"]);
+    expect(amendments(store, runId)[0]!.why).toContain("forbade the only file");
+    // And the worker was told what it is now held to, rather than being left to
+    // infer it from a bar that moved underneath it.
+    expect(workerPrompts[1]).toContain("except docs/passrate.md");
+  });
+
+  it("are offered at the wall clock, not only when a probe is what failed", async () => {
+    // The bug behind the bug. `amendable` used to mean "the probe rejected this
+    // attempt", so the gate run bc691359 actually opened — a wall-clock gate on
+    // a task with no probe at all — was never offered the criteria it was stuck
+    // on, and every fix downstream of that would have been dead code.
+    let clock = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => clock);
+    let planning = 0;
+    const advisorSystems: string[] = [];
+    const pool = {
+      async run(spec: AgentSpec): Promise<AgentResult> {
+        if (spec.role === "planner") return { sessionId: "sp", resultText: planning++ === 0 ? DOCS : CRITERIA_DAG, costUsd: 0, turns: 1, outcome: "done" };
+        if (spec.role === "worker") {
+          writeFileSync(path.join(spec.cwd, "feature.txt"), `attempt ${clock}\n`);
+          gitIn(spec.cwd, "add", "-A");
+          gitIn(spec.cwd, "commit", "-m", "wip");
+          return { sessionId: "sw", resultText: "worker done", costUsd: 0, turns: 1, outcome: "done" };
+        }
+        if (spec.role === "qa") {
+          // A slow iteration: the task is over its bound before the cap.
+          clock += 50 * 60_000;
+          return { sessionId: "sq", resultText: '{"verdict":"FAIL","reasons":["still red"],"mustFix":["x"]}', costUsd: 0, turns: 1, outcome: "done" };
+        }
+        if (spec.role === "advisor") advisorSystems.push(spec.systemPrompt);
+        return { sessionId: "sa", resultText: advice(""), costUsd: 0, turns: 1, outcome: "done" };
+      },
+    } as unknown as AgentPool;
+
+    const asked: string[] = [];
+    const store = new Store(":memory:");
+    const controller = new RunController(store, new Bus(store), pool, noGithub, gates(async (why) => { asked.push(why); return null; }), repo());
+    // Two iterations allowed, so the clock is what stops it rather than the cap.
+    await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], qaIterationCap: 2, taskGate: { decidedBy: "operator" } }));
+
+    expect(asked.some((w) => /wall clock/.test(w))).toBe(true);
+    expect(advisorSystems[0]).toContain("`criteria` is this task's acceptance criteria, rewritten");
+    expect(advisorSystems[0]).toContain("no file outside crates/parser is modified");
+    // The probe is not widened with it: nothing rejected this task through a
+    // probe, so there is nothing there for an advisor to repair.
+    expect(advisorSystems[0]).not.toContain("is this task's completion probe, rewritten");
+  });
+
+  it("are left for a human, who is handed the command instead", async () => {
+    // An advisor drafting for the operator has no authority over the bar. What
+    // it does have is the exact command — the reason contradictory criteria
+    // outlive three sessions was never that nobody could see the contradiction.
+    const { pool } = probePool(() => advice(`,"criteria":${JSON.stringify(AMENDED)}`), CRITERIA_DAG);
+    const { store, runId } = await run(gates(async () => null), pool);
+
+    expect(amendments(store, runId)).toHaveLength(0);
+    const hint = logs(store, runId).find((t) => t.includes("harness criteria"));
+    expect(hint).toContain("look unsatisfiable — one forbade the only file that satisfies the other.");
+    expect(hint).toContain(`harness criteria task-a 'the workspace suite is green' 'no file outside crates/parser is modified, except docs/passrate.md' --run ${runId}`);
+  });
+
+  it("hand the operator the command even when the advisor never says why", async () => {
+    // `why` is what a run reviewing itself later reads to tell an honest repair
+    // from a quiet capitulation, and an advisor is free to omit it. The command
+    // is the part the operator cannot look up, so it goes out either way.
+    const { pool } = probePool(
+      () => `\`\`\`json\n{"recommendation":"the two criteria contradict","checked":[],"criteria":${JSON.stringify(AMENDED)}}\n\`\`\``,
+      CRITERIA_DAG
+    );
+    const { store, runId } = await run(gates(async () => null), pool);
+
+    const hint = logs(store, runId).find((t) => t.includes("harness criteria"));
+    expect(hint).toContain("look unsatisfiable. QA grades against them");
+    expect(hint).not.toContain(" — ");
+    expect(amendments(store, runId)).toHaveLength(0);
+  });
+
+  it("are not the decider's to shorten", async () => {
+    // Whether a rewritten criterion is weaker than the one it replaces is a
+    // judgment. Whether one was deleted outright is not — and a deleted
+    // criterion is a requirement nobody is ever graded on again.
+    const { pool } = probePool(() => advice(`,"criteria":${JSON.stringify(["the workspace suite is green"])}`), CRITERIA_DAG);
+    const { store, runId } = await run(gates(async () => null), pool, { taskGate: { decidedBy: "product-manager" } });
+
+    expect(criteriaOf(store, runId)).toHaveLength(2);
+    expect(amendments(store, runId)).toHaveLength(0);
+    const hint = logs(store, runId).find((t) => t.includes("harness criteria"));
+    expect(hint).toContain("The product-manager proposed dropping 1 of them, which is not its to drop.");
+  });
+
+  it("stop moving once the run says they are not an agent's to move", async () => {
+    const { pool } = probePool(() => advice(`,"criteria":${JSON.stringify(AMENDED)}`), CRITERIA_DAG);
+    const { store, runId } = await run(gates(async () => null), pool, {
+      taskGate: { decidedBy: "product-manager", criteriaAmendments: 0 },
+    });
+
+    expect(amendments(store, runId)).toHaveLength(0);
+    expect(logs(store, runId).some((t) => t.includes("harness criteria"))).toBe(true);
+  });
+
+  it("are left exactly as they were when the advisor's best proposal is the list it was given", async () => {
+    const given = ["the workspace suite is green", "no file outside crates/parser is modified"];
+    const { pool } = probePool(() => advice(`,"criteria":${JSON.stringify(given)}`), CRITERIA_DAG);
+    const { store, runId } = await run(gates(async () => null), pool, { taskGate: { decidedBy: "product-manager" } });
+
+    expect(amendments(store, runId)).toHaveLength(0);
+    expect(logs(store, runId).some((t) => t.includes("harness criteria"))).toBe(false);
+  });
+
+  it("survive a list with nothing left in it", async () => {
+    // `store.amendCriteria` throws on an empty list rather than leaving a task
+    // nothing can judge. Getting there from a model's JSON should not be how
+    // that is discovered.
+    const { pool } = probePool(() => advice(`,"criteria":${JSON.stringify(["  ", ""])}`), CRITERIA_DAG);
+    const { store, runId } = await run(gates(async () => null), pool, { taskGate: { decidedBy: "product-manager" } });
+
+    expect(criteriaOf(store, runId)).toHaveLength(2);
+    expect(amendments(store, runId)).toHaveLength(0);
+  });
+
+  it("are left alone when the advisor answers with something that is not a list of them", async () => {
+    // A string, or a list with a number in it, is a malformed answer rather
+    // than a partial one. Taking the strings out of it would be inventing a bar
+    // nobody wrote.
+    for (const bad of ['"criteria":"widen AC7"', '"criteria":["the workspace suite is green",7]']) {
+      const { pool } = probePool(() => advice(`,${bad}`), CRITERIA_DAG);
+      const { store, runId } = await run(gates(async () => null), pool, { taskGate: { decidedBy: "product-manager" } });
+      expect(amendments(store, runId)).toHaveLength(0);
+      expect(criteriaOf(store, runId)).toHaveLength(2);
+    }
+  });
+
+  it("are offered when a deterministic check the criteria forbid satisfying keeps failing", async () => {
+    // The shape run bc691359 actually hit: the run's own check demanded the
+    // workspace suite be green, one criterion demanded the same, and another
+    // forbade touching the only file that could make it so. The checks belong
+    // to the run and no answer to this gate can move them, which leaves the
+    // criteria as the only side of that disagreement an answer can reach.
+    const { pool, advisorSystems } = probePool(() => advice(`,"criteria":${JSON.stringify(AMENDED)}`), CRITERIA_DAG);
+    const asked: string[] = [];
+    const store = new Store(":memory:");
+    const controller = new RunController(store, new Bus(store), pool, noGithub, gates(async (why) => { asked.push(why); return null; }), repo());
+    const runId = await controller.startRun(
+      "do a thing",
+      RunConfig.parse({ deterministicChecks: ["! test -f feature.txt"], qaIterationCap: 1, taskGate: { decidedBy: "product-manager" } })
+    );
+
+    expect(asked.some((w) => /deterministic checks still failing/.test(w))).toBe(true);
+    expect(advisorSystems[0]).toContain("`criteria` is this task's acceptance criteria, rewritten");
+    expect(criteriaOf(store, runId)).toEqual(AMENDED);
+  });
+
+  it("are never offered when nothing about the bar is what rejected the task", async () => {
+    // An empty branch says nothing about whether the criteria are fair — there
+    // is no work to hold them against yet. Offering them there would be handing
+    // an agent its own bar for no reason at all.
+    let planning = 0;
+    const advisorSystems: string[] = [];
+    const pool = {
+      async run(spec: AgentSpec): Promise<AgentResult> {
+        if (spec.role === "planner") return { sessionId: "sp", resultText: planning++ === 0 ? DOCS : CRITERIA_DAG, costUsd: 0, turns: 1, outcome: "done" };
+        // A worker that commits nothing: the branch stays empty, which is its
+        // own gate and one no criterion could have prevented.
+        if (spec.role === "worker") return { sessionId: "sw", resultText: "worker done", costUsd: 0, turns: 1, outcome: "done" };
+        if (spec.role === "advisor") {
+          advisorSystems.push(spec.systemPrompt);
+          return { sessionId: "sa", resultText: advice(`,"criteria":${JSON.stringify(AMENDED)}`), costUsd: 0, turns: 1, outcome: "done" };
+        }
+        return { sessionId: "sq", resultText: '{"verdict":"PASS","summary":"n/a"}', costUsd: 0, turns: 1, outcome: "done" };
+      },
+    } as unknown as AgentPool;
+
+    const asked: string[] = [];
+    const store = new Store(":memory:");
+    const controller = new RunController(store, new Bus(store), pool, noGithub, gates(async (why) => { asked.push(why); return null; }), repo());
+    const runId = await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], qaIterationCap: 1, taskGate: { decidedBy: "product-manager" } }));
+
+    expect(asked.some((w) => /still empty/.test(w))).toBe(true);
+    expect(advisorSystems[0]).not.toContain("acceptance criteria, rewritten");
+    // And the advisor proposing one anyway changes nothing.
+    expect(amendments(store, runId)).toHaveLength(0);
+    expect(criteriaOf(store, runId)).toHaveLength(2);
   });
 });

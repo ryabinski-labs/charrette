@@ -576,6 +576,17 @@ export interface SubscriptionGate {
  * percent is enough to finish, and the run carries on knowing the wall is
  * there — where `usageLimitWaitMinutes` takes over if it arrives.
  */
+/**
+ * What a task-escalation gate's answer is allowed to change about the task, on
+ * top of telling the worker what to do.
+ *
+ * Most escalations are about the attempt, and the answer is words. Two are not:
+ * a probe rejects before QA runs and the worker may not touch it, and criteria
+ * that contradict each other reject through QA forever. `"none"` is the default
+ * because moving either is the rare case and the dangerous one.
+ */
+export type Amendable = "none" | "criteria" | "both";
+
 export type SubscriptionChoice =
   | { action: "continue" }
   | { action: "switch"; account: string }
@@ -3146,11 +3157,11 @@ export class RunController {
    * either because the operator chose to, or because this gate handler has no
    * way to ask (headless / test contexts).
    *
-   * `probe` marks the one escalation whose answer may also rewrite what the task
-   * is being held to, because it is the one an answer alone cannot end.
+   * `amend` marks the escalations whose answer may also rewrite what the task is
+   * being held to, because they are the ones an answer alone cannot end.
    */
-  private async askOrPark(runId: string, taskId: string, why: string, probe = false): Promise<string | null> {
-    const guidance = await this.askOperator(runId, taskId, why, probe);
+  private async askOrPark(runId: string, taskId: string, why: string, amend: Amendable = "none"): Promise<string | null> {
+    const guidance = await this.askOperator(runId, taskId, why, amend);
     if (guidance === null) {
       this.park(runId, taskId, why);
       return null;
@@ -3168,7 +3179,7 @@ export class RunController {
    * NEEDS_HUMAN -> NEEDS_HUMAN transition. Null when the operator declined or
    * this gate handler has no way to ask (headless / test contexts).
    */
-  private async askOperator(runId: string, taskId: string, why: string, amendable = false): Promise<string | null> {
+  private async askOperator(runId: string, taskId: string, why: string, amend: Amendable = "none"): Promise<string | null> {
     const task = this.store.getTask(runId, taskId)!;
     const decider = this.taskGateDecider(runId, taskId);
     // Nobody to ask and nobody to decide: park, without paying for advice that
@@ -3178,7 +3189,15 @@ export class RunController {
     // whole run on a human, so a minute of agent time drafting their reply is
     // the cheapest latency win in the system. With a decider named, that same
     // session *is* the answer — see adviseOperator.
-    const probe = amendable ? task.completionProbe : "";
+    const probe = amend === "both" ? task.completionProbe : "";
+    // Offered more widely than the probe, because more escalations are about
+    // them. The probe is offered only where the probe is the thing rejecting;
+    // the criteria are what QA grades against, so they are the thing rejecting
+    // at the QA cap, at the deterministic checks QA's verdict rests on, and at
+    // the wall clock a task spends failing both. Withholding them there is what
+    // turned a correct diagnosis on run bc691359 into a question for an
+    // operator who was not there.
+    const criteria = amend === "none" ? [] : task.acceptanceCriteria;
     // How many times this same task has already stopped somebody. Every other
     // number the advisor is given was reset by the last answer — `qaIterations`
     // goes back to zero the moment a gate resolves, so a task on its fourteenth
@@ -3186,11 +3205,13 @@ export class RunController {
     // this the advisor investigates each round from scratch and reaches the same
     // conclusion it reached last round, which is precisely the loop.
     const repeats = this.store.taskGateOpenings(runId, taskId);
-    const advice = await this.adviseOperator(runId, taskId, why, decider, probe, repeats);
+    const advice = await this.adviseOperator(runId, taskId, why, decider, probe, repeats, criteria);
     // Done before the gate is published, so the answer the operator reads
     // already says what the task is now being held to.
     const amended = probe && advice.probe !== null ? this.amendProbe(runId, taskId, probe, advice.probe, decider, advice.why) : "";
-    const drafted = amended ? `${amended}\n\n${advice.recommendation}` : advice.recommendation;
+    const rebarred =
+      criteria.length && advice.criteria !== null ? this.amendCriteria(runId, taskId, criteria, advice.criteria, decider, advice.why) : "";
+    const drafted = [amended, rebarred, advice.recommendation].filter(Boolean).join("\n\n");
     // The runbook is for the person, so it is added only on the path that
     // reaches one. When a decider answers, `recommendation` goes to the worker
     // verbatim — and a worker told to "open the AWS console" learns only that
@@ -3334,6 +3355,57 @@ export class RunController {
   }
 
   /**
+   * The same move for the acceptance criteria, bounded the same way and for a
+   * sharper reason.
+   *
+   * `amendProbe` exists because no answer can make a wrong probe pass. This
+   * exists because no answer, and no rewritten probe either, can make
+   * contradictory criteria pass: QA grades against the criteria and is right to
+   * distrust a worker who says they were withdrawn, so the only thing that ends
+   * the loop is moving them where QA actually looks. On run bc691359 a task was
+   * held to "the workspace suite is green" and "do not touch the only file that
+   * can make it green" at once; its advisor found the cause exactly — the
+   * commit, the fixture, the two lines — and then wrote "only the operator can
+   * resolve it", because that was the only thing the contract let it say.
+   *
+   * Bounded harder than the probe in one respect. "Do not lower the bar" is
+   * mostly a thing only the prompt can enforce — whether a rewritten criterion
+   * is weaker than the one it replaces is a judgment, not a predicate. But one
+   * shape of it is decidable, and it is the shape that matters: a list shorter
+   * than the one it replaces has dropped a criterion, and a dropped criterion
+   * is a requirement nobody will ever be graded on again. That is refused here
+   * rather than argued about in the prompt, and it falls through to the same
+   * operator line as a spent allowance, so a rewrite worth making is still in
+   * front of someone who can make it.
+   */
+  private amendCriteria(runId: string, taskId: string, from: string[], to: string[], decider: string, why: string): string {
+    const next = to.map((c) => c.trim().slice(0, 1000)).filter(Boolean);
+    if (!next.length || JSON.stringify(next) === JSON.stringify(from)) return "";
+    const gate = this.store.getRun(runId)!.config.taskGate;
+    const spent = this.store.taskCriteriaAmendments(runId, taskId);
+    const by = decider || gate.decidedBy;
+    if (gate.decidedBy === "operator" || spent >= gate.criteriaAmendments || next.length < from.length) {
+      this.bus.publish({
+        type: "agent.log",
+        runId,
+        taskId,
+        sessionId: "advisor",
+        text:
+          `this task's acceptance criteria look unsatisfiable${why ? ` — ${why}` : ""}. QA grades against them and no answer can talk a worker past them.` +
+          `${next.length < from.length ? ` The ${by} proposed dropping ${from.length - next.length} of them, which is not its to drop.` : ""} To change them:\n` +
+          `  harness criteria ${taskId} ${next.map(shellQuote).join(" ")} --run ${runId} --why '...'`,
+        ts: Date.now(),
+      });
+      return "";
+    }
+    this.store.amendCriteria(runId, taskId, next, by, why);
+    return (
+      `Your acceptance criteria have been changed by the ${by}, which looked at why they could not all be met at once. QA now grades you against these and only these:\n\n` +
+      `${next.map((c, i) => `    ${i + 1}. ${c}`).join("\n")}\n\nThat is the bar; the old list is not.`
+    );
+  }
+
+  /**
    * A short read-only advisor session in the stuck task's worktree, drafting
    * the answer the operator will probably give — or, when `decider` names a
    * skill, giving it. Never fatal — a crashed or unparseable advisor just means
@@ -3351,11 +3423,12 @@ export class RunController {
     why: string,
     decider = "",
     probe = "",
-    repeats = 0
-  ): Promise<{ recommendation: string; needsOperator: boolean; why: string; probe: string | null; runbook: Runbook | null }> {
+    repeats = 0,
+    criteria: string[] = []
+  ): Promise<{ recommendation: string; needsOperator: boolean; why: string; probe: string | null; criteria: string[] | null; runbook: Runbook | null }> {
     const run = this.store.getRun(runId)!;
     const task = this.store.getTask(runId, taskId)!;
-    const none = { recommendation: "", needsOperator: true, why: "", probe: null, runbook: null };
+    const none = { recommendation: "", needsOperator: true, why: "", probe: null, criteria: null, runbook: null };
     try {
       // Looked up by name, as the pit stop's decider is: the skill was named to
       // be the one answering, and the lexical matcher's opinion of what this
@@ -3367,7 +3440,7 @@ export class RunController {
         taskId,
         role: "advisor",
         model: run.config.models.advisor,
-        systemPrompt: advisorSystemPrompt("", decider, skillsBlock(skills), probe, repeats),
+        systemPrompt: advisorSystemPrompt("", decider, skillsBlock(skills), probe, repeats, criteria),
         skills: skills.map((s) => s.name),
         prompt: advisorPrompt(task, why, run.config.deterministicChecks, repeats),
         cwd: task.worktreePath ?? this.repoPath,
@@ -3385,6 +3458,7 @@ export class RunController {
         needsOperator?: unknown;
         why?: unknown;
         probe?: unknown;
+        criteria?: unknown;
         runbook?: unknown;
       };
       if (typeof parsed?.recommendation !== "string") return none;
@@ -3399,6 +3473,14 @@ export class RunController {
         // advisor drafting for a human, an older prompt, a model that dropped
         // it — is saying the same thing by saying nothing.
         probe: probe && typeof parsed.probe === "string" ? parsed.probe : null,
+        // Same contract as `probe`: only a well-formed value is an amendment.
+        // A list with a non-string in it is a malformed answer rather than a
+        // partial one — taking the strings out of it would be inventing a bar
+        // nobody wrote.
+        criteria:
+          criteria.length && Array.isArray(parsed.criteria) && parsed.criteria.every((c) => typeof c === "string")
+            ? (parsed.criteria as string[])
+            : null,
         // Parsed here and rendered only if the gate actually reaches a person:
         // a decider that answers its own escalation hands the worker prose, and
         // a worker has no use for instructions addressed to somebody else.
@@ -5516,8 +5598,8 @@ export class RunController {
      * still reaches it again, one full interval later, and each of those
      * intervals is separated by an operator who chose to continue.
      */
-    const ask = async (why: string, probe = false): Promise<string | null> => {
-      const guidance = await this.askOrPark(runId, taskId, why, probe);
+    const ask = async (why: string, amend: Amendable = "none"): Promise<string | null> => {
+      const guidance = await this.askOrPark(runId, taskId, why, amend);
       startedAt = Date.now();
       return guidance;
     };
@@ -5556,7 +5638,12 @@ export class RunController {
       if (Date.now() - startedAt > run.config.taskWallClockMinutes * 60_000) {
         const guidance = await ask(
           `still not accepted after ${run.config.taskWallClockMinutes} minutes of wall clock (${task.qaIterations} QA iterations so far)` +
-            (lastRejection ? `\n\nWhy the last iteration was sent back:\n${lastRejection}` : "")
+            (lastRejection ? `\n\nWhy the last iteration was sent back:\n${lastRejection}` : ""),
+          // A task that has spent its whole clock failing is the case this is
+          // most for: run bc691359's multipart task arrived here holding two
+          // criteria that could not both be true, and three worker sessions
+          // died against them before anyone could say so.
+          "criteria"
         );
         if (guidance === null) return;
         qaFeedback =
@@ -5874,7 +5961,11 @@ export class RunController {
         this.store.updateTask(runId, taskId, { qaIterations: iterations });
         if (iterations >= run.config.qaIterationCap) {
           const guidance = await ask(
-            `deterministic checks still failing after ${iterations} attempts: ${failures.map((f) => f.command).join(", ")}\n\n${failures.map((f) => f.output.slice(-1500)).join("\n")}${notYours}`
+            `deterministic checks still failing after ${iterations} attempts: ${failures.map((f) => f.command).join(", ")}\n\n${failures.map((f) => f.output.slice(-1500)).join("\n")}${notYours}`,
+            // A check the criteria forbid satisfying fails forever. The checks
+            // are the run's, not this task's, so the criteria are the only side
+            // of that disagreement an answer to this gate can move.
+            "criteria"
           );
           if (guidance === null) return;
           qaFeedback = `The operator looked at the failing checks and says:\n${guidance}\n\nThe checks that were failing:\n${detail}`;
@@ -5924,11 +6015,12 @@ export class RunController {
           if (iterations >= run.config.qaIterationCap) {
             const guidance = await ask(
               `the completion probe still fails after ${iterations} attempts — the task is not finished everywhere it was scoped to reach:\n\n$ ${task.completionProbe}\n${output.slice(-1500)}`,
-              // The one gate whose answer may also change the question. Every
-              // other escalation is about the attempt; this one is the only one
-              // where the thing doing the rejecting can itself be wrong, and
-              // where agreeing that it is wrong changes nothing on its own.
-              true
+              // The gate where both halves of the question can be wrong. The
+              // probe is what rejected this attempt, so it is offered here and
+              // nowhere else — and the criteria come with it, because a task
+              // whose probe is unsatisfiable is often a task whose criteria are
+              // too, and finding out costs the same session either way.
+              "both"
             );
             if (guidance === null) return;
             qaFeedback = `The operator looked at the failing probe and says — follow it over anything that contradicts it:\n${guidance}\n\n${qaFeedback}`;
@@ -6194,7 +6286,9 @@ export class RunController {
         continue;
       }
       if (iterations >= run.config.qaIterationCap) {
-        const guidance = await ask(`QA rejected it ${iterations} times (the cap): ${verdict.reasons.join("; ")}`);
+        // QA grades against the criteria, so criteria that contradict each other
+        // are exactly what a repeated rejection looks like from in here.
+        const guidance = await ask(`QA rejected it ${iterations} times (the cap): ${verdict.reasons.join("; ")}`, "criteria");
         if (guidance === null) return;
         this.store.transitionTask(runId, taskId, "QA_FAILED", "cap reached; operator answered the escalation");
         this.store.transitionTask(runId, taskId, "WORKING", "re-dispatched with the operator's guidance");

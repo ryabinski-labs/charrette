@@ -562,6 +562,27 @@ export const TaskGateConfig = z.object({
    * unamendable; the operator's own `harness probe` is never bounded.
    */
   probeAmendments: z.number().int().min(0).max(5).default(1),
+  /**
+   * How many times the decider may amend the *acceptance criteria* a task is
+   * escalating about, when those criteria are what make it unsatisfiable.
+   *
+   * The probe is not the only bar an answer cannot move. QA grades against the
+   * criteria, so a task whose criteria contradict each other cannot be talked
+   * out of the gate by any instruction: on run bc691359 one task was held to
+   * "the workspace suite is green" and "do not touch the only file that can
+   * make it green" at the same time, and its advisor diagnosed that exactly —
+   * naming the commit, the fixture and the two lines to change — before
+   * writing "only the operator can resolve it" and handing it to a desk nobody
+   * was at. It was right about everything except who could act.
+   *
+   * An agent editing the standard it is judged by is the more dangerous power
+   * of the two, so it is bounded harder in the prompt than in the number: the
+   * amendment must resolve a contradiction, never lower a bar, and it lands on
+   * the record as `task.criteria_amended` with the decider's name on it. `0`
+   * restores the criteria as unamendable; the operator's own `harness criteria`
+   * is never bounded.
+   */
+  criteriaAmendments: z.number().int().min(0).max(5).default(1),
 });
 export type TaskGateConfig = z.infer<typeof TaskGateConfig>;
 

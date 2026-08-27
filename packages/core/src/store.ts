@@ -1237,17 +1237,34 @@ export class Store {
     });
   }
 
-  /**
-   * How many times an agent has rewritten this task's probe. Read off the event
-   * log for the same reason the auto-answer count is: it is the only thing that
-   * survives the process, and the bound exists precisely for the run that keeps
-   * coming back to the same gate. The operator's own amendments do not count
-   * against a skill's allowance — they are not the thing being bounded.
-   */
+  /** How many times an agent has rewritten this task's probe. */
   taskProbeAmendments(runId: string, taskId: string): number {
+    return this.agentAmendments(runId, taskId, "task.probe_amended");
+  }
+
+  /**
+   * The same count for the acceptance criteria, kept separate on purpose. A
+   * task can have a probe that is merely wrong and criteria that are merely
+   * contradictory, and spending one allowance should not close the other: the
+   * two failures have different causes and the run that hits both needs to be
+   * able to fix both.
+   */
+  taskCriteriaAmendments(runId: string, taskId: string): number {
+    return this.agentAmendments(runId, taskId, "task.criteria_amended");
+  }
+
+  /**
+   * Amendments made by an agent, which is every one whose `by` is set to
+   * something other than the operator. Read off the event log for the same
+   * reason the auto-answer count is: it is the only thing that survives the
+   * process, and the bound exists precisely for the run that keeps coming back
+   * to the same gate. The operator's own amendments do not count against a
+   * skill's allowance — they are not the thing being bounded.
+   */
+  private agentAmendments(runId: string, taskId: string, type: string): number {
     const rows = this.db
-      .prepare("SELECT payload FROM events WHERE runId = ? AND taskId = ? AND type = 'task.probe_amended'")
-      .all(runId, taskId) as { payload: string }[];
+      .prepare("SELECT payload FROM events WHERE runId = ? AND taskId = ? AND type = ?")
+      .all(runId, taskId, type) as { payload: string }[];
     return rows.filter((r) => {
       const p = JSON.parse(r.payload) as { by?: string };
       return Boolean(p.by) && p.by !== "operator";
