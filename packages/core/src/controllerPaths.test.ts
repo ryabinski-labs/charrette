@@ -405,6 +405,33 @@ describe("recording a planner attempt that cannot be saved", () => {
     );
   });
 
+  it("names the id it rejected and the rule it broke, not just the index", async () => {
+    const dir = repo();
+    // `tasks.52.id: Invalid` is what run 5122c83a's planner was told, and it
+    // located neither the task nor the rule — the index is into an assembled
+    // plan the planner never emitted as one array.
+    let call = 0;
+    const { pool } = rolePool({ planner: () => (++call === 1 ? DOCS : dagJson([{ id: "tool-comp-privateEquity-alias", dependsOn: [] }])) });
+    const { controller } = build({ repoPath: dir, pool });
+
+    await expect(controller.startRun("build a thing", RunConfig.parse({}))).rejects.toThrow(
+      /tasks\.0\.id: must be a lowercase kebab-case slug.*got "tool-comp-privateEquity-alias"/
+    );
+  });
+
+  it("does not quote an offending value too long to be a hint", async () => {
+    const dir = repo();
+    const long = `a${"b".repeat(129)}`;
+    let call = 0;
+    const { pool } = rolePool({ planner: () => (++call === 1 ? DOCS : dagJson([{ id: long, dependsOn: [] }])) });
+    const { controller } = build({ repoPath: dir, pool });
+
+    const err = (await controller.startRun("build a thing", RunConfig.parse({})).catch((e: unknown) => e)) as Error;
+
+    expect(err.message).toMatch(/tasks\.0\.id: must be a lowercase kebab-case slug/);
+    expect(err.message).not.toContain(long);
+  });
+
   it("says the plan is not a valid DAG when it references a task that does not exist", async () => {
     const dir = repo();
     const { pool } = rolePool({
