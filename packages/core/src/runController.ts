@@ -4116,6 +4116,34 @@ export class RunController {
     // SEC-13: hash what will be approved; the build consumes exactly this version.
     const planHash = createHash("sha256").update(JSON.stringify(plan)).digest("hex");
     this.store.setRunPlan(runId, prdPath, planHash);
+    // A re-plan supersedes the plan before it, but `insertTasks` is INSERT OR
+    // REPLACE: it upserts every id the new plan names and leaves every id the
+    // new plan dropped exactly where it was. Those ids stay PENDING forever,
+    // and the scheduler — which reads `tasks`, not `plan.json` — then holds two
+    // plans at once and dispatches from both.
+    //
+    // Run b65127b0 re-planned once, over two intent gaps. `plan.json` held 86
+    // coherent tasks; `tasks` held 139: those 86 plus 53 left by the superseded
+    // draft. The validator read the union and failed the plan for being "two
+    // full, independently-numbered task sets pasted together" — two
+    // contradictory migration series for one schema, two tasks each declaring
+    // they owned `middleware.ts`, and fourteen routes where two tasks claimed
+    // one `page.tsx` with acceptance criteria that could not both pass. Neither
+    // plan was wrong. Only their sum was, and no planner could have fixed it,
+    // because the next re-plan added its own set on top of these two.
+    //
+    // CANCELLED rather than deleted, and PENDING-only, on the reasoning the
+    // pit-stop re-plan below already cancels by: a task that has been
+    // dispatched owns a branch, a worktree and an issue, and its row is the
+    // only record that any of that happened. A task that has never been
+    // dispatched owns none of them, so cancelling costs nothing — and leaving
+    // the row in place keeps its id reserved, which is what stops a later
+    // re-plan from reusing the id and inheriting a real task's history.
+    const named = new Set(plan.tasks.map((t) => t.id));
+    for (const t of this.store.listTasks(runId)) {
+      if (t.state !== "PENDING" || named.has(t.id)) continue;
+      this.store.transitionTask(runId, t.id, "CANCELLED", "superseded when the plan was rewritten");
+    }
     this.store.insertTasks(
       runId,
       plan.epics.map((e) => ({ id: e.id, title: e.title })),
