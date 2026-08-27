@@ -362,6 +362,8 @@ interface RunOpts {
   model?: string[];
   /** Which configured Claude subscription this run spends; `""` is the ambient login. */
   account?: string;
+  /** A skill that answers the intake agent in the operator's place. */
+  intakeDecider?: string;
 }
 
 interface Resolved {
@@ -530,9 +532,11 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
   // An assignment on the command line is taken as final; without one, the intake
   // agent is the only way the operator gets to say what they want.
   const chat = fromCli("chat") ? opts.chat === true : file.chat ?? assignment === undefined;
+  const intakeDecider = opts.intakeDecider ?? file.intake?.decidedBy;
   banner.push(
     chat
-      ? `intake     conversation before planning   (${fromCli("chat") ? "--chat" : file.chat !== undefined ? via : "default"})`
+      ? `intake     conversation before planning   (${fromCli("chat") ? "--chat" : file.chat !== undefined ? via : "default"})` +
+          (intakeDecider && intakeDecider !== "operator" ? `\n           ${intakeDecider} answers what you are not here to answer` : "")
       : `intake     off — planning directly from the assignment`
   );
 
@@ -553,6 +557,9 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
     // the operator reaches for when *this* run needs to go somewhere else.
     subscription: { ...file.subscription, ...(opts.account === undefined ? {} : { active: opts.account }) },
     pitStop: file.pitStop,
+    // The flag wins over the file, as `--model` and `--account` do: it is what
+    // the operator reaches for when *this* run has to go unattended.
+    intake: { ...file.intake, ...(opts.intakeDecider === undefined ? {} : { decidedBy: opts.intakeDecider }) },
     skillsDirs,
     skillRouting: file.skillRouting,
     roleSkills: file.roleSkills,
@@ -661,6 +668,10 @@ export function buildProgram(): Command {
     .option("--port <n>", "pin the dashboard port (default: the first free port from 4777)")
     .option("--chat", "talk the assignment through with an intake agent first (default when no assignment is given)")
     .option("--no-chat", "skip the conversation; plan directly from the assignment")
+    .option(
+      "--intake-decider <skill>",
+      "let a skill answer the intake agent in your place, so the run can start unattended (default: operator)"
+    )
     .option("-m, --model <role=model>", "route one role to a model, e.g. worker=gpt-5.6-terra; repeatable", collect, [])
     .option("--account <name>", "spend a named Claude subscription from subscription.accounts (default: the account you are logged into)")
     .action(async (assignment: string | undefined, opts: RunOpts, cmd: Command) => {
@@ -700,7 +711,13 @@ export function buildProgram(): Command {
       banner.push(...mailBanner(mail));
       process.stdout.write(`\n${banner.map((l) => `  ${l}`).join("\n")}\n`);
 
-      const chat = wantChat || assignment === undefined ? new TerminalChat() : undefined;
+      // With a decider named and nothing on the other end of stdin, the terminal
+      // transport blocks forever on the first question — a run that looks hung
+      // and is actually waiting for a person who was never going to be there.
+      // Handing intake no operator is what lets the decider answer alone, which
+      // is the whole point of naming one.
+      const unattended = config.intake.decidedBy !== "operator" && !process.stdin.isTTY;
+      const chat = (wantChat || assignment === undefined) && !unattended ? new TerminalChat() : undefined;
       const seed = assignment ?? (await chat!.promptSeed(wantChat));
       const stopGateMail = watchGateMail(bus, { project: path.basename(repo), url: url ?? "", target: mail });
       const stopBudgetWatch = watchBudgetCommands(controller, liveRunId);

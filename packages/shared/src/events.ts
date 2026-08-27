@@ -77,7 +77,19 @@ export const HarnessEvent = z.discriminatedUnion("type", [
   }),
   z.object({ ...base, type: z.literal("run.plan_attempt_failed"), attempt: z.number().int(), reason: z.string(), rawPath: z.string() }),
   z.object({ ...base, type: z.literal("intake.question"), sessionId: z.string(), question: z.string(), options: z.array(z.string()).default([]) }),
-  z.object({ ...base, type: z.literal("intake.answered"), sessionId: z.string(), question: z.string(), answer: z.string() }),
+  // `decidedBy` names who answered: "operator" for a person, a skill name when a
+  // decider stood in, "nobody" when the question reached neither. It defaults to
+  // the operator because every row written before intake could be delegated was
+  // one, and because a reader that cannot tell them apart should assume the
+  // answer came from the person rather than from a model.
+  z.object({
+    ...base,
+    type: z.literal("intake.answered"),
+    sessionId: z.string(),
+    question: z.string(),
+    answer: z.string(),
+    decidedBy: z.string().default("operator"),
+  }),
   z.object({ ...base, type: z.literal("intake.brief_ready"), goal: z.string(), decisions: z.number().int() }),
   z.object({ ...base, type: z.literal("task.state_changed"), taskId: z.string(), from: TaskState, to: TaskState, reason: z.string().default("") }),
   z.object({ ...base, type: z.literal("task.qa_verdict"), taskId: z.string(), verdict: z.enum(["PASS", "FAIL"]), iteration: z.number().int(), detail: z.unknown() }),

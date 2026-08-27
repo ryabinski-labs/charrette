@@ -275,3 +275,54 @@ describe("how the intake session is set up", () => {
     expect(createSdkMcpServerMock).toHaveBeenCalledOnce();
   });
 });
+
+/**
+ * The transcript has to be able to say who decided, because the answers in it
+ * are what the planner, the specification and every task are then held to. A
+ * brief that cannot distinguish "the operator said fakes only" from "a model
+ * assumed fakes only" is a brief nobody can audit after the fact.
+ */
+describe("recording who answered", () => {
+  it("attributes a bare string to the operator, as every answer before this was", async () => {
+    const { pool } = poolThat(BRIEF(), async () => {
+      await askHandler()({ question: "Keyed on what?" });
+    });
+
+    await runIntake(pool, bus, request({ ui: { async ask() { return "per API key"; }, say() {} } }));
+
+    const answered = typed("intake.answered")[0] as { answer: string; decidedBy: string };
+    expect(answered.answer).toBe("per API key");
+    expect(answered.decidedBy).toBe("operator");
+  });
+
+  it("names the decider when one answered in the operator's place", async () => {
+    const { pool } = poolThat(BRIEF(), async () => {
+      await askHandler()({ question: "Real vendors or fakes?" });
+    });
+    const ui = {
+      async ask() {
+        return { answer: "Fakes only.", decidedBy: "product-manager" };
+      },
+      say() {},
+    };
+
+    await runIntake(pool, bus, request({ ui }));
+
+    const answered = typed("intake.answered")[0] as { answer: string; decidedBy: string };
+    expect(answered.answer).toBe("Fakes only.");
+    expect(answered.decidedBy).toBe("product-manager");
+  });
+
+  it("hands the agent the words themselves, whichever form they arrived in", async () => {
+    let handed = "";
+    const { pool } = poolThat(BRIEF(), async () => {
+      const out = await askHandler()({ question: "Which store?" });
+      handed = out.content[0]!.text;
+    });
+
+    await runIntake(pool, bus, request({ ui: { async ask() { return { answer: "Postgres." }; }, say() {} } }));
+
+    // The agent gets the answer, not the envelope it came in.
+    expect(handed).toBe("Postgres.");
+  });
+});
