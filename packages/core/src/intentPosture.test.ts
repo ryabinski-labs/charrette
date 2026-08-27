@@ -389,3 +389,40 @@ describe("intentPosture, speaking about one of something", () => {
     expect(p.headline).toContain("2 tasks against gaps are parked and waiting on you");
   });
 });
+
+/**
+ * Which task owns a gap is decided by matching a key off the task's title, and
+ * the prefix that key is built from is a convention `queueIntentFixes` follows
+ * — not something the store enforces. A task whose title never had it must
+ * still be able to own the gap it is plainly working: an operator who renamed
+ * one, a task carried in from a re-plan, a row written before the convention
+ * existed. The alternative is a dashboard that paints a red meter over work
+ * that is in flight.
+ */
+describe("intentPosture, owning a gap without wearing the prefix", () => {
+  it("matches a fix task whose title is the bare gap, with no prefix on it", () => {
+    const p = intentPosture(
+      input({
+        intent: { verdict: "FAIL", gaps: [GAP_B] },
+        fixes: [fix({ title: GAP_B, state: "WORKING" })],
+      })
+    );
+    expect(p.gaps).toEqual([{ text: GAP_B, status: "in-flight", taskId: "intent-fix-1-1" }]);
+  });
+
+  it("still prefers the prefixed task when both claim the same gap", () => {
+    // Same gap, two claimants, and the ranking is on state rather than on which
+    // one is spelled the way the convention expects.
+    const p = intentPosture(
+      input({
+        intent: { verdict: "FAIL", gaps: [GAP_B] },
+        fixes: [
+          fix({ id: "bare", title: GAP_B, state: "CANCELLED" }),
+          fix({ id: "intent-fix-1-2", title: titleFor(GAP_B), state: "MERGED" }),
+        ],
+      })
+    );
+    expect(p.gaps[0]!.status).toBe("closed");
+    expect(p.gaps[0]!.taskId).toBe("intent-fix-1-2");
+  });
+});

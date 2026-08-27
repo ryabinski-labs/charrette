@@ -2615,6 +2615,50 @@ describe("harness init", () => {
     expect(h.writeFileSyncMock).not.toHaveBeenCalled();
   });
 
+  it("keeps writing a config when the file it is preserving from has no config in it", async () => {
+    // `existingConfig` exists so a re-init does not reset what it did not
+    // detect — but the whole point of `--force` is a file too broken to read.
+    // A loader that hands back no config at all is that case arriving by the
+    // other route, and refusing to write because there was nothing to preserve
+    // would be exactly backwards.
+    h.loadFileConfigMock.mockReturnValue({ config: undefined as unknown as Record<string, unknown>, path: "/repo/harness.json" });
+    h.detectChecksMock.mockReturnValue({ checks: ["npm test"], source: "package.json", skipped: [] });
+
+    await cli("init", "--repo", "/repo");
+
+    const [, body] = h.writeFileSyncMock.mock.calls[0] as [string, string];
+    expect(JSON.parse(body).deterministicChecks).toEqual(["npm test"]);
+  });
+
+  it("re-inits without resetting a ceiling the operator already set", async () => {
+    // The case the whole `existingConfig` change exists for. `init` is run more
+    // than once — a repo's CI changes and this is the command that catches the
+    // config up — and before this every re-run put the ceiling back to the
+    // default, with the file still looking right afterwards.
+    h.loadFileConfigMock.mockReturnValue({ config: { deterministicCheckTimeoutMinutes: 45 }, path: "/repo/harness.json" });
+    h.detectChecksMock.mockReturnValue({ checks: ["cargo test --workspace"], source: "1 step(s) from 1 CI workflow(s)", skipped: [] });
+
+    await cli("init", "--repo", "/repo");
+
+    // Proved under the ceiling it kept, and written back down under it too.
+    expect(h.verifyChecksMock).toHaveBeenCalledWith("/repo", ["cargo test --workspace"], expect.objectContaining({ timeoutMs: 45 * 60 * 1000 }));
+    const [, body] = h.writeFileSyncMock.mock.calls[0] as [string, string];
+    expect(JSON.parse(body).deterministicCheckTimeoutMinutes).toBe(45);
+  });
+
+  it("ignores a kept ceiling that is not a positive number of minutes", async () => {
+    // The flag is validated when it is typed; the value already in the file
+    // never was. A zero — or anything else a hand-edit can leave behind —
+    // reaches `execFileSync` as no timeout at all, which is an init that hangs
+    // on the first slow check. The default is the honest fallback.
+    h.loadFileConfigMock.mockReturnValue({ config: { deterministicCheckTimeoutMinutes: 0 }, path: "/repo/harness.json" });
+    h.detectChecksMock.mockReturnValue({ checks: ["npm test"], source: "package.json", skipped: [] });
+
+    await cli("init", "--repo", "/repo");
+
+    expect(h.verifyChecksMock).toHaveBeenCalledWith("/repo", ["npm test"], expect.objectContaining({ timeoutMs: 10 * 60 * 1000 }));
+  });
+
   it("takes the checks unproven when told to skip the running", async () => {
     h.detectChecksMock.mockReturnValue({ checks: ["cargo test"], source: "1 step(s) from 1 CI workflow(s)", skipped: [] });
 

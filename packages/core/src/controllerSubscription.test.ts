@@ -497,6 +497,19 @@ describe("picking a parked run back up", () => {
       payload: { summary: "100% of the weekly limit" },
       ts: Date.now(),
     });
+    // A second gate, of a different kind, open at the same moment. A resume out
+    // of a subscription hold says the operator fixed the token; it says nothing
+    // whatever about whether they approved the plan. Closing this one too would
+    // trade a stale record for a false one — and record it as `approved`.
+    parked.bus.publish({
+      type: "run.gate_opened",
+      runId,
+      gateId: "9c40b1a2",
+      kind: "plan",
+      payload: { summary: "the plan needs an answer" },
+      ts: Date.now(),
+    });
+
     const abandoned = parked.store.openRunGates(runId).filter((g) => g.kind === "subscription");
     expect(abandoned.map((g) => g.gateId)).toEqual(["1546f6e3"]);
 
@@ -517,5 +530,8 @@ describe("picking a parked run back up", () => {
     ) as { decidedBy?: string; feedback?: string } | undefined;
     expect(closed?.decidedBy).toBe("resume");
     expect(closed?.feedback).toBe("resumed from subscription hold");
+    // And the plan gate is untouched: still open, and never resolved by anyone.
+    expect(parked.store.openRunGates(runId).map((g) => g.gateId)).toContain("9c40b1a2");
+    expect(parked.events.some((e) => e.type === "run.gate_resolved" && (e as { gateId?: string }).gateId === "9c40b1a2")).toBe(false);
   });
 });

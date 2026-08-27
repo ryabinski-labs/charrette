@@ -504,3 +504,38 @@ describe("what the intent check left behind", () => {
     expect(store.eventCountSince("run1", "git.merged", 0)).toBe(3);
   });
 });
+
+/**
+ * Which of a run's gates are still asking, computed from the open/resolve pair.
+ *
+ * Both cases below are rows an *older build* wrote. `gateId` and `kind` are
+ * required by the event schema, so nothing this harness publishes today can be
+ * missing either — but `openRunGates` is read on resume, against whatever
+ * database the run already had, and a reader that mishandles an old row on the
+ * resume path is a reader that mishandles it while somebody is waiting.
+ */
+describe("which of a run's gates are still asking", () => {
+  it("ignores a gate event that names no gate", () => {
+    const store = makeStore();
+    makeRun(store);
+    store.db
+      .prepare("INSERT INTO events (runId, taskId, sessionId, type, payload, ts) VALUES (?, NULL, NULL, ?, ?, ?)")
+      .run("run1", "run.gate_opened", JSON.stringify({ kind: "subscription" }), 1);
+    // An unidentified gate can never be matched to its resolution, so counting
+    // it would leave the run reporting a gate that nothing is able to close.
+    expect(store.openRunGates("run1")).toEqual([]);
+  });
+
+  it("reads a gate opened by a build that recorded no kind", () => {
+    const store = makeStore();
+    makeRun(store);
+    store.db
+      .prepare("INSERT INTO events (runId, taskId, sessionId, type, payload, ts) VALUES (?, NULL, NULL, ?, ?, ?)")
+      .run("run1", "run.gate_opened", JSON.stringify({ gateId: "e2f1" }), 1);
+    // The empty string rather than `undefined`, and it matters which: every
+    // caller decides what to do with a gate by comparing its kind, and a gate
+    // whose kind was never recorded must fail that comparison rather than be
+    // treated as one of them.
+    expect(store.openRunGates("run1")).toEqual([{ gateId: "e2f1", kind: "" }]);
+  });
+});
