@@ -279,6 +279,23 @@ export const HarnessEvent = z.discriminatedUnion("type", [
      * that enumeration is a stack left holding ports.
      */
     summoned: z.boolean().default(false),
+    /**
+     * The `ts` of the `run.pitstop_requested` this stop actually carried, or 0.
+     *
+     * Publishing this event is what retires a pending request, and until this
+     * field existed it retired *whichever* request was pending at publish time.
+     * A stop is picked up, runs its demo and its reviewers for ten or twenty
+     * minutes, and only then opens; an operator who asks a question inside that
+     * window had it deleted by a stop that never carried it and never asked it.
+     * On run bc691359 that is exactly what happened: seq 69990 asked why nothing
+     * owned bench.yml at 05:11:38, seq 70000 opened the config-canon cadence stop
+     * at 05:23:36, and the question was gone with nothing anywhere saying so.
+     *
+     * With the instant recorded, `pendingPitStopRequest` can retire only the
+     * request this stop was carrying and leave a newer one standing. 0 means a
+     * stop that carried no question — a cadence stop retires nothing.
+     */
+    askedAt: z.number().default(0),
   }),
   z.object({
     ...base,

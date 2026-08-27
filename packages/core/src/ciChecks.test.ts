@@ -485,3 +485,135 @@ jobs:
     expect(commands(`${PR}  t:\n    steps:\n      - run: cargo test\n`)).toEqual(["cargo test"]);
   });
 });
+
+/**
+ * Run bc691359. `ci.yml` runs `npm ci --prefix ui && npm run --prefix ui build`
+ * before the cargo step in every job, because revetment-control-plane's build
+ * script panics without ui/dist. The `&&` chain is refused, so the cargo step
+ * was lifted on its own — and then failed on every task in the run for an hour,
+ * against a tree that was green. A check that cannot pass in a fresh worktree
+ * is the most expensive thing this scanner can produce.
+ */
+describe("a step that depends on one this scanner would not take", () => {
+  it("does not lift a command whose prerequisite was dropped", () => {
+    const out = scanCiChecks(
+      wf(`${PR}  clippy:
+    steps:
+      - run: npm ci --prefix ui && npm run --prefix ui build
+      - run: cargo clippy -- -D warnings
+`)
+    );
+
+    expect(out.checks).toEqual([]);
+    // And it says why, naming the step it refused rather than going quiet: an
+    // operator comparing this list against their CI needs to know the gap is
+    // deliberate.
+    expect(out.skipped.map((s) => s.reason)).toContain("an earlier step in this job was not lifted, so this one may depend on something that never ran");
+  });
+
+  it("still lifts the steps that ran before the dropped one", () => {
+    // Nothing was missing yet when these ran, so they are as safe as they were.
+    expect(
+      commands(`${PR}  t:
+    steps:
+      - run: cargo deny check
+      - run: npm ci --prefix ui && npm run --prefix ui build
+      - run: cargo test
+`)
+    ).toEqual(["cargo deny check"]);
+  });
+
+  it("does not poison a job over a step that only sets the runner up", () => {
+    // Every job in run bc691359's eight workflows opens with a multi-line
+    // rustup installer. Treating that as a prerequisite refused all fourteen
+    // checks — correct in the strict sense and useless in every other one,
+    // because the machine running the worktree already has the toolchain.
+    expect(
+      commands(`${PR}  t:
+    steps:
+      - name: Install rustup if the runner does not have it
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl -sSf https://sh.rustup.rs | sh -s -- -y
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - run: cargo test
+`)
+    ).toEqual(["cargo test"]);
+  });
+
+  it("does not poison a job over a dependency install", () => {
+    // The canonical Node pipeline, and the regression that made this test
+    // exist: `npm ci` is not a liftable verb, so it is dropped — and treating
+    // the drop as a poisoned prerequisite refused every check behind it. A repo
+    // whose CI is checkout / setup-node / install / lint / test came out of
+    // `harness init` with no deterministic checks at all.
+    //
+    // It is also the one drop that provably needs no poisoning:
+    // `seedWorktreeDeps` installs node_modules into every task worktree before
+    // the first check runs.
+    expect(
+      commands(`${PR}  t:
+    steps:
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+`)
+    ).toEqual(["npm run lint", "npm test"]);
+  });
+
+  it("does not poison a job over a runner-setup step that merely names a build tool", () => {
+    // `make` appears here as an apt package, not as a command. Matching the
+    // word anywhere on the line dropped both cargo checks behind it — the same
+    // "a strict rule refused all fourteen checks" failure as the rustup case
+    // above, moved from rustup to make.
+    expect(
+      commands(`${PR}  t:
+    steps:
+      - run: sudo apt-get install -y make libssl-dev
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace -- -D warnings
+`)
+    ).toEqual(["cargo test --workspace", "cargo clippy --workspace -- -D warnings"]);
+  });
+
+  it("does not poison a job over a package manager that is only asked its version", () => {
+    expect(
+      commands(`${PR}  t:
+    steps:
+      - run: npm --version
+      - run: cargo test
+`)
+    ).toEqual(["cargo test"]);
+  });
+
+  it("still poisons a job over a build that writes into the tree", () => {
+    // The exemption above is for installs, not for builds. `npm run --prefix ui
+    // build` makes ui/dist, which revetment-control-plane's build script reads
+    // — this is the case the whole mechanism exists for, and it is chained
+    // behind an install so the two are told apart per command, not per line.
+    expect(
+      commands(`${PR}  t:
+    steps:
+      - run: npm ci --prefix ui && npm run --prefix ui build
+      - run: cargo clippy -- -D warnings
+`)
+    ).toEqual([]);
+  });
+
+  it("keeps the jobs apart — one job's gap is not another's", () => {
+    // Jobs run independently, so a prerequisite missing from one says nothing
+    // about the next. Poisoning the file rather than the job would throw away
+    // every check after the first awkward step in it.
+    expect(
+      commands(`${PR}  a:
+    steps:
+      - run: npm ci --prefix ui && npm run --prefix ui build
+      - run: cargo clippy -- -D warnings
+  b:
+    steps:
+      - run: cargo audit
+`)
+    ).toEqual(["cargo audit"]);
+  });
+});

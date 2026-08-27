@@ -862,7 +862,27 @@ export const RunConfig = z.object({
       })
     )
     .default([
-      // First, because both of these lose the per-role cap to the architecture
+      // The pipeline, first of all — for the same cap reason as the two below,
+      // and one of its own. A CI task matches the architecture vocabulary
+      // coming and going ("infrastructure", "deployment", "latency", "capacity"
+      // are what a bench gate is *about*), and that rule alone fills all four
+      // slots, so the agent writing `.github/workflows/` would carry four
+      // playbooks and none of them about GitHub Actions.
+      //
+      // The reason to route it at all rather than leave it to scoring is that
+      // `ciScan` makes the pipeline task nearly compulsory — it fires on every
+      // plan that has no CI, because a parser, a library and a bank all need
+      // something that checks the merge — and `queueCiFixes` writes more of
+      // these tasks than any other kind when a run's own PR goes red. Those
+      // fix tasks arrive titled "Fix red CI check: …" with a job log in the
+      // spec, and the thing they most need is the one skill that knows a
+      // report-only gate from a real one, and that "make it green" is not the
+      // same instruction as "delete the check".
+      {
+        when: "\\.github\\/workflows|\\bgithub actions?\\b|\\bworkflow (?:file|ya?ml|run|job|dispatch)\\b|\\bci ?\\/ ?cd\\b|\\bci (?:pipeline|workflow|check|job|gate|run|is red)\\b|\\bred ci\\b|\\bcontinuous integration\\b|\\brequired check\\b|\\breusable workflow\\b|\\bcomposite action\\b|\\bself-?hosted runner\\b|\\bactions? runner\\b|\\brunner (?:label|group|fleet)\\b|\\bdependabot\\b|\\bcoverage (?:floor|threshold|gate)\\b",
+        skills: ["github-pipeline-expert"],
+      },
+      // Then these two, because both lose the per-role cap to the architecture
       // rule otherwise. A DNS task and a greenfield task both match the
       // architecture vocabulary, and that rule alone fills all four slots — so
       // the one skill that knows the actual answer would be the one dropped.

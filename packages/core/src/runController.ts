@@ -5,6 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import {
+  GateKind,
   Plan,
   PlanBatch,
   PlanBreakdown,
@@ -1140,6 +1141,30 @@ export class RunController {
   }
 
   /**
+   * Put a task back to a clean slate of attempts.
+   *
+   * Every counter here answers the same question — "how many times has this
+   * task already tried, and should it be allowed another?" — so they are reset
+   * together or not at all. `store.ts` states that invariant on
+   * `emptyDeliveries`; this is where it is kept.
+   *
+   * Two things buy a task fresh iterations. An operator who has read the
+   * failure and said what to do about it changed the conditions the old
+   * failures happened under. And a task cancelled as `unreachable` was never
+   * judged on its own work at all — it was collateral damage of a parked
+   * dependency, and by the time that dependency is merged the ground it failed
+   * on has moved. Run bc691359 reopened `cp-no-third-party-test` four days
+   * after cancelling it and dispatched it carrying two QA strikes from a life
+   * that ended before the work it was waiting for existed; its first honest
+   * failure would have parked it.
+   */
+  private freshIterations(runId: string, taskId: string): void {
+    this.store.updateTask(runId, taskId, {
+      qaIterations: 0, respawns: 0, emptyDeliveries: 0, conflictFixes: 0, errorSummary: null,
+    });
+  }
+
+  /**
    * Tasks cancelled as "unreachable" whose blockers have since resolved: every
    * dependency is merged, or is itself in the returned set. This is the run
    * where a parked dependency was later revived and merged, but its cancelled
@@ -1219,7 +1244,7 @@ export class RunController {
       const why = t.errorSummary || this.store.taskStateReason(runId, t.id) || "parked";
       const guidance = await this.askOperator(runId, t.id, why);
       if (guidance === null) continue; // still parked; no transition needed
-      this.store.updateTask(runId, t.id, { qaIterations: 0, respawns: 0, emptyDeliveries: 0, conflictFixes: 0, errorSummary: null });
+      this.freshIterations(runId, t.id);
       this.revivalGuidance.set(`${runId}/${t.id}`, `This task was parked (${why.slice(0, 300)}) and the operator reopened it with this guidance — follow it over anything that contradicts it:\n${guidance}\n\nInspect git log in this worktree first: earlier iterations may already contain most of the work.`);
       this.store.transitionTask(runId, t.id, "READY", "the operator answered the escalation; fresh iterations");
       revived++;
@@ -1230,6 +1255,9 @@ export class RunController {
       // operator just revived a parked task its "unreachable" reason pointed at.
       // The scheduler re-cancels any whose dependencies are in fact still parked.
       if (revivable.has(t.id) || (revived && this.store.taskStateReason(runId, t.id).startsWith("unreachable"))) {
+        // The cancellation reason is read above, from the transition event
+        // rather than the row, so clearing `errorSummary` here cannot affect it.
+        this.freshIterations(runId, t.id);
         this.store.transitionTask(runId, t.id, "PENDING", "dependencies reopened");
       }
     }
@@ -1376,6 +1404,7 @@ export class RunController {
     } else if (run.state === "BUDGET_HOLD") {
       // The cap that parked it is still in force: execution re-opens the budget
       // gate on the first check, giving the operator another chance to raise it.
+      this.closeAbandonedGates(runId, "budget", "resumed from budget hold");
       this.store.transitionRun(runId, "EXECUTING", "resumed from budget hold");
       run = this.store.getRun(runId)!;
     } else if (run.state === "LIMIT_HOLD") {
@@ -1386,6 +1415,7 @@ export class RunController {
       // has just read the account to find out which. If the plan is still spent
       // the gate opens again immediately, which is the honest outcome — nothing
       // was lost by trying.
+      this.closeAbandonedGates(runId, "subscription", "resumed from subscription hold");
       this.store.transitionRun(runId, "EXECUTING", "resumed from subscription hold");
       run = this.store.getRun(runId)!;
     }
@@ -1840,7 +1870,7 @@ export class RunController {
       id: `intent-fix-${round}-${i + 1}`,
       epicId: INTENT_FIX_EPIC.id,
       scenarioIds: [],
-      title: `Close intent gap: ${gap.split("\n")[0]!.slice(0, 80)}`,
+      title: `Close intent gap: ${gap.split("\n")[0]!.slice(0, 80).trim()}`,
       spec: `The run finished and a validation agent read the whole merged tree against the operator's original intent. It found this gap:\n\n${gap}\n\nWhat it concluded overall:\n${verdict.summary}\n\nClose that gap in the integration branch you are working from — it already contains every merged task, so the code the gap refers to is here. Fix the gap itself, not the surrounding design: the rest of this tree was reviewed and accepted, and a rewrite costs more than the gap did. If the gap turns out not to be real, say so in your summary with the file and line that settle it rather than changing code to satisfy it.`,
       acceptanceCriteria: [gap.split("\n")[0]!.slice(0, 300), "The claim the gap makes is no longer true of this tree, demonstrated by a check or a test that fails without the change"],
       // Chained: same omission, same file, and nothing here is urgent enough to
@@ -2058,10 +2088,37 @@ export class RunController {
           text: `re-ran the failed jobs on #${prNumber} before diagnosing — a flake that passes on the second go is not work`,
           ts: Date.now(),
         });
+        const red = ci; // the verdict that sent us here, before the re-ask
         await this.awaitChecks(runId);
         // Non-null by the same construction as `prNumber` above: a status was
         // on the record before the re-run, and events only accumulate.
-        ci = this.store.ciStatus(runId)!;
+        const after = this.store.ciStatus(runId)!;
+        // A re-run answers "was that only flake?" only when it settles, and
+        // `awaitChecks` does not always get to settle: GitHub going unreadable
+        // ends its wait, and the newest `run.ci_status` is then the `pending`
+        // it published while waiting. `ciStatus` is last-event-wins, so that
+        // pending does not merely fail to answer — it overwrites the red this
+        // function was called about, and reads below as "nothing is failing".
+        //
+        // Run bc691359 exited down that path. `test`, `coverage (project
+        // floor)` and two bench gates had failed on #334; the failed jobs were
+        // re-run; the next ask came back unreadable a minute later; and the
+        // pending left behind stood the run down. Neither of its two fix
+        // rounds was spent, `ciPitStop` found nothing to escalate, and the run
+        // reported "1 pull request open for review; CI still running" over a
+        // branch that is red to this day.
+        //
+        // Not knowing is not a pass. Only a settled answer overturns the one
+        // already on the record.
+        //
+        // `none` is the other way of not knowing, and it took the same path out
+        // until this line named it: `awaitChecks` publishes `state: "none"` when
+        // the head carries no check runs at all, and its own comment says
+        // "'None' is not a pass — it is the absence of the only check that
+        // judges the merge." A re-run that comes back before GitHub has
+        // re-attached its check runs answers nothing, and letting it through
+        // discarded the red verdict exactly as the pending did.
+        ci = after.state === "passing" || after.state === "failing" ? after : red;
         if (ci.state !== "failing") return [];
       }
     }
@@ -3100,7 +3157,7 @@ export class RunController {
     }
     // The answer buys a whole new set of iterations, not one more attempt: the
     // operator just changed the conditions the old failures happened under.
-    this.store.updateTask(runId, taskId, { qaIterations: 0, respawns: 0, emptyDeliveries: 0, conflictFixes: 0, errorSummary: null });
+    this.freshIterations(runId, taskId);
     return guidance;
   }
 
@@ -3464,7 +3521,7 @@ export class RunController {
     // now survives to be read, which is the whole point of persisting it.
     const revived = !hit && task.state === "NEEDS_HUMAN" && this.store.getRun(runId)?.state === "EXECUTING";
     if (revived) {
-      this.store.updateTask(runId, target, { qaIterations: 0, respawns: 0, emptyDeliveries: 0, conflictFixes: 0, errorSummary: null });
+      this.freshIterations(runId, target);
       this.store.transitionTask(runId, target, "READY", "reopened by the operator's feedback");
       // …and tell the loop now, rather than leaving the revived task to wait out
       // whatever unrelated task happens to be mid-iteration.
@@ -4188,7 +4245,12 @@ export class RunController {
       // No `epicIds`: this stop covers no epic boundary, and claiming one would
       // silently cancel the real pit stop that epic is owed — the same reason
       // `resumePitStop` leaves it empty.
-      return { reason: "you asked for a look at the product", epicIds: [], question: asked.question };
+      return {
+        reason: "you asked for a look at the product",
+        epicIds: [],
+        question: asked.question,
+        askedAt: asked.ts,
+      };
     }
     if (run.config.pitStop.every === "never") return null;
     const merged = this.store.mergedTaskIds(runId);
@@ -4304,6 +4366,10 @@ export class RunController {
       // answered the question, and the request should survive to be answered by
       // whatever restarts the run.
       summoned: Boolean(question),
+      // Which request this stop retires. Without it the publish below retires
+      // whatever is pending *now*, which after a twenty-minute demo is not
+      // necessarily the question this stop was picked up to ask.
+      askedAt: due.askedAt ?? 0,
       ts: Date.now(),
     });
 
@@ -4972,11 +5038,28 @@ export class RunController {
         ...epics.map((e) => ({ id: e.id, title: e.title, summary: "" })),
         ...breakdown.epics.filter((e) => !epics.some((x) => x.id === e.id)),
       ];
+      // A CANCELLED task still owns its id — a re-plan that reuses it would
+      // take a real task's branch and issue history, so it stays in the graph
+      // and the duplicate-id check keeps seeing it. Its `dependsOn` edges do
+      // not survive with it. Cancelling a task never rewrote the graph around
+      // it, so those edges routinely point at PENDING tasks, and a re-plan
+      // drops PENDING tasks by design: validating the two together makes every
+      // dropped task look like a dangling reference from a task that was never
+      // going to run again, and throws out an otherwise valid plan whole.
+      //
+      // Run bc691359 hit this on its third re-plan attempt in a row. Six
+      // cancelled tasks held edges into the queue; the planner returned exactly
+      // what the operator asked for and the whole thing was refused with
+      // `task ci-e2e-operator-journey depends on unknown task cp-embed-spa`.
+      // The more of a run's history is cancelled, the less it can be re-planned
+      // — which is backwards, since a run accumulates cancellations precisely
+      // by being re-planned.
+      const constraining = keep.map((t) => (t.state === "CANCELLED" ? { ...t, dependsOn: [] } : t));
       const errors = validatePlanDag({
         prdMarkdown: "x",
         conventionsMarkdown: "x",
         epics: epicUnion,
-        tasks: [...keep, ...breakdown.tasks],
+        tasks: [...constraining, ...breakdown.tasks],
       });
       if (errors.length) throw new Error(`re-planned DAG is invalid: ${errors.join("; ")}`);
       // The pit stop can re-plan into the same out-of-scope mistake the first
@@ -5875,6 +5958,16 @@ export class RunController {
         }
       }
 
+      // Re-read before QA is briefed. `task` was read when this iteration
+      // began, and between there and here sit the worker session and five
+      // operator gates — which is exactly when someone amends the criteria,
+      // because a gate is where they are looking at the task. Grading the
+      // work against a bar the operator has already moved wastes the round
+      // the amendment existed to save, and reports a failure against wording
+      // that no longer stands. The probe is re-read for the same reason a few
+      // lines above; the criteria deserve the same freshness, and so does
+      // `touchedPaths`, which the drift note below reads.
+      task = this.store.getTask(runId, taskId)!;
       this.store.transitionTask(runId, taskId, "QA");
       const diffStat = await git(wt.path, ["diff", "--stat", `${this.wt.integrationBranch(runId)}...HEAD`]).catch(() => "unavailable");
       // What the plan expected this task to touch, against what it did. A
@@ -6513,6 +6606,51 @@ export class RunController {
    * its own copy of the same question.
    */
   private subscriptionChain: Promise<void> = Promise.resolve();
+
+  /**
+   * Close the gates the previous process left open when it died holding one.
+   *
+   * A hold state and its gate are two records of one fact, written by the same
+   * call: `askSubscription` parks the run and then awaits an answer. Kill the
+   * process while it waits and only the parking survives — the awaited promise
+   * dies with it, so `run.gate_resolved` is never written. `resume` then lifts
+   * the hold and the gate is left standing, and because nothing ever revisits an
+   * opened gate, it is answered by nobody for the life of the run.
+   *
+   * Resuming *is* the answer: the operator is at the keyboard, they either
+   * pointed the run at another account or waited out the window, and the
+   * preflight read above has already re-measured which. So the gate is closed
+   * as approved — never attributed to a decider, or the auto-raise rounds in
+   * `budgetAutoRaises` would count a resume as a skill's decision and spend the
+   * operator's remaining rounds on nothing.
+   *
+   * `"resume"` rather than `"operator"`, because the two are not the same
+   * reading and one report needs to tell them apart. `postmortem` counts every
+   * gate closed by `"operator"` as time the run spent waiting on a person, so
+   * attributing this one to them booked the whole span the process was dead —
+   * which nobody was waiting through — as operator wait, and showed a budget
+   * gate approved by somebody who never saw it. `budgetAutoRaises` excludes
+   * this word for the same reason it excludes `"operator"`.
+   *
+   * Only gates of the kind that produced this hold: a subscription resume says
+   * nothing about an open plan gate, and closing one it did not answer would
+   * trade a stale record for a false one.
+   */
+  private closeAbandonedGates(runId: string, kind: z.infer<typeof GateKind>, feedback: string): void {
+    for (const gate of this.store.openRunGates(runId)) {
+      if (gate.kind !== kind) continue;
+      this.bus.publish({
+        type: "run.gate_resolved",
+        runId,
+        gateId: gate.gateId,
+        kind,
+        resolution: "approved",
+        feedback,
+        decidedBy: "resume",
+        ts: Date.now(),
+      });
+    }
+  }
 
   private publishReading(runId: string, reading: SubscriptionReading): void {
     this.bus.publish({

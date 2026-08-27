@@ -153,6 +153,7 @@ describe("skill routing", () => {
     "dns-project-iac-engineer",
     "fullstack-app",
     "visual-qa-agent",
+    "github-pipeline-expert",
   ];
 
   function routingSkillsDir(): string {
@@ -237,6 +238,28 @@ describe("skill routing", () => {
     // Four slots, five matching skills: the architecture rule's last one gives way.
     expect(system).not.toContain('<skill name="frontend-design"');
   }, 30_000);
+
+  /**
+   * The pipeline is routed ahead of everything for the same cap reason, and it
+   * needs the ordering more than DNS does: a CI task matches the architecture
+   * vocabulary by its nature. "Infrastructure", "deployment", "latency" and
+   * "capacity" are what a bench gate is *about*, so the agent writing
+   * `.github/workflows/` would otherwise carry four playbooks, none of them
+   * about GitHub Actions.
+   */
+  it("routes pipeline work to the pipeline expert, ahead of the architecture skills it also matches", async () => {
+    const built = await inject("Build the CI pipeline", "Add .github/workflows/ci.yml running fmt, clippy and the test suite behind a coverage floor of 75%");
+    expect(built).toContain('<skill name="github-pipeline-expert"');
+
+    // The shape `queueCiFixes` writes, on a check that is itself about latency.
+    const fix = await inject(
+      "Fix red CI check: dev-loop bench + p99 regression gate",
+      "The repo's own CI check failed on the merged branch after a re-run. Reproduce it from the workflow definition in .github/workflows/; the gate measures added latency and throughput against a candidate build."
+    );
+    expect(fix).toContain('<skill name="github-pipeline-expert"');
+    // Four slots, five matching skills: the architecture rule's last one gives way.
+    expect(fix).not.toContain('<skill name="frontend-design"');
+  }, 60_000);
 
   it("consults the stack skill when a task picks a stack rather than extends one", async () => {
     const greenfield = await inject("Bootstrap the companion service", "Scaffold a new service from scratch with magic-link auth and DynamoDB");

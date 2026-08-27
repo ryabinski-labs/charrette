@@ -144,11 +144,101 @@ const ESCAPES = /[>`]|\$\(|\|\||&&|;|\|/;
  * better. Duplicates across workflows are dropped, keeping the first sighting
  * and its provenance.
  */
+/**
+ * Commands that leave build inputs in the working tree.
+ *
+ * A job is a sequence, and dropping one of its steps can make everything after
+ * it unliftable — but only when the dropped step left something behind that the
+ * later command reads. Most of what CI does first is set up the *runner*:
+ * install rustup, apt-get libclang, warm ~/.cargo. A developer machine already
+ * satisfies those, and treating them as prerequisites lifts nothing at all —
+ * run bc691359's eight workflows open every job with a multi-line rustup
+ * installer, so a strict rule refused all fourteen checks.
+ *
+ * So the test is narrow and names the thing that actually bit: a build tool,
+ * at the head of a command, writing something into the repository that a later
+ * step reads. `npm run build` makes ui/dist, and revetment-control-plane's
+ * build script panics without ui/dist, which is how a lifted
+ * `cargo clippy --workspace --all-features` failed every task for an hour.
+ *
+ * Installing dependencies is deliberately not on that list — see
+ * DEPENDENCY_INSTALL for why.
+ *
+ * It is a heuristic, and it errs toward lifting: a step that writes the tree by
+ * some means not listed here will not poison its job, and the check after it
+ * will fail in the worktree the way it always did. `verifyChecks` is what
+ * catches that, by proving every check locally before the run starts.
+ */
+const WRITES_BUILD_INPUTS = [
+  // A verb, not a flag: `npm run build` writes ui/dist, `npm --version` writes
+  // nothing and used to poison the job anyway.
+  /^(?:npm|yarn|pnpm|bun)\s+(?![-@])\S/,
+  /^cargo\s+(?:build|xtask|run)\b/,
+  /^make\b/,
+  /^go\s+(?:build|generate)\b/,
+  /^dotnet\s+build\b/,
+  /^(?:\.\/gradlew|gradlew?|mvn)\b/,
+  /^(?:protoc|buf\s+generate)\b/,
+];
+
+/**
+ * Installing dependencies is not writing a build input.
+ *
+ * `npm ci` makes node_modules, and `seedWorktreeDeps` already puts node_modules
+ * in every task worktree before the first check runs — which is the whole
+ * reason it exists. Treating the install as a poisoner cost the canonical Node
+ * workflow every check it had: `npm ci` is not a liftable verb, so it is
+ * dropped, and dropping it used to refuse `npm run lint` and `npm test` behind
+ * it. A repository whose CI is checkout / setup-node / install / lint / test —
+ * which is most of them — came out of `harness init` with no checks at all.
+ */
+const DEPENDENCY_INSTALL = [
+  /^(?:npm|yarn|pnpm|bun)\s+(?:ci|install|i|add)\b/,
+  /^(?:bundle|composer)\s+install\b/,
+  /^(?:pip|pip3)\s+install\b/,
+  /^uv\s+(?:pip\s+install|sync)\b/,
+  /^go\s+mod\s+download\b/,
+];
+
+/**
+ * Command heads, not words anywhere on the line.
+ *
+ * The patterns above are anchored because an unanchored `\bmake\b` matches
+ * `sudo apt-get install -y make libssl-dev` — a runner-setup step that writes
+ * nothing into the repository — and dropped `cargo test --workspace` and
+ * `cargo clippy --workspace` behind it. That is the same "a strict rule refused
+ * all fourteen checks" failure the narrow test was written to avoid; it had
+ * only moved from rustup to make.
+ *
+ * Chains are split rather than exempted, because the step that started all of
+ * this was one: `npm ci --prefix ui && npm run --prefix ui build` is an install
+ * the seeder covers followed by a build it does not, and only the second half
+ * may poison the job.
+ */
+function writesBuildInputs(script: string): boolean {
+  return script
+    .replace(/\s*\\\n\s*/g, " ")
+    .split("\n")
+    .flatMap((l) => l.split(/&&|\|\||[;|]/))
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith("#"))
+    .some((l) => !DEPENDENCY_INSTALL.some((re) => re.test(l)) && WRITES_BUILD_INPUTS.some((re) => re.test(l)));
+}
+
 export function scanCiChecks(files: WorkflowFile[]): CiCheckScan {
   const checks: CiCheck[] = [];
   const skipped: SkippedStep[] = [];
   const seen = new Set<string>();
   const refused = new Set<string>();
+  // Jobs where a `run:` step was left behind. A job is a sequence, not a bag:
+  // the steps after a dropped one may depend on what it did, and a check that
+  // cannot pass in a fresh worktree is the most expensive thing this file can
+  // produce — every task in the run is charged for a failure that was never
+  // theirs. Run bc691359 lifted `cargo clippy --workspace --all-features` out
+  // of a job whose previous step was `npm ci --prefix ui && npm run --prefix ui
+  // build`; the `&&` chain is refused, so the lifted clippy hit a build script
+  // that panics without ui/dist and failed on every task for an hour.
+  const brokenJobs = new Set<string>();
 
   for (const file of [...files].sort((a, b) => a.path.localeCompare(b.path))) {
     const text = withoutComments(file.text);
@@ -163,8 +253,21 @@ export function scanCiChecks(files: WorkflowFile[]): CiCheckScan {
       // one nobody reads, and the point of the list is that it gets read.
       if (step.script.trim() === "") continue;
       const where = `${name} › ${step.job} › ${step.name || step.script.split("\n")[0]!.slice(0, 40)}`;
+      const job = `${file.path}\u0000${step.job}`;
+      // Steps before the first dropped one are safe — nothing was missing yet.
+      // From the first drop onward, this job's remaining steps are unliftable
+      // whatever they say, because what they need may be what was dropped.
+      if (brokenJobs.has(job)) {
+        const gap = `prereq\u0000${job}`;
+        if (!refused.has(gap)) {
+          refused.add(gap);
+          skipped.push({ source: where, reason: "an earlier step in this job was not lifted, so this one may depend on something that never ran" });
+        }
+        continue;
+      }
       const verdict = lift(step.script, step.guarded, env);
       if (typeof verdict !== "string") {
+        if (writesBuildInputs(step.script)) brokenJobs.add(job);
         // One gap, not eight. Run bc691359's workflows install rustup in every
         // job, so an undeduplicated list is eighty-five lines of the same four
         // sentences — and a list that long is one the operator scrolls past,

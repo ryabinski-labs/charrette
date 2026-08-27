@@ -48,6 +48,13 @@ CREATE TABLE IF NOT EXISTS events (
   type TEXT NOT NULL, payload TEXT NOT NULL, ts INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_run ON events(runId, seq);
+-- Type-filtered reads, which the dashboard does four times per run per poll.
+-- Without this every one of them walks the run's whole event range: the worst
+-- is the plan-intent verdict, an ORDER BY seq DESC LIMIT 1 on a type whose
+-- only row is among the oldest in the run, so it scans essentially everything
+-- before it finds one. On a run with 80k events, five seconds apart, on the
+-- same loopback the watcher is also polling.
+CREATE INDEX IF NOT EXISTS idx_events_run_type ON events(runId, type, seq);
 CREATE TABLE IF NOT EXISTS ledger (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   runId TEXT NOT NULL, taskId TEXT, sessionId TEXT NOT NULL, model TEXT NOT NULL,
@@ -194,6 +201,15 @@ export interface SessionRow {
   /** The harness build this session was spawned under; "" before it was recorded. */
   build: string;
 }
+
+/**
+ * `decidedBy` values that mean a person, not one of the run's own deciders.
+ *
+ * `operator` is somebody answering the gate. `resume` is `closeAbandonedGates`
+ * shutting one the process died holding — also not a decider, and counting
+ * either as an automatic raise would spend a round nobody used.
+ */
+const HUMAN_DECIDERS = new Set(["operator", "resume"]);
 
 export class InvalidTransition extends Error {}
 
@@ -590,6 +606,38 @@ export class Store {
   }
 
   /**
+   * What the plan gate's intent check said about the plan itself.
+   *
+   * Distinct from `intentVerdict` in the only way that matters: this one read a
+   * list of tasks, not a tree. It is what the dashboard has to show for the
+   * hours before anything merges, and it must be labelled as being about the
+   * plan — a plan that covers the assignment is not a product that does.
+   */
+  planIntentVerdict(runId: string): { verdict: string; gaps: string[] } | null {
+    const row = this.db
+      .prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.plan_intent_verdict' ORDER BY seq DESC LIMIT 1")
+      .get(runId) as { payload: string } | undefined;
+    if (!row) return null;
+    const parsed = JSON.parse(row.payload) as { verdict: string; gaps?: string[] };
+    return { verdict: parsed.verdict, gaps: parsed.gaps ?? [] };
+  }
+
+  /**
+   * How many events of a type landed after a point.
+   *
+   * The intent posture needs it for one question: how many merges the tree has
+   * taken on since the last thing that read it. A verdict is a statement about
+   * the tree it was given, and the run keeps merging underneath it.
+   */
+  eventCountSince(runId: string, type: string, seq: number): number {
+    return (
+      this.db.prepare("SELECT COUNT(*) c FROM events WHERE runId = ? AND type = ? AND seq > ?").get(runId, type, seq) as {
+        c: number;
+      }
+    ).c;
+  }
+
+  /**
    * The intake conversation as far as it got, in order, with `answer: null` for
    * a question the operator never came back to.
    *
@@ -732,10 +780,13 @@ export class Store {
    * lost in precisely the window it has to survive.
    *
    * Three event types, one pass, last-one-wins: a request is pending until
-   * either a stop opens (it consumed the request) or the operator cancels it.
-   * Asking twice is therefore idempotent — the second request replaces the
-   * first's question rather than queueing a second stop — which is the behaviour
-   * an operator who clicks again because nothing visibly happened expects.
+   * either the stop that carried it opens or the operator cancels it. Asking
+   * twice is therefore idempotent — the second request replaces the first's
+   * question rather than queueing a second stop — which is the behaviour an
+   * operator who clicks again because nothing visibly happened expects.
+   *
+   * "The stop that carried it", not "any stop": see the `run.pitstop_opened`
+   * branch below for why the difference is the whole point.
    */
   pendingPitStopRequest(runId: string): { question: string; ts: number } | null {
     const rows = this.db
@@ -746,6 +797,28 @@ export class Store {
       .all(runId) as { type: string; payload: string }[];
     let pending: { question: string; ts: number } | null = null;
     for (const r of rows) {
+      if (r.type === "run.pitstop_opened") {
+        // A stop retires the request it carried, and only that one. It is
+        // published after the demo and the reviewers — ten or twenty minutes
+        // after the stop was picked up — so "whatever is pending now" is not
+        // the same set as "what this stop is asking". A question typed inside
+        // that window belongs to the *next* stop and must survive this one.
+        //
+        // `askedAt` is the request instant this stop carried; 0 means it
+        // carried none, which is every cadence stop. Events written before the
+        // field existed have no instant to compare, so they keep the old
+        // behaviour and retire a pending request iff they were summoned — which
+        // is what they meant.
+        const p = JSON.parse(r.payload) as { askedAt?: number; summoned?: boolean };
+        // A stop nobody asked for carried no question and so answers none. It
+        // used to retire one anyway, which is the bug.
+        if (!p.summoned) continue;
+        // A summoned stop retires the request it was picked up with. `askedAt`
+        // is that instant; a stop written before the field existed does not say,
+        // and the only safe reading of an unadorned summoned stop is the old one.
+        if (!p.askedAt || (pending !== null && p.askedAt >= pending.ts)) pending = null;
+        continue;
+      }
       if (r.type !== "run.pitstop_requested") {
         pending = null;
         continue;
@@ -857,11 +930,45 @@ export class Store {
       if (e.kind !== "budget") continue;
       if (row.type === "run.gate_opened") {
         mine.add(e.gateId);
-      } else if (mine.has(e.gateId) && e.resolution === "approved" && e.decidedBy && e.decidedBy !== "operator") {
+        // `operator` and `resume` are both a person, not a decider: the first
+        // answered the gate, the second closed one the process died holding.
+        // Counting either would spend an auto-raise round nobody used.
+      } else if (mine.has(e.gateId) && e.resolution === "approved" && e.decidedBy && !HUMAN_DECIDERS.has(e.decidedBy)) {
         raises++;
       }
     }
     return raises;
+  }
+
+  /**
+   * The run-level gates that were opened and never closed.
+   *
+   * A gate is a question with a promise awaiting the answer, so it is normally
+   * resolved by the same call that opened it. A process that dies while one is
+   * open takes that promise with it, and nothing on the next start goes looking:
+   * the `run.gate_opened` stands in the event store with no `run.gate_resolved`
+   * after it, and every reader — the dashboard, `postmortem`, a watcher — reports
+   * a gate nobody will ever answer, forever.
+   *
+   * Run bc691359 carried six of them. The one that cost something: seq 66181
+   * opened a subscription gate at 100% of the weekly window, seq 66180 parked the
+   * run in LIMIT_HOLD, the operator exported a different token and resumed, and
+   * seq 66204 took the run back to EXECUTING at 20:35:56 without ever closing the
+   * gate. Two hours later the run was healthy and its own record still said it
+   * was waiting on an answer.
+   */
+  openRunGates(runId: string): { gateId: string; kind: string }[] {
+    const rows = this.db
+      .prepare("SELECT type, payload FROM events WHERE runId = ? AND type IN ('run.gate_opened','run.gate_resolved') ORDER BY seq")
+      .all(runId) as { type: string; payload: string }[];
+    const open = new Map<string, string>();
+    for (const row of rows) {
+      const e = JSON.parse(row.payload) as { gateId?: string; kind?: string };
+      if (!e.gateId) continue;
+      if (row.type === "run.gate_opened") open.set(e.gateId, e.kind ?? "");
+      else open.delete(e.gateId);
+    }
+    return [...open].map(([gateId, kind]) => ({ gateId, kind }));
   }
 
   /**

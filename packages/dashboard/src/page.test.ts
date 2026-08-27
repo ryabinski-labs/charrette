@@ -120,6 +120,175 @@ beforeEach(() => {
   return () => vi.useRealTimers();
 });
 
+/** The posture the server ships on /api/state, with sane defaults. */
+function intent(over: Partial<Record<string, Any>> = {}): Any {
+  return {
+    percent: 75, delivered: 3, total: 4, milestonesDone: 1,
+    milestones: [
+      { id: "engine", title: "M1: rule compiler and evaluation", done: 2, total: 2, parked: 0, percent: 100 },
+      { id: "ui", title: "M2/M4: operator UI", done: 1, total: 2, parked: 0, percent: 50 },
+    ],
+    stance: "unjudged", verdict: null, judged: "nothing", gaps: [],
+    closed: 0, inFlight: 0, parked: 0, unowned: 0,
+    staleMerges: 0, roundsLeft: 1, gapProgress: null,
+    deliveryHeadline: "3 of 4 tasks the plan asked for are merged, across 2 milestones.",
+    headline: "Nothing has read this run against what you asked for yet.", ...over,
+  };
+}
+
+function gap(text: string, status: string, taskId: string | null = null): Any {
+  return { text, status, taskId };
+}
+
+/**
+ * The second meter in the header.
+ *
+ * It carries two facts that must never be allowed to edit each other: how much
+ * of the asked-for work is built, and what the intent check says is missing
+ * from what that work produced. Most of what is pinned here is what it must
+ * refuse to say \u2014 that a failing check makes the run less built, that an
+ * unmeasured run is passing, that a parked task is progress.
+ */
+describe("the header's intent meter", () => {
+  it("stays out of the header until a run ships a posture for it", async () => {
+    const page = mount(state({ runs: [run()] }));
+    await page.refresh();
+    expect(($("#intentmeter") as HTMLElement).hidden).toBe(true);
+  });
+
+  it("does not aggregate across runs, because two runs are two assignments", async () => {
+    const page = mount(state({ runs: [run({ id: "r1", intent: intent() }), run({ id: "r2", intent: intent() })] }));
+    await page.refresh();
+    expect(($("#intentmeter") as HTMLElement).hidden).toBe(true);
+  });
+
+  it("draws the work delivered, and says the check has not run yet rather than implying it passed", async () => {
+    const page = mount(state({ runs: [run({ intent: intent() })] }));
+    await page.refresh();
+
+    expect($("#intentnum")!.textContent).toBe("75% delivered");
+    expect(($("#intentbar")!.firstChild as HTMLElement).style.width).toBe("75%");
+    expect($("#intentnote")!.textContent).toBe("not judged yet");
+    // Unjudged is not a failing state either \u2014 nothing is coloured for it.
+    expect($("#intentnote")!.className).toBe("");
+    // No gaps yet, so the gap half of the panel is not there to be read.
+    expect(($("#intentgapbox") as HTMLElement).style.display).toBe("none");
+  });
+
+  it("hatches the bar rather than drawing an empty one when there is no plan to measure", async () => {
+    const page = mount(state({ runs: [run({ intent: intent({ percent: null, milestones: [], total: 0, delivered: 0 }) })] }));
+    await page.refresh();
+
+    expect($("#intentnum")!.textContent).toBe("no plan yet");
+    // An empty bar reads as "none of it is built"; the truth is "there is
+    // nothing yet to be built against".
+    expect($("#intentbar")!.className).toContain("idle");
+  });
+
+  it("does not let a failing check move the completion bar", async () => {
+    const failing = intent({
+      stance: "unowned", verdict: "FAIL", judged: "tree", gapProgress: 0, unowned: 2, staleMerges: 23, roundsLeft: 0,
+      gaps: [gap("The p99 was never captured.", "unowned"), gap("No Dockerfile exists.", "unowned")],
+      headline: "2 things you asked for are still missing and nothing in the run is moving on them.",
+    });
+    const page = mount(state({ runs: [run({ intent: failing })] }));
+    await page.refresh();
+
+    // Same 75% as the clean case above. The check is a separate fact and it
+    // gets a separate place to be stated in.
+    expect($("#intentnum")!.textContent).toBe("75% delivered");
+    expect($("#intentnote")!.textContent).toContain("2 gaps open");
+    expect($("#intentnote")!.textContent).toContain("no rounds left");
+    expect($("#intentnote")!.textContent).toContain("23 merges since");
+    // Red is reserved for gaps nothing is moving on.
+    expect($("#intentnote")!.className).toBe("bad");
+  });
+
+  it("breaks the work down by the milestones the assignment asked for", async () => {
+    const page = mount(state({ runs: [run({ intent: intent() })] }));
+    await page.refresh();
+
+    expect(all("#intentms .ms .t").map((n) => n.textContent)).toEqual([
+      "M1: rule compiler and evaluation",
+      "M2/M4: operator UI",
+    ]);
+    expect(all("#intentms .ms .n").map((n) => n.textContent)).toEqual(["2/2", "1/2"]);
+    expect(all("#intentms .ms").map((n) => n.className)).toEqual(["ms full", "ms"]);
+  });
+
+  it("marks a milestone whose work is parked, because nothing there moves without the operator", async () => {
+    const page = mount(state({ runs: [run({ intent: intent({
+      milestones: [{ id: "bench", title: "Measurement: one authorised Tier 1 session", done: 0, total: 1, parked: 1, percent: 0 }],
+    }) })] }));
+    await page.refresh();
+
+    expect($("#intentms .ms")!.className).toContain("held");
+  });
+
+  it("lists every gap with the task carrying it, so the count is checkable", async () => {
+    const page = mount(state({ runs: [run({ intent: intent({
+      stance: "closing", verdict: "FAIL", judged: "tree", gapProgress: 50, closed: 1, inFlight: 1,
+      gaps: [gap("Ingestion is absent.", "closed", "intent-fix-1-1"), gap("No Dockerfile exists.", "in-flight", "intent-fix-1-2")],
+      headline: "1 of 2 gaps the last check found is closed and 1 more in flight.",
+    }) })] }));
+    await page.refresh();
+
+    expect(all("#intentgaps .gap .chip").map((n) => n.textContent)).toEqual(["closed", "in flight"]);
+    expect(all("#intentgaps .gap .who").map((n) => n.textContent)).toEqual(["intent-fix-1-1", "intent-fix-1-2"]);
+    expect($("#intentgapline")!.textContent).toContain("1 more in flight");
+    // A run that is actually closing its gaps must not read like one that stopped.
+    expect($("#intentnote")!.className).toBe("");
+  });
+
+  it("says a stale pass is stale rather than current", async () => {
+    const page = mount(state({ runs: [run({ intent: intent({
+      stance: "met", verdict: "PASS", judged: "tree", staleMerges: 23,
+      headline: "The last check found nothing missing, 23 merges ago with nothing re-read since.",
+    }) })] }));
+    await page.refresh();
+
+    expect($("#intentnote")!.textContent).toBe("no gaps open \u00b7 23 merges since");
+  });
+
+  it("keeps the milestone rows across a re-render that changed nothing", async () => {
+    const posture = intent();
+    const page = mount(state({ runs: [run({ intent: posture })] }));
+    await page.refresh();
+
+    const before = $("#intentms .ms");
+    page.serve(state({ runs: [run({ intent: posture, spentUsd: 2 })] }));
+    await page.refresh();
+
+    // An equal node is not the same node: replacing it takes the operator's
+    // selection out of the middle of the row they were reading.
+    expect($("#intentms .ms")).toBe(before);
+  });
+
+
+  it("reserves amber for a gap that has an owner and still needs the operator", async () => {
+    const page = mount(state({ runs: [run({ intent: intent({
+      stance: "unowned", verdict: "FAIL", judged: "tree", gapProgress: 0, parked: 1, unowned: 0,
+      gaps: [gap("The p99 was never captured.", "parked", "intent-fix-1-5")],
+      headline: "1 task against a gap is parked and waiting on you.",
+    }) })] }));
+    await page.refresh();
+    expect($("#intentnote")!.className).toBe("warn");
+  });
+
+  it("opens the gap list when the meter is activated", async () => {
+    const page = mount(state({ runs: [run({ intent: intent({
+      stance: "unowned", verdict: "FAIL", judged: "tree", gapProgress: 0, unowned: 1,
+      gaps: [gap("The p99 was never captured.", "unowned")],
+      headline: "1 thing you asked for is still missing.",
+    }) })] }));
+    await page.refresh();
+
+    expect(($("#intentdetails") as HTMLDetailsElement).open).toBe(false);
+    ($("#intentmeter") as HTMLElement).click();
+    expect(($("#intentdetails") as HTMLDetailsElement).open).toBe(true);
+  });
+});
+
 describe("the header's budget cap", () => {
   it("is an editable control only when exactly one run is showing", async () => {
     const page = mount(state({ runs: [run()] }));

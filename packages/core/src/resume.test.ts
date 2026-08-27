@@ -8,6 +8,7 @@ import { Bus } from "./bus.js";
 import type { GitHubAdapter } from "./github.js";
 import type { AgentPool, AgentResult, AgentSpec } from "./pool.js";
 import { RunController, type GateHandler } from "./runController.js";
+import type { TaskRow } from "./store.js";
 import { Store } from "./store.js";
 
 const DOCS = "<prd>\n# PRD\n</prd>\n<conventions>\nc\n</conventions>";
@@ -206,6 +207,42 @@ describe("resuming a finished run", () => {
     expect(store.getTask(runId, "task-b")!.state).toBe("MERGED");
     expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
     expect(controller.hasRecoverableWork(runId)).toBe(false);
+  });
+
+  it("gives a revived cancelled task a fresh set of attempts, not the strikes from its last life", async () => {
+    // Run bc691359: `cp-no-third-party-test` failed QA twice, was swept as
+    // "unreachable" when its dependency parked, and came back four days later
+    // when that dependency merged. It dispatched carrying both old strikes
+    // against a cap of three, so its first honest failure in a world where the
+    // work it needed finally existed would have parked it — for iterations
+    // spent before any of that work was there to build on.
+    //
+    // The parked-task branch above this one has always reset these counters.
+    // This branch is the same claim: the task is starting over.
+    const { repoPath, store, bus, runId } = await parkedRun();
+    for (const s of ["READY", "WORKING", "QA", "ACCEPTED", "MERGED"] as const) store.transitionTask(runId, "task-a", s);
+    store.updateTask(runId, "task-b", {
+      qaIterations: 2, respawns: 1, emptyDeliveries: 1, conflictFixes: 1, errorSummary: "failed in a previous life",
+    });
+
+    // The counters have to be read when the revived task is dispatched, not
+    // when the run ends: `qaIterations` counts QA rounds rather than failures,
+    // so a task that sails through still finishes on 1.
+    let atDispatch: TaskRow | undefined;
+    const inner = healedPool().pool;
+    const pool = {
+      async run(spec: AgentSpec): Promise<AgentResult> {
+        if (spec.role === "worker") atDispatch ??= store.getTask(runId, "task-b");
+        return inner.run(spec);
+      },
+    } as unknown as AgentPool;
+    const controller = new RunController(store, bus, pool, noGithub, gates(), repoPath);
+    await controller.resume(runId);
+
+    expect(store.getTask(runId, "task-b")!.state).toBe("MERGED");
+    expect(atDispatch).toMatchObject({
+      qaIterations: 0, respawns: 0, emptyDeliveries: 0, conflictFixes: 0, errorSummary: null,
+    });
   });
 
   it("requeues tasks a dead harness process left mid-flight instead of cancelling them", async () => {
