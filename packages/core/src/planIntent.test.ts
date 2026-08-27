@@ -72,14 +72,30 @@ const PASS = '```json\n{"verdict":"PASS","summary":"every clause has a task"}\n`
  * check answers. Rejecting keeps the run inside the planning loop, which is
  * where the feedback under test goes.
  */
-function harness(validator: string | (() => AgentResult), approve = false, dag: string | ((nth: number) => string) = REAL_DAG) {
+function harness(
+  validator: string | (() => AgentResult),
+  approve: boolean | ((nth: number) => boolean) = false,
+  dag: string | ((nth: number) => string) = REAL_DAG
+) {
   const repo = mkdtempSync(path.join(tmpdir(), "harness-plan-intent-"));
   const store = new Store(":memory:");
   const bus = new Bus(store);
   const summaries: string[] = [];
   const feedback: string[] = [];
   const specs: AgentSpec[] = [];
+  // Every task an issue was filed for, in order. `GitHubAdapter` is stubbed
+  // rather than constructed disabled, because a disabled adapter makes
+  // `fileIssues` return before it reads the plan at all.
+  const issued: string[] = [];
+  const github = {
+    enabled: true,
+    async ensureIssue(_runId: string, id: string) {
+      issued.push(id);
+      return { number: issued.length, url: `https://example.invalid/${issued.length}` };
+    },
+  } as unknown as GitHubAdapter;
   let planning = 0;
+  let gateRound = 0;
   const pool = {
     async run(spec: AgentSpec): Promise<AgentResult> {
       specs.push(spec);
@@ -96,14 +112,15 @@ function harness(validator: string | (() => AgentResult), approve = false, dag: 
   const gates: GateHandler = {
     async resolvePlanGate(_prd, summary) {
       summaries.push(summary);
-      return { approved: approve, feedback: "I want the vendors real." };
+      const nth = gateRound++;
+      return { approved: typeof approve === "function" ? approve(nth) : approve, feedback: "I want the vendors real." };
     },
     async resolveBudgetGate() {
       return null;
     },
   };
-  const controller = new RunController(store, bus, pool, new GitHubAdapter(undefined, undefined), gates, repo);
-  return { controller, store, summaries, specs };
+  const controller = new RunController(store, bus, pool, github, gates, repo);
+  return { controller, store, summaries, specs, issued };
 }
 
 /**
@@ -158,6 +175,30 @@ describe("asking whether the plan could deliver the assignment", () => {
     expect(checks[1]!.prompt).toContain("ledger-service");
     expect(checks[1]!.prompt).not.toContain("provider-layer");
     expect(checks[1]!.prompt).not.toContain("ach-origination");
+  }, 30_000);
+
+  it("files issues for the plan that stands, not the one it replaced", async () => {
+    // Same cancelled-row blindness, one call site further on, and this one
+    // reaches outside the machine. Run 5122c83a replanned twice and then went
+    // to open a GitHub issue for all 239 rows in its task table — 142 of them
+    // cancelled — against a repo that had two commits in it. An issue is not a
+    // read: nothing downstream un-files it.
+    const second = dagOf("ledger-service", "payout-worker");
+    const script = [DOCS, REAL_DAG, DOCS, second];
+    const { controller, issued } = harness(
+      FAIL,
+      // Reject the first plan, take the second, so the run reaches the filing
+      // step with a table holding both.
+      (nth) => nth > 0,
+      (nth) => script[nth] ?? ""
+    );
+
+    await controller.startRun("build a thing", RunConfig.parse({})).catch(() => undefined);
+
+    expect(issued).toContain("ledger-service");
+    expect(issued).toContain("payout-worker");
+    expect(issued).not.toContain("provider-layer");
+    expect(issued).not.toContain("ach-origination");
   }, 30_000);
 
   it("says nothing when the plan covers the assignment", async () => {

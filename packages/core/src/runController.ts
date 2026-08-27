@@ -4290,7 +4290,12 @@ export class RunController {
 
   private async fileIssues(runId: string): Promise<void> {
     if (!this.github.enabled) return;
-    for (const task of this.store.listTasks(runId)) {
+    // The live plan, not every row ever planned. A replan cancels the tasks it
+    // supersedes and leaves them in the table, so filing over `listTasks` opens
+    // a GitHub issue for work that was explicitly thrown away: run 5122c83a
+    // replanned twice and this went to file 239 issues, 142 of them for
+    // cancelled tasks, against a repo that had two commits in it.
+    for (const task of this.livePlan(runId)) {
       const issue = await this.github.ensureIssue(
         runId,
         task.id,
