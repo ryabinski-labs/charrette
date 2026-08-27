@@ -155,11 +155,14 @@ const ESCAPES = /[>`]|\$\(|\|\||&&|;|\|/;
  * run bc691359's eight workflows open every job with a multi-line rustup
  * installer, so a strict rule refused all fourteen checks.
  *
- * So the test is narrow and names the thing that actually bit: a package
- * manager or build tool that writes into the repository. `npm ci` makes
- * node_modules; `npm run build` makes ui/dist; and revetment-control-plane's
+ * So the test is narrow and names the thing that actually bit: a build tool,
+ * at the head of a command, writing something into the repository that a later
+ * step reads. `npm run build` makes ui/dist, and revetment-control-plane's
  * build script panics without ui/dist, which is how a lifted
  * `cargo clippy --workspace --all-features` failed every task for an hour.
+ *
+ * Installing dependencies is deliberately not on that list — see
+ * DEPENDENCY_INSTALL for why.
  *
  * It is a heuristic, and it errs toward lifting: a step that writes the tree by
  * some means not listed here will not poison its job, and the check after it
@@ -167,22 +170,59 @@ const ESCAPES = /[>`]|\$\(|\|\||&&|;|\|/;
  * catches that, by proving every check locally before the run starts.
  */
 const WRITES_BUILD_INPUTS = [
-  /\b(?:npm|yarn|pnpm|bun)\b/,
-  /\bcargo\s+(?:build|xtask|run)\b/,
-  /\bmake\b/,
-  /\bgo\s+(?:build|generate)\b/,
-  /\bdotnet\s+build\b/,
-  /\bgradlew?\b|\bmvn\b/,
-  /\bprotoc\b|\bbuf\s+generate\b/,
+  // A verb, not a flag: `npm run build` writes ui/dist, `npm --version` writes
+  // nothing and used to poison the job anyway.
+  /^(?:npm|yarn|pnpm|bun)\s+(?![-@])\S/,
+  /^cargo\s+(?:build|xtask|run)\b/,
+  /^make\b/,
+  /^go\s+(?:build|generate)\b/,
+  /^dotnet\s+build\b/,
+  /^(?:\.\/gradlew|gradlew?|mvn)\b/,
+  /^(?:protoc|buf\s+generate)\b/,
 ];
 
-/** Did this skipped step leave something behind that a later step could read? */
+/**
+ * Installing dependencies is not writing a build input.
+ *
+ * `npm ci` makes node_modules, and `seedWorktreeDeps` already puts node_modules
+ * in every task worktree before the first check runs — which is the whole
+ * reason it exists. Treating the install as a poisoner cost the canonical Node
+ * workflow every check it had: `npm ci` is not a liftable verb, so it is
+ * dropped, and dropping it used to refuse `npm run lint` and `npm test` behind
+ * it. A repository whose CI is checkout / setup-node / install / lint / test —
+ * which is most of them — came out of `harness init` with no checks at all.
+ */
+const DEPENDENCY_INSTALL = [
+  /^(?:npm|yarn|pnpm|bun)\s+(?:ci|install|i|add)\b/,
+  /^(?:bundle|composer)\s+install\b/,
+  /^(?:pip|pip3)\s+install\b/,
+  /^uv\s+(?:pip\s+install|sync)\b/,
+  /^go\s+mod\s+download\b/,
+];
+
+/**
+ * Command heads, not words anywhere on the line.
+ *
+ * The patterns above are anchored because an unanchored `\bmake\b` matches
+ * `sudo apt-get install -y make libssl-dev` — a runner-setup step that writes
+ * nothing into the repository — and dropped `cargo test --workspace` and
+ * `cargo clippy --workspace` behind it. That is the same "a strict rule refused
+ * all fourteen checks" failure the narrow test was written to avoid; it had
+ * only moved from rustup to make.
+ *
+ * Chains are split rather than exempted, because the step that started all of
+ * this was one: `npm ci --prefix ui && npm run --prefix ui build` is an install
+ * the seeder covers followed by a build it does not, and only the second half
+ * may poison the job.
+ */
 function writesBuildInputs(script: string): boolean {
   return script
+    .replace(/\s*\\\n\s*/g, " ")
     .split("\n")
+    .flatMap((l) => l.split(/&&|\|\||[;|]/))
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith("#"))
-    .some((l) => WRITES_BUILD_INPUTS.some((re) => re.test(l)));
+    .some((l) => !DEPENDENCY_INSTALL.some((re) => re.test(l)) && WRITES_BUILD_INPUTS.some((re) => re.test(l)));
 }
 
 export function scanCiChecks(files: WorkflowFile[]): CiCheckScan {
