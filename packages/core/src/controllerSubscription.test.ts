@@ -505,12 +505,17 @@ describe("picking a parked run back up", () => {
     // Resuming is the answer — the operator is demonstrably at the keyboard —
     // so the gate they settled must not still be asking.
     expect(parked.store.openRunGates(runId).map((g) => g.gateId)).not.toContain(abandoned[0]!.gateId);
-    // Attributed to them, never to a decider: `budgetAutoRaises` counts
-    // non-operator approvals, and a resume must not spend an auto-raise round.
+    // Attributed to the resume, never to a decider: `budgetAutoRaises` counts
+    // non-human approvals, and a resume must not spend an auto-raise round.
+    //
+    // `resume` rather than `operator` because `postmortem` reads every gate
+    // closed by `operator` as time the run spent waiting on a person — and the
+    // span this closes is the one the process spent dead, which nobody waited
+    // through.
     const closed = parked.events.find(
       (e) => e.type === "run.gate_resolved" && (e as { gateId?: string }).gateId === abandoned[0]!.gateId
     ) as { decidedBy?: string; feedback?: string } | undefined;
-    expect(closed?.decidedBy).toBe("operator");
+    expect(closed?.decidedBy).toBe("resume");
     expect(closed?.feedback).toBe("resumed from subscription hold");
   });
 });

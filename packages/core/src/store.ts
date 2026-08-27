@@ -202,6 +202,15 @@ export interface SessionRow {
   build: string;
 }
 
+/**
+ * `decidedBy` values that mean a person, not one of the run's own deciders.
+ *
+ * `operator` is somebody answering the gate. `resume` is `closeAbandonedGates`
+ * shutting one the process died holding — also not a decider, and counting
+ * either as an automatic raise would spend a round nobody used.
+ */
+const HUMAN_DECIDERS = new Set(["operator", "resume"]);
+
 export class InvalidTransition extends Error {}
 
 /**
@@ -921,7 +930,10 @@ export class Store {
       if (e.kind !== "budget") continue;
       if (row.type === "run.gate_opened") {
         mine.add(e.gateId);
-      } else if (mine.has(e.gateId) && e.resolution === "approved" && e.decidedBy && e.decidedBy !== "operator") {
+        // `operator` and `resume` are both a person, not a decider: the first
+        // answered the gate, the second closed one the process died holding.
+        // Counting either would spend an auto-raise round nobody used.
+      } else if (mine.has(e.gateId) && e.resolution === "approved" && e.decidedBy && !HUMAN_DECIDERS.has(e.decidedBy)) {
         raises++;
       }
     }

@@ -6612,9 +6612,17 @@ export class RunController {
    * Resuming *is* the answer: the operator is at the keyboard, they either
    * pointed the run at another account or waited out the window, and the
    * preflight read above has already re-measured which. So the gate is closed
-   * as approved and attributed to them — never to a decider, or the auto-raise
-   * rounds in `budgetAutoRaises` would count a resume as a skill's decision and
-   * spend the operator's remaining rounds on nothing.
+   * as approved — never attributed to a decider, or the auto-raise rounds in
+   * `budgetAutoRaises` would count a resume as a skill's decision and spend the
+   * operator's remaining rounds on nothing.
+   *
+   * `"resume"` rather than `"operator"`, because the two are not the same
+   * reading and one report needs to tell them apart. `postmortem` counts every
+   * gate closed by `"operator"` as time the run spent waiting on a person, so
+   * attributing this one to them booked the whole span the process was dead —
+   * which nobody was waiting through — as operator wait, and showed a budget
+   * gate approved by somebody who never saw it. `budgetAutoRaises` excludes
+   * this word for the same reason it excludes `"operator"`.
    *
    * Only gates of the kind that produced this hold: a subscription resume says
    * nothing about an open plan gate, and closing one it did not answer would
@@ -6630,7 +6638,7 @@ export class RunController {
         kind,
         resolution: "approved",
         feedback,
-        decidedBy: "operator",
+        decidedBy: "resume",
         ts: Date.now(),
       });
     }
