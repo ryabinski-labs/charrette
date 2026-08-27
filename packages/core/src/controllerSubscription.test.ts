@@ -354,7 +354,15 @@ describe("a live session reporting the window running out", () => {
     // each arriving with its own copy of the same question. Asking the operator
     // eight times is how a good gate becomes an ignored one.
     let asks = 0;
-    const { pool } = watchingPool(ROLES, { readings: [weekly(96), weekly(97), weekly(98)] });
+    // One `resetsAt` for all three, read from the clock once. `weekly()` stamps
+    // `Date.now()` per call, so three calls that straddle a millisecond boundary
+    // describe three *different* windows — which is a correct re-ask, and a test
+    // that fails perhaps one CI run in fifty. The scenario is three sessions
+    // meeting one window, so the fixture has to say one window.
+    const resetsAt = Date.now() + 3 * 3_600_000;
+    const { pool } = watchingPool(ROLES, {
+      readings: [weekly(96, { resetsAt }), weekly(97, { resetsAt }), weekly(98, { resetsAt })],
+    });
     const { controller } = build({
       repoPath: repo(),
       pool,
