@@ -39,6 +39,29 @@ describe("intentPosture", () => {
     expect(p.verdict).toBeNull();
   });
 
+  it("still owns a gap whose title was cut on a space", () => {
+    // `queueIntentFixes` builds the title as `Close intent gap: ${first line,
+    // 80}` and stores it untrimmed. Whenever that cut lands on whitespace the
+    // stored title and the key computed here differed by exactly that space,
+    // and the gap read as unowned — the red meter, and "nothing in the run is
+    // moving on it", over a task that was actively working it.
+    //
+    // Built the way the queueing site builds it, deliberately: the helper above
+    // trims, so a test written through it could never have caught this.
+    const gap = `${"a".repeat(79)} and then some more of the same sentence`;
+    const untrimmedTitle = `Close intent gap: ${gap.split("\n")[0]!.slice(0, 80)}`;
+    expect(untrimmedTitle.endsWith(" ")).toBe(true);
+
+    const p = intentPosture(
+      input({
+        intent: { verdict: "FAIL", gaps: [gap] },
+        fixes: [fix({ id: "intent-fix-1-1", title: untrimmedTitle, state: "WORKING" })],
+      })
+    );
+    expect(p.gaps[0]!.status).toBe("in-flight");
+    expect(p.gaps[0]!.taskId).toBe("intent-fix-1-1");
+  });
+
   it("shows the plan's verdict before anything merges, labelled as being about the plan", () => {
     const p = intentPosture(input({ plan: { verdict: "FAIL", gaps: [GAP_A, GAP_B] } }));
     expect(p.stance).toBe("plan-only");

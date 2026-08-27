@@ -188,6 +188,22 @@ function gapKey(gap: string): string {
   return TITLE_PREFIX + gap.split("\n")[0]!.slice(0, 80).trim();
 }
 
+/**
+ * The same key, read back off a task title.
+ *
+ * `queueIntentFixes` slices the gap's first line at 80 characters and stores it
+ * untrimmed, so whenever that cut lands on whitespace — or the gap's first line
+ * opens with a space — the title and `gapKey` differ by exactly that
+ * whitespace. The gap then reads as unowned: the dashboard paints the red meter
+ * and says nothing in the run is moving on it, while an IN_PROGRESS task is
+ * working it. Both sides normalise here so the two cannot drift apart again,
+ * and titles already written with the stray space still match.
+ */
+function titleKey(title: string): string {
+  const body = title.startsWith(TITLE_PREFIX) ? title.slice(TITLE_PREFIX.length) : title;
+  return TITLE_PREFIX + body.trim();
+}
+
 const TITLE_PREFIX = "Close intent gap: ";
 
 /**
@@ -222,8 +238,9 @@ function staleClause(staleMerges: number): string {
 function attribute(gaps: string[], fixes: IntentFixTask[]): IntentGap[] {
   const best = new Map<string, IntentFixTask>();
   for (const f of fixes) {
-    const prior = best.get(f.title);
-    if (!prior || RANK[statusOf(f.state)] > RANK[statusOf(prior.state)]) best.set(f.title, f);
+    const key = titleKey(f.title);
+    const prior = best.get(key);
+    if (!prior || RANK[statusOf(f.state)] > RANK[statusOf(prior.state)]) best.set(key, f);
   }
   return gaps.map((text) => {
     const owner = best.get(gapKey(text));

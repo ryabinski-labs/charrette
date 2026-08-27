@@ -1870,7 +1870,7 @@ export class RunController {
       id: `intent-fix-${round}-${i + 1}`,
       epicId: INTENT_FIX_EPIC.id,
       scenarioIds: [],
-      title: `Close intent gap: ${gap.split("\n")[0]!.slice(0, 80)}`,
+      title: `Close intent gap: ${gap.split("\n")[0]!.slice(0, 80).trim()}`,
       spec: `The run finished and a validation agent read the whole merged tree against the operator's original intent. It found this gap:\n\n${gap}\n\nWhat it concluded overall:\n${verdict.summary}\n\nClose that gap in the integration branch you are working from — it already contains every merged task, so the code the gap refers to is here. Fix the gap itself, not the surrounding design: the rest of this tree was reviewed and accepted, and a rewrite costs more than the gap did. If the gap turns out not to be real, say so in your summary with the file and line that settle it rather than changing code to satisfy it.`,
       acceptanceCriteria: [gap.split("\n")[0]!.slice(0, 300), "The claim the gap makes is no longer true of this tree, demonstrated by a check or a test that fails without the change"],
       // Chained: same omission, same file, and nothing here is urgent enough to
