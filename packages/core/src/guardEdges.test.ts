@@ -216,13 +216,43 @@ describe("prompts that change shape with what they are given", () => {
     expect(plannerRepairPrompt("{...}", "epics.0.id: Invalid")).toContain("epics.0.id: Invalid");
   });
 
-  it("keeps only the tail of an enormous previous attempt", () => {
+  it("keeps only the tail of an attempt that was cut off, which is being re-emitted rather than repaired", () => {
     const huge = `START${"x".repeat(80_000)}END`;
 
-    const prompt = plannerRepairPrompt(huge, "too long");
+    const prompt = plannerRepairPrompt(huge, "cut off mid-JSON", true);
 
     expect(prompt).toContain("END");
     expect(prompt).not.toContain("START");
+    expect(prompt).toContain("SHORTER");
+  });
+
+  it("hands a rejected breakdown back whole, because a repair needs the part that was rejected", () => {
+    // Run 5122c83a's breakdown was 187k characters and the defect was a third of
+    // the way in. Under the old 60k tail window the prompt did not contain it.
+    const big = `START${"x".repeat(80_000)}END`;
+
+    const prompt = plannerRepairPrompt(big, 'tasks.52.id: must be a lowercase kebab-case slug (got "tool-comp-privateEquity-alias")');
+
+    expect(prompt).toContain("START");
+    expect(prompt).toContain("END");
+    expect(prompt).toContain("tool-comp-privateEquity-alias");
+  });
+
+  it("does not offer to repair a breakdown too large to hand back in full", () => {
+    const enormous = `START${"x".repeat(400_000)}END`;
+
+    const prompt = plannerRepairPrompt(enormous, "tasks.52.id: bad slug");
+
+    expect(prompt).not.toContain("START");
+    expect(prompt).toContain("SHORTER");
+    expect(prompt).toContain("cannot see");
+  });
+
+  it("keeps the continuation protocol when the plan took more than one message to emit", () => {
+    const prompt = plannerRepairPrompt("{...}", "tasks.52.id: bad slug", false, 3);
+
+    expect(prompt).toContain('"more": true');
+    expect(prompt).not.toContain("exactly one complete JSON object");
   });
 
   it("carries the operator's mid-flight feedback into QA's judgement", () => {

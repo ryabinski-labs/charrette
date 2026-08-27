@@ -1,8 +1,21 @@
 import { z } from "zod";
 
+/**
+ * The shape every planner-assigned id has to have.
+ *
+ * The rule is not the interesting part — the message is. Zod's default for a
+ * failed regex is the bare word "Invalid", which is what the planner is handed
+ * when its plan is rejected, and it names neither the rule it broke nor the
+ * value that broke it. Run 5122c83a lost a hundred-task plan to
+ * `tasks.52.id: Invalid`: one segment of one id was camelCase, and nothing the
+ * planner was told could have located it.
+ */
+const SLUG = /^[a-z0-9][a-z0-9-]{1,63}$/;
+const SLUG_RULE = "must be a lowercase kebab-case slug of 2-64 characters: a-z, 0-9 and hyphens only, starting with a letter or digit";
+
 /** A single task emitted by the planner. IDs are planner-assigned slugs, unique per run. */
 export const PlannedTask = z.object({
-  id: z.string().regex(/^[a-z0-9][a-z0-9-]{1,63}$/),
+  id: z.string().regex(SLUG, SLUG_RULE),
   epicId: z.string(),
   title: z.string().min(1),
   spec: z.string().min(1),
@@ -41,7 +54,7 @@ export const PlannedTask = z.object({
 export type PlannedTask = z.infer<typeof PlannedTask>;
 
 export const PlannedEpic = z.object({
-  id: z.string().regex(/^[a-z0-9][a-z0-9-]{1,63}$/),
+  id: z.string().regex(SLUG, SLUG_RULE),
   title: z.string().min(1),
   summary: z.string(),
 });

@@ -352,16 +352,37 @@ const PLANNER_MAX_OUTPUT_TOKENS = 64_000;
 const MAX_DAG_BATCHES = 8;
 
 /** The first few schema complaints, named by field, for a planner to act on. */
-function issueSummary(error: z.ZodError): string {
+function issueSummary(error: z.ZodError, data: unknown): string {
   return (
     error.issues
       .slice(0, 5)
-      // `extractJson` has already guaranteed an object, so every issue has a key
-      // to name; "(root)" is for a schema that grows a root-level rule.
-      /* v8 ignore next */
-      .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+      .map((i) => {
+        // `extractJson` has already guaranteed an object, so every issue has a
+        // key to name; "(root)" is for a schema that grows a root-level rule.
+        /* v8 ignore next */
+        const at = i.path.join(".") || "(root)";
+        const got = valueAt(data, i.path);
+        // The path is an index into the assembled plan, which is not an array
+        // the planner ever emitted or can count through. The value is the only
+        // part of this it can search its own output for, so it is worth the
+        // characters whenever there is one short enough to quote.
+        return typeof got === "string" && got.length <= 120 ? `${at}: ${i.message} (got ${JSON.stringify(got)})` : `${at}: ${i.message}`;
+      })
       .join("; ")
   );
+}
+
+/** The value a Zod issue points at, or undefined when the path does not lead to one. */
+function valueAt(data: unknown, path: PropertyKey[]): unknown {
+  let at = data;
+  for (const key of path) {
+    // A Zod issue path always follows the value it was produced from, so this
+    // only fires if a schema and its data are ever handed here separately.
+    /* v8 ignore next */
+    if (at === null || typeof at !== "object") return undefined;
+    at = (at as Record<PropertyKey, unknown>)[key];
+  }
+  return at;
 }
 
 /**
@@ -3979,6 +4000,7 @@ export class RunController {
     let lastPath = "";
     let lastOutput = "";
     let lastTruncated = false;
+    let lastMessages = 1;
     // Phase B has no tools, so what it knows about the repository is what it is
     // told. Without this it names `touchedPaths` from the PRD's vocabulary and
     // invents paths for files that already exist a directory away.
@@ -3995,6 +4017,11 @@ export class RunController {
       const repair = attempt > 1 && lastOutput.length > 0;
       const epics: PlannedEpic[] = [];
       const tasks: PlannedTask[] = [];
+      // Every message of this attempt, not just the last one. Shape and DAG are
+      // judged on the assembled plan, so a rejection can name a task that was
+      // emitted three messages ago — and a repair prompt holding only the final
+      // message is a repair prompt without the defect in it.
+      const messages: string[] = [];
       let resume: string | undefined;
       let reason = "";
       let outcome: AgentResult["outcome"] = "done";
@@ -4015,7 +4042,7 @@ export class RunController {
             batch > 1
               ? plannerContinuePrompt(epics, tasks, perMessage)
               : repair
-                ? plannerRepairPrompt(lastOutput, lastReason, lastTruncated)
+                ? plannerRepairPrompt(lastOutput, lastReason, lastTruncated, lastMessages)
                 : `Assignment:\n${run.assignment}\n${specPlanBlock(this.store.runSpec(runId) ?? RunSpec.parse({}))}${feedback ? `\nOperator feedback on the previous plan:\n${feedback}\n` : ""}\n\nYou have already surveyed the repository and written these documents. Do not use any tools.\n\n<prd>\n${docs.prdMarkdown}\n</prd>\n\n<conventions>\n${docs.conventionsMarkdown}\n</conventions>\n${
                     files
                       ? `\n<repository-files>\n${files}\n</repository-files>\n\nThese are the files that exist today. Put the real ones under \`touchedPaths\` — a path you invent for a file that already exists is a task pointed at nothing, and two tasks naming the same file by different paths will collide instead of depending on each other. Only invent a path for a file the assignment genuinely requires and the repository does not have.\n`
@@ -4036,6 +4063,7 @@ export class RunController {
         // offers a handle; when it does not, `plannerContinuePrompt` carries
         // enough of the plan for the next message to stand on its own.
         resume = result.sdkSessionId;
+        messages.push(result.resultText);
         lastOutput = result.resultText;
         lastTruncated = outputTruncated(result.resultText, result.errorDetail);
         outcome = result.outcome;
@@ -4058,7 +4086,7 @@ export class RunController {
           // dangling once every message that could have satisfied it is in.
           const parsed = PlanBreakdown.safeParse({ epics, tasks });
           if (!parsed.success) {
-            reason = `the breakdown does not match the required shape: ${issueSummary(parsed.error)}`;
+            reason = `the breakdown does not match the required shape: ${issueSummary(parsed.error, { epics, tasks })}`;
             break;
           }
           const errors = validatePlanDag({ ...docs, ...parsed.data });
@@ -4085,6 +4113,8 @@ export class RunController {
         }
       }
 
+      lastMessages = messages.length;
+      if (messages.length > 1) lastOutput = messages.map((m, i) => `<message-${i + 1}>\n${m}\n</message-${i + 1}>`).join("\n\n");
       lastReason = this.failedAttempt(runId, attempt, reason, lastPath, outcome, errorDetail);
     }
     throw this.planFailed(runId, attempts, lastReason, lastPath);
@@ -4128,7 +4158,7 @@ export class RunController {
       };
     }
     const parsed = PlanBatch.safeParse(json);
-    return parsed.success ? { batch: parsed.data } : { reason: `the breakdown does not match the required shape: ${issueSummary(parsed.error)}` };
+    return parsed.success ? { batch: parsed.data } : { reason: `the breakdown does not match the required shape: ${issueSummary(parsed.error, json)}` };
   }
 
   /** Record a rejected planner attempt; returns the reason the next attempt is told. */

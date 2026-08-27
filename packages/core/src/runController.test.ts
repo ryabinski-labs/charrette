@@ -292,6 +292,26 @@ describe("a DAG too big for one message", () => {
     expect(first!.reason).toMatch(/depends on unknown task ghost/);
   });
 
+  it("hands the whole attempt back for repair, not only its last message", async () => {
+    // The rejection can name a task from the first message. A repair prompt
+    // holding only the last one does not contain the defect it asks to be fixed
+    // — which is how run 5122c83a's second attempt reconstructed two thirds of a
+    // plan from nothing and renamed eight public routes doing it.
+    const { controller, specs } = harness([
+      DOCS,
+      batch({ epics: [epic], tasks: [task("task-a")], more: true }),
+      batch({ tasks: [task("task-b", ["ghost"])], more: false }),
+    ]);
+
+    await controller.startRun("do a thing", CONFIG).catch(() => undefined);
+
+    const repair = specs.find((s) => s.prompt.includes("Your previous plan was rejected"))!;
+    expect(repair.prompt).toContain("task-a");
+    expect(repair.prompt).toContain("task-b");
+    // And it is told to emit the repair the same way it emitted the original.
+    expect(repair.prompt).toContain('"more": true');
+  });
+
   it("rejects a plan that finishes with no epic to hang the tasks on", async () => {
     // The shape is only checkable on the assembled whole: a continuation message
     // legitimately carries no epics, and the first message is what must.

@@ -281,14 +281,34 @@ export function extractSection(text: string, tag: string): string {
  * planner that ran out of output tokens to "re-emit in full, do not abbreviate"
  * buys three identical truncations at Opus prices.
  */
-export function plannerRepairPrompt(previousOutput: string, reason: string, truncated = false): string {
-  const MAX = 60_000; // a full breakdown is ~10-30k; beyond this the tail is what matters
-  const previous = previousOutput.length > MAX ? `…${previousOutput.slice(-MAX)}` : previousOutput;
+export function plannerRepairPrompt(previousOutput: string, reason: string, truncated = false, messages = 1): string {
+  // A breakdown that overran the message limit is re-emitted shorter rather than
+  // repaired, so a sample of it is enough and the tail is the part that shows
+  // where it ran out. A breakdown that was *rejected* is repaired in place, and
+  // a repair is only possible against the whole object. The old rule kept the
+  // tail either way, on a comment that assumed a breakdown is 10-30k characters.
+  // Run 5122c83a's was 187k: it was rejected over the 53rd task's id and handed
+  // a window that began at the 68th, so nothing the next attempt could do would
+  // have fixed it, and the attempt after that repaired the fragment instead.
+  const SAMPLE = 60_000;
+  const WHOLE = 300_000;
+  // Past this the object cannot be handed back in full at all. Saying so beats
+  // offering a repair against a window, which is how a hundred-task plan comes
+  // back as thirty and still parses.
+  const unrepairable = !truncated && previousOutput.length > WHOLE;
+  const shorter = `Emit the breakdown again, SHORTER. Merge the smallest tasks into their neighbours and compress every spec to two or three sentences, moving the detail into acceptanceCriteria, which are short lines. Cover the same scope with fewer, larger tasks. Prose costs you the plan; structure does not.`;
+  const previous = (truncated || unrepairable) && previousOutput.length > SAMPLE ? `…${previousOutput.slice(-SAMPLE)}` : previousOutput;
   const instruction = truncated
     ? `Your output ran past the per-message limit and was cut off mid-JSON, so none of it could be used.
 
-Emit the breakdown again, SHORTER. Merge the smallest tasks into their neighbours and compress every spec to two or three sentences, moving the detail into acceptanceCriteria, which are short lines. Cover the same scope with fewer, larger tasks. Prose costs you the plan; structure does not.`
-    : `Re-emit the corrected breakdown as exactly one complete JSON object in a \`\`\`json fence. Keep the analysis you already did; fix only what was rejected. Do not abbreviate, summarise, or elide any field — the whole object must be present.`;
+${shorter}`
+    : unrepairable
+      ? `Your breakdown is too large to hand back to you in full — only its last ${SAMPLE.toLocaleString("en-US")} characters are below — so there is no complete object here for you to repair. Do not try to reconstruct the part you cannot see.
+
+${shorter} Fix what was rejected as you go.`
+      : messages > 1
+        ? `Re-emit the corrected breakdown. Keep the analysis you already did; fix only what was rejected. It did not fit in one message last time and it still will not: emit it across messages the same way, no more tasks per message than before, \`"more": true\` while tasks remain and \`false\` on the message that completes the plan. Do not abbreviate, summarise, or elide any field.`
+        : `Re-emit the corrected breakdown as exactly one complete JSON object in a \`\`\`json fence. Keep the analysis you already did; fix only what was rejected. Do not abbreviate, summarise, or elide any field — the whole object must be present.`;
   return `Your previous plan was rejected: ${reason}
 
 You have already surveyed the repository — do not read it again, and do not use any tools. Everything you need is in your previous output below.
