@@ -391,11 +391,25 @@ function positive(value: string, flag: string): number {
  * exactly what `init --force` is for. So an unreadable file yields no cap and
  * the write goes ahead with the default.
  */
-function existingRunCap(repo: string): number | undefined {
+/**
+ * The config file already on disk, or `{}` when there is none to read.
+ *
+ * `init --force` is the command that catches a config up to changed CI, and it
+ * used to rewrite the whole file to do it — so every field the operator chose
+ * and `init` does not detect was silently reset to a default. The cap was fixed
+ * first because it was the loudest, but it was never the only one:
+ * `deterministicCheckTimeoutMinutes` is the sharpest of the rest, since
+ * `verifyChecks` prints "Raise deterministicCheckTimeoutMinutes above its honest
+ * wall clock" as a drop reason — the operator raises it, re-inits, and it goes
+ * back to the default with the file still looking right. `models`, `pitStop`,
+ * `taskGate`, `planGate`, `ciFixRounds`, `intentFixRounds` and `subscription`
+ * all went the same way.
+ */
+function existingConfig(repo: string): Record<string, unknown> {
   try {
-    return loadFileConfig(repo).config.budget?.runCapUsd;
+    return (loadFileConfig(repo).config ?? {}) as Record<string, unknown>;
   } catch {
-    return undefined;
+    return {};
   }
 }
 
@@ -1238,11 +1252,10 @@ export function buildProgram(): Command {
     .option("--no-verify", "write the detected checks without running them first")
     .option(
       "--check-timeout <minutes>",
-      "how long any one check may run, here and in the run this writes",
-      String(DEFAULT_CHECK_TIMEOUT_MINUTES)
+      `how long any one check may run, here and in the run this writes (default: the value already in the file, else ${DEFAULT_CHECK_TIMEOUT_MINUTES})`
     )
     .option("--run-cap <usd>", `run budget cap in USD (default: the cap already in the file, else ${DEFAULT_RUN_CAP})`)
-    .action((opts: { repo: string; force: boolean; verify: boolean; checkTimeout: string; runCap?: string }) => {
+    .action((opts: { repo: string; force: boolean; verify: boolean; checkTimeout?: string; runCap?: string }) => {
       const repo = resolveRepoRoot(opts.repo);
       const target = path.join(repo, CONFIG_FILENAME);
       if (existsSync(target) && !opts.force) {
@@ -1254,9 +1267,16 @@ export function buildProgram(): Command {
       // cannot come apart. Proving at a stricter ceiling than the run will use
       // drops checks the run could have afforded; proving at a looser one
       // adopts checks QA is going to kill on every task.
-      const checkTimeout = Number(opts.checkTimeout);
-      if (!Number.isFinite(checkTimeout) || checkTimeout <= 0) {
-        throw new Error(`--check-timeout wants a positive number of minutes, not ${opts.checkTimeout}.`);
+      const existing = existingConfig(repo);
+      let checkTimeout: number;
+      if (opts.checkTimeout === undefined) {
+        const kept = existing.deterministicCheckTimeoutMinutes;
+        checkTimeout = typeof kept === "number" && kept > 0 ? kept : DEFAULT_CHECK_TIMEOUT_MINUTES;
+      } else {
+        checkTimeout = Number(opts.checkTimeout);
+        if (!Number.isFinite(checkTimeout) || checkTimeout <= 0) {
+          throw new Error(`--check-timeout wants a positive number of minutes, not ${opts.checkTimeout}.`);
+        }
       }
       // A repo inits more than once — its CI changes, and this is the command
       // that catches the config up. The cap in the file is not a detected
@@ -1265,7 +1285,14 @@ export function buildProgram(): Command {
       // is silent in the worst way. The file still looks right afterwards, and
       // the next run stops at thirty dollars for a reason nothing on screen
       // explains. waf's cap had been raised to 2000 and a re-init put it back.
-      const runCapUsd = opts.runCap === undefined ? existingRunCap(repo) ?? DEFAULT_RUN_CAP : positive(opts.runCap, "--run-cap");
+      const existingBudget = (existing.budget ?? {}) as Record<string, unknown>;
+      const existingCap = existingBudget.runCapUsd;
+      const runCapUsd =
+        opts.runCap === undefined
+          ? typeof existingCap === "number"
+            ? existingCap
+            : DEFAULT_RUN_CAP
+          : positive(opts.runCap, "--run-cap");
       const detected = detectChecks(repo);
       const out = (line: string) => process.stdout.write(`${line}\n`);
       out(`Checks from ${detected.source}:`);
@@ -1306,16 +1333,26 @@ export function buildProgram(): Command {
         }
       }
 
+      // Everything already in the file survives, and only what `init` actually
+      // detects is written over it. A re-init is meant to catch the *checks* up
+      // to changed CI; every other field in there is a decision somebody made,
+      // and rewriting the file wholesale unmade all of them at once.
+      // Dropped from the spread and re-added deliberately below: `checkTimeout`
+      // has already absorbed the file's value when the flag was not given, so
+      // letting the old key through the spread would make an explicit
+      // `--check-timeout 45` lose to a stored 90.
+      const { deterministicCheckTimeoutMinutes: _storedTimeout, ...keptFields } = existing;
       const contents = {
-        budget: { runCapUsd },
+        ...keptFields,
+        budget: { ...existingBudget, runCapUsd },
         deterministicChecks: checks,
         // Written whenever it is not the default, so the ceiling the checks
         // were proved under is the one QA gives them. Left out when it is the
         // default, because a config file restating a default teaches the reader
         // nothing and invites them to treat it as a decision somebody made.
         ...(checkTimeout === DEFAULT_CHECK_TIMEOUT_MINUTES ? {} : { deterministicCheckTimeoutMinutes: checkTimeout }),
-        dashboard: true,
-        skillsDirs: DEFAULT_SKILLS_DIRS,
+        dashboard: keptFields.dashboard ?? true,
+        skillsDirs: keptFields.skillsDirs ?? DEFAULT_SKILLS_DIRS,
       };
       writeFileSync(target, `${JSON.stringify(contents, null, 2)}\n`);
       out(`\nWrote ${target} with ${checks.length} check(s).`);
