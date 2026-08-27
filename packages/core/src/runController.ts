@@ -2110,7 +2110,15 @@ export class RunController {
         //
         // Not knowing is not a pass. Only a settled answer overturns the one
         // already on the record.
-        ci = after.state === "pending" ? red : after;
+        //
+        // `none` is the other way of not knowing, and it took the same path out
+        // until this line named it: `awaitChecks` publishes `state: "none"` when
+        // the head carries no check runs at all, and its own comment says
+        // "'None' is not a pass — it is the absence of the only check that
+        // judges the merge." A re-run that comes back before GitHub has
+        // re-attached its check runs answers nothing, and letting it through
+        // discarded the red verdict exactly as the pending did.
+        ci = after.state === "passing" || after.state === "failing" ? after : red;
         if (ci.state !== "failing") return [];
       }
     }
