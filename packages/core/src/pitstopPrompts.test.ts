@@ -21,7 +21,7 @@ import {
  */
 
 describe("the demo agent", () => {
-  const system = demoSystemPrompt("/repo/.harness/r1/pitstops/1", "\ntoolbelt", "\nskills");
+  const system = demoSystemPrompt("/repo/.harness/r1/pitstops/1", "/repo-wt/r1/__integration__", "\ntoolbelt", "\nskills");
 
   it("is told to run the thing, not to read it", () => {
     expect(system).toContain("START the half-built product");
@@ -33,6 +33,23 @@ describe("the demo agent", () => {
     // had not looked for more of the same. The second half is what nobody read.
     expect(system).toContain("Say plainly what you could NOT reach");
     expect(system).toContain("Never imply coverage you do not have");
+  });
+
+  it("is told which checkout is the product, because the evidence path is in another one", () => {
+    // Pit stop 33 of run bc691359: the demo was cwd'd into the integration
+    // worktree and told to write its captures to
+    // `<repoPath>/.harness/<runId>/pitstops/33`. That path is inside the
+    // operator's own checkout, which was parked on `main` — four crates and a
+    // whole `ui/` behind the integration branch. The agent read the artifacts
+    // path as "the repo", explored it, and reported the control plane, the k8s
+    // controller and the UI as never built. All three had merged days earlier.
+    // Nothing caught it: the tree-clean rule inspects the worktree, so reading
+    // a different checkout is invisible to it.
+    expect(system).toContain("/repo-wt/r1/__integration__");
+    expect(system).toMatch(/Demo \/repo-wt\/r1\/__integration__ and nothing else/);
+    expect(system).toMatch(/never read the product from it/);
+    expect(system).toMatch(/never `cd`, `ls`, `cat`, `git` or `cargo` your way into any other checkout/);
+    expect(system).toMatch(/is not a gap, and reporting it as one sends the run to rebuild something it already merged/);
   });
 
   it("is given somewhere to put the evidence, and told to leave the tree alone", () => {
