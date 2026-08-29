@@ -790,6 +790,67 @@ describe("harness run — the dashboard", () => {
     expect(h.dashboardArgs[0]![2]).toEqual({ port: undefined, preferPort: undefined, token: undefined });
   });
 
+  it("keeps the link record when the run stopped without finishing, so resume comes back on the same URL", async () => {
+    // The port and the token live nowhere but that file. Clearing it on the way
+    // out of a paused run is what breaks `harness pause`'s own promise that the
+    // run "comes back on this same dashboard" — resume then takes a fresh token
+    // and the operator's open tab is dead. No TTY here, so it does not hold.
+    const tty = process.stdin.isTTY;
+    process.stdin.isTTY = false;
+    try {
+      h.storeMethods.getRun.mockReturnValue({ id: "run-1", state: "PAUSED", config: {} });
+
+      await cli("run", "x", "--repo", "/repo");
+
+      expect(h.dashboardMethods.stop).toHaveBeenCalledOnce();
+      expect(h.clearDashboardMock).not.toHaveBeenCalled();
+    } finally {
+      process.stdin.isTTY = tty;
+    }
+  });
+
+  it("clears the link record when the run actually finished", async () => {
+    const tty = process.stdin.isTTY;
+    process.stdin.isTTY = false;
+    try {
+      h.storeMethods.getRun.mockReturnValue({ id: "run-1", state: "DONE", config: {} });
+
+      await cli("run", "x", "--repo", "/repo");
+
+      expect(h.dashboardMethods.stop).toHaveBeenCalledOnce();
+      expect(h.clearDashboardMock).toHaveBeenCalledWith("/repo");
+    } finally {
+      process.stdin.isTTY = tty;
+    }
+  });
+
+  it("holds the dashboard open on a paused run at a terminal, until a signal ends it", async () => {
+    // The case this exists for: the run stopped to ask something, and the thing
+    // it asked is readable only on the dashboard. Exiting here hands the
+    // operator a URL that died at the moment they were asked to reply.
+    const tty = process.stdin.isTTY;
+    process.stdin.isTTY = true;
+    try {
+      h.storeMethods.getRun.mockReturnValue({ id: "run-1", state: "PAUSED", config: {} });
+
+      const running = cli("run", "x", "--repo", "/repo");
+      await vi.waitFor(() => expect(printed()).toContain("the dashboard is still serving"));
+      expect(printed()).toContain("http://localhost:4777/#tok");
+      expect(h.dashboardMethods.stop).not.toHaveBeenCalled();
+
+      process.emit("SIGTERM");
+      await running;
+
+      expect(h.dashboardMethods.stop).toHaveBeenCalledOnce();
+      expect(h.clearDashboardMock).not.toHaveBeenCalled();
+      // Nothing left listening: a second paused run in the same process must
+      // not find this one's handler still on the emitter.
+      expect(process.listeners("SIGTERM")).toHaveLength(0);
+    } finally {
+      process.stdin.isTTY = tty;
+    }
+  });
+
   it("says the plan gate will be answered in the terminal when the dashboard is off", async () => {
     await cli("run", "x", "--repo", "/repo", "--no-dashboard");
 

@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { createInterface } from "node:readline/promises";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { DEFAULT_CHECK_TIMEOUT_MINUTES, ModelRoutingShape, RunConfig, SubscriptionConfig } from "@harness/shared";
+import { DEFAULT_CHECK_TIMEOUT_MINUTES, ModelRoutingShape, RunConfig, RunState, SubscriptionConfig } from "@harness/shared";
 import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, accountEnv, assembleReport, checkMemoryBanner, detectToolbelt, ensureIgnored, harnessBuild, missingKeys, originSlug, postmortem, renderPostmortem, reportPath, runLockHolder, standaloneReport, repoUnusable, wasMerged } from "@harness/core";
 import { Dashboard } from "@harness/dashboard";
 import { promptForNewCap, watchBudgetCommands } from "./budget.js";
@@ -49,7 +49,7 @@ function makeDashboardFactory(want: boolean, port: number | undefined, repoPath:
   gateOverride?: (bus: Bus, store: Store) => GateHandler;
   connect: (controller: RunController) => void;
   start: () => Promise<string | null>;
-  stop: () => Promise<void>;
+  stop: (keepLink?: boolean) => Promise<void>;
 } {
   if (!want) return { connect: () => undefined, start: async () => null, stop: async () => undefined };
   // Only `resume` reuses: a run being picked up should come back at the URL the
@@ -75,13 +75,91 @@ function makeDashboardFactory(want: boolean, port: number | undefined, repoPath:
     },
     // Guarded the same way `connect` is: a caller is free not to wire
     // `gateOverride` into anything, and then there is no server to stop.
-    stop: async () => {
+    //
+    // `keepLink` is for a run that stopped without finishing. The link file is
+    // the only record of the port and the token, and `resume` reuses both so
+    // that the tab the operator still has open keeps working — so clearing it
+    // on the way out is precisely what makes `harness pause`'s own promise,
+    // "It comes back on this same dashboard", false. Leaving a stale record
+    // behind costs nothing: `liveDashboardUrl` asks the port before trusting
+    // it and clears the file itself when nothing answers.
+    stop: async (keepLink = false) => {
       if (dash) {
         await dash.stop();
-        clearDashboard(repoPath);
+        if (!keepLink) clearDashboard(repoPath);
       }
     },
   };
+}
+
+/**
+ * Run states that mean the run stopped without finishing, and `harness resume`
+ * is what picks it back up. Every one of them is the run waiting on a person: a
+ * pit stop answered `stop`, a cap reached, a subscription spent.
+ */
+const HELD_STATES: ReadonlySet<RunState> = new Set<RunState>(["PAUSED", "BUDGET_HOLD", "LIMIT_HOLD"]);
+
+/**
+ * What becomes of the dashboard once the controller returns.
+ *
+ * A run that reached DONE, PR_REVIEW, FAILED or ABORTED is over, and a server
+ * still listening on a finished run is a port and a bearer token left lying
+ * around for nothing. Stop it, and clear the link so the next command does not
+ * go knocking on a dead port.
+ *
+ * A held run is the opposite case, and it is the one this function exists for.
+ * `stop` at a pit stop is not the run giving up — it is the run asking the
+ * operator something it has no authority to decide, and the question it asked
+ * is on the dashboard. Tearing the dashboard down in the same breath hands them
+ * a URL that stopped answering at the exact moment they were asked to reply,
+ * and leaves the question readable only out of SQLite or a pit stop artifacts
+ * directory. Nobody should have to go there to answer their own run. So on a
+ * held run the server stays up and this waits.
+ *
+ * Ctrl-C (or SIGTERM) closes it, and even then the link record survives, because
+ * `resume` reuses the recorded port and token: either way the operator comes
+ * back at the URL they already have open.
+ *
+ * Two guards on holding. Nothing is held when the dashboard is off, because
+ * there is nothing to hold — `--no-dashboard` resolves its gates in the
+ * terminal, which has already come back. And nothing is held without a TTY: an
+ * unattended `run` that pauses has to exit, or a scripted invocation hangs
+ * forever on a person who was never there. That is the same test `run` already
+ * uses to decide whether intake may open a terminal chat.
+ */
+async function settleDashboard(
+  dash: { stop: (keepLink?: boolean) => Promise<void> },
+  url: string | null,
+  state: RunState | undefined
+): Promise<void> {
+  const held = state !== undefined && HELD_STATES.has(state);
+  if (!held) {
+    await dash.stop();
+    return;
+  }
+  if (url === null || !process.stdin.isTTY) {
+    await dash.stop(true);
+    return;
+  }
+  process.stdout.write(
+    `\n  The run is ${state} and the dashboard is still serving, so you can read what it asked:\n` +
+      `    ${url}\n` +
+      "  Answer it there, then `harness resume` — it comes back on this same URL.\n" +
+      "  Ctrl-C closes the dashboard. The run keeps its state either way.\n"
+  );
+  // Both handlers come off together: whichever signal arrives, the other must
+  // not be left behind holding a reference to a resolved promise. Same shape as
+  // the `dashboard` command, which is the other place this process is the
+  // server and nothing else.
+  await new Promise<void>((resolve) => {
+    const signals = ["SIGINT", "SIGTERM"] as const;
+    const done = () => {
+      for (const sig of signals) process.off(sig, done);
+      resolve();
+    };
+    for (const sig of signals) process.on(sig, done);
+  });
+  await dash.stop(true);
 }
 
 /**
@@ -721,9 +799,14 @@ export function buildProgram(): Command {
       const seed = assignment ?? (await chat!.promptSeed(wantChat));
       const stopGateMail = watchGateMail(bus, { project: path.basename(repo), url: url ?? "", target: mail });
       const stopBudgetWatch = watchBudgetCommands(controller, liveRunId);
+      // Read inside the `try`, so the throw path leaves it undefined and the
+      // dashboard comes down: a run that ended in an exception is not a run
+      // holding a question, whatever state the row happens to say.
+      let finalState: RunState | undefined;
       try {
         const runId = await controller.startRun(seed, config, wantChat ? chat : undefined);
         await reportOutcome(controller, repo, runId);
+        finalState = store.getRun(runId)?.state;
       } catch (e) {
         notifyDone(`${path.basename(repo)} — run stopped`, e instanceof Error ? e.message : String(e));
         throw e;
@@ -731,7 +814,7 @@ export function buildProgram(): Command {
         stopGateMail();
         stopBudgetWatch();
         chat?.close();
-        await dash.stop();
+        await settleDashboard(dash, url, finalState);
       }
     });
 
@@ -940,9 +1023,13 @@ export function buildProgram(): Command {
       mailBanner(mail).forEach((l) => process.stdout.write(`${l}\n`));
       const stopGateMail = watchGateMail(bus, { project: path.basename(repo), url: url ?? "", target: mail });
       const stopBudgetWatch = watchBudgetCommands(controller, () => runId);
+      // See `run`: undefined on the throw path is what brings the dashboard
+      // down after an exception rather than holding it open on one.
+      let finalState: RunState | undefined;
       try {
         await controller.resume(runId, chat);
         await reportOutcome(controller, repo, runId);
+        finalState = store.getRun(runId)?.state;
       } catch (e) {
         notifyDone(`${path.basename(repo)} — run stopped`, e instanceof Error ? e.message : String(e));
         throw e;
@@ -950,7 +1037,7 @@ export function buildProgram(): Command {
         stopGateMail();
         stopBudgetWatch();
         chat?.close();
-        await dash.stop();
+        await settleDashboard(dash, url, finalState);
       }
     });
 
