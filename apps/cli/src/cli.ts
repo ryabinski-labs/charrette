@@ -95,22 +95,36 @@ function makeDashboardFactory(want: boolean, port: number | undefined, repoPath:
 /**
  * Run states that mean the run stopped without finishing, and `harness resume`
  * is what picks it back up. Every one of them is the run waiting on a person: a
- * pit stop answered `stop`, a cap reached, a subscription spent.
+ * pit stop answered `stop`, a cap reached, a subscription spent, a pull request
+ * that only a human may merge.
+ *
+ * PR_REVIEW is here for the same reason as the rest, and it took a live run to
+ * see it. A run reaching PR_REVIEW reads like an ending — the tasks stopped, the
+ * branch is pushed, CI is green — so it was first classified with DONE. But the
+ * state's own exit reason is a list of things still owed to a person: "1 pull
+ * request open for review; 2 tasks need you; 102 never started, blocked behind
+ * them; intent check found 3 gaps". The pull request is deliberately left in
+ * draft when the intent check failed, precisely so that a human has to act
+ * rather than read past a verdict. A state whose entire purpose is to ask
+ * someone to act is not a state to close their window on, and `listRuns`
+ * already agrees: it offers PR_REVIEW runs as resumable.
  */
-const HELD_STATES: ReadonlySet<RunState> = new Set<RunState>(["PAUSED", "BUDGET_HOLD", "LIMIT_HOLD"]);
+const HELD_STATES: ReadonlySet<RunState> = new Set<RunState>(["PAUSED", "BUDGET_HOLD", "LIMIT_HOLD", "PR_REVIEW"]);
 
 /**
  * What becomes of the dashboard once the controller returns.
  *
- * A run that reached DONE, PR_REVIEW, FAILED or ABORTED is over, and a server
- * still listening on a finished run is a port and a bearer token left lying
- * around for nothing. Stop it, and clear the link so the next command does not
- * go knocking on a dead port.
+ * A run that reached DONE, FAILED or ABORTED is over, and a server still
+ * listening on a finished run is a port and a bearer token left lying around
+ * for nothing. Stop it, and clear the link so the next command does not go
+ * knocking on a dead port.
  *
  * A held run is the opposite case, and it is the one this function exists for.
  * `stop` at a pit stop is not the run giving up — it is the run asking the
  * operator something it has no authority to decide, and the question it asked
- * is on the dashboard. Tearing the dashboard down in the same breath hands them
+ * is on the dashboard. PR_REVIEW is the same shape: the run has no authority to
+ * merge, and what it needs read — the intent gaps, the tasks still owed to a
+ * person, the draft it deliberately did not flip — is on the dashboard too. Tearing the dashboard down in the same breath hands them
  * a URL that stopped answering at the exact moment they were asked to reply,
  * and leaves the question readable only out of SQLite or a pit stop artifacts
  * directory. Nobody should have to go there to answer their own run. So on a
@@ -141,10 +155,17 @@ async function settleDashboard(
     await dash.stop(true);
     return;
   }
+  // PR_REVIEW is held for a different reason than the rest, so it is told
+  // differently: nothing there is a question with an answer box. What is owed is
+  // a review, and a merge only a person may perform.
+  const next =
+    state === "PR_REVIEW"
+      ? "  Review it there. `harness resume` takes another lap — it comes back on this same URL.\n"
+      : "  Answer it there, then `harness resume` — it comes back on this same URL.\n";
   process.stdout.write(
     `\n  The run is ${state} and the dashboard is still serving, so you can read what it asked:\n` +
       `    ${url}\n` +
-      "  Answer it there, then `harness resume` — it comes back on this same URL.\n" +
+      next +
       "  Ctrl-C closes the dashboard. The run keeps its state either way.\n"
   );
   // Both handlers come off together: whichever signal arrives, the other must

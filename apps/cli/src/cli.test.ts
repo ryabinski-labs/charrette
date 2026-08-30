@@ -851,6 +851,52 @@ describe("harness run — the dashboard", () => {
     }
   });
 
+  it("holds the dashboard open on a PR_REVIEW run, which is owed a person and not finished", async () => {
+    // The case this exists for, found on a live run: PR_REVIEW reads like an
+    // ending — tasks stopped, branch pushed, CI green — but the state's own exit
+    // reason is a list of things still owed to a person, and the pull request is
+    // deliberately left in draft so that somebody has to act. Closing the window
+    // at that moment is the same mistake as closing it at a pit stop.
+    const tty = process.stdin.isTTY;
+    process.stdin.isTTY = true;
+    try {
+      h.storeMethods.getRun.mockReturnValue({ id: "run-1", state: "PR_REVIEW", config: {} });
+
+      const running = cli("run", "x", "--repo", "/repo");
+      await vi.waitFor(() => expect(printed()).toContain("the dashboard is still serving"));
+      expect(printed()).toContain("http://localhost:4777/#tok");
+      // Told as a review, not as a question with an answer box.
+      expect(printed()).toContain("Review it there");
+      expect(h.dashboardMethods.stop).not.toHaveBeenCalled();
+
+      process.emit("SIGTERM");
+      await running;
+
+      expect(h.dashboardMethods.stop).toHaveBeenCalledOnce();
+      expect(h.clearDashboardMock).not.toHaveBeenCalled();
+      expect(process.listeners("SIGTERM")).toHaveLength(0);
+    } finally {
+      process.stdin.isTTY = tty;
+    }
+  });
+
+  it("keeps the link record for a PR_REVIEW run even with no terminal to hold in", async () => {
+    // Unattended, the process still has to exit — but `resume` reuses the
+    // recorded port and token, so the tab the operator left open keeps working.
+    const tty = process.stdin.isTTY;
+    process.stdin.isTTY = false;
+    try {
+      h.storeMethods.getRun.mockReturnValue({ id: "run-1", state: "PR_REVIEW", config: {} });
+
+      await cli("run", "x", "--repo", "/repo");
+
+      expect(h.dashboardMethods.stop).toHaveBeenCalledOnce();
+      expect(h.clearDashboardMock).not.toHaveBeenCalled();
+    } finally {
+      process.stdin.isTTY = tty;
+    }
+  });
+
   it("says the plan gate will be answered in the terminal when the dashboard is off", async () => {
     await cli("run", "x", "--repo", "/repo", "--no-dashboard");
 
