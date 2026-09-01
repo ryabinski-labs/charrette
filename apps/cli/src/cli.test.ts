@@ -24,7 +24,10 @@ const h = vi.hoisted(() => {
     prodVerdict: vi.fn(() => null as unknown),
   };
   const controllerMethods = {
-    startRun: vi.fn(async () => "run-1"),
+    // Mirrors RunController.startRun's arity: a no-arg implementation types
+    // `mock.calls` as an empty tuple, so reading the intake argument off a
+    // recorded call stops compiling even while the test passes.
+    startRun: vi.fn(async (_assignment: string, _config: unknown, _intake?: unknown) => "run-1"),
     resume: vi.fn(async () => undefined),
     outcome: vi.fn(() => ({
       prs: [] as { number: number; title: string }[],
