@@ -112,7 +112,8 @@ async function build(
   agents: AgentPool,
   repo: string,
   over: Record<string, unknown> = {},
-  resolvePitStop?: (stop: unknown) => Promise<PitStopDecision>
+  resolvePitStop?: (stop: unknown) => Promise<PitStopDecision>,
+  tune?: (controller: RunController) => void
 ) {
   const store = new Store(":memory:");
   const bus = new Bus(store);
@@ -136,9 +137,13 @@ async function build(
     },
     repo
   );
+  tune?.(controller);
   const runId = await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], checkTimeoutMinutes: 1, deployTimeoutMinutes: 1, ...over }));
   return { store, bus, runId, logs, controller };
 }
+
+/** The old shape: the red verdict goes into the outcome line and the run reports. */
+const NO_HOLD = { holdUntilGreen: false };
 
 const ciFixTasks = (store: Store, runId: string) => store.listTasks(runId).filter((t) => t.id.startsWith("ci-fix-"));
 
@@ -371,11 +376,27 @@ describe("a red check that survives its re-run", () => {
 });
 
 describe("a failure that outlives its rounds", () => {
-  it("stops treating it as its own work and leaves the verdict on the record", async () => {
+  it("holds rather than reporting, when nobody is there to grant more rounds", async () => {
     const repo = repoWithOrigin();
     // Sticky failing: no fix round ever helps.
     const { adapter } = fakeGitHub([{ state: "failing", failing: ["Backend test"], total: 1 }]);
-    const { store, runId, controller } = await build(adapter, pool(), repo);
+    const { store, runId, controller, logs } = await build(adapter, pool(), repo);
+
+    const rounds = new Set(ciFixTasks(store, runId).map((t) => /^ci-fix-(\d+)-/.exec(t.id)![1]));
+    expect(rounds.size).toBe(2);
+    // Not PR_REVIEW: a run does not report itself in review over a branch the
+    // repo has rejected. Paused, with the reason where `resume` reads it.
+    expect(store.getRun(runId)!.state).toBe("PAUSED");
+    expect(store.lastRunStateChange(runId)!.reason).toMatch(/^green hold: CI is red on #7/);
+    expect(store.ciStatus(runId)).toMatchObject({ state: "failing" });
+    expect(controller.outcome(runId).line).toContain("CI red (Backend test)");
+    expect(logs.join("\n")).toMatch(/no pit stop can grant more here, so the run is pausing. `harness resume` grants another 2/);
+  });
+
+  it("stops treating it as its own work and leaves the verdict on the record, with the hold off", async () => {
+    const repo = repoWithOrigin();
+    const { adapter } = fakeGitHub([{ state: "failing", failing: ["Backend test"], total: 1 }]);
+    const { store, runId, controller } = await build(adapter, pool(), repo, NO_HOLD);
 
     const rounds = new Set(ciFixTasks(store, runId).map((t) => /^ci-fix-(\d+)-/.exec(t.id)![1]));
     expect(rounds.size).toBe(2);
@@ -386,10 +407,25 @@ describe("a failure that outlives its rounds", () => {
     expect(controller.hasRecoverableWork(runId)).toBe(true);
   });
 
-  it("keeps the old behaviour when the fix loop is switched off", async () => {
+  it("re-asks on resume with the hold off, and reports again when the rounds are still spent", async () => {
+    // The pre-hold resume shape, kept: no pit stop, no grant — the escalation
+    // was shown on the way in, and a resume with nothing left to spend reports.
+    const repo = repoWithOrigin();
+    const { adapter } = fakeGitHub([{ state: "failing", failing: ["Backend test"], total: 1 }]);
+    const { store, runId, controller } = await build(adapter, pool(), repo, NO_HOLD);
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+
+    await controller.resume(runId);
+
+    expect(new Set(ciFixTasks(store, runId).map((t) => /^ci-fix-(\d+)-/.exec(t.id)![1])).size).toBe(2);
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    expect(store.eventCount(runId, "run.ci_rounds_granted")).toBe(0);
+  });
+
+  it("keeps the old behaviour when the fix loop is switched off, with the hold off", async () => {
     const repo = repoWithOrigin();
     const { adapter, rerunAsked } = fakeGitHub([{ state: "failing", failing: ["Backend test"], total: 1 }]);
-    const { store, runId } = await build(adapter, pool(), repo, { ciFixRounds: 0 }, async (stop) => {
+    const { store, runId } = await build(adapter, pool(), repo, { ciFixRounds: 0, ...NO_HOLD }, async (stop) => {
       if ((stop as { reason: string }).reason.includes("CI is red")) throw new Error("the pit stop opened with the loop switched off");
       return { action: "continue", feedback: "" };
     });
@@ -398,6 +434,22 @@ describe("a failure that outlives its rounds", () => {
     expect(store.eventCount(runId, "run.ci_retry")).toBe(0);
     expect(ciFixTasks(store, runId)).toHaveLength(0);
     expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+  });
+
+  it("pauses with the fix loop switched off and the hold on, saying which knob to turn", async () => {
+    // `ciFixRounds: 0` means "never fix CI yourself"; the hold means "never
+    // report red". Together they can only wait for a person, and say so.
+    const repo = repoWithOrigin();
+    const { adapter, rerunAsked } = fakeGitHub([{ state: "failing", failing: ["Backend test"], total: 1 }]);
+    const { store, runId, logs } = await build(adapter, pool(), repo, { ciFixRounds: 0 }, async (stop) => {
+      if ((stop as { reason: string }).reason.includes("CI is red")) throw new Error("the pit stop opened with the loop switched off");
+      return { action: "continue", feedback: "" };
+    });
+
+    expect(rerunAsked()).toBe(0);
+    expect(ciFixTasks(store, runId)).toHaveLength(0);
+    expect(store.getRun(runId)!.state).toBe("PAUSED");
+    expect(logs.join("\n")).toMatch(/`ciFixRounds` is 0, so the run will not fix it itself/);
   });
 
   it("asks nobody when checks are off entirely", async () => {
@@ -440,30 +492,60 @@ describe("the pit stop at the end of the rounds", () => {
     expect(logs.join("\n")).toMatch(/CI is still red after 1 fix round\(s\): Backend test/);
   });
 
-  it("proceeds with the red verdict on the record when they say continue", async () => {
+  it("grants another block of rounds when they say continue, and asks again when those are spent too", async () => {
+    const repo = repoWithOrigin();
+    const { adapter } = fakeGitHub([{ state: "failing", failing: ["Backend test"], total: 1 }]);
+    const stop = spent((n) => (n === 1 ? { action: "continue", feedback: "" } : { action: "stop", feedback: "" }));
+    const { store, runId, logs } = await build(adapter, pool(), repo, { ciFixRounds: 1 }, stop.resolve);
+
+    expect(stop.asked()).toBe(2);
+    // One round configured, one granted: two rounds of fix tasks on the record.
+    expect(new Set(ciFixTasks(store, runId).map((t) => /^ci-fix-(\d+)-/.exec(t.id)![1])).size).toBe(2);
+    const grants = store.eventsSince(runId, 0, 10_000).map((r) => r.event).filter((e) => e.type === "run.ci_rounds_granted");
+    expect(grants).toHaveLength(1);
+    expect(grants[0]).toMatchObject({ prNumber: 7, rounds: 2, by: "pitstop" });
+    expect(logs.join("\n")).toMatch(/"continue" grants another 1 round\(s\)/);
+    expect(logs.join("\n")).toMatch(/round 2 of 2/);
+    expect(store.getRun(runId)!.state).toBe("PAUSED");
+    expect(store.ciStatus(runId)).toMatchObject({ state: "failing" });
+  });
+
+  it("proceeds with the red verdict on the record when they say continue, with the hold off", async () => {
     const repo = repoWithOrigin();
     const { adapter } = fakeGitHub([{ state: "failing", failing: ["Backend test"], total: 1 }]);
     const stop = spent(() => ({ action: "continue", feedback: "" }));
-    const { store, runId } = await build(adapter, pool(), repo, { ciFixRounds: 1 }, stop.resolve);
+    const { store, runId } = await build(adapter, pool(), repo, { ciFixRounds: 1, ...NO_HOLD }, stop.resolve);
 
     expect(stop.asked()).toBe(1);
     expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
     expect(store.ciStatus(runId)).toMatchObject({ state: "failing" });
+    expect(store.eventCount(runId, "run.ci_rounds_granted")).toBe(0);
   });
 
   it("sends the run back to work on a redirect, and asks again when it comes back red", async () => {
     const repo = repoWithOrigin();
     const { adapter } = fakeGitHub([{ state: "failing", failing: ["Backend test"], total: 1 }]);
-    const stop = spent((n) => (n === 1 ? { action: "redirect", feedback: "look at the runner" } : { action: "continue", feedback: "" }));
+    const stop = spent((n) => (n === 1 ? { action: "redirect", feedback: "look at the runner" } : n === 2 ? { action: "continue", feedback: "" } : { action: "stop", feedback: "" }));
     const { store, runId } = await build(adapter, pool(), repo, { ciFixRounds: 1 }, stop.resolve);
 
-    // Asked twice: once redirected, once — the failure still standing on the
-    // fresh status the next pass published — answered for good.
+    // Asked three times: once redirected, once — the failure still standing
+    // on the fresh status the next pass published — granted a round, and once
+    // that round was spent too, answered for good.
+    expect(stop.asked()).toBe(3);
+    expect(store.getRun(runId)!.state).toBe("PAUSED");
+  });
+
+  it("sends the run back to work on a redirect, with the hold off", async () => {
+    const repo = repoWithOrigin();
+    const { adapter } = fakeGitHub([{ state: "failing", failing: ["Backend test"], total: 1 }]);
+    const stop = spent((n) => (n === 1 ? { action: "redirect", feedback: "look at the runner" } : { action: "continue", feedback: "" }));
+    const { store, runId } = await build(adapter, pool(), repo, { ciFixRounds: 1, ...NO_HOLD }, stop.resolve);
+
     expect(stop.asked()).toBe(2);
     expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
   });
 
-  it("has nothing to ask about a run whose repo never reported at all", async () => {
+  it("has nothing to ask about a run whose repo never reported at all, and pauses on not knowing", async () => {
     const repo = repoWithOrigin();
     const adapter = {
       enabled: true,
@@ -478,18 +560,55 @@ describe("the pit stop at the end of the rounds", () => {
       },
     } as unknown as GitHubAdapter;
     const stop = spent(() => ({ action: "stop", feedback: "" }));
-    const { store, runId } = await build(adapter, pool(), repo, {}, stop.resolve);
+    const { store, runId, logs } = await build(adapter, pool(), repo, {}, stop.resolve, (c) => {
+      c.githubRetryMs = 1;
+    });
+
+    expect(stop.asked()).toBe(0);
+    expect(store.ciStatus(runId)).toBeNull();
+    // Asked three times, then paused: not knowing is not green.
+    expect(logs.filter((t) => /GitHub could not be read while waiting on CI for #7 — asking again/.test(t))).toHaveLength(2);
+    expect(store.getRun(runId)!.state).toBe("PAUSED");
+    expect(store.lastRunStateChange(runId)!.reason).toBe("green hold: GitHub could not be read while waiting on CI for #7");
+  });
+
+  it("has nothing to ask about a run whose repo never reported at all, with the hold off", async () => {
+    const repo = repoWithOrigin();
+    const adapter = {
+      enabled: true,
+      async ensureIssue() {
+        return null;
+      },
+      async ensurePR() {
+        return { number: 7, url: "https://example.test/pull/7", fresh: true };
+      },
+      async markPrReady() {
+        return true;
+      },
+    } as unknown as GitHubAdapter;
+    const stop = spent(() => ({ action: "stop", feedback: "" }));
+    const { store, runId } = await build(adapter, pool(), repo, NO_HOLD, stop.resolve);
 
     expect(stop.asked()).toBe(0);
     expect(store.ciStatus(runId)).toBeNull();
     expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
   });
 
-  it("never opens with the loop switched off, even red and spent", async () => {
+  it("never opens with the loop switched off, even red and spent — and pauses instead", async () => {
     const repo = repoWithOrigin();
     const { adapter } = fakeGitHub([{ state: "failing", failing: ["Backend test"], total: 1 }]);
     const stop = spent(() => ({ action: "stop", feedback: "" }));
     const { store, runId } = await build(adapter, pool(), repo, { ciFixRounds: 0, pitStop: { every: "never" } }, stop.resolve);
+
+    expect(stop.asked()).toBe(0);
+    expect(store.getRun(runId)!.state).toBe("PAUSED");
+  });
+
+  it("never opens with the loop switched off, with the hold off", async () => {
+    const repo = repoWithOrigin();
+    const { adapter } = fakeGitHub([{ state: "failing", failing: ["Backend test"], total: 1 }]);
+    const stop = spent(() => ({ action: "stop", feedback: "" }));
+    const { store, runId } = await build(adapter, pool(), repo, { ciFixRounds: 0, pitStop: { every: "never" }, ...NO_HOLD }, stop.resolve);
 
     expect(stop.asked()).toBe(0);
     expect(store.getRun(runId)!.state).toBe("PR_REVIEW");

@@ -296,7 +296,45 @@ export class Store {
       }
     }
     this.freezeLightTier();
+    this.freezeWorkerTiers();
     this.freezeReviewer();
+  }
+
+  /**
+   * Give a run created before `models.workerUi` and `models.workerHeavy`
+   * existed the model those tasks were actually running on.
+   *
+   * The same migration as `freezeLightTier`, for the same reason, in the other
+   * direction: an absent key takes today's default, and today's default for
+   * the heavy tier is a model at twice the price of anything that run agreed
+   * to. A run planned and priced on Sonnet, parked over this release, must not
+   * come back and send its rejected tasks to Fable having agreed to nothing.
+   * Both rungs are set to that run's own worker — which is where every one of
+   * its tasks was going anyway — and a run that named them itself is left
+   * alone.
+   */
+  private freezeWorkerTiers(): void {
+    const fallback = RunConfig.parse({}).models.worker;
+    const rows = this.db.prepare("SELECT id, config FROM runs").all() as { id: string; config: string }[];
+    const patch = this.db.prepare("UPDATE runs SET config = ? WHERE id = ?");
+    for (const row of rows) {
+      let config: { models?: Record<string, unknown> };
+      try {
+        config = JSON.parse(row.config) as { models?: Record<string, unknown> };
+      } catch {
+        continue;
+      }
+      const models = config?.models;
+      if (!models || typeof models !== "object") continue;
+      const worker = typeof models.worker === "string" ? models.worker : fallback;
+      let touched = false;
+      for (const rung of ["workerUi", "workerHeavy"] as const) {
+        if (rung in models) continue;
+        models[rung] = worker;
+        touched = true;
+      }
+      if (touched) patch.run(JSON.stringify(config), row.id);
+    }
   }
 
   /**
@@ -681,14 +719,14 @@ export class Store {
   }
 
   /** Whether the run's pull request can be merged into its base, and what broke if not. */
-  mergeStatus(runId: string): { prNumber: number; state: "mergeable" | "conflicting" | "unknown"; baseBranch: string; conflicts: string[]; resolvedBy: string } | null {
+  mergeStatus(runId: string): { prNumber: number; state: "mergeable" | "conflicting" | "behind" | "unknown"; baseBranch: string; conflicts: string[]; resolvedBy: string } | null {
     const row = this.db
       .prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.merge_status' ORDER BY seq DESC LIMIT 1")
       .get(runId) as { payload: string } | undefined;
     if (!row) return null;
     const p = JSON.parse(row.payload) as {
       prNumber?: number;
-      state: "mergeable" | "conflicting" | "unknown";
+      state: "mergeable" | "conflicting" | "behind" | "unknown";
       baseBranch?: string;
       conflicts?: string[];
       resolvedBy?: string;
@@ -992,6 +1030,32 @@ export class Store {
   /** How many of this event a run has recorded — how many times round it has been. */
   eventCount(runId: string, type: string): number {
     return (this.db.prepare("SELECT COUNT(*) c FROM events WHERE runId = ? AND type = ?").get(runId, type) as { c: number }).c;
+  }
+
+  /**
+   * How many CI fix rounds the run may spend: the configured `ciFixRounds`
+   * until something grants more, then whatever the latest grant said. The
+   * grant lives in the event log because the config's own cap on the field
+   * would refuse to store it, and because who kept the run going is part of
+   * the record.
+   */
+  /** The run's most recent state change — what paused it, when it is paused. */
+  lastRunStateChange(runId: string): { from: string; to: string; reason: string } | null {
+    const row = this.db
+      .prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.state_changed' ORDER BY seq DESC LIMIT 1")
+      .get(runId) as { payload: string } | undefined;
+    if (!row) return null;
+    const p = JSON.parse(row.payload) as { from: string; to: string; reason: string };
+    return { from: p.from, to: p.to, reason: p.reason };
+  }
+
+  ciRoundsAllowed(runId: string, configured: number): number {
+    const row = this.db
+      .prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.ci_rounds_granted' ORDER BY seq DESC LIMIT 1")
+      .get(runId) as { payload: string } | undefined;
+    if (!row) return configured;
+    const p = JSON.parse(row.payload) as { rounds: number };
+    return Math.max(configured, p.rounds);
   }
 
   lastEventSeq(runId: string, type: string): number {

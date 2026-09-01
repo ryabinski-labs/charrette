@@ -8,8 +8,23 @@ import { modelId } from "@harness/shared";
  * spends real money the budget gate cannot see. The unknown-model fallback in
  * `priceFor` is the top tier for exactly that reason — an unpriced model is
  * over-charged and stops the run early, never under-charged and let run on.
+ *
+ * "Top tier" moved when Fable shipped. The fallback was Opus's $5/$25 for as
+ * long as Opus was the dearest model the harness could be pointed at; the day
+ * `models.planner` defaulted to `claude-fable-5-1` at $10/$50, a Fable row
+ * missing from this table would have been charged at half its price — the one
+ * direction this table exists to never go. The fallback below is Fable's rate
+ * for that reason, and any model dearer than Fable needs its own row *and* a
+ * new fallback in the same commit.
  */
 export const PRICES: Record<string, { in: number; out: number }> = {
+  // Cache reads on Fable 5.1 are a flat $0.25/MTok, not the 0.1x that
+  // `CACHE_READ_MULT` applies to every model here ($1.00). Left as is: the
+  // harness over-charges Fable's cache hits by 4x, which stops a run early
+  // rather than late, and a per-model cache rate is not worth a second table
+  // until a run's bill is dominated by them.
+  "claude-fable-5-1": { in: 10, out: 50 },
+  "claude-fable-5": { in: 10, out: 50 },
   "claude-opus-5": { in: 5, out: 25 },
   "claude-sonnet-5": { in: 3, out: 15 },
   "claude-haiku-4-5-20251001": { in: 1, out: 5 },
@@ -49,7 +64,7 @@ export function priceFor(model: string): { in: number; out: number } {
   const exact = PRICES[name];
   if (exact) return exact;
   const key = Object.keys(PRICES).find((k) => name.startsWith(k) || k.startsWith(name));
-  return key ? PRICES[key]! : { in: 5, out: 25 }; // unknown models priced at the top tier, never under
+  return key ? PRICES[key]! : { in: 10, out: 50 }; // unknown models priced at the top tier (Fable), never under
 }
 
 export function costUsd(model: string, usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }): number {

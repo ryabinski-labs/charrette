@@ -181,9 +181,14 @@ async function build(github: GitHubAdapter, agents: AgentPool, repo: string, ove
   // `checkTimeoutMinutes` is a whole-minute integer, so a test that has to
   // exhaust the mergeability settle budget cannot get there through config.
   if (over.settleMinutes !== undefined) controller.mergeabilitySettleMinutes = over.settleMinutes;
+  // The green hold is off here on purpose. These tests are about the base
+  // merge, the resolver and the verdict GitHub records — the machinery — and
+  // the fakes carry no CI at all, which the hold reads as "GitHub could not be
+  // read" and pauses on before any of that is reached. What the hold does with
+  // a conflicting or behind pull request is greenHold.test.ts's subject.
   const runId = await controller.startRun(
     "do a thing",
-    RunConfig.parse({ deterministicChecks: [], checkTimeoutMinutes: 1, deployTimeoutMinutes: 1, ...(over.baseBranch ? { baseBranch: over.baseBranch } : {}) })
+    RunConfig.parse({ deterministicChecks: [], checkTimeoutMinutes: 1, deployTimeoutMinutes: 1, holdUntilGreen: false, ...(over.baseBranch ? { baseBranch: over.baseBranch } : {}) })
   );
   return { store, bus, runId, logs, controller };
 }

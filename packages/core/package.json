@@ -13,7 +13,7 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.222",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.257",
     "@harness/shared": "workspace:*",
     "@harness/skills-mcp": "workspace:*",
     "octokit": "^4.0.0",

@@ -1,3 +1,4 @@
+import { createReadStream } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -135,16 +136,76 @@ function bundlePath(): string {
 }
 
 /**
- * The installed SDK's ceiling for one model.
+ * Where the SDK's native binary lives, for the SDKs that keep the registry
+ * there instead.
  *
- * The bundle is a megabyte and does not change while the harness runs, so it is
- * read once per process. Never throws: an SDK that cannot be resolved, read, or
- * parsed produces no opinion.
+ * From 0.3.25x the entry bundle is a thin bridge and the model table moved
+ * into the platform binary (`@anthropic-ai/claude-agent-sdk-darwin-arm64`
+ * and its siblings), which is the Claude Code build the sessions actually run
+ * on. It is resolved from the SDK's own directory rather than the harness's,
+ * so a pnpm layout that hoists nothing still finds the copy the SDK uses.
  */
-export async function sdkCeiling(model: string, load = () => readFile(bundlePath(), "utf8")): Promise<CeilingReading> {
-  cached ??= load()
+function binaryPath(): string {
+  const platform = `${process.platform}-${process.arch}`;
+  const pkg = createRequire(bundlePath()).resolve(`@anthropic-ai/claude-agent-sdk-${platform}/package.json`);
+  return path.join(path.dirname(pkg), process.platform === "win32" ? "claude.exe" : "claude");
+}
+
+/** How much of the binary is read at a time, and how much of it is kept. */
+const CHUNK_BYTES = 8 * 1024 * 1024;
+const OVERLAP_BYTES = 1024 * 1024;
+
+/**
+ * Read the registry out of a file too big to hold as one string.
+ *
+ * The binary is two hundred megabytes and the registry inside it is a few
+ * kilobytes, contiguous. So it is scanned in chunks, each one overlapping the
+ * last by more than the registry is long, and every chunk is parsed exactly
+ * as a bundle would be — the same anchor, the same shape, the same silence on
+ * a chunk that carries nothing. An entry that straddles the overlap is seen
+ * whole in the next chunk, and an entry seen twice is one entry.
+ */
+async function ceilingTableFromFile(file: string): Promise<CeilingTable | undefined> {
+  const models = new Map<string, ModelLimits>();
+  let carry = "";
+  const stream = createReadStream(file, { highWaterMark: CHUNK_BYTES });
+  for await (const chunk of stream) {
+    // latin1: one byte, one character, so an offset is an offset and the
+    // ASCII the registry is written in comes through untouched.
+    const text = carry + (chunk as Buffer).toString("latin1");
+    const table = ceilingTable(text);
+    if (table) for (const m of table.models) if (!models.has(m.id)) models.set(m.id, m.limits);
+    carry = text.slice(-OVERLAP_BYTES);
+  }
+  if (models.size < MIN_MODELS) return undefined;
+  return {
+    models: [...models.entries()].map(([id, limits]) => ({ id, limits })).sort((a, b) => b.id.length - a.id.length),
+  };
+}
+
+/**
+ * The installed SDK's registry, wherever this SDK keeps it: the entry bundle
+ * first, the native binary when the bundle carries none. Undefined when
+ * neither does, or neither can be read.
+ */
+export async function installedCeilingTable(): Promise<CeilingTable | undefined> {
+  const fromBundle = await readFile(bundlePath(), "utf8")
     .then(ceilingTable)
     .catch(() => undefined);
+  if (fromBundle) return fromBundle;
+  return ceilingTableFromFile(binaryPath()).catch(() => undefined);
+}
+
+/**
+ * The installed SDK's ceiling for one model.
+ *
+ * The registry does not change while the harness runs, so it is read once per
+ * process. Never throws: an SDK that cannot be resolved, read, or parsed
+ * produces no opinion. `load` is the seam tests use to hand in a bundle; the
+ * harness itself reads whatever the installed SDK keeps.
+ */
+export async function sdkCeiling(model: string, load?: () => Promise<string>): Promise<CeilingReading> {
+  cached ??= (load ? load().then(ceilingTable) : installedCeilingTable()).catch(() => undefined);
   return modelCeiling(await cached, model);
 }
 

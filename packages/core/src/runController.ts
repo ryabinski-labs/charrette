@@ -262,6 +262,48 @@ const CONFLICT_FIX_ATTEMPTS = 1;
  * which makes one more session cheap against what is already spent.
  */
 const BASE_CONFLICT_FIX_ATTEMPTS = 2;
+
+/**
+ * How many times the green hold brings the pull request back up to date with
+ * its base before it asks somebody whether to keep going.
+ *
+ * Each reconcile is a base merge, a push, and a fresh CI run on the new head,
+ * so two is already a busy base moving twice during one run's closing checks.
+ * Past it the base is moving faster than this run can chase it, which is a
+ * fact about the repository — a release train, a monorepo with forty
+ * committers — that another push will only restate. The decider can grant
+ * more, exactly as it can grant more CI fix rounds.
+ */
+const MERGE_RECONCILE_ROUNDS = 2;
+
+/**
+ * How many times the green hold asks GitHub again when it could not be read at
+ * all, before it pauses the run. A blip should not park an overnight run; an
+ * outage should not be waited out in a loop nobody can see.
+ */
+const GITHUB_READ_ATTEMPTS = 3;
+
+/**
+ * The prefix every pause the green hold writes begins with. `resume` reads it
+ * back: a run paused here and resumed is the operator granting whatever the
+ * hold was waiting for, and the reason is the only place that fact survives a
+ * restart.
+ */
+const GREEN_HOLD = "green hold: ";
+
+/**
+ * Whether a session died because the model's own safety classifier declined
+ * the task, which is the one death that says something about the model rather
+ * than the machine. Matched narrowly: `ECONNREFUSED` and "connection refused"
+ * are the transport's word for a different thing, and reading a dropped
+ * socket as a refusal would demote a heavy-tier task over a network blip.
+ */
+export function refusedByClassifier(e: unknown): boolean {
+  return /\brefusal\b|\brefused to (?:respond|answer|help|continue|assist|proceed)\b/i.test(String(e));
+}
+
+/** What the green hold tells the run to do next. */
+type GateCall = { call: "proceed" } | { call: "back-to-work" | "stop"; why: string };
 /**
  * How long to wait for GitHub to say whether the pull request merges.
  *
@@ -793,6 +835,13 @@ export class RunController {
    * half-minute it costs more wall clock than the rest of the suite together.
    */
   mergeabilitySettleMinutes = MERGEABILITY_SETTLE_MINUTES;
+  /** How long the green hold waits between attempts to read a GitHub that would not answer. Tests shorten it. */
+  githubRetryMs = 30_000;
+  /**
+   * Runs `resume` found paused by the green hold. Consumed by the next
+   * `greenGate` pass, which treats the resume as the grant the hold asked for.
+   */
+  private readonly greenHoldResumed = new Set<string>();
 
   constructor(
     private store: Store,
@@ -1275,7 +1324,20 @@ export class RunController {
       // this machine still has them. A run resumed on another laptop, or after
       // the operator moved their skills directory, has a different answer.
       this.preflightSkillPins(runId);
-      await this.drive(runId, intake);
+      // A run the green hold paused — CI red with the rounds spent, no CI at
+      // all, a base it could not catch — is being resumed by the one person
+      // who can grant what it was waiting for. Remembered here because the
+      // grant is spent in INTEGRATING, several transitions away, and nothing
+      // else on the way there says why the run had stopped.
+      const last = this.store.lastRunStateChange(runId);
+      if (this.store.getRun(runId)?.state === "PAUSED" && last?.to === "PAUSED" && last.reason.startsWith(GREEN_HOLD)) {
+        this.greenHoldResumed.add(runId);
+      }
+      try {
+        await this.drive(runId, intake);
+      } finally {
+        this.greenHoldResumed.delete(runId);
+      }
     } finally {
       unlock();
     }
@@ -1338,7 +1400,8 @@ export class RunController {
       // A pull request that cannot be merged is work, and it is work only the
       // run can do. Without this a run whose every task succeeded would report
       // nothing to resume while holding the one artifact it produced hostage.
-      (this.github.enabled && this.store.mergeStatus(runId)?.state === "conflicting") ||
+      // "behind" is the same work with a shorter fix — the base merge alone.
+      (this.github.enabled && ["conflicting", "behind"].includes(this.store.mergeStatus(runId)?.state ?? "")) ||
       // So does CI the repo has not answered green for: red because the repo
       // rejected the branch, pending because the run stopped waiting — a kill,
       // a GitHub that went unreadable mid-wait — before CI ever settled.
@@ -1777,39 +1840,40 @@ export class RunController {
         }
         await this.openPrs(runId);
         published = true;
-        await this.awaitChecks(runId);
         // Red CI is work, not a report — the same rule the base merge follows,
-        // one gate further down. The escalation is only consulted on a pass
-        // that queued nothing: a round queued this pass has not run yet, and
-        // counting it as spent would show the operator a stop about work the
-        // run was still about to do.
-        const ciTasks = await this.queueCiFixes(runId);
-        const ciCall = ciTasks.length ? ("proceed" as const) : await this.ciPitStop(runId);
-        if (ciCall === "stop") {
-          this.store.transitionRun(runId, "PAUSED", "the run was stopped at a pit stop");
+        // one gate further down — and so is a pull request the base has moved
+        // out from under. `greenGate` turns both into work while the run still
+        // has agents, and with `holdUntilGreen` on it is the only way out of
+        // INTEGRATING: a run does not report itself in review over a branch
+        // the repo has rejected or cannot merge.
+        const gate = await this.greenGate(runId);
+        if (gate.call === "stop") {
+          this.store.transitionRun(runId, "PAUSED", gate.why);
           return;
         }
-        if (ciCall === "back-to-work" || ciTasks.length) {
-          this.store.transitionRun(
-            runId,
-            "EXECUTING",
-            ciCall === "back-to-work" ? "the pit stop sent the run back to work" : `fixing ${ciTasks.length} failing CI check(s)`
-          );
+        if (gate.call === "back-to-work") {
+          this.store.transitionRun(runId, "EXECUTING", gate.why);
           run = this.store.getRun(runId)!;
           continue;
         }
-        await this.confirmMergeable(runId);
         this.store.transitionRun(runId, "PR_REVIEW", this.outcome(runId).line);
         run = this.store.getRun(runId)!;
       }
-      // A resume landing here with CI not green asks again before anything
-      // waits on a human merging a branch the repo has rejected.
+      // A resume landing here with CI not green, or a pull request not known to
+      // merge, asks again before anything waits on a human merging a branch the
+      // repo has rejected.
       if (run.state === "PR_REVIEW" && !published) {
-        if ((await this.recheckRedCi(runId)) === "back-to-work") {
-          this.store.transitionRun(runId, "EXECUTING", "fixing the CI checks that were red when the run last reported");
+        const again = await this.recheckGreen(runId);
+        if (again.call === "back-to-work") {
+          this.store.transitionRun(runId, "EXECUTING", again.why);
           run = this.store.getRun(runId)!;
           continue;
         }
+        if (again.call === "stop") {
+          this.store.transitionRun(runId, "PAUSED", again.why);
+          return;
+        }
+        run = this.store.getRun(runId)!;
       }
       break;
     }
@@ -2301,7 +2365,11 @@ export class RunController {
     const prNumber = this.rollupPr(runId)!;
     const tasks = this.store.listTasks(runId);
     const rounds = new Set(tasks.map((t) => /^ci-fix-(\d+)-/.exec(t.id)?.[1]).filter(Boolean));
-    if (rounds.size >= run.config.ciFixRounds) return [];
+    // The configured rounds, or whatever the green hold has granted since:
+    // a pit stop answering "continue" or an operator resuming a paused run
+    // each add another `ciFixRounds` (see `grantCiRounds`).
+    const allowed = this.store.ciRoundsAllowed(runId, run.config.ciFixRounds);
+    if (rounds.size >= allowed) return [];
     // One re-run per round: each round pushes a new head, and each head gets
     // one chance to have been unlucky before it is treated as broken.
     if (this.store.eventCount(runId, "run.ci_retry") <= rounds.size) {
@@ -2389,7 +2457,7 @@ export class RunController {
       runId,
       sessionId: "integrator",
       text:
-        `CI is red on #${prNumber} with ${ci.failing.length} failing check(s); queued ${queued.length} task(s) to fix them (round ${round} of ${run.config.ciFixRounds})` +
+        `CI is red on #${prNumber} with ${ci.failing.length} failing check(s); queued ${queued.length} task(s) to fix them (round ${round} of ${allowed})` +
         (ci.failing.length > failing.length ? `. Not queued, and yours to judge: ${ci.failing.slice(MAX_CHECKS).join(", ")}` : ""),
       ts: Date.now(),
     });
@@ -2407,11 +2475,30 @@ export class RunController {
    * change. Opens only when CI is failing, the rounds are spent, and nobody has
    * been shown this failure yet.
    */
-  private async ciPitStop(runId: string): Promise<"proceed" | "stop" | "back-to-work"> {
+  private async ciPitStop(runId: string): Promise<"proceed" | "stop" | "back-to-work" | "granted"> {
     const run = this.store.getRun(runId)!;
-    if (!this.gates.resolvePitStop || run.config.pitStop.every === "never" || !run.config.ciFixRounds) return "proceed";
     const ci = this.store.ciStatus(runId);
     if (!ci || ci.state !== "failing") return "proceed";
+    const hold = this.holdsUntilGreen(run);
+    // Nobody to ask, or nothing the run is allowed to do about it. Without the
+    // hold that is the old shape — the red verdict goes into the outcome line
+    // and the run reports. With it the run may not report, so it pauses with
+    // the reason on the record, and `harness resume` is the grant.
+    if (!this.gates.resolvePitStop || run.config.pitStop.every === "never" || !run.config.ciFixRounds) {
+      if (!hold) return "proceed";
+      this.bus.publish({
+        type: "agent.log",
+        runId,
+        sessionId: "integrator",
+        text:
+          `CI is red on #${ci.prNumber} (${ci.failing.join(", ")}) and the run may not report in review until it is green — ` +
+          (run.config.ciFixRounds
+            ? `the fix rounds are spent and no pit stop can grant more here, so the run is pausing. \`harness resume\` grants another ${run.config.ciFixRounds}.`
+            : "`ciFixRounds` is 0, so the run will not fix it itself. Fix the branch, or set `holdUntilGreen: false`, then `harness resume`."),
+        ts: Date.now(),
+      });
+      return "stop";
+    }
     // No rounds-remaining guard: reaching here with a failing status means
     // `queueCiFixes` just returned empty despite it, and its only such path
     // leaves the rounds spent — every other empty return leaves the recorded
@@ -2429,29 +2516,219 @@ export class RunController {
       sessionId: "pitstop",
       text:
         `CI is still red after ${rounds.size} fix round(s): ${ci.failing.join(", ")} — ` +
-        `the failure has survived everything the run can do to it, so this one is yours to answer`,
+        `the failure has survived everything the run can do to it, so this one is yours to answer` +
+        (hold ? ` — "continue" grants another ${run.config.ciFixRounds} round(s); the run stays out of review until the branch is green` : ""),
       ts: Date.now(),
     });
     const action = await this.pitStop(runId, { reason: "the repo's CI is red on the run's pull request", epicIds: [] }, true);
     if (action === "stop") return "stop";
-    return action === "continue" ? "proceed" : "back-to-work";
+    if (action !== "continue") return "back-to-work";
+    if (!hold) return "proceed";
+    this.grantCiRounds(runId, ci.prNumber, "pitstop");
+    return "granted";
+  }
+
+  /** Whether this run may report in review only over a green, mergeable branch. */
+  private holdsUntilGreen(run: { config: RunConfig }): boolean {
+    return run.config.holdUntilGreen && run.config.waitForChecks && this.github.enabled;
   }
 
   /**
-   * A resume landing on a run whose CI was not green when it last reported.
+   * Let the run spend another `ciFixRounds` on its red pull request.
+   *
+   * An event rather than a config patch: `ciFixRounds` is capped by its own
+   * schema, so the allowance could not be written back, and the record should
+   * say who kept the run going — a decider at a pit stop, or the operator by
+   * resuming. `queueCiFixes` reads the latest grant as its bound.
+   */
+  private grantCiRounds(runId: string, prNumber: number, by: "pitstop" | "resume"): void {
+    const run = this.store.getRun(runId)!;
+    const rounds = this.store.ciRoundsAllowed(runId, run.config.ciFixRounds) + run.config.ciFixRounds;
+    this.bus.publish({ type: "run.ci_rounds_granted", runId, prNumber, rounds, by, ts: Date.now() });
+  }
+
+  /**
+   * The way out of INTEGRATING: CI green and the pull request mergeable — or,
+   * with `holdUntilGreen` off, whatever the repo said, on the record.
+   *
+   * Everything here used to be four steps in the integration loop: wait for
+   * checks, queue fixes, escalate, confirm mergeability, and then PR_REVIEW
+   * whatever the last two answered. That shape let a run report "in review"
+   * over a red branch (5743ce85), a conflicting one (5743ce85 again, #834),
+   * and one nothing had checked at all (3ae58e02). With the hold on, every one
+   * of those is either work the run does now or a stop with its reason on the
+   * record, and the only "proceed" is the green one.
+   *
+   * `resumed` is the operator having typed `harness resume` at a run that
+   * paused here: it is the grant — another block of fix rounds, another
+   * reconcile, or publishing a branch no CI will ever judge — spent on the
+   * first hold this pass meets, so a resume always does something.
+   */
+  private async greenGate(runId: string, opts: { resumed?: boolean } = {}): Promise<GateCall> {
+    const run = this.store.getRun(runId)!;
+    const hold = this.holdsUntilGreen(run);
+    const prNumber = this.rollupPr(runId);
+    // Nothing published, nothing to hold: `openPrs` said why, and the outcome
+    // line carries it. A hold here would pause a run over parked tasks it has
+    // already reported.
+    if (prNumber === undefined) return { call: "proceed" };
+    let resumed = Boolean(opts.resumed) || this.greenHoldResumed.delete(runId);
+    const spendResume = () => {
+      const r = resumed;
+      resumed = false;
+      return r;
+    };
+    const base = run.config.baseBranch || "the base branch";
+    const say = (text: string) => this.bus.publish({ type: "agent.log", runId, sessionId: "integrator", text, ts: Date.now() });
+    /** Ask GitHub again, or say that asking again is over. */
+    let unreadable = 0;
+    const askAgain = async (what: string): Promise<boolean> => {
+      if (++unreadable >= GITHUB_READ_ATTEMPTS) return false;
+      say(`${what} — asking again in ${Math.round(this.githubRetryMs / 1000)}s (attempt ${unreadable + 1} of ${GITHUB_READ_ATTEMPTS})`);
+      await new Promise((r) => setTimeout(r, this.githubRetryMs));
+      return true;
+    };
+    let reconciles = 0;
+    for (;;) {
+      await this.awaitChecks(runId);
+      // Red CI is work, not a report. The escalation is only consulted on a
+      // pass that queued nothing: a round queued this pass has not run yet,
+      // and counting it as spent would show the operator a stop about work
+      // the run was still about to do.
+      const ciTasks = await this.queueCiFixes(runId);
+      if (ciTasks.length) return { call: "back-to-work", why: `fixing ${ciTasks.length} failing CI check(s)` };
+      const ci = this.store.ciStatus(runId);
+      if (ci?.state === "failing") {
+        // `queueCiFixes` queues on any failing status with a round left, so
+        // reaching here with one means the rounds are spent.
+        if (hold && spendResume()) {
+          this.grantCiRounds(runId, prNumber, "resume");
+          continue;
+        }
+        // The old resume path opened no pit stop: the escalation was shown on
+        // the way in, and a resume with the rounds spent simply reported again.
+        if (!hold && opts.resumed) return { call: "proceed" };
+        const call = await this.ciPitStop(runId);
+        if (call === "granted") continue;
+        if (call === "stop") {
+          return { call: "stop", why: hold ? `${GREEN_HOLD}CI is red on #${prNumber} and the run may not report in review until it is green` : "the run was stopped at a pit stop" };
+        }
+        if (call === "back-to-work") return { call: "back-to-work", why: "the pit stop sent the run back to work" };
+      } else if (hold && ci?.state === "none") {
+        const call = await this.noCiHold(runId, prNumber, spendResume());
+        if (call.call !== "proceed") return call;
+      } else if (hold && (!ci || ci.state === "pending")) {
+        // `awaitChecks` only leaves pending on the record, or nothing at all,
+        // when GitHub went unreadable. Not knowing is not green.
+        if (await askAgain(`GitHub could not be read while waiting on CI for #${prNumber}`)) continue;
+        say(`GitHub could not be read while waiting on CI for #${prNumber}, and the run may not report in review until it is green — pausing; \`harness resume\` asks again`);
+        return { call: "stop", why: `${GREEN_HOLD}GitHub could not be read while waiting on CI for #${prNumber}` };
+      } else if (!hold && opts.resumed) {
+        return { call: "proceed" };
+      }
+      const merge = await this.confirmMergeable(runId);
+      if (!hold || merge === undefined || merge === "mergeable") return { call: "proceed" };
+      if (merge === null) {
+        if (await askAgain(`GitHub could not say whether #${prNumber} merges into ${base}`)) continue;
+        say(`GitHub could not say whether #${prNumber} merges into ${base}, and the run may not report in review until it does — pausing; \`harness resume\` asks again`);
+        return { call: "stop", why: `${GREEN_HOLD}GitHub could not say whether #${prNumber} merges into ${base}` };
+      }
+      if (reconciles >= MERGE_RECONCILE_ROUNDS) {
+        const call = await this.mergeHold(runId, prNumber, merge, reconciles, spendResume());
+        if (call === "stop") return { call: "stop", why: `${GREEN_HOLD}#${prNumber} is ${merge} against ${base} and the run may not report in review until it merges` };
+        if (call === "back-to-work") return { call: "back-to-work", why: "the pit stop sent the run back to work" };
+        reconciles = 0;
+      }
+      reconciles++;
+      say(
+        merge === "unknown"
+          ? `GitHub has not settled whether #${prNumber} merges into ${base} — asking again (attempt ${reconciles} of ${MERGE_RECONCILE_ROUNDS})`
+          : `#${prNumber} is ${merge} against ${base} — reconciling the branch with the base again and re-pushing (attempt ${reconciles} of ${MERGE_RECONCILE_ROUNDS})`
+      );
+      // A verdict GitHub has not computed yet is not answered by another push.
+      if (merge !== "unknown") await this.openPrs(runId);
+    }
+  }
+
+  /**
+   * A repository with no CI, under the hold.
+   *
+   * "None" is not a pass — it is the absence of the only check that judges the
+   * merge — and with the hold on it is not a way out either. There is nothing
+   * for the run to fix, so this asks: a decider can send the run back to add a
+   * workflow (US-13a says the plan should have carried one), stop it, or
+   * release it with the NO CI headline the outcome line already prints.
+   */
+  private async noCiHold(runId: string, prNumber: number, resumed: boolean): Promise<GateCall> {
+    const run = this.store.getRun(runId)!;
+    const say = (text: string) => this.bus.publish({ type: "agent.log", runId, sessionId: "integrator", text, ts: Date.now() });
+    if (resumed) {
+      say(`#${prNumber} still has no CI; publishing it as the resume asked — nothing has built or tested the merged branch, and the outcome line says so`);
+      return { call: "proceed" };
+    }
+    if (!this.gates.resolvePitStop || run.config.pitStop.every === "never") {
+      say(`#${prNumber} has no CI and the run may not report in review over a branch nothing has checked — pausing; add a workflow, or \`harness resume\` to publish it anyway`);
+      return { call: "stop", why: `${GREEN_HOLD}#${prNumber} has no CI, so nothing has checked the merged branch` };
+    }
+    const action = await this.pitStop(runId, { reason: "the repository has no CI: nothing has built or tested the merged branch", epicIds: [] }, true);
+    if (action === "stop") return { call: "stop", why: `${GREEN_HOLD}#${prNumber} has no CI, so nothing has checked the merged branch` };
+    if (action !== "continue") return { call: "back-to-work", why: "the pit stop sent the run back to work" };
+    say(`#${prNumber} has no CI and the pit stop released it anyway — the outcome line says nothing checked the merged branch`);
+    return { call: "proceed" };
+  }
+
+  /**
+   * A pull request that still will not merge after the hold has reconciled it
+   * `MERGE_RECONCILE_ROUNDS` times. No demo: the question is about the base
+   * branch, not the product.
+   */
+  private async mergeHold(
+    runId: string,
+    prNumber: number,
+    state: "conflicting" | "behind" | "unknown",
+    reconciles: number,
+    resumed: boolean
+  ): Promise<"granted" | "stop" | "back-to-work"> {
+    const run = this.store.getRun(runId)!;
+    if (resumed) return "granted";
+    const say = (text: string) => this.bus.publish({ type: "agent.log", runId, sessionId: "integrator", text, ts: Date.now() });
+    if (!this.gates.resolvePitStop || run.config.pitStop.every === "never") {
+      say(`#${prNumber} is still ${state} after ${reconciles} reconcile(s) and the run may not report in review until it merges — pausing; \`harness resume\` tries again`);
+      return "stop";
+    }
+    say(`#${prNumber} is still ${state} after ${reconciles} reconcile(s) — this one is yours to answer; "continue" tries another ${MERGE_RECONCILE_ROUNDS}`);
+    const action = await this.pitStop(runId, { reason: `the run's pull request still cannot be merged after ${reconciles} reconcile(s): it is ${state}`, epicIds: [] }, true, { demo: false });
+    if (action === "stop") return "stop";
+    return action === "continue" ? "granted" : "back-to-work";
+  }
+
+  /**
+   * A resume landing on a run whose branch was not green, or not known to
+   * merge, when it last reported.
    *
    * The world moves while a run is parked in review: a human re-runs a job, a
-   * runner comes back, someone pushes a fix. Ask again rather than trusting
-   * the stale answer — and if it is still red with fix rounds left, the resume
-   * is the operator asking the run to try, so it tries. No pit stop here: the
-   * escalation was already shown on the way in, and PR_REVIEW has no legal
-   * transition to PAUSED for a "stop" to land on.
+   * runner comes back, someone pushes a fix, the base moves again. Ask again
+   * rather than trusting the stale answer — and if it is still red, the resume
+   * is the operator asking the run to try, so it tries. A pull request a
+   * person has already merged or closed is left alone: there is nothing left
+   * to hold.
    */
-  private async recheckRedCi(runId: string): Promise<"proceed" | "back-to-work"> {
+  private async recheckGreen(runId: string): Promise<GateCall> {
     const run = this.store.getRun(runId)!;
-    if (!run.config.waitForChecks || !this.github.enabled) return "proceed";
-    const prior = this.store.ciStatus(runId);
-    if (!prior || prior.state === "passing") return "proceed";
+    if (!run.config.waitForChecks || !this.github.enabled) return { call: "proceed" };
+    const prNumber = this.rollupPr(runId);
+    if (prNumber === undefined) return { call: "proceed" };
+    const hold = this.holdsUntilGreen(run);
+    const ci = this.store.ciStatus(runId);
+    const merge = this.store.mergeStatus(runId);
+    // Without the hold only a red or unsettled CI is re-asked, which is what
+    // this did before the hold existed; with it, anything short of green and
+    // mergeable is.
+    const redCi = ci ? (hold ? ci.state !== "passing" : ci.state === "failing" || ci.state === "pending") : false;
+    const notMerging = hold && merge !== null && merge.state !== "mergeable";
+    if (!redCi && !notMerging) return { call: "proceed" };
+    const state = await (this.github.prState?.(prNumber) ?? Promise.resolve(null));
+    if (state === "merged" || state === "closed") return { call: "proceed" };
     // The recheck is work, and PR_REVIEW is the one working moment the
     // dashboard cannot see: `listOpenRuns` excludes it by design, because a
     // run that ends there has ended. A resume that re-asks GitHub about a red
@@ -2460,12 +2737,10 @@ export class RunController {
     // when there is nothing left to fix. Without this, an operator who ran
     // `harness resume` watched a dashboard that said "no active runs" while
     // the run it had just resumed was waiting on the repo's answer.
-    this.store.transitionRun(runId, "INTEGRATING", "resumed to re-check CI the repo had not answered green");
-    await this.awaitChecks(runId);
-    const tasks = await this.queueCiFixes(runId);
-    if (tasks.length) return "back-to-work";
-    this.store.transitionRun(runId, "PR_REVIEW", this.outcome(runId).line);
-    return "proceed";
+    this.store.transitionRun(runId, "INTEGRATING", "resumed to re-check a branch the repo had not answered green");
+    const gate = await this.greenGate(runId, { resumed: true });
+    if (gate.call === "proceed") this.store.transitionRun(runId, "PR_REVIEW", this.outcome(runId).line);
+    return gate;
   }
 
   /**
@@ -2947,36 +3222,40 @@ export class RunController {
    * the whole point of this phase is that a run must not claim a merge it has
    * not been told about.
    */
-  private async confirmMergeable(runId: string): Promise<void> {
+  private async confirmMergeable(runId: string): Promise<"mergeable" | "conflicting" | "behind" | "unknown" | null | undefined> {
     const run = this.store.getRun(runId)!;
-    if (!this.github.enabled) return;
+    if (!this.github.enabled) return undefined;
     const prNumber = this.rollupPr(runId);
     const local = this.store.mergeStatus(runId);
     // No local verdict means nothing reconciled this branch against its base,
     // which is the same position as having no pull request at all: there is
     // nothing for GitHub's answer to confirm or contradict, and a run says
     // nothing rather than inventing a comparison it never made.
-    if (prNumber === undefined || !local) return;
+    if (prNumber === undefined || !local) return undefined;
     // Mapped onto the check vocabulary so the settling, the grace period and the
     // timeout-is-not-a-pass rule are the ones `settleChecks` already proves.
     // GitHub computes `mergeable` in the background, so "unknown" is pending in
-    // exactly the sense that phase was written for.
+    // exactly the sense that phase was written for. "behind" rides in the
+    // failing list, which is the one field that survives the mapping.
     const settled = await this.settleChecks(
       runId,
       async (n: number) => {
         const m = await (this.github.prMergeable?.(n) ?? Promise.resolve(null));
         if (!m) return null;
         return {
-          state: m.state === "mergeable" ? ("passing" as const) : m.state === "conflicting" ? ("failing" as const) : ("pending" as const),
-          failing: m.state === "conflicting" ? [m.mergeStateStatus] : [],
+          state: m.state === "mergeable" ? ("passing" as const) : m.state === "conflicting" || m.state === "behind" ? ("failing" as const) : ("pending" as const),
+          failing: m.state === "conflicting" ? [m.mergeStateStatus] : m.state === "behind" ? ["behind"] : [],
           total: 1,
         };
       },
       prNumber,
       Math.min(this.mergeabilitySettleMinutes, run.config.checkTimeoutMinutes)
     );
-    if (!settled) return;
-    const state = settled.state === "passing" ? "mergeable" : settled.state === "failing" ? "conflicting" : "unknown";
+    // Nothing learned — GitHub off mid-ask, or the pull request unreadable.
+    // Distinct from "nothing to confirm" above: the hold pauses on this one.
+    if (!settled) return null;
+    const state =
+      settled.state === "passing" ? "mergeable" : settled.state === "failing" ? (settled.failing[0] === "behind" ? "behind" : "conflicting") : "unknown";
     this.bus.publish({
       type: "run.merge_status",
       runId,
@@ -2986,9 +3265,18 @@ export class RunController {
       // GitHub says whether it merges, never where it broke. The file list is
       // only ever the one the harness found itself.
       conflicts: state === "conflicting" ? local.conflicts : [],
-      resolvedBy: state === "conflicting" ? "none" : (local.resolvedBy as "already-current" | "merge" | "agent" | "none"),
+      resolvedBy: state === "conflicting" || state === "behind" ? "none" : (local.resolvedBy as "already-current" | "merge" | "agent" | "none"),
       ts: Date.now(),
     });
+    if (state === "behind") {
+      this.bus.publish({
+        type: "agent.log",
+        runId,
+        sessionId: "integrator",
+        text: `#${prNumber} is behind ${run.config.baseBranch}: no conflict, but the base moved after the push, and a protection rule that requires an up-to-date branch will refuse the merge until it is brought forward.`,
+        ts: Date.now(),
+      });
+    }
     if (state === "conflicting") {
       this.bus.publish({
         type: "agent.log",
@@ -3002,6 +3290,7 @@ export class RunController {
         ts: Date.now(),
       });
     }
+    return state;
   }
 
   /**
@@ -3228,7 +3517,7 @@ export class RunController {
     total: number;
     intent: { verdict: "PASS" | "FAIL"; gaps: string[]; summary: string } | null;
     ci: { prNumber: number; state: "passing" | "failing" | "pending" | "none"; failing: string[]; total: number } | null;
-    mergeable: { state: "mergeable" | "conflicting" | "unknown"; baseBranch: string; conflicts: string[] } | null;
+    mergeable: { state: "mergeable" | "conflicting" | "behind" | "unknown"; baseBranch: string; conflicts: string[] } | null;
     deploy: { sha: string; state: "passing" | "failing" | "pending" | "none"; failing: string[]; total: number } | null;
     prod: { url: string; verdict: "PASS" | "FAIL"; findings: string[]; summary: string } | null;
     line: string;
@@ -3278,6 +3567,8 @@ export class RunController {
           `CANNOT MERGE — conflicts with ${mergeable.baseBranch || "the base branch"}` +
             (mergeable.conflicts.length ? ` in ${mergeable.conflicts.length} file${mergeable.conflicts.length === 1 ? "" : "s"}` : "")
         );
+      } else if (mergeable.state === "behind") {
+        parts.push(`BEHIND ${mergeable.baseBranch || "the base branch"} — the base moved after the push`);
       } else if (mergeable.state === "unknown") {
         parts.push("mergeability unconfirmed");
       } else if (mergeable.resolvedBy === "agent" || mergeable.resolvedBy === "merge") {
@@ -5814,9 +6105,14 @@ export class RunController {
      * collect none of the saving.
      */
     let workerModel = tier.model;
-    /** Move this task up a tier for its next iteration. False when already there. */
+    /**
+     * Move a light-tier task up to the standard model for its next iteration.
+     * False when it is not on the light rung — including the rungs above it:
+     * a UI or heavy task that ran out of turns must not be *demoted* to the
+     * standard model by the rule that exists to promote Haiku.
+     */
     const escalateWorker = (sessionId: string, why: string): boolean => {
-      if (workerModel === run.config.models.worker) return false;
+      if (tier.decision.tier !== "light" || workerModel !== run.config.models.workerLight || workerModel === run.config.models.worker) return false;
       const from = workerModel;
       workerModel = run.config.models.worker;
       // Not also written onto the task row: the ledger already carries one row
@@ -5830,6 +6126,26 @@ export class RunController {
         text: `worker escalated from ${from} to ${workerModel}: ${why}`,
         ts: Date.now(),
       });
+      return true;
+    };
+    /**
+     * The top rung, reached on evidence rather than on a rule about the task.
+     *
+     * `heavyTierAfterRejections` iterations have come back — QA said no, a
+     * check failed, the branch arrived empty — and at that point the model is
+     * the most likely thing that is wrong, whatever tier it started on. The
+     * third attempt on the model that failed twice is the expensive one: it
+     * is usually the last before the task parks, and a parked task costs an
+     * operator's attention on top of everything already spent. Silent when
+     * the operator has pointed `workerHeavy` back at `worker`, exactly as the
+     * light tier goes silent when switched off.
+     */
+    const heavy = run.config.models.workerHeavy;
+    const escalateToHeavy = (sessionId: string, why: string): boolean => {
+      if (workerModel === heavy) return false;
+      const from = workerModel;
+      workerModel = heavy;
+      this.bus.publish({ type: "agent.log", runId, taskId, sessionId, text: `worker escalated from ${from} to ${workerModel}: ${why}`, ts: Date.now() });
       return true;
     };
     /**
@@ -5947,6 +6263,12 @@ export class RunController {
           (qaFeedback ? `${qaFeedback}\n\n` : "") +
           `The operator sent feedback on this task — follow it over anything that contradicts it:\n${queuedFeedback}`;
       }
+      // Sent back enough times that the next attempt runs on the top rung.
+      // Read from the task row rather than a local so a restart of the harness
+      // does not forget how many times this task has already failed.
+      if (task.qaIterations >= run.config.heavyTierAfterRejections) {
+        escalateToHeavy(workerSession ?? taskId, `it was sent back ${task.qaIterations} time(s), which is the heavyTierAfterRejections bound`);
+      }
       // The operator's own checkout, sampled either side of the session. The
       // worktree guard denies the direct forms of writing there; this is what
       // notices when something indirect got through, while there is still a
@@ -6017,6 +6339,23 @@ export class RunController {
         // alternative is telling the difference from an error string, and a
         // respawn that guesses wrong on a cheap model pays the crash twice.
         escalateWorker(taskId, `the session died on the light tier: ${String(e).slice(0, 120)}`);
+        // The one death that is evidence about the model: its safety
+        // classifier declined the task, and the same prompt on the same model
+        // declines again. A respawn on the top rung would spend the whole
+        // respawn cap learning that; the standard model takes the next attempt
+        // instead, and the log says why the task came down a rung.
+        if (workerModel === heavy && heavy !== run.config.models.worker && refusedByClassifier(e)) {
+          const from = workerModel;
+          workerModel = run.config.models.worker;
+          this.bus.publish({
+            type: "agent.log",
+            runId,
+            taskId,
+            sessionId: taskId,
+            text: `worker moved from ${from} back to ${workerModel}: the session ended in a refusal, and the same model would refuse again`,
+            ts: Date.now(),
+          });
+        }
         const respawns = task.respawns + 1;
         this.store.updateTask(runId, taskId, { respawns, errorSummary: String(e).slice(0, 500) });
         if (respawns >= run.config.workerRespawnCap) {

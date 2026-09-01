@@ -25,6 +25,7 @@ import { PINNED_ROLES } from "@harness/shared";
  * not exported is refused by `missingKeys` before the config is touched.
  */
 const MODEL_CHOICES = [
+  "claude-fable-5-1",
   "claude-opus-5",
   "claude-sonnet-5",
   "claude-haiku-4-5-20251001",
@@ -895,11 +896,19 @@ function describe(ev) {
         ev.state === "conflicting"
           ? "CANNOT MERGE into " + (ev.baseBranch || "the base branch") +
             (ev.conflicts.length ? " \u2014 " + ev.conflicts.join(", ") : "")
+          : ev.state === "behind"
+            ? "BEHIND " + (ev.baseBranch || "the base branch") + " \u2014 no conflict, but the base moved; bringing the branch up to date"
           : ev.state === "unknown"
             ? "mergeability unconfirmed \u2014 GitHub did not settle whether this branch merges"
             : "merges into " + (ev.baseBranch || "the base branch") +
               (ev.resolvedBy === "agent" ? " (an agent resolved the conflict)"
                 : ev.resolvedBy === "merge" ? " (the base was merged in to keep it that way)" : "")];
+    /* The green hold letting a red pull request have another go. Without a
+       case the feed printed the bare type at the one moment an operator wants
+       to know why the run is still working on a branch it already published. */
+    case "run.ci_rounds_granted":
+      return ["git", "integrator", (ev.by === "resume" ? "resumed: " : "pit stop: ") +
+        "granted up to " + ev.rounds + " CI fix round(s) on PR #" + ev.prNumber + " \u2014 the run stays out of review until it is green"];
     case "github.issue_created":
       return ["git", ev.taskId || "run", "issue #" + ev.issueNumber];
     case "github.pr_opened":

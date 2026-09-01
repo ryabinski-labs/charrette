@@ -157,7 +157,7 @@ export const HarnessEvent = z.discriminatedUnion("type", [
     ...base,
     type: z.literal("task.tier_decided"),
     taskId: z.string(),
-    tier: z.enum(["light", "standard"]),
+    tier: z.enum(["light", "standard", "ui", "heavy"]),
     model: z.string(),
     why: z.string().default(""),
   }),
@@ -206,6 +206,15 @@ export const HarnessEvent = z.discriminatedUnion("type", [
   // failure as it stands.
   z.object({ ...base, type: z.literal("run.ci_retry"), prNumber: z.number().int(), reran: z.boolean() }),
   /**
+   * The green hold granted the run another `ciFixRounds` of fix rounds against
+   * a red pull request — by a pit stop answering "continue", or by an operator
+   * resuming a run that paused with the rounds spent. `rounds` is the new
+   * allowance in total; `queueCiFixes` counts against it. Held in the event
+   * log rather than the config so raising it never fails the schema's cap on
+   * `ciFixRounds`, and so the record says who kept the run going.
+   */
+  z.object({ ...base, type: z.literal("run.ci_rounds_granted"), prNumber: z.number().int().default(0), rounds: z.number().int(), by: z.enum(["pitstop", "resume"]) }),
+  /**
    * Whether the run's pull request can be merged into its base at all.
    *
    * The sibling of `run.ci_status`, for the half of "is this branch shippable"
@@ -221,7 +230,10 @@ export const HarnessEvent = z.discriminatedUnion("type", [
     ...base,
     type: z.literal("run.merge_status"),
     prNumber: z.number().int().default(0),
-    state: z.enum(["mergeable", "conflicting", "unknown"]),
+    // "behind": no conflict, but the base moved and a protection rule can
+    // refuse the merge until the branch is brought up to date — which is the
+    // harness's own base merge, so the green hold reconciles and re-asks.
+    state: z.enum(["mergeable", "conflicting", "behind", "unknown"]),
     baseBranch: z.string().default(""),
     conflicts: z.array(z.string()).default([]),
     resolvedBy: z.enum(["already-current", "merge", "agent", "none"]).default("none"),

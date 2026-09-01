@@ -573,10 +573,19 @@ export class GitHubAdapter {
    * state and not an error — the caller polls it the way it polls a pending
    * check, and must never read it as a pass.
    *
+   * "behind" is `mergeable: true` with `mergeable_state: "behind"`: no conflict,
+   * but the base has moved since the branch was cut and a protection rule that
+   * requires branches to be up to date will refuse the merge button. It used to
+   * read as mergeable here, which is true of the diff and false of the pull
+   * request. It is its own state because the remedy is the harness's own base
+   * merge, not a person's. Every other `mergeable_state` a true `mergeable`
+   * can carry — `clean`, `blocked` (a review this harness will never give),
+   * `unstable`, `has_hooks` — is mergeable for this purpose.
+   *
    * `null` means GitHub is off or the pull request could not be read, which is
    * different again: nothing was learned at all.
    */
-  async prMergeable(prNumber: number): Promise<{ state: "mergeable" | "conflicting" | "unknown"; mergeStateStatus: string } | null> {
+  async prMergeable(prNumber: number): Promise<{ state: "mergeable" | "conflicting" | "behind" | "unknown"; mergeStateStatus: string } | null> {
     if (!this.octokit) return null;
     const data = await this.octokit.rest.pulls
       .get({ owner: this.owner, repo: this.repo, pull_number: prNumber })
@@ -588,7 +597,7 @@ export class GitHubAdapter {
     // waiting to happen, so answer from the state instead.
     if (data.merged_at) return { state: "mergeable", mergeStateStatus: "merged" };
     const status = data.mergeable_state ?? "unknown";
-    if (data.mergeable === true) return { state: "mergeable", mergeStateStatus: status };
+    if (data.mergeable === true) return { state: status === "behind" ? "behind" : "mergeable", mergeStateStatus: status };
     if (data.mergeable === false) return { state: "conflicting", mergeStateStatus: status };
     // `null` is GitHub still computing, and is worth waiting on. The field being
     // absent entirely is not the same thing and must not be polled: a response

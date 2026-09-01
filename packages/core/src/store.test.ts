@@ -177,7 +177,7 @@ describe("costUsd", () => {
 
   it("prices unknown models at the top tier, never under", () => {
     const cost = costUsd("mystery-model", { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 });
-    expect(cost).toBeCloseTo(5);
+    expect(cost).toBeCloseTo(10);
   });
 });
 
@@ -654,5 +654,12 @@ describe("a gate the task outlived", () => {
     for (const to of ["READY", "WORKING", "ACCEPTED", "MERGED"] as const) store.transitionTask("run1", "a", to);
 
     expect(resolutions(store)).toHaveLength(0);
+  });
+});
+
+describe("what paused a run, read back", () => {
+  it("answers null for a run that has never changed state", () => {
+    const store = new Store(":memory:");
+    expect(store.lastRunStateChange("never")).toBeNull();
   });
 });

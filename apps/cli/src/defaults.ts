@@ -360,6 +360,10 @@ export const FileConfig = z
         worker: z.string().optional(),
         /** The worker model for tasks the light-tier rule admits (modelTier.ts). */
         workerLight: z.string().optional(),
+        /** The worker model for user-interface tasks (modelTier.ts, `UI_WHEN`). */
+        workerUi: z.string().optional(),
+        /** The worker model for the hardest tasks, and the one a rejected task climbs to. */
+        workerHeavy: z.string().optional(),
         qa: z.string().optional(),
         /** Accepted and ignored: no agent is ever dispatched with it. */
         integrator: z.string().optional(),
@@ -374,6 +378,11 @@ export const FileConfig = z
         pm: z.string().optional(),
         /** The two-turn re-ask that transcribes an answer already reached. */
         repair: z.string().optional(),
+        // Two more the list had not caught up with, for the same reason as the
+        // five above: the file is strict, so naming either one used to reject
+        // the whole file.
+        spec: z.string().optional(),
+        skillsmith: z.string().optional(),
       })
       .optional(),
     budget: z

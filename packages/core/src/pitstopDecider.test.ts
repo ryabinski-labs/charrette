@@ -170,7 +170,7 @@ describe("a pit stop that decides for itself", () => {
     });
     // Wearing the hat it was told to wear, on the model that decides.
     const pm = specs.find((s) => s.role === "pm")!;
-    expect(pm.model).toBe("claude-opus-5");
+    expect(pm.model).toBe("claude-fable-5-1");
     expect(pm.systemPrompt).toContain("**product-manager**");
     expect(pm.disallowedTools).toContain("Write");
     // It reads the same report the operator would have.

@@ -6,6 +6,7 @@ import {
   ceilingTable,
   forgetCeilingTable,
   grantedTokens,
+  installedCeilingTable,
   modelCeiling,
   requestTokens,
   sdkCeiling,
@@ -104,11 +105,25 @@ describe("the SDK this harness is actually installed against", () => {
   it("still has a registry in the shape this parses", async () => {
     // The test that earns the rest of the module. If an SDK upgrade moves the
     // ceiling somewhere else, the harness goes quiet instead of lying — and this
-    // is what tells us it went quiet.
-    const bundle = await readFile(createRequire(import.meta.url).resolve("@anthropic-ai/claude-agent-sdk"), "utf8");
-    const table = ceilingTable(bundle);
+    // is what tells us it went quiet. It moved once already: 0.3.25x keeps the
+    // table in the native binary rather than the entry bundle, which is why
+    // this asks the installed-SDK reader rather than the bundle directly.
+    const table = await installedCeilingTable();
     expect(table).toBeDefined();
     expect(table!.models.length).toBeGreaterThanOrEqual(10);
+  });
+
+  it("finds nothing in the entry bundle of the SDK installed today, which is why the binary is read", async () => {
+    // Pinned so that the day the bundle carries the registry again, the
+    // two-hundred-megabyte scan is noticed as the dead code it would then be.
+    const bundle = await readFile(createRequire(import.meta.url).resolve("@anthropic-ai/claude-agent-sdk"), "utf8");
+    expect(ceilingTable(bundle)).toBeUndefined();
+  });
+
+  it("knows the model the heavy tier runs on", async () => {
+    const reading = await sdkCeiling("claude-fable-5-1");
+    expect(reading).toMatchObject({ known: true });
+    expect(requestTokens(reading, 64_000)).toBeGreaterThanOrEqual(64_000);
   });
 
   it("knows the model the planner runs on, and grants more than the harness used to ask for", async () => {
