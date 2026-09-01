@@ -1412,3 +1412,189 @@ describe("what the run is delivering against its assignment", () => {
     expect(intent.staleMerges).toBe(1);
   });
 });
+
+describe("answering the intake conversation", () => {
+  const started: Dashboard[] = [];
+  afterEach(async () => {
+    for (const d of started.splice(0)) await d.stop();
+  });
+
+  const OPEN = {
+    id: "q-1",
+    question: "How long does an import preview stay valid?",
+    detail: "",
+    options: [] as string[],
+    askedAt: 1,
+  };
+
+  /** A stand-in for `BridgedIntake`, scripted so a test owns who is waiting. */
+  function bridge(open: typeof OPEN | null) {
+    const answered: { id: string; text: string; decidedBy: string }[] = [];
+    return {
+      answered,
+      pending: () => open,
+      answer(id: string, text: string, decidedBy: string) {
+        answered.push({ id, text, decidedBy });
+        // Mirrors the real transport: nothing open means nothing to settle.
+        return open !== null;
+      },
+    };
+  }
+
+  async function withDash() {
+    const dash = dashboard();
+    started.push(dash);
+    const url = await dash.start();
+    const post = (body: unknown, headers: Record<string, string> = {}) =>
+      fetch(new URL("/api/intake", url), {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${dash.token}`,
+          "content-type": "application/json",
+          connection: "close",
+          ...headers,
+        },
+        body: JSON.stringify(body),
+      });
+    return { dash, url, post };
+  }
+
+  const good = { answer: "30 minutes, then 409 STALE_PREVIEW", decidedBy: "pit-crew", questionId: OPEN.id };
+
+  it("puts an answer into the run and says which question it settled", async () => {
+    const { dash, post } = await withDash();
+    const intake = bridge(OPEN);
+    dash.attachIntake(intake);
+
+    const res = await post({ ...good, answer: "  30 minutes, then 409 STALE_PREVIEW " });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, question: OPEN.question });
+    // Trimmed on the way in, and credited — `intake.answered` records who
+    // decided, so a postmortem can tell a considered answer from a keystroke.
+    expect(intake.answered).toEqual([{ id: OPEN.id, text: "30 minutes, then 409 STALE_PREVIEW", decidedBy: "pit-crew" }]);
+  });
+
+  it("refuses an answer aimed at a question that has since moved on", async () => {
+    const { dash, post } = await withDash();
+    const intake = bridge(OPEN);
+    dash.attachIntake(intake);
+
+    // The conversation advances the moment an answer lands, so a caller that
+    // polled, thought, and posted can arrive at the next question. Landing the
+    // answer anyway is how "yes" ends up against an either/or.
+    const res = await post({ ...good, questionId: "q-0" });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: "that question is no longer the one being asked",
+      id: OPEN.id,
+      question: OPEN.question,
+    });
+    expect(intake.answered).toEqual([]);
+  });
+
+  it("requires the question id — the text is not an identity", async () => {
+    const { dash, post } = await withDash();
+    const intake = bridge(OPEN);
+    dash.attachIntake(intake);
+    // A specification that re-asks after a failed fold puts the identical
+    // sentence up again, so a caller answering "the question that says X" is
+    // answering whichever asking happens to be open.
+    const absent = await post({ answer: "30 minutes", decidedBy: "pit-crew" });
+    expect(absent.status).toBe(400);
+    expect(await absent.json()).toEqual({ error: "questionId is required; read it from the open question" });
+    const blank = await post({ answer: "30 minutes", decidedBy: "pit-crew", questionId: "   " });
+    expect(blank.status).toBe(400);
+    expect(intake.answered).toEqual([]);
+  });
+
+  it("requires the caller to say who is answering", async () => {
+    const { dash, post } = await withDash();
+    const intake = bridge(OPEN);
+    dash.attachIntake(intake);
+    // Unattributed reads as the operator downstream, which is exactly the
+    // ambiguity this route exists to remove.
+    const blank = await post({ answer: "30 minutes", questionId: OPEN.id, decidedBy: "  " });
+    expect(blank.status).toBe(400);
+    expect(await blank.json()).toEqual({ error: "say who is answering — decidedBy is recorded on the run" });
+    // Omitted entirely reads the same as blank. A caller that never learned the
+    // field exists is the likelier one, and it must not be the one that gets
+    // through.
+    const absent = await post({ answer: "30 minutes", questionId: OPEN.id });
+    expect(absent.status).toBe(400);
+    expect(intake.answered).toEqual([]);
+  });
+
+  it("says nothing is being asked, rather than swallowing the answer", async () => {
+    const { dash, post } = await withDash();
+    dash.attachIntake(bridge(null));
+    const res = await post(good);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "no open intake question" });
+  });
+
+  it("reports a transport that refuses the answer it was handed", async () => {
+    const { dash, post } = await withDash();
+    // `pending()` said yes and `answer()` said no: the question was settled
+    // between the two calls. The caller is still waiting on an answer that did
+    // not land, so it has to be told.
+    dash.attachIntake({ pending: () => OPEN, answer: () => false });
+    const res = await post(good);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "no open intake question" });
+  });
+
+  it("refuses a blank answer — the agent would take it as settled", async () => {
+    const { dash, post } = await withDash();
+    const intake = bridge(OPEN);
+    dash.attachIntake(intake);
+    const res = await post({ ...good, answer: "   " });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "write an answer for the intake agent" });
+    expect(intake.answered).toEqual([]);
+  });
+
+  it("refuses a body with no answer field at all", async () => {
+    const { dash, post } = await withDash();
+    dash.attachIntake(bridge(OPEN));
+    expect((await post({ decidedBy: "pit-crew", questionId: OPEN.id })).status).toBe(400);
+  });
+
+  it("distinguishes a run that holds no conversation from one asking nothing", async () => {
+    const { post } = await withDash();
+    // Never attached: this run was started with --no-chat and asks nothing at
+    // all. A 409 would send the caller back to poll for a question that is
+    // never coming.
+    const res = await post(good);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "this run holds no intake conversation" });
+  });
+
+  it("is behind the same bearer and loopback checks as every other control call", async () => {
+    const { dash, url, post } = await withDash();
+    dash.attachIntake(bridge(OPEN));
+
+    const anonymous = await fetch(new URL("/api/intake", url), {
+      method: "POST",
+      headers: { "content-type": "application/json", connection: "close" },
+      body: JSON.stringify(good),
+    });
+    expect(anonymous.status).toBe(401);
+
+    const crossOrigin = await post(good, { origin: "https://evil.example" });
+    expect(crossOrigin.status).toBe(403);
+  });
+
+  it("shows the open question on /api/state, like every other gate", async () => {
+    const { dash, url } = await withDash();
+    const headers = { authorization: `Bearer ${dash.token}`, connection: "close" };
+    const before = (await (await fetch(new URL("/api/state", url), { headers })).json()) as { intake: unknown };
+    // Null rather than absent: a run with no conversation and a conversation
+    // with no open question both read as "nothing to answer".
+    expect(before.intake).toBeNull();
+
+    dash.attachIntake(bridge(OPEN));
+    const after = (await (await fetch(new URL("/api/state", url), { headers })).json()) as { intake: unknown };
+    // Carries the id, because that is what an answer has to quote back.
+    expect(after.intake).toEqual(OPEN);
+  });
+});

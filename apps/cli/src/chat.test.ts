@@ -355,3 +355,74 @@ describe("colour", () => {
     expect(chunks.join("")).not.toContain("[");
   });
 });
+
+describe("TerminalChat.ask, when something else answers first", () => {
+  let restore: (() => string) | null = null;
+  beforeEach(() => {
+    restore = capture();
+  });
+  afterEach(() => {
+    restore = null;
+    vi.restoreAllMocks();
+  });
+
+  /** A reader that records the signal it was handed and never returns. */
+  function watching(): { prompter: Prompter; signals: (AbortSignal | undefined)[] } {
+    const signals: (AbortSignal | undefined)[] = [];
+    return {
+      signals,
+      prompter: {
+        question(_prompt: string, options?: { signal?: AbortSignal }) {
+          signals.push(options?.signal);
+          return new Promise<string>((_resolve, reject) => {
+            options?.signal?.addEventListener("abort", () => reject(new Error("The operation was aborted")));
+          });
+        },
+        close() {},
+      },
+    };
+  }
+
+  it("hands the signal down to the reader it is blocking on", async () => {
+    const { prompter, signals } = watching();
+    const chat = new TerminalChat(prompter);
+    const controller = new AbortController();
+    const asking = chat.ask(question(OPTIONS), controller.signal);
+    // Without this the readline stays queued on a question that has already been
+    // answered elsewhere, and takes the operator's next line as the answer to
+    // this prompt — every answer after it one question behind.
+    expect(signals).toEqual([controller.signal]);
+    controller.abort();
+    await expect(asking).rejects.toThrow("The operation was aborted");
+  });
+
+  it("carries the signal onto every line of a continued answer", async () => {
+    const signals: (AbortSignal | undefined)[] = [];
+    let asked = 0;
+    const prompter: Prompter = {
+      async question(_prompt: string, options?: { signal?: AbortSignal }) {
+        signals.push(options?.signal);
+        // A trailing backslash continues onto the next line, so one answer can
+        // be several reads and every one of them has to be cancellable.
+        return asked++ === 0 ? "first line\\" : "second line";
+      },
+      close() {},
+    };
+    const controller = new AbortController();
+    expect(await new TerminalChat(prompter).ask(question([]), controller.signal)).toBe("first line\nsecond line");
+    expect(signals).toEqual([controller.signal, controller.signal]);
+  });
+
+  it("still works for a caller with no signal to give", async () => {
+    const signals: (AbortSignal | undefined)[] = [];
+    const prompter: Prompter = {
+      async question(_prompt: string, options?: { signal?: AbortSignal }) {
+        signals.push(options?.signal);
+        return "Redis-backed";
+      },
+      close() {},
+    };
+    expect(await new TerminalChat(prompter).ask(question(OPTIONS))).toBe("Redis-backed");
+    expect(signals).toEqual([undefined]);
+  });
+});

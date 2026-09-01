@@ -139,3 +139,76 @@ describe("finding a dashboard that is actually up", () => {
     expect(await liveDashboardUrl(dir)).toBeNull();
   });
 });
+
+/**
+ * A `dashboard.json` outlives the process that wrote it. ledger-app's run
+ * beb799c5 left one naming a pid that had exited, and every reader of that file
+ * — the CLI, and the watcher supervising the run — took it as evidence of a
+ * live control plane, went to the port, and found nothing listening. The pid is
+ * already recorded beside the URL; checking it answers the common case without
+ * opening a socket at all.
+ */
+describe("a link whose process is gone", () => {
+  const write = (dir: string, record: unknown) =>
+    writeFileSync(path.join(dir, ".harness", "dashboard.json"), `${JSON.stringify(record)}\n`);
+
+  /** A pid nothing can be running under: reaped, and never reissued this fast. */
+  async function deadPid(): Promise<number> {
+    const server = createServer();
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as { port: number };
+    await new Promise((resolve) => server.close(resolve));
+    // A closed port's number is not a pid; use one far above the range in use.
+    return 4_000_000 + port;
+  }
+
+  it("does not go to the port for a dashboard whose writer has exited", async () => {
+    const dir = repo();
+    const { url, asked } = await fakeDashboard();
+    write(dir, { url, pid: await deadPid() });
+
+    expect(await liveDashboardUrl(dir)).toBeNull();
+    // Never asked. The point is that a dead writer is answered without a socket.
+    expect(asked).toEqual([]);
+    // And the stale file is gone, so nothing reads it again.
+    expect(existsSync(path.join(dir, ".harness", "dashboard.json"))).toBe(false);
+  });
+
+  it("still asks when the writer is alive", async () => {
+    const dir = repo();
+    const { url, asked } = await fakeDashboard();
+    // This process is the liveness proof: a live pid proves nothing about the
+    // server, so the request still has to settle it.
+    write(dir, { url, pid: process.pid });
+    expect(await liveDashboardUrl(dir)).toBe(url);
+    expect(asked).toEqual(["/api/state"]);
+  });
+
+  it("asks when the file records no pid at all", async () => {
+    const dir = repo();
+    const { url, asked } = await fakeDashboard();
+    // Written by a harness from before the pid was recorded. Still a perfectly
+    // good link, and the request is what settles it.
+    write(dir, { url });
+    expect(await liveDashboardUrl(dir)).toBe(url);
+    expect(asked).toEqual(["/api/state"]);
+  });
+
+  it("ignores a pid that is not a number", async () => {
+    const dir = repo();
+    const { url, asked } = await fakeDashboard();
+    write(dir, { url, pid: "36025" });
+    expect(await liveDashboardUrl(dir)).toBe(url);
+    expect(asked).toEqual(["/api/state"]);
+  });
+
+  it("treats a process it may not signal as alive", async () => {
+    const dir = repo();
+    const { url, asked } = await fakeDashboard();
+    // pid 1 exists and is not ours to signal — EPERM, which is "alive", not
+    // "gone". Writing the file off here would delete a working link.
+    write(dir, { url, pid: 1 });
+    expect(await liveDashboardUrl(dir)).toBe(url);
+    expect(asked).toEqual(["/api/state"]);
+  });
+});

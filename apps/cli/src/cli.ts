@@ -3,7 +3,7 @@ import { createInterface } from "node:readline/promises";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { DEFAULT_CHECK_TIMEOUT_MINUTES, ModelRoutingShape, RunConfig, SubscriptionConfig } from "@harness/shared";
-import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, accountEnv, assembleReport, checkMemoryBanner, detectToolbelt, ensureIgnored, harnessBuild, missingKeys, originSlug, postmortem, renderPostmortem, reportPath, pinsInPlay, runLockHolder, skillPinBanner, standaloneReport, repoUnusable, wasMerged } from "@harness/core";
+import { AgentPool, Bus, GateHandler, BridgedIntake, IntakeBridge, GitHubAdapter, RunController, Store, accountEnv, assembleReport, checkMemoryBanner, detectToolbelt, ensureIgnored, harnessBuild, missingKeys, originSlug, postmortem, renderPostmortem, reportPath, pinsInPlay, runLockHolder, skillPinBanner, standaloneReport, repoUnusable, wasMerged } from "@harness/core";
 import { Dashboard } from "@harness/dashboard";
 import { promptForNewCap, watchBudgetCommands } from "./budget.js";
 import { promptForAccount } from "./subscription.js";
@@ -48,10 +48,12 @@ async function runningRunId(base: string, headers: Record<string, string>): Prom
 function makeDashboardFactory(want: boolean, port: number | undefined, repoPath: string, reuse = false): {
   gateOverride?: (bus: Bus, store: Store) => GateHandler;
   connect: (controller: RunController) => void;
+  connectIntake: (intake: IntakeBridge) => void;
   start: () => Promise<string | null>;
   stop: () => Promise<void>;
 } {
-  if (!want) return { connect: () => undefined, start: async () => null, stop: async () => undefined };
+  if (!want)
+    return { connect: () => undefined, connectIntake: () => undefined, start: async () => null, stop: async () => undefined };
   // Only `resume` reuses: a run being picked up should come back at the URL the
   // operator still has open, port and token both, rather than sending them to
   // find a new one. An explicit --port still wins — they are naming a port
@@ -66,6 +68,9 @@ function makeDashboardFactory(want: boolean, port: number | undefined, repoPath:
     // The dashboard is born inside makeController, before the controller exists;
     // feedback flows the other way (browser → controller), so it is wired after.
     connect: (controller) => dash?.attach(controller),
+    // Same direction as feedback and for the same reason: the answer travels
+    // browser-or-watcher → run, so the transport is wired in after it exists.
+    connectIntake: (intake) => dash?.attachIntake(intake),
     // Written down as well as printed: the banner scrolls away, and `harness
     // status` in another terminal is where an operator looks for the run.
     start: async () => {
@@ -728,10 +733,21 @@ export function buildProgram(): Command {
       const unattended = config.intake.decidedBy !== "operator" && !process.stdin.isTTY;
       const chat = (wantChat || assignment === undefined) && !unattended ? new TerminalChat() : undefined;
       const seed = assignment ?? (await chat!.promptSeed(wantChat));
+      // Wrapped, not replaced: the operator keeps the terminal they have always
+      // had, and the dashboard gains a second way in to the same question.
+      //
+      // Only when the question has somewhere to be answered from. `--no-chat`
+      // asks nothing at all, so a route onto it would be a 409 pretending to be
+      // a feature. The sharper case is a named decider with no TTY and no
+      // dashboard: handing that run a transport nobody can reach would turn a
+      // refused question — which today reaches `NOBODY_ANSWERED` and lets the
+      // run carry on with the gap recorded — into a wait with no end.
+      const bridgedIntake = wantChat && (chat || url) ? new BridgedIntake(chat) : undefined;
+      if (bridgedIntake) dash.connectIntake(bridgedIntake);
       const stopGateMail = watchGateMail(bus, { project: path.basename(repo), url: url ?? "", target: mail });
       const stopBudgetWatch = watchBudgetCommands(controller, liveRunId);
       try {
-        const runId = await controller.startRun(seed, config, wantChat ? chat : undefined);
+        const runId = await controller.startRun(seed, config, bridgedIntake);
         await reportOutcome(controller, repo, runId);
       } catch (e) {
         notifyDone(`${path.basename(repo)} — run stopped`, e instanceof Error ? e.message : String(e));
@@ -954,13 +970,18 @@ export function buildProgram(): Command {
       // Only a run interrupted mid-conversation needs the terminal back: opening
       // readline for any other resume would hold stdin for a question never asked.
       const chat = existing?.state === "INTAKE" ? new TerminalChat() : undefined;
+      // A resumed conversation is the case that most needs the second route: it
+      // is being picked up precisely because the first attempt ran out of
+      // whoever was answering it.
+      const bridgedIntake = chat ? new BridgedIntake(chat) : undefined;
+      if (bridgedIntake) dash.connectIntake(bridgedIntake);
       if (chat) process.stdout.write("This run stopped mid-conversation — picking it up where it left off.\n");
       const mail = mailTarget();
       mailBanner(mail).forEach((l) => process.stdout.write(`${l}\n`));
       const stopGateMail = watchGateMail(bus, { project: path.basename(repo), url: url ?? "", target: mail });
       const stopBudgetWatch = watchBudgetCommands(controller, () => runId);
       try {
-        await controller.resume(runId, chat);
+        await controller.resume(runId, bridgedIntake);
         await reportOutcome(controller, repo, runId);
       } catch (e) {
         notifyDone(`${path.basename(repo)} — run stopped`, e instanceof Error ? e.message : String(e));

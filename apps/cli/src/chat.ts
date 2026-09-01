@@ -4,7 +4,7 @@ import type { IntakeQuestion } from "@harness/shared";
 
 /** The slice of readline this needs — narrowed so tests can supply a script. */
 export interface Prompter {
-  question(prompt: string): Promise<string>;
+  question(prompt: string, options?: { signal?: AbortSignal }): Promise<string>;
   close(): void;
 }
 
@@ -137,10 +137,10 @@ export class TerminalChat implements IntakeUi {
    * constraints — and a single-line reader silently truncates a paste at the
    * first newline, taking the operator's first clause and discarding the rest.
    */
-  private async readAnswer(): Promise<string> {
+  private async readAnswer(signal?: AbortSignal): Promise<string> {
     const parts: string[] = [];
     for (;;) {
-      const line = await this.rl.question(cyan(parts.length ? "· " : "> "));
+      const line = await this.rl.question(cyan(parts.length ? "· " : "> "), { signal });
       if (!line.endsWith("\\")) {
         parts.push(line);
         return parts.join("\n");
@@ -156,7 +156,16 @@ export class TerminalChat implements IntakeUi {
     process.stdout.write(`\n${green("●")} ${wrap(trimmed, "  ")}\n`);
   }
 
-  async ask(q: IntakeQuestion): Promise<string> {
+  /**
+   * `signal` is the transport above this one saying the question has been
+   * answered somewhere else — from the dashboard's control plane, say. It
+   * matters because this reader is shared: a `readline` still waiting on a
+   * question that is already settled will take the operator's next line and
+   * hand it to the previous prompt, and every answer after that is one behind.
+   * `readline/promises` rejects the pending read on abort, which is exactly the
+   * release wanted; `BridgedIntake` swallows that rejection and nothing else.
+   */
+  async ask(q: IntakeQuestion, signal?: AbortSignal): Promise<string> {
     // The agent has stopped thinking and it is the operator's turn; nothing
     // should be spinning under the prompt they are typing into.
     this.working(false);
@@ -176,7 +185,7 @@ export class TerminalChat implements IntakeUi {
     }
 
     for (;;) {
-      const answer = (await this.readAnswer()).trim();
+      const answer = (await this.readAnswer(signal)).trim();
       if (answer === "") {
         if (recommended >= 0) return q.options[recommended]!.label;
         continue; // an open question needs an actual answer
