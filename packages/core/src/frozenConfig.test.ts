@@ -339,3 +339,135 @@ describe("a run created before the reviewer was pinned to Google", () => {
     cleanup();
   });
 });
+
+/**
+ * The same problem a third time, in the expensive direction.
+ *
+ * `workerUi` and `workerHeavy` are keys that did not exist, so an old config is
+ * merely incomplete — but today's default for the heavy rung is a model at
+ * twice the price of anything an old run agreed to, and a run parked over this
+ * release would otherwise come back sending its rejected tasks there.
+ */
+const FABLE = RunConfig.parse({}).models.workerHeavy;
+const OPUS_UI = RunConfig.parse({}).models.workerUi;
+
+/** Writes a run whose stored config has had the two rungs removed. */
+function runFromBeforeTheWorkerTiers(dbPath: string, models: Record<string, string> = {}, keep: string[] = []): string {
+  const store = new Store(dbPath);
+  store.createRun({
+    id: "run-pre-rungs",
+    repoPath: "/tmp/x",
+    assignment: "a",
+    state: "PLANNING",
+    prdPath: null,
+    planHash: null,
+    integrationBranch: "harness/run-pre-rungs",
+    config: RunConfig.parse({ models }),
+  });
+  const row = store.db.prepare("SELECT config FROM runs WHERE id = ?").get("run-pre-rungs") as { config: string };
+  const stored = JSON.parse(row.config) as { models: Record<string, string> };
+  for (const rung of ["workerUi", "workerHeavy"]) if (!keep.includes(rung)) delete stored.models[rung];
+  store.db.prepare("UPDATE runs SET config = ? WHERE id = ?").run(JSON.stringify(stored), "run-pre-rungs");
+  store.db.close();
+  return "run-pre-rungs";
+}
+
+describe("a run created before the interface and heavy rungs existed", () => {
+  it("keeps every rung on the model it was planned on", () => {
+    const { dbPath, cleanup } = onDisk();
+    const runId = runFromBeforeTheWorkerTiers(dbPath);
+
+    const store = new Store(dbPath);
+    const models = store.getRun(runId)!.config.models;
+    expect(models.workerUi).toBe(SONNET);
+    expect(models.workerHeavy).toBe(SONNET);
+    store.db.close();
+    cleanup();
+  });
+
+  it("follows that run's own worker rather than the default", () => {
+    const { dbPath, cleanup } = onDisk();
+    const runId = runFromBeforeTheWorkerTiers(dbPath, { worker: "gpt-5.6-terra" });
+
+    const store = new Store(dbPath);
+    const models = store.getRun(runId)!.config.models;
+    expect(models.workerUi).toBe("gpt-5.6-terra");
+    expect(models.workerHeavy).toBe("gpt-5.6-terra");
+    store.db.close();
+    cleanup();
+  });
+
+  it("leaves a rung the run named for itself alone, and fills only the missing one", () => {
+    const { dbPath, cleanup } = onDisk();
+    const runId = runFromBeforeTheWorkerTiers(dbPath, { workerHeavy: HAIKU }, ["workerHeavy"]);
+
+    const store = new Store(dbPath);
+    const models = store.getRun(runId)!.config.models;
+    expect(models.workerHeavy).toBe(HAIKU);
+    expect(models.workerUi).toBe(SONNET);
+    store.db.close();
+    cleanup();
+  });
+
+  it("is idempotent, so reopening the store does not keep rewriting rows", () => {
+    const { dbPath, cleanup } = onDisk();
+    const runId = runFromBeforeTheWorkerTiers(dbPath);
+
+    const once = new Store(dbPath);
+    const after1 = (once.db.prepare("SELECT config FROM runs WHERE id = ?").get(runId) as { config: string }).config;
+    once.db.close();
+    const twice = new Store(dbPath);
+    const after2 = (twice.db.prepare("SELECT config FROM runs WHERE id = ?").get(runId) as { config: string }).config;
+    twice.db.close();
+
+    expect(after2).toBe(after1);
+    cleanup();
+  });
+
+  it("steps over a config it cannot read, or one with no model table", () => {
+    const { dbPath, cleanup } = onDisk();
+    const runId = runFromBeforeTheWorkerTiers(dbPath);
+    const raw = new Store(dbPath);
+    raw.db.prepare("UPDATE runs SET config = ? WHERE id = ?").run("{not json", runId);
+    raw.createRun({
+      id: "run-no-models",
+      repoPath: "/tmp/x",
+      assignment: "a",
+      state: "PLANNING",
+      prdPath: null,
+      planHash: null,
+      integrationBranch: "harness/run-no-models",
+      config: RunConfig.parse({}),
+    });
+    raw.db.prepare("UPDATE runs SET config = ? WHERE id = ?").run(JSON.stringify({ budget: { runCapUsd: 1 } }), "run-no-models");
+    raw.db.close();
+
+    // The constructor runs the migration; a throw here would take every run.
+    const store = new Store(dbPath);
+    expect((store.db.prepare("SELECT config FROM runs WHERE id = ?").get(runId) as { config: string }).config).toBe("{not json");
+    expect(JSON.parse((store.db.prepare("SELECT config FROM runs WHERE id = ?").get("run-no-models") as { config: string }).config)).toEqual({ budget: { runCapUsd: 1 } });
+    store.db.close();
+    cleanup();
+  });
+
+  it("gives a run created today both rungs, because that is what it was priced with", () => {
+    const { dbPath, cleanup } = onDisk();
+    const store = new Store(dbPath);
+    store.createRun({
+      id: "run-today-rungs",
+      repoPath: "/tmp/x",
+      assignment: "a",
+      state: "PLANNING",
+      prdPath: null,
+      planHash: null,
+      integrationBranch: "harness/run-today-rungs",
+      config: RunConfig.parse({}),
+    });
+
+    const models = store.getRun("run-today-rungs")!.config.models;
+    expect(models.workerUi).toBe(OPUS_UI);
+    expect(models.workerHeavy).toBe(FABLE);
+    store.db.close();
+    cleanup();
+  });
+});

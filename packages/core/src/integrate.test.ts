@@ -128,7 +128,7 @@ async function build(
   prMode: "single" | "per-task" = "single",
   pool?: AgentPool,
   checkTimeoutMinutes = 20,
-  extra?: { prodUrl?: string; prodOut?: string; ciFixRounds?: number }
+  extra?: { prodUrl?: string; prodOut?: string; ciFixRounds?: number; holdUntilGreen?: boolean }
 ) {
   const { repo } = repoWithOrigin();
   const store = new Store(":memory:");
@@ -145,9 +145,21 @@ async function build(
       return null;
     },
   }, repo);
+  // The green hold is off by default here: these tests are about what the run
+  // publishes and reports, and most of their fakes carry no CI, which the hold
+  // reads as "GitHub could not be read" and pauses on. greenHold.test.ts is
+  // where the hold itself is exercised.
   const runId = await controller.startRun(
     "do a thing",
-    RunConfig.parse({ deterministicChecks: [], prMode, checkTimeoutMinutes, deployTimeoutMinutes: 1, prodUrl: extra?.prodUrl ?? "", ciFixRounds: extra?.ciFixRounds ?? 2 })
+    RunConfig.parse({
+      deterministicChecks: [],
+      prMode,
+      checkTimeoutMinutes,
+      deployTimeoutMinutes: 1,
+      prodUrl: extra?.prodUrl ?? "",
+      ciFixRounds: extra?.ciFixRounds ?? 2,
+      holdUntilGreen: extra?.holdUntilGreen ?? false,
+    })
   );
   return { store, runId, logs, repo, controller };
 }

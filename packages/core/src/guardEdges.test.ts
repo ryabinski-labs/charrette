@@ -47,7 +47,9 @@ describe("pricing a model nobody has priced", () => {
 
   it("prices something it has never heard of at the top tier, never under", () => {
     // Under-pricing an unknown model is how a budget cap silently stops binding.
-    expect(priceFor("some-future-model")).toEqual({ in: 5, out: 25 });
+    // Fable's rate, since that is the dearest model a role can be pointed at.
+    expect(priceFor("some-future-model")).toEqual({ in: 10, out: 50 });
+    expect(priceFor("claude-fable-5-1")).toEqual({ in: 10, out: 50 });
   });
 
   it("charges cache reads and writes at their own rates", () => {

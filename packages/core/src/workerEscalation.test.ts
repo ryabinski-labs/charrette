@@ -33,31 +33,38 @@ afterEach(() => {
 
 const SONNET = "claude-sonnet-5";
 const HAIKU = "claude-haiku-4-5-20251001";
+const OPUS = "claude-opus-5";
+const FABLE = "claude-fable-5-1";
 const DOCS = "<prd>\n# PRD\n</prd>\n<conventions>\nc\n</conventions>";
 
 /**
- * One task the light-tier rule admits: sized S, two paths, a probe that exits
- * zero, and nothing in it the risky-domain list matches.
+ * One task. By default the light-tier rule admits it: sized S, two paths, a
+ * probe that exits zero, and nothing in it the risky-domain list matches. The
+ * overrides are how the other rungs are reached.
  */
-const PLAN =
-  "```json\n" +
-  JSON.stringify({
-    epics: [{ id: "epic-e", title: "E", summary: "s" }],
-    tasks: [
-      {
-        id: "task-a",
-        epicId: "epic-e",
-        title: "Rename the badge copy",
-        spec: "The badge says Running. Change it to In progress.",
-        acceptanceCriteria: ["The badge reads In progress"],
-        dependsOn: [],
-        touchedPaths: ["src/Badge.tsx", "src/Badge.test.tsx"],
-        completionProbe: "true",
-        estimatedSize: "S" as const,
-      },
-    ],
-  }) +
-  "\n```";
+function plan(over: { title?: string; spec?: string; estimatedSize?: "S" | "M" | "L"; touchedPaths?: string[] } = {}): string {
+  return (
+    "```json\n" +
+    JSON.stringify({
+      epics: [{ id: "epic-e", title: "E", summary: "s" }],
+      tasks: [
+        {
+          id: "task-a",
+          epicId: "epic-e",
+          title: over.title ?? "Rename the badge copy",
+          spec: over.spec ?? "The badge says Running. Change it to In progress.",
+          acceptanceCriteria: ["The badge reads In progress"],
+          dependsOn: [],
+          touchedPaths: over.touchedPaths ?? ["src/Badge.tsx", "src/Badge.test.tsx"],
+          completionProbe: "true",
+          estimatedSize: over.estimatedSize ?? ("S" as const),
+        },
+      ],
+    }) +
+    "\n```"
+  );
+}
+const PLAN = plan();
 
 const gitIn = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "ignore" });
 
@@ -88,9 +95,10 @@ const gates: GateHandler = {
 /**
  * How each worker session ends. `"ceiling"` is the turn-ceiling error, which
  * falls through to QA with whatever it committed; `"crash"` is the session
- * dying, which is caught and re-dispatched immediately.
+ * dying, which is caught and re-dispatched immediately; `"refusal"` is the
+ * model's own classifier declining, which is a crash with a reason.
  */
-type Ending = "ceiling" | "crash" | "done";
+type Ending = "ceiling" | "crash" | "refusal" | "done";
 
 /**
  * Runs the one-task plan.
@@ -99,7 +107,13 @@ type Ending = "ceiling" | "crash" | "done";
  * verdicts reject before one passes — a rejection is what dispatches the task's
  * next worker, so it is the only way to see which model the second attempt got.
  */
-async function run(worker: (nth: number) => Ending, qaFails = 0, models: Record<string, string> = {}) {
+async function run(
+  worker: (nth: number) => Ending,
+  qaFails = 0,
+  models: Record<string, string> = {},
+  opts: { plan?: string; config?: Record<string, unknown> } = {}
+) {
+  const planText = opts.plan ?? PLAN;
   let planning = 0;
   let workers = 0;
   let qas = 0;
@@ -108,7 +122,7 @@ async function run(worker: (nth: number) => Ending, qaFails = 0, models: Record<
     async run(spec: AgentSpec): Promise<AgentResult> {
       specs.push(spec);
       const base = { sessionId: `s${specs.length}`, costUsd: 0, turns: 1 };
-      if (spec.role === "planner") return { ...base, resultText: planning++ === 0 ? DOCS : PLAN, outcome: "done" as const };
+      if (spec.role === "planner") return { ...base, resultText: planning++ === 0 ? DOCS : planText, outcome: "done" as const };
       if (spec.role === "worker") {
         // Committed before the ending is decided: a worker that ran out of turns
         // has usually written something on the way there, and a branch carrying
@@ -118,6 +132,7 @@ async function run(worker: (nth: number) => Ending, qaFails = 0, models: Record<
         gitIn(spec.cwd, "commit", "-m", "wip");
         const ending = worker(++workers);
         if (ending === "crash") throw new Error("transport closed");
+        if (ending === "refusal") throw new Error("the session ended with stop_reason refusal (category: cyber)");
         if (ending === "ceiling") {
           return { ...base, resultText: "", outcome: "error" as const, errorDetail: "error_max_turns (hit the turn ceiling of 120)" };
         }
@@ -134,7 +149,7 @@ async function run(worker: (nth: number) => Ending, qaFails = 0, models: Record<
   const controller = new RunController(store, new Bus(store), pool, new GitHubAdapter(undefined, undefined), gates, repo());
   const runId = await controller.startRun(
     "do a thing",
-    RunConfig.parse({ deterministicChecks: [], waitForChecks: false, maxParallelWorkers: 1, models })
+    RunConfig.parse({ deterministicChecks: [], waitForChecks: false, maxParallelWorkers: 1, models, ...opts.config })
   );
   return { store, runId, specs, workerSpecs: () => specs.filter((s) => s.role === "worker") };
 }
@@ -196,8 +211,9 @@ describe("a light-tier task that ran out of turns", () => {
   it("escalates once and then stops, rather than climbing on every failure", async () => {
     // Two ceiling deaths. The second is already on the standard model, so there
     // is nowhere further up to go — and a second log line would read as a second
-    // decision having been made.
-    const { store, runId, workerSpecs } = await run((nth) => (nth <= 2 ? "ceiling" : "done"), 2);
+    // decision having been made. The top rung is pointed back at the standard
+    // model so the rejection ladder (tested below) stays out of this one.
+    const { store, runId, workerSpecs } = await run((nth) => (nth <= 2 ? "ceiling" : "done"), 2, { workerHeavy: SONNET });
 
     expect(workerSpecs().map((s) => s.model)).toEqual([HAIKU, SONNET, SONNET]);
     expect(logs(store, runId).filter((t) => t.includes("worker escalated"))).toHaveLength(1);
@@ -225,5 +241,121 @@ describe("a light-tier session that died rather than finished", () => {
 
     expect(workerSpecs().map((s) => s.model)).toEqual([HAIKU, SONNET]);
     expect(logs(store, runId).some((t) => t.includes("the session died on the light tier: Error: transport closed"))).toBe(true);
+  });
+});
+
+describe("a task that keeps being sent back", () => {
+  it("runs its third attempt on the top rung, whatever rung it started on", async () => {
+    // Two rejections: the first dispatches the second worker on the same cheap
+    // model (a rejection is the ordinary loop), the second dispatches the third
+    // on the model that finishes.
+    const { store, runId, workerSpecs } = await run(() => "done", 2);
+
+    expect(workerSpecs().map((s) => s.model)).toEqual([HAIKU, HAIKU, FABLE]);
+    expect(logs(store, runId).some((t) => t.includes(`worker escalated from ${HAIKU} to ${FABLE}: it was sent back 2 time(s)`))).toBe(true);
+    // Still one decision, still light: the ledger bills the escalation to the
+    // tier that was wrong about the task.
+    expect(events(store, runId).filter((e) => e.type === "task.tier_decided")).toHaveLength(1);
+    expect(workerSpecs().every((s) => s.tier === "light")).toBe(true);
+  });
+
+  it("climbs on the bound the operator set", async () => {
+    const { workerSpecs } = await run(() => "done", 1, {}, { config: { heavyTierAfterRejections: 1 } });
+
+    expect(workerSpecs().map((s) => s.model)).toEqual([HAIKU, FABLE]);
+  });
+
+  it("says nothing when the top rung points at the model the task is already on", async () => {
+    // How the tier is switched off. A standard-tier task, the top rung pointed
+    // back at the standard model: no move, and no log claiming one.
+    const { store, runId, workerSpecs } = await run(() => "done", 2, { workerHeavy: SONNET }, { plan: plan({ estimatedSize: "M" }) });
+
+    expect(workerSpecs().map((s) => s.model)).toEqual([SONNET, SONNET, SONNET]);
+    expect(logs(store, runId).some((t) => t.includes("worker escalated"))).toBe(false);
+  });
+});
+
+describe("a task the rule sends to the top rung from the start", () => {
+  /** Sized L, in a risky domain: the heavy rule's own case. */
+  const hard = plan({
+    title: "Rework the session refresh under concurrent logins",
+    spec: "Two tabs refreshing the same session race each other and one logs the user out.",
+    estimatedSize: "L",
+    touchedPaths: ["src/auth/session.ts", "src/auth/refresh.ts", "src/auth/store.ts"],
+  });
+
+  it("starts there, and the decision says why", async () => {
+    const { store, runId, workerSpecs } = await run(() => "done", 0, {}, { plan: hard });
+
+    expect(workerSpecs()[0]).toMatchObject({ model: FABLE, tier: "heavy" });
+    const decided = events(store, runId).find((e) => e.type === "task.tier_decided") as { tier: string; why: string };
+    expect(decided.tier).toBe("heavy");
+    expect(decided.why).toContain("sized it L");
+  });
+
+  it("comes back down a rung when the model itself refused, rather than spending the respawn cap refusing", async () => {
+    const { store, runId, workerSpecs } = await run((nth) => (nth === 1 ? "refusal" : "done"), 0, {}, { plan: hard });
+
+    expect(workerSpecs().map((s) => s.model)).toEqual([FABLE, SONNET]);
+    expect(logs(store, runId).some((t) => t.includes(`worker moved from ${FABLE} back to ${SONNET}: the session ended in a refusal`))).toBe(true);
+  });
+
+  it("does not read a dropped socket as a refusal", async () => {
+    const { workerSpecs } = await run((nth) => (nth === 1 ? "crash" : "done"), 0, {}, { plan: hard });
+
+    expect(workerSpecs().map((s) => s.model)).toEqual([FABLE, FABLE]);
+  });
+
+  it("stays put when the top rung is switched off, even on a refusal", async () => {
+    const { store, runId, workerSpecs } = await run((nth) => (nth === 1 ? "refusal" : "done"), 0, { workerHeavy: SONNET }, { plan: hard });
+
+    expect(workerSpecs().map((s) => s.model)).toEqual([SONNET, SONNET]);
+    expect(logs(store, runId).some((t) => t.includes("back to"))).toBe(false);
+  });
+});
+
+describe("interface work", () => {
+  const screen = plan({ title: "Add an empty state to the projects dashboard", spec: "Show a friendly empty state with a call to action." });
+
+  it("runs on the design model", async () => {
+    const { store, runId, workerSpecs } = await run(() => "done", 0, {}, { plan: screen });
+
+    expect(workerSpecs()[0]).toMatchObject({ model: OPUS, tier: "ui" });
+    expect(events(store, runId).find((e) => e.type === "task.tier_decided")).toMatchObject({ tier: "ui", model: OPUS });
+  });
+
+  it("is not demoted to the standard model by the rule that promotes the cheap one", async () => {
+    // The light-tier escalation used to move any non-standard model to the
+    // standard one on a turn-ceiling death. A design-model session that ran
+    // out of turns must not come back on Sonnet.
+    const { store, runId, workerSpecs } = await run((nth) => (nth === 1 ? "ceiling" : "done"), 1, {}, { plan: screen });
+
+    expect(workerSpecs().map((s) => s.model)).toEqual([OPUS, OPUS]);
+    expect(logs(store, runId).some((t) => t.includes("worker escalated"))).toBe(false);
+  });
+});
+
+describe("the ladder's top", () => {
+  it("has nowhere further to send a heavy task that keeps being sent back", async () => {
+    const hard = plan({
+      title: "Rework the session refresh under concurrent logins",
+      spec: "Two tabs refreshing the same session race each other and one logs the user out.",
+      estimatedSize: "L",
+      touchedPaths: ["src/auth/session.ts", "src/auth/refresh.ts", "src/auth/store.ts"],
+    });
+    const { store, runId, workerSpecs } = await run(() => "done", 2, {}, { plan: hard });
+
+    expect(workerSpecs().map((s) => s.model)).toEqual([FABLE, FABLE, FABLE]);
+    expect(logs(store, runId).some((t) => t.includes("worker escalated"))).toBe(false);
+  });
+
+  it("does not let a turn-ceiling death demote a light task that had already climbed to the top", async () => {
+    // Rejected once (the bound is one here), so the second worker is on the
+    // top rung; it runs out of turns. The light-tier escalation must read
+    // that as "not on the light rung" and leave the model where it is.
+    const { store, runId, workerSpecs } = await run((nth) => (nth === 2 ? "ceiling" : "done"), 2, {}, { config: { heavyTierAfterRejections: 1 } });
+
+    expect(workerSpecs().map((s) => s.model)).toEqual([HAIKU, FABLE, FABLE]);
+    expect(logs(store, runId).filter((t) => t.includes("worker escalated"))).toHaveLength(1);
   });
 });

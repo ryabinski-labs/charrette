@@ -752,6 +752,19 @@ describe("asking whether a pull request merges", () => {
     await expect(adapter.prMergeable(42)).resolves.toEqual({ state: "conflicting", mergeStateStatus: "dirty" });
   });
 
+  it("reports a branch the base has moved out from under as behind, not as mergeable", async () => {
+    // `mergeable: true` is about the diff; `behind` is about the pull request,
+    // which a protection rule requiring an up-to-date branch will refuse.
+    const { adapter, api } = adapterWith();
+    api.rest.pulls.get.mockResolvedValue({ data: { mergeable: true, mergeable_state: "behind" } });
+    await expect(adapter.prMergeable(42)).resolves.toEqual({ state: "behind", mergeStateStatus: "behind" });
+
+    // Every other state a true `mergeable` carries — a review this harness
+    // will never give, a non-required check — is mergeable for this purpose.
+    api.rest.pulls.get.mockResolvedValue({ data: { mergeable: true, mergeable_state: "blocked" } });
+    await expect(adapter.prMergeable(42)).resolves.toEqual({ state: "mergeable", mergeStateStatus: "blocked" });
+  });
+
   it("answers a merged pull request from its state instead of polling a merge that no longer exists", async () => {
     // GitHub reports `mergeable: null` on a merged or closed pull request for
     // ever. Waiting on that is a timeout with a known answer already on the row.

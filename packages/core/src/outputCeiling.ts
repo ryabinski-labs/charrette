@@ -1,3 +1,4 @@
+import { createReadStream } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -91,9 +92,23 @@ const MIN_MODELS = 5;
  * assuming it.
  */
 export function ceilingTable(bundle: string): CeilingTable | undefined {
+  return tableOf(entriesIn(bundle));
+}
+
+/**
+ * Every model entry in one blob of text, with no floor applied.
+ *
+ * Split out from `ceilingTable` because the floor is a judgment about a whole
+ * registry and this is a judgment about one piece of text. Applying it per
+ * piece is what `ceilingTableFromFile` did by calling `ceilingTable` on each
+ * chunk: a registry that straddles a chunk boundary put four models in one
+ * chunk and two in the next, both were refused as coincidences, and six models
+ * became none. The floor now runs once, over the union.
+ */
+function entriesIn(text: string): { id: string; limits: ModelLimits }[] {
   const models: { id: string; limits: ModelLimits }[] = [];
   const seen = new Set<string>();
-  for (const chunk of bundle.split(ENTRY_ANCHOR).slice(1)) {
+  for (const chunk of text.split(ENTRY_ANCHOR).slice(1)) {
     const id = /^(claude-[a-z0-9.\-]+)"/.exec(chunk)?.[1];
     if (!id || seen.has(id)) continue;
     // Only within this entry: the split guarantees the next model's numbers are
@@ -104,11 +119,15 @@ export function ceilingTable(bundle: string): CeilingTable | undefined {
     seen.add(id);
     models.push({ id, limits: { standard: Number(limits[1]), upper: Number(limits[2]) } });
   }
+  return models;
+}
+
+/** The floor, and the order every reader depends on. */
+function tableOf(models: { id: string; limits: ModelLimits }[]): CeilingTable | undefined {
   if (models.length < MIN_MODELS) return undefined;
   // Longest first, so `claude-opus-4-5-20251101` matches `claude-opus-4-5`
   // rather than stopping at a shorter id that happens to be a prefix of it.
-  models.sort((a, b) => b.id.length - a.id.length);
-  return { models };
+  return { models: [...models].sort((a, b) => b.id.length - a.id.length) };
 }
 
 /**
@@ -135,16 +154,84 @@ function bundlePath(): string {
 }
 
 /**
- * The installed SDK's ceiling for one model.
+ * Where the SDK's native binary lives, for the SDKs that keep the registry
+ * there instead.
  *
- * The bundle is a megabyte and does not change while the harness runs, so it is
- * read once per process. Never throws: an SDK that cannot be resolved, read, or
- * parsed produces no opinion.
+ * From 0.3.25x the entry bundle is a thin bridge and the model table moved
+ * into the platform binary (`@anthropic-ai/claude-agent-sdk-darwin-arm64`
+ * and its siblings), which is the Claude Code build the sessions actually run
+ * on. It is resolved from the SDK's own directory rather than the harness's,
+ * so a pnpm layout that hoists nothing still finds the copy the SDK uses.
  */
-export async function sdkCeiling(model: string, load = () => readFile(bundlePath(), "utf8")): Promise<CeilingReading> {
-  cached ??= load()
+function binaryPath(): string {
+  const platform = `${process.platform}-${process.arch}`;
+  const pkg = createRequire(bundlePath()).resolve(`@anthropic-ai/claude-agent-sdk-${platform}/package.json`);
+  return path.join(path.dirname(pkg), binaryName(process.platform));
+}
+
+/**
+ * What the SDK's CLI binary is called. Only Windows differs, and only one
+ * platform's binary package is ever installed — so this is a rule about a
+ * machine the harness may run on tomorrow, not one it can resolve today.
+ */
+export function binaryName(platform: string): string {
+  return platform === "win32" ? "claude.exe" : "claude";
+}
+
+/** How much of the binary is read at a time, and how much of it is kept. */
+const CHUNK_BYTES = 8 * 1024 * 1024;
+const OVERLAP_BYTES = 1024 * 1024;
+
+/**
+ * Read the registry out of a file too big to hold as one string.
+ *
+ * The binary is two hundred megabytes and the registry inside it is a few
+ * kilobytes, contiguous. So it is scanned in chunks, each one overlapping the
+ * last by more than the registry is long, and every chunk is parsed exactly
+ * as a bundle would be — the same anchor, the same shape, the same silence on
+ * a chunk that carries nothing. An entry that straddles the overlap is seen
+ * whole in the next chunk, and an entry seen twice is one entry.
+ */
+export async function ceilingTableFromFile(file: string, chunkBytes = CHUNK_BYTES, overlapBytes = OVERLAP_BYTES): Promise<CeilingTable | undefined> {
+  const models = new Map<string, ModelLimits>();
+  let carry = "";
+  const stream = createReadStream(file, { highWaterMark: chunkBytes });
+  for await (const chunk of stream) {
+    // latin1: one byte, one character, so an offset is an offset and the
+    // ASCII the registry is written in comes through untouched.
+    const text = carry + (chunk as Buffer).toString("latin1");
+    for (const m of entriesIn(text)) if (!models.has(m.id)) models.set(m.id, m.limits);
+    carry = text.slice(-overlapBytes);
+  }
+  return tableOf([...models.entries()].map(([id, limits]) => ({ id, limits })));
+}
+
+/**
+ * The installed SDK's registry, wherever this SDK keeps it: the entry bundle
+ * first, the native binary when the bundle carries none. Undefined when
+ * neither does, or neither can be read.
+ */
+export async function installedCeilingTable(
+  loadBundle: () => Promise<string> = () => readFile(bundlePath(), "utf8"),
+  loadBinary: () => Promise<CeilingTable | undefined> = () => ceilingTableFromFile(binaryPath())
+): Promise<CeilingTable | undefined> {
+  const fromBundle = await loadBundle()
     .then(ceilingTable)
     .catch(() => undefined);
+  if (fromBundle) return fromBundle;
+  return loadBinary().catch(() => undefined);
+}
+
+/**
+ * The installed SDK's ceiling for one model.
+ *
+ * The registry does not change while the harness runs, so it is read once per
+ * process. Never throws: an SDK that cannot be resolved, read, or parsed
+ * produces no opinion. `load` is the seam tests use to hand in a bundle; the
+ * harness itself reads whatever the installed SDK keeps.
+ */
+export async function sdkCeiling(model: string, load?: () => Promise<string>): Promise<CeilingReading> {
+  cached ??= (load ? load().then(ceilingTable) : installedCeilingTable()).catch(() => undefined);
   return modelCeiling(await cached, model);
 }
 

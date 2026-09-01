@@ -20,9 +20,28 @@ export const DEFAULT_CHECK_TIMEOUT_MINUTES = 10;
  */
 const HAIKU = "claude-haiku-4-5-20251001";
 
+/**
+ * The top tier. Named once for the same reason `HAIKU` is: four roles and the
+ * price table key on this exact id, and a copy that drifts is a role billed at
+ * the wrong rate.
+ *
+ * Fable 5.1 needs a Claude Code of 2.1.251 or newer underneath the Agent SDK —
+ * an older one answers every session with `400 Claude Code 2.1.222 does not
+ * support this model` — which is why the SDK pin moved with this constant.
+ */
+const FABLE = "claude-fable-5-1";
+
 export const ModelRoutingShape = z.object({
   intake: z.string().default("claude-opus-5"),
-  planner: z.string().default("claude-opus-5"),
+  /**
+   * Drafts the PRD and cuts it into the DAG. Every worker session in the run is
+   * downstream of this one reading, and the two runs this harness has lost the
+   * most money on (40da9337, f338b5c8) both went wrong here — a plan that
+   * under-recognised the work, built anyway. The most expensive place to be
+   * wrong, so the most capable model: Fable, at twice Opus's rate for a
+   * handful of sessions a run.
+   */
+  planner: z.string().default(FABLE),
   worker: z.string().default("claude-sonnet-5"),
   /**
    * The worker model for tasks the light-tier rule admits. See modelTier.ts for
@@ -49,6 +68,43 @@ export const ModelRoutingShape = z.object({
    * paid for itself.
    */
   workerLight: z.string().default(HAIKU),
+  /**
+   * The worker model for user-interface tasks — the ones `UI_WHEN` matches,
+   * which is the same vocabulary that routes `frontend-design` and
+   * `ui-ux-cx-engineer` onto the worker and `visual-qa-agent` onto QA.
+   *
+   * Opus rather than Fable, and the reason is where interface quality actually
+   * comes from. It is bounded by the feedback loop — a design playbook going
+   * in, a screenshot-reading grader coming out — not by reasoning depth, and
+   * both halves of that loop are already forced onto every UI task by the
+   * routing rules. Fable at 3.3x Sonnet's price on the most numerous kind of
+   * task buys the least per dollar there, and its own guidance is that long
+   * prescriptive prompts (which is what a 200-line design skill is) lower its
+   * output quality. A UI task that visual QA keeps rejecting still climbs to
+   * `workerHeavy` through the ordinary escalation. Set this to `models.worker`
+   * to switch the route off while keeping the ledger's record of what it would
+   * have taken, exactly as `workerLight` allows.
+   */
+  workerUi: z.string().default("claude-opus-5"),
+  /**
+   * The worker model for the hardest tasks, and the top of the escalation
+   * ladder every other task can climb.
+   *
+   * Two things send a task here, both decided in code rather than by an agent
+   * — see modelTier.ts for why the planner is not allowed to nominate. A task
+   * *starts* here when the planner sized it L and it names a risky domain
+   * (auth, money, migrations, concurrency, infrastructure), or when it is a
+   * second-round fix of a check the standard tier already failed to turn
+   * green. A task *climbs* here after `heavyTierAfterRejections` iterations
+   * were sent back, whatever tier it started on: at that point the evidence
+   * that the model is the problem is on the record, and the cheapest thing
+   * left is the expensive model that finishes.
+   *
+   * Set this to `models.worker` to switch the tier off without losing the
+   * measurement — the rule still runs, `task.tier_decided` still says `heavy`,
+   * and the ledger keeps counting what it would have cost.
+   */
+  workerHeavy: z.string().default(FABLE),
   qa: z.string().default("claude-sonnet-5"),
   /**
    * Resolves the run's merge conflict with its own base branch.
@@ -142,9 +198,9 @@ export const ModelRoutingShape = z.object({
    * Decides what the run does next at a pit stop, having read the demo and
    * every reviewer. It is the only agent in the harness whose output redirects
    * or re-plans the remaining work on its own, so it is the last place to save
-   * money: Opus.
+   * money: Fable, for the same reason the planner is.
    */
-  pm: z.string().default("claude-opus-5"),
+  pm: z.string().default(FABLE),
   /**
    * Writes a playbook when a task matched nothing in the operator's skill
    * collection (`skillForge`). Sonnet rather than Haiku, and the reason is the
@@ -159,9 +215,9 @@ export const ModelRoutingShape = z.object({
    * The specification is the standard everything downstream is judged against,
    * and it is written once per run from a brief nobody has built against yet —
    * which is the hardest reading task in the run and the cheapest place to be
-   * wrong expensively. Opus, for the same reason the planner is.
+   * wrong expensively. Fable, for the same reason the planner is.
    */
-  spec: z.string().default("claude-opus-5"),
+  spec: z.string().default(FABLE),
 });
 
 /**
@@ -613,7 +669,7 @@ export type TaskGateConfig = z.infer<typeof TaskGateConfig>;
 // not: `\bicon\b` does not match "icons", so "Replace the emoji with proper
 // icons" routed nowhere, and neither did "responsive components". A gate that
 // depends on a planner writing the singular is not a gate.
-const UI_WHEN =
+export const UI_WHEN =
   "\\b(" +
   // Surfaces and the design system itself.
   "ui|ux|frontend|front-end|dashboards?|console|web pages?|landing|components?|css|styling|layouts?|responsive|" +
@@ -714,6 +770,21 @@ export const RunConfig = z.object({
   // value is frozen in their config.
   maxParallelWorkers: z.number().int().min(1).max(16).default(3),
   qaIterationCap: z.number().int().min(1).max(3).default(3),
+  /**
+   * How many times a task may be sent back before its next worker runs on
+   * `models.workerHeavy`, whatever tier it started on.
+   *
+   * Counted on the same `qaIterations` the cap above counts — every iteration
+   * that came back, whether QA rejected it, a deterministic check failed it,
+   * or the branch arrived empty — because that is the number that says the
+   * model is not finishing, and it is the number an operator already sees.
+   * Two of a cap of three: the first rejection is the ordinary loop and
+   * escalating on it would move most tasks up on their first go, the second
+   * is a pattern, and the third attempt is the one that should not be made on
+   * the model that failed twice. A task answered at a gate has its count
+   * reset, and starts the ladder again with the operator's guidance.
+   */
+  heavyTierAfterRejections: z.number().int().min(1).max(3).default(2),
   /**
    * How many turns a QA session gets before the SDK cuts it off.
    *
@@ -1064,6 +1135,22 @@ export const RunConfig = z.object({
    * restores the old behaviour — report the red branch and stop.
    */
   ciFixRounds: z.number().int().min(0).max(3).default(2),
+  /**
+   * Whether the run may report itself in review while its pull request is red
+   * or cannot be merged.
+   *
+   * `ciFixRounds` decides how much the run does about a red branch on its own;
+   * this decides what happens when that is not enough. With it on — the
+   * default — the run never reaches PR_REVIEW while CI is failing, the branch
+   * has no CI at all, GitHub has not answered, or the pull request is
+   * conflicting or behind its base. Rounds spent, it holds at a pit stop where
+   * the decider (`pitStop.decidedBy`, or you) can grant another `ciFixRounds`
+   * or stop the run; a repo with no pit stops pauses with the reason on the
+   * record, and `harness resume` is the grant. Off restores the older shape:
+   * the rounds are spent, the failure goes into the outcome line, and the run
+   * reports in review over a branch the repo has rejected.
+   */
+  holdUntilGreen: z.boolean().default(true),
   /**
    * The live URL this repo deploys to. Set it and a run does not end at the
    * pull request: once a human merges, the harness follows the deploy and sends

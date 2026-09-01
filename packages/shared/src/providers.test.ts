@@ -196,7 +196,7 @@ describe("the run config refuses a routing it cannot honour", () => {
       qa: "claude-sonnet-5",
       reviewer: "gemini-3.7-flash",
       prod: "claude-opus-5",
-      pm: "claude-opus-5",
+      pm: "claude-fable-5-1",
       advisor: "claude-sonnet-5",
     });
   });

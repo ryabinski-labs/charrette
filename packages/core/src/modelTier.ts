@@ -1,4 +1,4 @@
-import type { PlannedTask } from "@harness/shared";
+import { UI_WHEN, type PlannedTask } from "@harness/shared";
 
 /**
  * Which worker model a task is dispatched on.
@@ -98,7 +98,30 @@ const RISKY =
 
 const RISKY_RE = new RegExp(RISKY, "i");
 
-export type Tier = "light" | "standard";
+/**
+ * The interface vocabulary, shared with the skill router so the tier that gets
+ * the design model is exactly the set of tasks that gets the design skills.
+ * Two lists would drift, and a task carrying `frontend-design` on Sonnet while
+ * its neighbour carries nothing on Opus is the drift.
+ */
+const UI_RE = new RegExp(UI_WHEN, "i");
+
+/**
+ * A fix task the harness wrote itself, and which round it belongs to.
+ *
+ * `queueCiFixes`, `queueScenarioFixes` and `queueIntentFixes` all name their
+ * tasks `<kind>-fix-<round>-<n>`. The round is the one field on a task that
+ * says the standard tier already tried: a round-two fix exists because the
+ * round-one fix, on the ordinary worker, left the check red.
+ */
+const FIX_ROUND_RE = /^(?:ci|spec|intent)-fix-(\d+)-/;
+
+/**
+ * The rungs, cheapest first. A task starts on the rung the rule names and only
+ * ever moves up: `escalateWorker` in runController.ts climbs one rung on a
+ * light-tier death, and `heavyTierAfterRejections` sends any rung to the top.
+ */
+export type Tier = "light" | "standard" | "ui" | "heavy";
 
 export interface TierDecision {
   tier: Tier;
@@ -111,11 +134,15 @@ export interface TierDecision {
   why: string;
 }
 
-/** The fields the rule reads. Narrower than PlannedTask so tests can be honest. */
+/**
+ * The fields the rule reads. Narrower than PlannedTask so tests can be honest.
+ * `id` is optional because only the harness's own fix tasks carry a meaning in
+ * theirs; a planner's `task-a` says nothing and is read as nothing.
+ */
 type Nominee = Pick<
   PlannedTask,
   "title" | "spec" | "acceptanceCriteria" | "touchedPaths" | "completionProbe" | "estimatedSize"
->;
+> & { id?: string };
 
 /**
  * Decide a task's worker tier.
@@ -128,6 +155,38 @@ type Nominee = Pick<
  */
 export function taskTier(task: Nominee, maxPaths = LIGHT_TIER_MAX_PATHS): TierDecision {
   const std = (why: string): TierDecision => ({ tier: "standard", why });
+  const haystack = [task.title, task.spec, task.acceptanceCriteria.join("\n"), task.touchedPaths.join("\n")].join("\n");
+
+  // The top rung first, because a task that qualifies for it must not be
+  // talked down by a rule below: the heavy rule is about the cost of being
+  // wrong, and every other rule here is about the cost of being right.
+  //
+  // A fix task from round two or later is the clearest case. The round-one
+  // fix ran on the ordinary worker and the check is still red; sending round
+  // two to the same model replays the wall, and it does so on the integration
+  // branch, where the whole run is waiting on the answer.
+  const fixRound = Number(FIX_ROUND_RE.exec(task.id ?? "")?.[1] ?? 0);
+  if (fixRound >= 2) {
+    return { tier: "heavy", why: `it is a round-${fixRound} fix of a check the standard tier already failed to turn green` };
+  }
+  // Sized L *and* in a domain where a plausible-looking mistake passes QA. Size
+  // alone is not enough — an L-sized rename is still a rename — and a risky
+  // domain alone is what the light rule refuses, not what the heavy one
+  // admits. Together they name the task the planner itself called big, in the
+  // one kind of work where the retry loop does not catch a quiet failure.
+  const risky = RISKY_RE.exec(haystack);
+  if (task.estimatedSize === "L" && risky) {
+    return { tier: "heavy", why: `the planner sized it L and it involves ${risky[0].toLowerCase()}, where a plausible-looking mistake passes QA` };
+  }
+  // Interface work gets the design model. Matched on the same vocabulary that
+  // routes the design skills, so the two decisions cannot disagree about what
+  // a UI task is. Checked before the light rule: a small badge-copy change is
+  // exactly the S-sized, two-path, probe-checked task the light tier admits,
+  // and it is still a screen somebody looks at.
+  const ui = UI_RE.exec(haystack);
+  if (ui) {
+    return { tier: "ui", why: `it is interface work (${ui[0].toLowerCase()}), which gets the design model and the design skills` };
+  }
 
   if (task.estimatedSize !== "S") {
     return std(`the planner sized it ${task.estimatedSize}, and only S is eligible`);
@@ -146,10 +205,8 @@ export function taskTier(task: Nominee, maxPaths = LIGHT_TIER_MAX_PATHS): TierDe
   if (!task.completionProbe.trim()) {
     return std("it has no completion probe, so nothing but an agent's opinion would judge it done");
   }
-  const haystack = [task.title, task.spec, task.acceptanceCriteria.join("\n"), task.touchedPaths.join("\n")].join("\n");
-  const hit = RISKY_RE.exec(haystack);
-  if (hit) {
-    return std(`it involves ${hit[0].toLowerCase()}, where a plausible-looking mistake passes QA`);
+  if (risky) {
+    return std(`it involves ${risky[0].toLowerCase()}, where a plausible-looking mistake passes QA`);
   }
   return {
     tier: "light",
@@ -157,21 +214,38 @@ export function taskTier(task: Nominee, maxPaths = LIGHT_TIER_MAX_PATHS): TierDe
   };
 }
 
+/** The worker models, one per rung. */
+export interface TierModels {
+  worker: string;
+  workerLight: string;
+  workerUi: string;
+  workerHeavy: string;
+}
+
+/** The model a rung runs on. */
+export function tierModel(tier: Tier, models: TierModels): string {
+  switch (tier) {
+    case "light":
+      return models.workerLight;
+    case "ui":
+      return models.workerUi;
+    case "heavy":
+      return models.workerHeavy;
+    default:
+      return models.worker;
+  }
+}
+
 /**
  * The model a task's worker session runs on.
  *
- * Returns `models.worker` unless the rule admits the task *and* the operator has
- * actually pointed the light tier somewhere cheaper. Those are two separate
+ * Returns `models.worker` unless the rule names another rung *and* the operator
+ * has actually pointed that rung somewhere else. Those are two separate
  * conditions on purpose: the rule runs on every task from the day it ships, so
  * the ledger records which tasks it would have moved long before any of them
  * move, and the operator can price the experiment before running it.
  */
-export function workerModelFor(
-  task: Nominee,
-  models: { worker: string; workerLight: string },
-  maxPaths = LIGHT_TIER_MAX_PATHS
-): { model: string; decision: TierDecision } {
+export function workerModelFor(task: Nominee, models: TierModels, maxPaths = LIGHT_TIER_MAX_PATHS): { model: string; decision: TierDecision } {
   const decision = taskTier(task, maxPaths);
-  const model = decision.tier === "light" ? models.workerLight : models.worker;
-  return { model, decision };
+  return { model: tierModel(decision.tier, models), decision };
 }
