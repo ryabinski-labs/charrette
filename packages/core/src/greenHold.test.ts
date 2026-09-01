@@ -396,3 +396,28 @@ describe("what the hold leaves alone", () => {
     expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
   });
 });
+
+describe("a resume that cannot catch the base either", () => {
+  it("pauses instead of handing a run in review back to review", async () => {
+    // The hold's last exit: a run already in PR_REVIEW is resumed, the base is
+    // still moving faster than the reconciles, and the gate says stop. The run
+    // wears INTEGRATING for the attempt and lands PAUSED with the reason — it
+    // must not fall back into review over a pull request nobody can merge.
+    const repo = repoWithOrigin();
+    const { adapter, prs, setMerge } = fakeGitHub();
+    const { store, bus, runId, controller } = await build(adapter, pool(), repo);
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    const published = prs();
+
+    bus.publish({ type: "run.merge_status", runId, prNumber: 7, state: "behind", baseBranch: "release", conflicts: [], resolvedBy: "none", ts: Date.now() } as never);
+    setMerge([BEHIND]);
+
+    await controller.resume(runId);
+
+    expect(store.getRun(runId)!.state).toBe("PAUSED");
+    expect(store.lastRunStateChange(runId)!.reason).toBe("green hold: #7 is behind against release and the run may not report in review until it merges");
+    // The resume was spent on a grant of two more reconciles before it gave up.
+    expect(prs()).toBeGreaterThan(published);
+    expect(transitions(store, runId).slice(-2)).toEqual(["PR_REVIEW->INTEGRATING", "INTEGRATING->PAUSED"]);
+  });
+});

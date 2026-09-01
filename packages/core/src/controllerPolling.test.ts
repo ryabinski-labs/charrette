@@ -169,6 +169,9 @@ describe("polling CI that stops answering", () => {
     });
     const { pool } = rolePool({ planner: planner(["task-a"]), worker, qa: () => QA_PASS, validator: () => INTENT_PASS });
     const { controller, store } = build({ repoPath: dir, pool, github: adapter });
+    // The green hold asks an unreadable GitHub again a few times before it
+    // pauses; a millisecond between asks keeps this about the polling.
+    controller.githubRetryMs = 1;
 
     const runId = await controller.startRun(
       "build a thing",
@@ -180,6 +183,10 @@ describe("polling CI that stops answering", () => {
     );
 
     expect(store.ciStatus(runId)).toMatchObject({ state: "pending" });
+    // And pending is not green: the run pauses on not knowing rather than
+    // reporting in review over a branch nothing answered for.
+    expect(store.getRun(runId)!.state).toBe("PAUSED");
+    expect(store.lastRunStateChange(runId)!.reason).toMatch(/^green hold: GitHub could not be read/);
   });
 });
 

@@ -1,9 +1,14 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   ceilingNote,
+  binaryName,
   ceilingTable,
+  ceilingTableFromFile,
   forgetCeilingTable,
   grantedTokens,
   installedCeilingTable,
@@ -218,5 +223,92 @@ describe("how much to ask each message for", () => {
     expect(grantedTokens(modelCeiling(table, "claude-opus-5"), 128_000)).toBe(128_000);
     expect(grantedTokens(modelCeiling(table, "claude-opus-5"), 16_000)).toBe(16_000);
     expect(grantedTokens({ known: false, model: "x", reason: "unreadable" }, 64_000)).toBe(64_000);
+  });
+});
+
+describe("reading the registry out of the SDK's native binary", () => {
+  /** A registry file on disk, with `filler` bytes of noise before and after it. */
+  function registryFile(entries: string[], filler = 0): string {
+    const dir = mkdtempSync(path.join(tmpdir(), "harness-ceiling-"));
+    const file = path.join(dir, "claude");
+    writeFileSync(file, " ".repeat(filler) + `let MODELS=[${entries.join(",")}];` + " ".repeat(filler));
+    return file;
+  }
+
+  const six = [
+    entry("claude-3-5-haiku", 8192, 8192),
+    entry("claude-opus-4-5", 32000, 64000),
+    entry("claude-opus-4", 32000, 32000),
+    entry("claude-sonnet-4-5", 32000, 64000),
+    entry("claude-opus-5", 64000, 128000),
+    entry("claude-fable-5-1", 64000, 128000),
+  ];
+
+  it("finds it in a file read a chunk at a time, and reads each model once", async () => {
+    // Chunks far smaller than the registry, so it straddles several of them —
+    // the case the overlap exists for, and the one a single-chunk test would
+    // never reach. The real binary is 200MB read in 8MB chunks.
+    const table = await ceilingTableFromFile(registryFile(six, 4096), 512, 400);
+
+    expect(table!.models).toHaveLength(6);
+    expect(table!.models).toContainEqual({ id: "claude-fable-5-1", limits: { standard: 64_000, upper: 128_000 } });
+    // Longest first, so a dated alias matches its family rather than a prefix.
+    expect(table!.models[0]!.id.length).toBeGreaterThanOrEqual(table!.models[5]!.id.length);
+  });
+
+  it("says nothing about a file carrying too few models to be the registry", async () => {
+    // Below the floor it is not a registry, it is a coincidence that parsed.
+    expect(await ceilingTableFromFile(registryFile(six.slice(0, 2)), 512, 400)).toBeUndefined();
+  });
+
+  it("says nothing about a file that is not there", async () => {
+    await expect(ceilingTableFromFile(path.join(tmpdir(), "harness-no-such-binary"))).rejects.toThrow();
+  });
+});
+
+describe("where the installed SDK keeps its registry", () => {
+  it("takes the entry bundle when it carries one, and never opens the binary", async () => {
+    // The shape every SDK through 0.3.24x had. If a later one goes back to it,
+    // the 200MB scan is skipped rather than merely wasted.
+    let openedBinary = false;
+    const found = await installedCeilingTable(
+      async () => REGISTRY,
+      async () => {
+        openedBinary = true;
+        return undefined;
+      }
+    );
+
+    expect(found!.models).toHaveLength(6);
+    expect(openedBinary).toBe(false);
+  });
+
+  it("falls back to the binary when the bundle carries none", async () => {
+    // 0.3.25x: the entry is a thin bridge and the models moved into the CLI.
+    const found = await installedCeilingTable(
+      async () => "no registry here",
+      async () => ceilingTable(REGISTRY)
+    );
+
+    expect(found!.models).toHaveLength(6);
+  });
+
+  it("has no opinion when neither can be read", async () => {
+    const found = await installedCeilingTable(
+      () => Promise.reject(new Error("ENOENT")),
+      () => Promise.reject(new Error("no platform package for this machine"))
+    );
+
+    expect(found).toBeUndefined();
+  });
+});
+
+describe("what the SDK's binary is called", () => {
+  it("is claude.exe on Windows and claude everywhere else", () => {
+    // Only the running machine's platform package is ever installed, so this
+    // rule is about a machine the harness has not run on yet.
+    expect(binaryName("win32")).toBe("claude.exe");
+    expect(binaryName("darwin")).toBe("claude");
+    expect(binaryName("linux")).toBe("claude");
   });
 });

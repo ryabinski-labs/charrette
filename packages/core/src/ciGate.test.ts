@@ -587,9 +587,16 @@ describe("the pit stop at the end of the rounds", () => {
       },
     } as unknown as GitHubAdapter;
     const stop = spent(() => ({ action: "stop", feedback: "" }));
-    const { store, runId } = await build(adapter, pool(), repo, NO_HOLD, stop.resolve);
+    const { store, runId, controller } = await build(adapter, pool(), repo, NO_HOLD, stop.resolve);
 
     expect(stop.asked()).toBe(0);
+    expect(store.ciStatus(runId)).toBeNull();
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+
+    // And a resume finds no status to re-ask about: with the hold off there is
+    // nothing to hold, so it hands the run straight back to review rather than
+    // re-entering integration over a repo that never answered.
+    await controller.resume(runId);
     expect(store.ciStatus(runId)).toBeNull();
     expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
   });
@@ -710,5 +717,72 @@ describe("a resume onto a branch whose CI moved while the run was parked", () =>
     expect(rerunAsked()).toBe(0);
     expect(ciFixTasks(store, runId)).toHaveLength(0);
     expect(controller.hasRecoverableWork(runId)).toBe(false);
+  });
+});
+
+describe("the run that reports whatever the repo said, with the hold off", () => {
+  /** Answers only the CI escalation, counting how often it was asked. */
+  const spentStop = () => {
+    let asked = 0;
+    const resolve = async (stop: unknown): Promise<PitStopDecision> => {
+      if (!/CI is red/.test((stop as { reason: string }).reason)) return { action: "continue", feedback: "" };
+      asked++;
+      return { action: "stop", feedback: "" };
+    };
+    return { resolve, asked: () => asked };
+  };
+
+  it("parks the run when the operator says stop, and does not blame the hold for it", async () => {
+    // The same stop, without the hold: the run was stopped at a pit stop, and
+    // the reason says exactly that rather than naming a gate that is switched
+    // off. `harness resume` must not read it back as a grant.
+    const repo = repoWithOrigin();
+    const { adapter } = fakeGitHub([{ state: "failing", failing: ["Backend test"], total: 1 }]);
+    const stop = spentStop();
+    const { store, runId } = await build(adapter, pool(), repo, { ciFixRounds: 1, ...NO_HOLD }, stop.resolve);
+
+    expect(stop.asked()).toBe(1);
+    expect(store.getRun(runId)!.state).toBe("PAUSED");
+    expect(store.lastRunStateChange(runId)!.reason).toBe("the run was stopped at a pit stop");
+    expect(store.eventCount(runId, "run.ci_rounds_granted")).toBe(0);
+  });
+
+  it("stands down on resume when the world fixed the red branch, without confirming the merge again", async () => {
+    // The pre-hold resume path: the recheck re-asks, the fresh answer is green,
+    // and the run goes straight back to review. With the hold on this same run
+    // would go on to confirm the pull request still merges.
+    const repo = repoWithOrigin();
+    const { adapter } = fakeGitHub([{ state: "passing", failing: [], total: 1 }]);
+    const { store, bus, runId, controller } = await build(adapter, pool(), repo, NO_HOLD);
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+
+    bus.publish({ type: "run.ci_status", runId, prNumber: 7, state: "failing", failing: ["Backend test"], total: 1, ts: Date.now() } as never);
+    await controller.resume(runId);
+
+    expect(ciFixTasks(store, runId)).toHaveLength(0);
+    expect(store.ciStatus(runId)).toMatchObject({ state: "passing" });
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+  });
+});
+
+describe("a run that stopped waiting mid-CI, with the hold off", () => {
+  it("treats the pending it left behind as unfinished and resumes into the answer", async () => {
+    // Pending is not an answer, and that was true before the hold existed: the
+    // process died mid-wait, so the run never learned what the repo said. The
+    // resume re-asks whether or not the hold is on.
+    const repo = repoWithOrigin();
+    const { adapter, rerunAsked } = fakeGitHub([{ state: "passing", failing: [], total: 1 }]);
+    const { store, bus, runId, controller } = await build(adapter, pool(), repo, NO_HOLD);
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+
+    bus.publish({ type: "run.ci_status", runId, prNumber: 7, state: "pending", failing: [], total: 12, ts: Date.now() } as never);
+    expect(controller.hasRecoverableWork(runId)).toBe(true);
+
+    await controller.resume(runId);
+
+    expect(rerunAsked()).toBe(0);
+    expect(ciFixTasks(store, runId)).toHaveLength(0);
+    expect(store.ciStatus(runId)).toMatchObject({ state: "passing" });
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
   });
 });

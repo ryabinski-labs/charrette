@@ -2384,7 +2384,7 @@ export class RunController {
           ts: Date.now(),
         });
         const red = ci; // the verdict that sent us here, before the re-ask
-        await this.awaitChecks(runId);
+        await this.awaitChecks(runId, prNumber);
         // Non-null by the same construction as `prNumber` above: a status was
         // on the record before the re-run, and events only accumulate.
         const after = this.store.ciStatus(runId)!;
@@ -2475,10 +2475,8 @@ export class RunController {
    * change. Opens only when CI is failing, the rounds are spent, and nobody has
    * been shown this failure yet.
    */
-  private async ciPitStop(runId: string): Promise<"proceed" | "stop" | "back-to-work" | "granted"> {
+  private async ciPitStop(runId: string, ci: { prNumber: number; failing: string[] }): Promise<"proceed" | "stop" | "back-to-work" | "granted"> {
     const run = this.store.getRun(runId)!;
-    const ci = this.store.ciStatus(runId);
-    if (!ci || ci.state !== "failing") return "proceed";
     const hold = this.holdsUntilGreen(run);
     // Nobody to ask, or nothing the run is allowed to do about it. Without the
     // hold that is the old shape — the red verdict goes into the outcome line
@@ -2578,7 +2576,10 @@ export class RunController {
       resumed = false;
       return r;
     };
-    const base = run.config.baseBranch || "the base branch";
+    // Not defaulted: a pull request cannot be opened without a base branch —
+    // both `openRunPr` and `openTaskPr` throw on a detached HEAD — and this
+    // gate is only reached once one is open.
+    const base = run.config.baseBranch;
     const say = (text: string) => this.bus.publish({ type: "agent.log", runId, sessionId: "integrator", text, ts: Date.now() });
     /** Ask GitHub again, or say that asking again is over. */
     let unreadable = 0;
@@ -2590,7 +2591,7 @@ export class RunController {
     };
     let reconciles = 0;
     for (;;) {
-      await this.awaitChecks(runId);
+      await this.awaitChecks(runId, prNumber);
       // Red CI is work, not a report. The escalation is only consulted on a
       // pass that queued nothing: a round queued this pass has not run yet,
       // and counting it as spent would show the operator a stop about work
@@ -2608,7 +2609,7 @@ export class RunController {
         // The old resume path opened no pit stop: the escalation was shown on
         // the way in, and a resume with the rounds spent simply reported again.
         if (!hold && opts.resumed) return { call: "proceed" };
-        const call = await this.ciPitStop(runId);
+        const call = await this.ciPitStop(runId, ci);
         if (call === "granted") continue;
         if (call === "stop") {
           return { call: "stop", why: hold ? `${GREEN_HOLD}CI is red on #${prNumber} and the run may not report in review until it is green` : "the run was stopped at a pit stop" };
@@ -2974,11 +2975,9 @@ export class RunController {
    * GitHub going unreadable ends the wait unsettled — leaving "pending" on the
    * record, which `hasRecoverableWork` counts as work, so a resume re-asks.
    */
-  private async awaitChecks(runId: string): Promise<void> {
+  private async awaitChecks(runId: string, prNumber: number): Promise<void> {
     const run = this.store.getRun(runId)!;
     if (!run.config.waitForChecks || !this.github.enabled) return;
-    const prNumber = this.rollupPr(runId);
-    if (prNumber === undefined) return;
     const settle = () =>
       this.settleChecks(runId, (n: number) => this.github.prChecks?.(n) ?? Promise.resolve(null), prNumber, run.config.checkTimeoutMinutes);
     let checks = await settle();
@@ -3224,6 +3223,10 @@ export class RunController {
    */
   private async confirmMergeable(runId: string): Promise<"mergeable" | "conflicting" | "behind" | "unknown" | null | undefined> {
     const run = this.store.getRun(runId)!;
+    // Unreachable from either caller — `republishUnmergeable` checks it first,
+    // and `greenGate` is only entered with a pull request open, which no run
+    // without GitHub has. Kept because it is the invariant this method reads.
+    /* v8 ignore next */
     if (!this.github.enabled) return undefined;
     const prNumber = this.rollupPr(runId);
     const local = this.store.mergeStatus(runId);
@@ -3562,19 +3565,23 @@ export class RunController {
     // out the only fact that mattered: nobody could merge it.
     const mergeable = this.store.mergeStatus(runId);
     if (mergeable && prs.length) {
+      // One fallback for every clause below: a run recorded before the event
+      // carried a base branch has none to name, and that is not a fact worth
+      // repeating three times.
+      const against = mergeable.baseBranch || "the base branch";
       if (mergeable.state === "conflicting") {
         parts.push(
-          `CANNOT MERGE — conflicts with ${mergeable.baseBranch || "the base branch"}` +
+          `CANNOT MERGE — conflicts with ${against}` +
             (mergeable.conflicts.length ? ` in ${mergeable.conflicts.length} file${mergeable.conflicts.length === 1 ? "" : "s"}` : "")
         );
       } else if (mergeable.state === "behind") {
-        parts.push(`BEHIND ${mergeable.baseBranch || "the base branch"} — the base moved after the push`);
+        parts.push(`BEHIND ${against} — the base moved after the push`);
       } else if (mergeable.state === "unknown") {
         parts.push("mergeability unconfirmed");
       } else if (mergeable.resolvedBy === "agent" || mergeable.resolvedBy === "merge") {
         // Worth a clause of its own: the branch in the pull request is not only
         // the run's work, it carries a base merge the operator did not ask for.
-        parts.push(`${mergeable.baseBranch || "the base branch"} merged in to keep it mergeable`);
+        parts.push(`${against} merged in to keep it mergeable`);
       }
     }
     if (parked.length) parts.push(parked.length === 1 ? "1 task needs you" : `${parked.length} tasks need you`);

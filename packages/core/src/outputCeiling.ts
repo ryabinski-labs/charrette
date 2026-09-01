@@ -92,9 +92,23 @@ const MIN_MODELS = 5;
  * assuming it.
  */
 export function ceilingTable(bundle: string): CeilingTable | undefined {
+  return tableOf(entriesIn(bundle));
+}
+
+/**
+ * Every model entry in one blob of text, with no floor applied.
+ *
+ * Split out from `ceilingTable` because the floor is a judgment about a whole
+ * registry and this is a judgment about one piece of text. Applying it per
+ * piece is what `ceilingTableFromFile` did by calling `ceilingTable` on each
+ * chunk: a registry that straddles a chunk boundary put four models in one
+ * chunk and two in the next, both were refused as coincidences, and six models
+ * became none. The floor now runs once, over the union.
+ */
+function entriesIn(text: string): { id: string; limits: ModelLimits }[] {
   const models: { id: string; limits: ModelLimits }[] = [];
   const seen = new Set<string>();
-  for (const chunk of bundle.split(ENTRY_ANCHOR).slice(1)) {
+  for (const chunk of text.split(ENTRY_ANCHOR).slice(1)) {
     const id = /^(claude-[a-z0-9.\-]+)"/.exec(chunk)?.[1];
     if (!id || seen.has(id)) continue;
     // Only within this entry: the split guarantees the next model's numbers are
@@ -105,11 +119,15 @@ export function ceilingTable(bundle: string): CeilingTable | undefined {
     seen.add(id);
     models.push({ id, limits: { standard: Number(limits[1]), upper: Number(limits[2]) } });
   }
+  return models;
+}
+
+/** The floor, and the order every reader depends on. */
+function tableOf(models: { id: string; limits: ModelLimits }[]): CeilingTable | undefined {
   if (models.length < MIN_MODELS) return undefined;
   // Longest first, so `claude-opus-4-5-20251101` matches `claude-opus-4-5`
   // rather than stopping at a shorter id that happens to be a prefix of it.
-  models.sort((a, b) => b.id.length - a.id.length);
-  return { models };
+  return { models: [...models].sort((a, b) => b.id.length - a.id.length) };
 }
 
 /**
@@ -148,7 +166,16 @@ function bundlePath(): string {
 function binaryPath(): string {
   const platform = `${process.platform}-${process.arch}`;
   const pkg = createRequire(bundlePath()).resolve(`@anthropic-ai/claude-agent-sdk-${platform}/package.json`);
-  return path.join(path.dirname(pkg), process.platform === "win32" ? "claude.exe" : "claude");
+  return path.join(path.dirname(pkg), binaryName(process.platform));
+}
+
+/**
+ * What the SDK's CLI binary is called. Only Windows differs, and only one
+ * platform's binary package is ever installed — so this is a rule about a
+ * machine the harness may run on tomorrow, not one it can resolve today.
+ */
+export function binaryName(platform: string): string {
+  return platform === "win32" ? "claude.exe" : "claude";
 }
 
 /** How much of the binary is read at a time, and how much of it is kept. */
@@ -165,22 +192,18 @@ const OVERLAP_BYTES = 1024 * 1024;
  * a chunk that carries nothing. An entry that straddles the overlap is seen
  * whole in the next chunk, and an entry seen twice is one entry.
  */
-async function ceilingTableFromFile(file: string): Promise<CeilingTable | undefined> {
+export async function ceilingTableFromFile(file: string, chunkBytes = CHUNK_BYTES, overlapBytes = OVERLAP_BYTES): Promise<CeilingTable | undefined> {
   const models = new Map<string, ModelLimits>();
   let carry = "";
-  const stream = createReadStream(file, { highWaterMark: CHUNK_BYTES });
+  const stream = createReadStream(file, { highWaterMark: chunkBytes });
   for await (const chunk of stream) {
     // latin1: one byte, one character, so an offset is an offset and the
     // ASCII the registry is written in comes through untouched.
     const text = carry + (chunk as Buffer).toString("latin1");
-    const table = ceilingTable(text);
-    if (table) for (const m of table.models) if (!models.has(m.id)) models.set(m.id, m.limits);
-    carry = text.slice(-OVERLAP_BYTES);
+    for (const m of entriesIn(text)) if (!models.has(m.id)) models.set(m.id, m.limits);
+    carry = text.slice(-overlapBytes);
   }
-  if (models.size < MIN_MODELS) return undefined;
-  return {
-    models: [...models.entries()].map(([id, limits]) => ({ id, limits })).sort((a, b) => b.id.length - a.id.length),
-  };
+  return tableOf([...models.entries()].map(([id, limits]) => ({ id, limits })));
 }
 
 /**
@@ -188,12 +211,15 @@ async function ceilingTableFromFile(file: string): Promise<CeilingTable | undefi
  * first, the native binary when the bundle carries none. Undefined when
  * neither does, or neither can be read.
  */
-export async function installedCeilingTable(): Promise<CeilingTable | undefined> {
-  const fromBundle = await readFile(bundlePath(), "utf8")
+export async function installedCeilingTable(
+  loadBundle: () => Promise<string> = () => readFile(bundlePath(), "utf8"),
+  loadBinary: () => Promise<CeilingTable | undefined> = () => ceilingTableFromFile(binaryPath())
+): Promise<CeilingTable | undefined> {
+  const fromBundle = await loadBundle()
     .then(ceilingTable)
     .catch(() => undefined);
   if (fromBundle) return fromBundle;
-  return ceilingTableFromFile(binaryPath()).catch(() => undefined);
+  return loadBinary().catch(() => undefined);
 }
 
 /**
