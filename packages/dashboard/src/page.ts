@@ -906,6 +906,12 @@ function describe(ev) {
       return ["git", ev.taskId, "PR #" + ev.prNumber + " opened \\u2014 yours to merge"];
     case "skills.injected":
       return ["tool", ev.taskId, "skills" + (ev.role ? " \\u2192 " + ev.role : "") + ": " + ev.skills.map((s) => s.name + " (" + s.mode + ")").join(", ")];
+    case "skills.unresolved":
+      return ["bad", ev.role, "pinned skill \\u201c" + ev.skill + "\\u201d " +
+        (ev.reason === "missing" ? "is in none of this run's skillsDirs" : "changed on disk since it was indexed") +
+        " \\u2014 " + (ev.role === "spec"
+          ? "the spec phase is inventing its own scenarios, and the acceptance gate will hold this run to them"
+          : "the " + ev.role + " agent runs without it")];
     case "run.spec_ready":
       return [
         "state",
@@ -914,7 +920,11 @@ function describe(ev) {
           (ev.spec.openQuestions.length ? ", " + ev.spec.openQuestions.length + " open question(s)" : ""),
       ];
     case "run.acceptance_verdict":
-      return [ev.passed ? "state" : "error", "spec", "acceptance: " + ev.line];
+      // "bad" rather than "error": the stylesheet paints k-bad red and knows
+      // nothing about k-error, so a failing acceptance verdict — the loudest
+      // negative signal the run has — was printing in the ordinary body colour
+      // while a merge conflict beside it printed in red.
+      return [ev.passed ? "state" : "bad", "spec", "acceptance: " + ev.line];
     case "skills.forged":
       return ["tool", ev.taskId, ev.action + " skill \\u201c" + ev.name + "\\u201d (~" + ev.tokensApprox + " tokens) \\u2014 " + ev.path];
     default:

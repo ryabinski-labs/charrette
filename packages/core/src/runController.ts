@@ -21,6 +21,7 @@ import {
   validatePlanDag,
 } from "@harness/shared";
 import { indexSkills, matchSkills, verifyHash, type IndexedSkill } from "@harness/skills-mcp";
+import { pinsInPlay, unresolvedRoleSkills } from "./skillPins.js";
 import { Bus } from "./bus.js";
 import { BudgetExceeded } from "./budget.js";
 import { seedWorktreeDeps } from "./deps.js";
@@ -829,10 +830,40 @@ export class RunController {
     // with. `drive` sets it again from the frozen config, which is what a
     // resumed run reads.
     this.applyCheckpointCadence(runId);
+    // Before intake, because intake is already an agent carrying a pinned skill
+    // — the first thing this run does is the first thing a missing pin can
+    // spoil.
+    this.preflightSkillPins(runId);
     const ui = this.intakeUi(runId, assignment, intake);
     if (ui) await this.intake(runId, assignment, ui);
     await this.drive(runId);
     return runId;
+  }
+
+  /**
+   * Say which `roleSkills` pins this machine cannot honour, before the run
+   * dispatches anything.
+   *
+   * Never throws and never stops the run: a routing table is written once and
+   * carried between machines, so a pin naming a skill that is not installed
+   * here is an ordinary fact about here, not a broken config. What it is not is
+   * *invisible* — the injected set is the same shape either way, so nothing
+   * downstream can tell an unpinned role from a pin that quietly missed.
+   *
+   * Called from `startRun` and `resume` rather than from `drive`, because both
+   * of those do work before they drive anything — intake is an agent, and it
+   * carries a pin of its own — and the whole value of this is being early.
+   */
+  private preflightSkillPins(runId: string): void {
+    // An id nothing was ever created under is `driveRun`'s to turn away, in the
+    // words it has always used. Reading a config off it here would replace
+    // "unknown run no-such-run" with a property access on undefined.
+    const run = this.store.getRun(runId);
+    if (!run) return;
+    const config = run.config;
+    for (const pin of unresolvedRoleSkills(indexSkills(config.skillsDirs), pinsInPlay(config))) {
+      this.bus.publish({ type: "skills.unresolved", runId, role: pin.role, skill: pin.skill, reason: pin.reason, ts: Date.now() });
+    }
   }
 
   /**
@@ -1171,6 +1202,11 @@ export class RunController {
       await this.wt.pruneAndReconcile();
       await this.bookLandedParked(runId);
       await this.reopen(runId);
+      // Asked again rather than trusted from the run's creation: the frozen
+      // config records which skills this run wants, and nothing records whether
+      // this machine still has them. A run resumed on another laptop, or after
+      // the operator moved their skills directory, has a different answer.
+      this.preflightSkillPins(runId);
       await this.drive(runId, intake);
     } finally {
       unlock();

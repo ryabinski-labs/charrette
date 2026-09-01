@@ -3,7 +3,7 @@ import { createInterface } from "node:readline/promises";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { DEFAULT_CHECK_TIMEOUT_MINUTES, ModelRoutingShape, RunConfig, SubscriptionConfig } from "@harness/shared";
-import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, accountEnv, assembleReport, checkMemoryBanner, detectToolbelt, ensureIgnored, harnessBuild, missingKeys, originSlug, postmortem, renderPostmortem, reportPath, runLockHolder, standaloneReport, repoUnusable, wasMerged } from "@harness/core";
+import { AgentPool, Bus, GateHandler, GitHubAdapter, RunController, Store, accountEnv, assembleReport, checkMemoryBanner, detectToolbelt, ensureIgnored, harnessBuild, missingKeys, originSlug, postmortem, renderPostmortem, reportPath, pinsInPlay, runLockHolder, skillPinBanner, standaloneReport, repoUnusable, wasMerged } from "@harness/core";
 import { Dashboard } from "@harness/dashboard";
 import { promptForNewCap, watchBudgetCommands } from "./budget.js";
 import { promptForAccount } from "./subscription.js";
@@ -509,6 +509,15 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
 
   const skillsDirs = (file.skillsDirs ?? DEFAULT_SKILLS_DIRS).map(expandHome);
   banner.push(`skills     ${skillsDirs.join(" · ")}   (${file.skillsDirs ? via : "defaults"})`);
+  // Which of the pinned skills are actually there. A `roleSkills` entry naming
+  // a skill these directories do not hold is skipped at injection time without
+  // a word, and the default table pins `spec` to `prd-to-tdd` — so the run that
+  // silently loses it still produces a specification, still runs an acceptance
+  // gate, and is judged against scenarios one agent made up. Read from the same
+  // schema default the run will use, so this cannot disagree with what is
+  // injected; the directories are already `~`-expanded above, which is what
+  // indexing them needs.
+  banner.push(...skillPinBanner(skillsDirs, RunConfig.shape.roleSkills.parse(file.roleSkills)));
 
   const github = resolveGitHub(repo, file.githubRepo);
   banner.push(github.slug ? `github     ${github.slug}   (${github.source})` : `github     ${github.source}`);
@@ -929,6 +938,16 @@ export function buildProgram(): Command {
       // told about the corrected ones rather than the ones it is abandoning.
       const remembered = checkMemoryBanner(store, store.getRun(runId)?.config.deterministicChecks ?? []);
       if (remembered.length) process.stdout.write(`${remembered.join("\n")}\n`);
+      // The pins are asked about again here, and against the frozen config,
+      // because the question is about *this machine*: the run recorded which
+      // skills it wants and nothing recorded whether the laptop resuming it has
+      // them. The directories come with the lines — without the `skills` line
+      // that `harness run` prints above them, "in none of those directories"
+      // would name nothing.
+      if (resumed) {
+        const pinned = skillPinBanner(resumed.config.skillsDirs, pinsInPlay(resumed.config));
+        if (pinned.length) process.stdout.write(`skills     ${resumed.config.skillsDirs.join(" · ")}\n${pinned.join("\n")}\n`);
+      }
       const url = await dash.start();
       if (url) process.stdout.write(`Dashboard: ${url}\n(keep the fragment — it is your auth token)\n`);
       process.stdout.write("Type 'budget run <usd>' any time to raise the cap before it's hit.\n");

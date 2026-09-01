@@ -1176,6 +1176,37 @@ four slots.
 { "when": "\\b(ui|ux|frontend|screen|theme)\\b", "skills": ["visual-qa-agent"], "roles": ["qa"] }
 ```
 
+### A pin that names a skill you do not have
+
+`skillRouting` and `roleSkills` address skills **by name**, matched against
+whatever `skillsDirs` holds on the machine the run starts on. A name that matches
+nothing is skipped rather than fatal — a routing table is written once and
+carried between machines — but it is no longer skipped in silence. Before a run
+dispatches anything, the startup banner names every unhonoured `roleSkills` pin
+under the `skills` line, and a `skills.unresolved` event goes on the log for each
+one:
+
+```
+skills     /home/you/.claude/skills · /home/you/skills   (defaults)
+           spec is pinned to prd-to-tdd, which is in none of those directories — the
+           spec phase runs anyway, inventing its own idea of what a scenario is, and
+           the acceptance gate holds the run to whatever it invents
+           put it in one of those directories, or drop the pin from roleSkills
+```
+
+That default pin is the one to watch. The spec phase runs between intake and
+planning so that the run is judged against a standard rather than an
+improvisation, and a run that loses `prd-to-tdd` looks identical from the
+outside: there is still a specification, still a scenario list, still an
+acceptance verdict. The check runs again on every `harness resume`, because the
+answer is about *this machine* — a run resumed on another laptop, or after you
+moved your skills directory, has a different one, and the frozen config cannot
+know that.
+
+Setting `skillsDirs` in `harness.config.json` **replaces** the defaults rather
+than adding to them, so a config that points at a project-local skills directory
+must list `~/.claude/skills` too if you still want it.
+
 ### Design is a planned deliverable, not the first UI task's side effect
 
 The planner is told that when a product has a user interface, one task

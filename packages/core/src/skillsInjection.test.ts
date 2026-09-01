@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { RunConfig } from "@harness/shared";
+import { RunConfig, type HarnessEvent } from "@harness/shared";
 import { describe, expect, it } from "vitest";
 import { Bus } from "./bus.js";
 import type { GitHubAdapter } from "./github.js";
@@ -395,4 +395,73 @@ describe("skills bound to a role rather than a topic", () => {
     expect(seen.worker).not.toContain('<skill name="product-manager"');
     expect(seen.planner).not.toContain('<skill name="branding-manager"');
   }, 30_000);
+});
+
+/**
+ * The pin is a name, and the collection it names into belongs to the operator.
+ * A name that matches nothing used to be dropped where nobody could see it —
+ * including `spec` → `prd-to-tdd`, which is the difference between a run
+ * specified against a standard and a run specified against an improvisation.
+ */
+describe("a roleSkills pin this machine cannot honour", () => {
+  it("names it on the event log before the run leaves the state it was created in", async () => {
+    const { pool } = recordingPool();
+    const store = new Store(":memory:");
+    const bus = new Bus(store);
+    const seen: HarnessEvent[] = [];
+    bus.subscribe(({ event }) => void seen.push(event));
+    const controller = new RunController(store, bus, pool, noGithub, approveAll, repo());
+
+    // The fixture holds stripe-setup, qa-playbook and branding-manager — none
+    // of the three skills the default table pins.
+    await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], skillsDirs: [skillsDir()] }));
+
+    const unresolved = seen.filter((e) => e.type === "skills.unresolved");
+    expect(unresolved.map((e) => `${e.role}:${e.skill}:${e.reason}`)).toEqual([
+      "intake:product-manager:missing",
+      "planner:product-manager:missing",
+      "spec:prd-to-tdd:missing",
+    ]);
+    // Early is the whole point: an agent already briefed cannot be re-briefed,
+    // so these land before the run has left the state it was created in.
+    expect(seen.slice(0, 4).map((e) => e.type)).toEqual(["run.created", "skills.unresolved", "skills.unresolved", "skills.unresolved"]);
+  }, 60_000);
+
+  /**
+   * The spec pin is the one worth shouting about, and the one thing that must
+   * not be shouted about on a run that will never spawn a spec agent: advice
+   * the operator cannot act on reads as a bug in the tool.
+   */
+  it("says nothing about the spec pin when the spec phase is switched off", async () => {
+    const { pool } = recordingPool();
+    const store = new Store(":memory:");
+    const bus = new Bus(store);
+    const seen: HarnessEvent[] = [];
+    bus.subscribe(({ event }) => void seen.push(event));
+    const controller = new RunController(store, bus, pool, noGithub, approveAll, repo());
+
+    await controller.startRun(
+      "do a thing",
+      RunConfig.parse({ deterministicChecks: [], skillsDirs: [skillsDir()], spec: { enabled: false } })
+    );
+
+    const unresolved = seen.filter((e) => e.type === "skills.unresolved");
+    expect(unresolved.map((e) => e.role)).toEqual(["intake", "planner"]);
+  }, 60_000);
+
+  it("stays quiet about the pins it can honour", async () => {
+    const { pool } = recordingPool();
+    const store = new Store(":memory:");
+    const bus = new Bus(store);
+    const seen: HarnessEvent[] = [];
+    bus.subscribe(({ event }) => void seen.push(event));
+    const dir = skillsDir();
+    mkdirSync(path.join(dir, "product-manager"));
+    writeFileSync(path.join(dir, "product-manager", "SKILL.md"), "---\nname: product-manager\ndescription: product voice\n---\nBody.");
+    const controller = new RunController(store, bus, pool, noGithub, approveAll, repo());
+
+    await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], skillsDirs: [dir] }));
+
+    expect(seen.filter((e) => e.type === "skills.unresolved").map((e) => e.skill)).toEqual(["prd-to-tdd"]);
+  }, 60_000);
 });

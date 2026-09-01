@@ -77,6 +77,10 @@ const h = vi.hoisted(() => {
     ensureIgnoredMock: vi.fn(() => false),
     repoUnusableMock: vi.fn(async () => null as string | null),
     checkMemoryBannerMock: vi.fn(() => [] as string[]),
+    skillPinBannerMock: vi.fn(() => [] as string[]),
+    // Pass-through: which pins a run still has is settled in skillPins.test.ts.
+    // What the CLI owes is asking, with the config the run will really use.
+    pinsInPlayMock: vi.fn((c: { roleSkills: Record<string, string[]> }) => c.roleSkills),
     originSlugMock: vi.fn(async () => "acme/widgets" as string | null),
     verifyChecksMock: vi.fn(
     (_repo: string, checks: string[]): { kept: string[]; dropped: { command: string; reason: string }[] } => ({ kept: checks, dropped: [] })
@@ -148,6 +152,12 @@ vi.mock("@harness/core", () => ({
   // What the CLI owes is asking about the checks this run will actually use,
   // and putting the answer where the operator reads before approving a plan.
   checkMemoryBanner: h.checkMemoryBannerMock,
+  // What an unhonoured pin costs is settled in skillPins.test.ts against real
+  // skill directories. What the CLI owes is asking about the directories and
+  // the pins this run will actually use, and printing the answer where the
+  // operator reads before anything is spent.
+  skillPinBanner: h.skillPinBannerMock,
+  pinsInPlay: h.pinsInPlayMock,
   // Pinned, so the banner assertion is about the line existing rather than
   // about whatever commit this checkout happens to be on.
   harnessBuild: () => "0.0.1@7453d60",
@@ -311,6 +321,8 @@ beforeEach(() => {
   h.ensureIgnoredMock.mockReset().mockReturnValue(false);
   h.repoUnusableMock.mockReset().mockResolvedValue(null);
   h.checkMemoryBannerMock.mockReset().mockReturnValue([]);
+  h.skillPinBannerMock.mockReset().mockReturnValue([]);
+  h.pinsInPlayMock.mockClear();
   h.originSlugMock.mockReset().mockResolvedValue("acme/widgets");
   h.detectChecksMock.mockReset().mockReturnValue({ checks: ["npm test"], source: "package.json", skipped: [] });
   h.verifyChecksMock.mockReset().mockImplementation((_repo: string, checks: string[]) => ({ kept: checks, dropped: [] }));
@@ -574,6 +586,34 @@ describe("harness run — resolving what the run will actually do", () => {
     expect(printed()).toContain("tools      rtk · gh   (offered to worker + QA agents)");
     // `~` must be expanded before it reaches a config the agents read.
     expect(printed()).not.toContain("~/my-skills");
+  });
+
+  /**
+   * A `roleSkills` pin is a name matched against the operator's own collection,
+   * and a name that matches nothing is skipped at injection time without a
+   * word. The default table pins `spec` to `prd-to-tdd`, and a run that loses it
+   * still produces a specification and still runs an acceptance gate — against
+   * scenarios one agent made up. The banner is the only moment that is cheap to
+   * notice, so the CLI has to ask, with the directories and the pins the run
+   * will really use.
+   */
+  it("asks about the pinned skills with the directories and the pins the run will use", async () => {
+    h.loadFileConfigMock.mockReturnValue({ config: { roleSkills: { spec: ["prd-to-tdd"] } }, path: "/repo/harness.config.json" });
+    h.skillPinBannerMock.mockReturnValue(["           spec is pinned to prd-to-tdd, which is in none of those directories"]);
+
+    await cli("run", "x", "--repo", "/repo", "--no-dashboard");
+
+    const [dirs, pins] = h.skillPinBannerMock.mock.calls.at(-1) as unknown as [string[], Record<string, string[]>];
+    expect(dirs.every((d) => !d.startsWith("~"))).toBe(true);
+    expect(pins).toEqual({ spec: ["prd-to-tdd"] });
+    expect(printed()).toContain("spec is pinned to prd-to-tdd, which is in none of those directories");
+  });
+
+  it("falls back to the schema's own pins when the config file names none", async () => {
+    await cli("run", "x", "--repo", "/repo", "--no-dashboard");
+
+    const [, pins] = h.skillPinBannerMock.mock.calls.at(-1) as unknown as [string[], Record<string, string[]>];
+    expect(pins).toEqual({ intake: ["product-manager"], planner: ["product-manager"], spec: ["prd-to-tdd"] });
   });
 
   it("says nothing about PR mode when there is no GitHub repo to open one on", async () => {
@@ -1362,6 +1402,49 @@ describe("harness resume", () => {
 
     await expect(cli("resume", "run-old", "--repo", "/repo", "--no-dashboard")).rejects.toThrow(/GEMINI_API_KEY is not set/);
     expect(h.controllerMethods.resume).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The question a pin asks is about *this machine*, and a resume is exactly
+   * when that answer can have changed: another laptop, a moved skills
+   * directory, a collection cleaned out since the run was planned. The run
+   * banner is printed by `harness run` and never seen again, so without this
+   * the operator resuming gets no warning at all.
+   */
+  it("checks the resumed run's pins against this machine, from the frozen config", async () => {
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-old", state: "EXECUTING", assignment: "a" }]);
+    h.storeMethods.getRun.mockReturnValue({
+      id: "run-old",
+      state: "EXECUTING",
+      config: {
+        models: {},
+        deterministicChecks: [],
+        skillsDirs: ["/elsewhere/skills"],
+        roleSkills: { spec: ["prd-to-tdd"] },
+        spec: { enabled: true },
+      },
+    });
+    h.skillPinBannerMock.mockReturnValue(["           spec is pinned to prd-to-tdd, which is in none of those directories"]);
+
+    await cli("resume", "--repo", "/repo", "--no-dashboard");
+
+    expect(h.skillPinBannerMock).toHaveBeenCalledWith(["/elsewhere/skills"], { spec: ["prd-to-tdd"] });
+    // The directories come with the lines: "none of those directories" has to
+    // name some, and the run banner that named them is long gone.
+    expect(printed()).toContain("skills     /elsewhere/skills\n           spec is pinned to prd-to-tdd");
+  });
+
+  it("says nothing on a resume whose pins this machine can all honour", async () => {
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-old", state: "EXECUTING", assignment: "a" }]);
+    h.storeMethods.getRun.mockReturnValue({
+      id: "run-old",
+      state: "EXECUTING",
+      config: { models: {}, deterministicChecks: [], skillsDirs: ["/here/skills"], roleSkills: {}, spec: { enabled: true } },
+    });
+
+    await cli("resume", "--repo", "/repo", "--no-dashboard");
+
+    expect(printed()).not.toContain("skills     ");
   });
 
   it("comes back on the port and token the paused run was serving", async () => {
