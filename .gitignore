@@ -11,3 +11,4 @@ dist/
 coverage/
 # Machine-local Claude Code permissions; the shared skills beside it do ship.
 .claude/settings.local.json
+pnpm-lock.yaml
