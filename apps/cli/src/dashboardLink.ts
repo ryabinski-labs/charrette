@@ -61,6 +61,27 @@ export function clearDashboard(repoPath: string): void {
 }
 
 /**
+ * Whether the process that wrote the link is still running.
+ *
+ * Signal 0 checks for the process without touching it. `EPERM` means it exists
+ * and belongs to somebody else, which is still "alive" — the only answer that
+ * clears the file is `ESRCH`, nothing there.
+ *
+ * A pid is not a proof of identity: after enough churn the number belongs to
+ * something else entirely, and this says "alive" about a dashboard that is
+ * gone. That is the safe direction to be wrong in — the request below is what
+ * settles it, and this only ever spares that request.
+ */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
  * The dashboard serving this repo right now, or null.
  *
  * Asked rather than assumed: the recorded process may have exited without
@@ -68,12 +89,27 @@ export function clearDashboard(repoPath: string): void {
  * goes nowhere is worse than no link — it sends the operator to a browser tab
  * to find out. One authenticated request settles it, and a wrong answer here
  * costs a printed line, so the timeout is short and every failure means "no".
+ *
+ * The pid recorded beside the URL is checked first. A dead writer is the common
+ * case for a stale file and it can be answered without opening a socket at all
+ * — which matters because everything reading this file reads it to decide
+ * whether a run can still be talked to. ledger-app's run beb799c5 left a
+ * `dashboard.json` naming a pid that had exited, and every reader of it —
+ * including the watcher supervising that run — took the file as evidence of a
+ * live control plane and went to the port to find out otherwise.
  */
 export async function liveDashboardUrl(repoPath: string): Promise<string | null> {
   let url: string;
   try {
-    url = String(JSON.parse(readFileSync(linkPath(repoPath), "utf8")).url ?? "");
+    const record = JSON.parse(readFileSync(linkPath(repoPath), "utf8")) as { url?: unknown; pid?: unknown };
+    url = String(record.url ?? "");
     if (!url) return null;
+    // Only when there is one to check: files written before the pid was
+    // recorded are still perfectly good links, and the request settles those.
+    if (typeof record.pid === "number" && !processAlive(record.pid)) {
+      clearDashboard(repoPath);
+      return null;
+    }
   } catch {
     return null; // never started one, or already cleared
   }

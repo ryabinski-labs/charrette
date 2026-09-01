@@ -751,3 +751,175 @@ describe("the acceptance gate", () => {
     expect(store.acceptanceVerdict(store.listRuns()[0]!.id)).toBeNull();
   });
 });
+
+/**
+ * What an interrupted question costs, and what it must not.
+ *
+ * Run beb799c5: the specification agent finished — 61 requirements, 182
+ * scenarios, $8.54, `agent.ended` with outcome `done` — and the run then put the
+ * artifact's eight open questions to the operator one at a time. At the eighth
+ * they pressed Ctrl+C. The abort unwound out of the whole of `specify`, which
+ * logged "no specification was written" about a specification that had been
+ * written, skipped `run.spec_ready` and the commit, and moved the run to
+ * PLANNING on the reason "brief agreed" with no acceptance gate at all.
+ *
+ * Ctrl+C at a question you do not want to answer is the most ordinary thing a
+ * person does at a terminal. It cannot be the thing that silently removes the
+ * only objective standard the run has.
+ */
+describe("an interrupted open question", () => {
+  const BLOCKED = specJson({
+    requirements: [{ id: "REQ-001", text: "take payment", priority: "P0", blockedBy: ["OQ-1"] }],
+    openQuestions: [{ id: "OQ-1", question: "Real Stripe account, or sandbox?", detail: "the brief does not say", blocks: ["REQ-001"] }],
+    scenarios: [{ id: "SC-001", requirement: "REQ-001", title: "takes payment", level: "unit", priority: "P0", oracle: "o", testRef: "", blocked: true }],
+  });
+
+  /** An operator who answers the question by refusing to answer it. */
+  const interrupts = (e: unknown): IntakeUi => ({
+    async ask() {
+      throw e;
+    },
+    say() {},
+  });
+
+  const specRun = (dir: string) =>
+    rolePool({
+      intake: BRIEF,
+      spec: BLOCKED,
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS : dag([{ id: "task-a", scenarioIds: ["SC-001"] }])),
+      worker,
+      qa: () => QA_PASS,
+      validator: () => INTENT_PASS,
+    });
+
+  it("keeps the specification the run already paid for", async () => {
+    const dir = repo();
+    const { pool } = specRun(dir);
+    const { controller, store, events } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a checkout", RunConfig.parse(BASE), interrupts(new Error("Aborted with Ctrl+C")));
+
+    const runId = store.listRuns()[0]!.id;
+    // The gate exists. Before this fix `runSpec` was null here and the run had
+    // nothing holding it to anything.
+    const spec = store.runSpec(runId)!;
+    expect(spec).not.toBeNull();
+    expect(spec.scenarios.map((s) => s.id)).toEqual(["SC-001"]);
+
+    const log = events.filter((e) => e.type === "agent.log").map((e) => (e as { text: string }).text);
+    // It says what happened, and it stops claiming nothing was written.
+    expect(log.some((t) => t.includes("open questions were interrupted, so it stands as written with 1 question(s) still open"))).toBe(true);
+    expect(log.some((t) => t.includes("no specification was written"))).toBe(false);
+  });
+
+  it("arrives in PLANNING saying it still has a gate", async () => {
+    const dir = repo();
+    const { pool } = specRun(dir);
+    const { controller, events } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a checkout", RunConfig.parse(BASE), interrupts(new Error("Aborted with Ctrl+C")));
+
+    const planning = events.find((e) => e.type === "run.state_changed" && (e as { to: string }).to === "PLANNING") as
+      | { reason: string }
+      | undefined;
+    expect(planning!.reason).toBe("brief agreed");
+  });
+
+  it("still stops the run when the interruption is the budget, not a person", async () => {
+    const dir = repo();
+    const { pool } = specRun(dir);
+    const { controller } = build({ repoPath: dir, pool });
+
+    // A ceiling reached inside the questions is the run's problem, not this
+    // step's. Swallowing it here would spend the same exhausted budget on the
+    // planner and every task after it.
+    await expect(
+      controller.startRun("build a checkout", RunConfig.parse(BASE), interrupts(new BudgetExceeded(31, 30)))
+    ).rejects.toBeInstanceOf(BudgetExceeded);
+  });
+});
+
+describe("a run that arrives in PLANNING without a gate says so", () => {
+  it("names the missing gate when no specification could be written at all", async () => {
+    const dir = repo();
+    const { pool } = rolePool({
+      intake: BRIEF,
+      // Nothing parseable comes back, so there is no specification to keep.
+      spec: "the model said something else entirely",
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS : dag([{ id: "task-a" }])),
+      worker,
+      qa: () => QA_PASS,
+      validator: () => INTENT_PASS,
+    });
+    const { controller, store, events } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a checkout", RunConfig.parse(BASE), operator());
+
+    expect(store.runSpec(store.listRuns()[0]!.id)).toBeNull();
+    const planning = events.find((e) => e.type === "run.state_changed" && (e as { to: string }).to === "PLANNING") as
+      | { reason: string }
+      | undefined;
+    // The one sentence anybody reads about how the run got here.
+    expect(planning!.reason).toBe("brief agreed; no acceptance gate");
+  });
+
+  it("says the same for a repo that never asked for one", async () => {
+    const dir = repo();
+    const { pool } = rolePool({
+      intake: BRIEF,
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS : dag([{ id: "task-a" }])),
+      worker,
+      qa: () => QA_PASS,
+      validator: () => INTENT_PASS,
+    });
+    const { controller, events } = build({ repoPath: dir, pool });
+
+    await controller.startRun(
+      "build a checkout",
+      RunConfig.parse({ ...BASE, spec: { enabled: false } }),
+      operator()
+    );
+
+    const planning = events.find((e) => e.type === "run.state_changed" && (e as { to: string }).to === "PLANNING") as
+      | { reason: string }
+      | undefined;
+    expect(planning!.reason).toBe("brief agreed; no acceptance gate");
+  });
+
+  it("tells a specification that could not be recorded from one never written", async () => {
+    const dir = repo();
+    const { pool } = rolePool({
+      intake: BRIEF,
+      spec: specJson(),
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS : dag([{ id: "task-a", scenarioIds: ["SC-001"] }])),
+      worker,
+      qa: () => QA_PASS,
+      validator: () => INTENT_PASS,
+    });
+    const { controller, store, events } = build({ repoPath: dir, pool });
+    // The write of `run.spec_ready` fails — a full disk, a locked database, the
+    // ordinary ways a store write goes wrong. The specification was written and
+    // paid for; only the recording of it failed, and the log has to say which of
+    // the two happened, because they call for different things from a reader.
+    const append = store.appendEvent.bind(store);
+    let failed = false;
+    store.appendEvent = ((ev: { type: string }, materialize?: () => void) => {
+      if (ev.type === "run.spec_ready" && !failed) {
+        failed = true;
+        throw new Error("SQLITE_FULL: database or disk is full");
+      }
+      return append(ev as never, materialize);
+    }) as typeof store.appendEvent;
+
+    await controller.startRun("build a checkout", RunConfig.parse(BASE), operator());
+
+    const log = events.filter((e) => e.type === "agent.log").map((e) => (e as { text: string }).text);
+    expect(log.some((t) => t.includes("the specification was written but could not be recorded"))).toBe(true);
+    expect(log.some((t) => t.includes("no specification was written"))).toBe(false);
+    const planning = events.find((e) => e.type === "run.state_changed" && (e as { to: string }).to === "PLANNING") as
+      | { reason: string }
+      | undefined;
+    expect(planning!.reason).toBe("brief agreed; no acceptance gate");
+    expect(store.listRuns()[0]!.state).not.toBe("INTAKE");
+  });
+});

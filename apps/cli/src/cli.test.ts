@@ -48,6 +48,7 @@ const h = vi.hoisted(() => {
     start: vi.fn(async () => "http://localhost:4777/#tok"),
     stop: vi.fn(async () => undefined),
     attach: vi.fn(),
+    attachIntake: vi.fn(),
   };
   return {
     storeMethods,
@@ -62,6 +63,11 @@ const h = vi.hoisted(() => {
     // Null = no dashboard was recorded for this repo, which is every test that
     // is not about resuming onto the operator's existing tab.
     recordedDashboardMock: vi.fn((): { port: number; token: string } | null => null),
+    // Records the transport it wrapped, so a test can tell "wrapped the
+    // terminal" from "wrapped nothing" without reaching into the class.
+    BridgedIntakeMock: vi.fn(function (this: { wrapped: unknown }, wrapped: unknown) {
+      this.wrapped = wrapped;
+    }),
     StoreMock: vi.fn(() => storeMethods),
     BusMock: vi.fn(),
     AgentPoolMock: vi.fn(),
@@ -177,6 +183,10 @@ vi.mock("@harness/core", () => ({
   assembleReport: h.assembleReportMock,
   reportPath: h.reportPathMock,
   standaloneReport: h.standaloneReportMock,
+  // What the CLI owes here is wiring: build one, hand the same one to the
+  // controller and to the dashboard. Its behaviour — the race, the abort, the
+  // question id — is unit-tested against the real class in core.
+  BridgedIntake: h.BridgedIntakeMock,
 }));
 vi.mock("@harness/dashboard", () => ({ Dashboard: h.DashboardMock }));
 vi.mock("./defaults.js", async (importOriginal) => {
@@ -867,10 +877,12 @@ describe("harness run — intake", () => {
     await cli("run", "--repo", "/repo", "--no-dashboard");
 
     expect(h.promptSeedMock).toHaveBeenCalledWith(true);
+    // The terminal, wrapped so the dashboard can answer the same question — the
+    // operator still types into exactly what they always did.
     expect(h.controllerMethods.startRun).toHaveBeenCalledWith(
       "seed from the conversation",
       expect.any(Object),
-      expect.objectContaining({ promptSeed: h.promptSeedMock })
+      expect.objectContaining({ wrapped: expect.objectContaining({ promptSeed: h.promptSeedMock }) })
     );
     expect(printed()).toContain("intake     conversation before planning   (default)");
     expect(h.chatCloseMock).toHaveBeenCalledOnce();
@@ -884,12 +896,44 @@ describe("harness run — intake", () => {
     expect(h.controllerMethods.startRun).toHaveBeenCalledWith(
       "build the thing",
       expect.objectContaining({ intake: expect.objectContaining({ decidedBy: "product-manager" }) }),
-      // No chat, even though `--chat` was asked for: a decider is named and
-      // there is no TTY, so there is nobody at the terminal to hold up the
-      // other end of the conversation. That is the whole point of the flag.
+      // No transport at all, even though `--chat` was asked for: a decider is
+      // named, there is no TTY, and `--no-dashboard` leaves no control plane
+      // either. A question here has nowhere to be answered from, and the run
+      // records it as unanswered rather than waiting on nobody.
       undefined
     );
     expect(printed()).toContain("product-manager answers what you are not here to answer");
+  });
+
+  it("gives an unattended run the control plane as its one way in", async () => {
+    // Same run as above but with the dashboard up. There is still nobody at a
+    // terminal, so the decider answers what it can — but a question it refuses
+    // now has somewhere to go instead of being recorded as reaching nobody.
+    await cli("run", "build the thing", "--repo", "/repo", "--chat", "--intake-decider", "product-manager");
+
+    const transport = h.controllerMethods.startRun.mock.calls[0]![2] as { wrapped: unknown };
+    expect(transport).toBeDefined();
+    // Wrapping nothing: there is no terminal behind it, only the route.
+    expect(transport.wrapped).toBeUndefined();
+    // And the dashboard was given the very same object, or the route would
+    // answer a conversation the run is not holding.
+    expect(h.dashboardMethods.attachIntake).toHaveBeenCalledWith(transport);
+  });
+
+  it("wires the same transport into both the run and the dashboard", async () => {
+    await cli("run", "--repo", "/repo");
+
+    const transport = h.controllerMethods.startRun.mock.calls[0]![2];
+    expect(h.dashboardMethods.attachIntake).toHaveBeenCalledWith(transport);
+  });
+
+  it("attaches nothing when the run holds no conversation", async () => {
+    await cli("run", "build the thing", "--repo", "/repo", "--no-chat");
+
+    expect(h.controllerMethods.startRun).toHaveBeenCalledWith("build the thing", expect.any(Object), undefined);
+    // `--no-chat` asks nothing at all, so a route onto it would be a 409
+    // pretending to be a feature.
+    expect(h.dashboardMethods.attachIntake).not.toHaveBeenCalled();
   });
 
   it("takes the decider from the config file when the flag is not given", async () => {

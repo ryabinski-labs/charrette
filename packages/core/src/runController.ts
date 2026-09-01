@@ -990,8 +990,14 @@ export class RunController {
     // the operator is still here: `prd-to-tdd` refuses to invent an oracle for
     // anything the brief leaves open and records the gap instead, and this is
     // the last moment those gaps can be answered by the person who has them.
-    await this.specify(runId, assignment, ui);
-    this.store.transitionRun(runId, "PLANNING", "brief agreed");
+    const gated = await this.specify(runId, assignment, ui);
+    // The reason is the only sentence anybody reads about how a run got here.
+    // Run beb799c5 arrived in PLANNING on "brief agreed" having lost its whole
+    // specification to an abort thirty seconds earlier, and every later reader —
+    // the dashboard, `harness status`, the watcher, me — took the state at its
+    // word. A run without an acceptance gate is a materially different run and
+    // the state machine now says so.
+    this.store.transitionRun(runId, "PLANNING", gated ? "brief agreed" : "brief agreed; no acceptance gate");
   }
 
   /**
@@ -1007,10 +1013,19 @@ export class RunController {
    * Never throws. A run whose specification could not be written is a run
    * without this gate, which is exactly the run every harness before this one
    * was; failing intake over it would trade a working run for no run.
+   *
+   * Returns whether the run comes out of here with an acceptance gate. A run
+   * that does not is not a failure — a repo with `spec.enabled` off has never
+   * had one — but it is a fact about the run that its own state should carry
+   * rather than one a reader has to reconstruct from the event log.
    */
-  private async specify(runId: string, assignment: string, ui: IntakeUi): Promise<void> {
+  private async specify(runId: string, assignment: string, ui: IntakeUi): Promise<boolean> {
     const run = this.store.getRun(runId)!;
-    if (!run.config.spec.enabled) return;
+    if (!run.config.spec.enabled) return false;
+    // Held outside the try so the catch can tell "the specification could not be
+    // written" from "it was written and something after it failed". Those are
+    // different sentences and the second one used to be told as the first.
+    let written: RunSpec | null = null;
     try {
       // The branch first: nothing has created it yet at intake, and it is the
       // whole point of writing the specification here — task branches are cut
@@ -1020,11 +1035,10 @@ export class RunController {
       const dir = await this.wt.ensureIntegrationWorktree(runId);
       const skills = this.selectSkills(indexSkills(run.config.skillsDirs), "spec", assignment, run.config);
       const sessionId = randomUUID();
-      const spec = await this.specSession(runId, sessionId, dir, assignment, skills, run);
-      if (!spec) return;
+      written = await this.specSession(runId, sessionId, dir, assignment, skills, run);
+      if (!written) return false;
 
-      const answered = await this.askSpecQuestions(runId, spec, ui);
-      const final = answered.length ? await this.specWithAnswers(runId, dir, assignment, skills, run, answered, sessionId, spec) : spec;
+      const final = await this.answeredSpec(runId, dir, assignment, skills, run, sessionId, written, ui);
 
       this.bus.publish({ type: "run.spec_ready", runId, spec: final, ts: Date.now() });
       await this.commitSpec(runId, dir, final);
@@ -1035,15 +1049,69 @@ export class RunController {
         text: `specification: ${final.requirements.length} requirement(s), ${final.scenarios.length} scenario(s), ${gating(final).length} of them gating${final.openQuestions.length ? `, ${final.openQuestions.length} open question(s)` : ""}`,
         ts: Date.now(),
       });
+      return true;
     } catch (e) {
       if (stopsTheRun(e)) throw e;
       this.bus.publish({
         type: "agent.log",
         runId,
         sessionId: "spec",
-        text: `no specification was written, so the acceptance gate has nothing to hold this run to: ${String(e).slice(0, 300)}`,
+        text: written
+          ? `the specification was written but could not be recorded, so this run has no acceptance gate: ${String(e).slice(0, 300)}`
+          : `no specification was written, so the acceptance gate has nothing to hold this run to: ${String(e).slice(0, 300)}`,
         ts: Date.now(),
       });
+      return false;
+    }
+  }
+
+  /**
+   * The open questions and the pass that folds their answers back in — neither
+   * of which is worth the specification itself.
+   *
+   * Run beb799c5 is why this is a separate try. Its specification agent finished:
+   * 61 requirements, 182 scenarios, $8.54, `agent.ended` with outcome `done`.
+   * The run then put the artifact's eight open questions to the operator one at a
+   * time, and at the eighth they pressed Ctrl+C — the most ordinary thing a person
+   * does at a question they do not want to answer. The abort unwound out of the
+   * whole of `specify`, which published "no specification was written" about a
+   * specification that had been written, skipped `run.spec_ready` and the commit,
+   * and let the run into PLANNING with no acceptance gate and $10.41 already spent.
+   *
+   * So a refinement that fails leaves the specification standing as written. The
+   * questions are worth asking — that is the whole reason specifying happens at
+   * intake — but an unanswered question is a gap in a specification, not grounds
+   * for having none. `stopsTheRun` still passes through: a budget or subscription
+   * ceiling reached in here is the run's problem, not this step's.
+   */
+  private async answeredSpec(
+    runId: string,
+    dir: string,
+    assignment: string,
+    skills: { name: string; path: string; sha256: string; content?: string }[],
+    run: RunRow,
+    sessionId: string,
+    spec: RunSpec,
+    ui: IntakeUi
+  ): Promise<RunSpec> {
+    try {
+      const answered = await this.askSpecQuestions(runId, spec, ui);
+      return answered.length ? await this.specWithAnswers(runId, dir, assignment, skills, run, answered, sessionId, spec) : spec;
+    } catch (e) {
+      if (stopsTheRun(e)) throw e;
+      this.bus.publish({
+        type: "agent.log",
+        runId,
+        sessionId: "spec",
+        // `openQuestions` is never empty here: `blockingQuestions` filters that
+        // list, so nothing was asked — and nothing could have thrown — unless it
+        // had something in it.
+        text:
+          `the specification's open questions were interrupted, so it stands as written ` +
+          `with ${spec.openQuestions.length} question(s) still open: ${String(e).slice(0, 200)}`,
+        ts: Date.now(),
+      });
+      return spec;
     }
   }
 

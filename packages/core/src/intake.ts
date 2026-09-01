@@ -41,8 +41,14 @@ export interface IntakeUi {
    * agent-backed transport returns who decided, and the difference is recorded
    * on `intake.answered` rather than being flattened away. Both forms are
    * accepted forever — a transport outside this repo does not have to change.
+   *
+   * `signal` aborts the wait. It is how a transport that has more than one way
+   * in — a terminal and a control-plane route, say — releases the reader that
+   * lost the race. A transport with a single reader may ignore it; one that
+   * blocks on a shared `readline` must honour it, or the abandoned read
+   * consumes the answer to the *next* question.
    */
-  ask(question: IntakeQuestion): Promise<IntakeAnswer>;
+  ask(question: IntakeQuestion, signal?: AbortSignal): Promise<IntakeAnswer>;
   /** Prose the agent emits between questions. */
   say(text: string): void;
   /**
