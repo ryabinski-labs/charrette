@@ -321,7 +321,10 @@ export class GitHubAdapter {
       per_page: 100,
     });
     const open = prior.data.find((p) => p.state === "open");
-    if (open) return { number: open.number, url: open.html_url };
+    if (open) {
+      await this.refreshPrBody(runId, taskId, open.number, open.body ?? "", body);
+      return { number: open.number, url: open.html_url };
+    }
 
     // A merged or closed PR does not count as "the PR for this branch". A run
     // that keeps merging tasks after its rollup PR was merged used to find that
@@ -339,6 +342,43 @@ export class GitHubAdapter {
       }
       throw e;
     }
+  }
+
+  /**
+   * Write a recomputed body back onto a PR this run already opened.
+   *
+   * The body is derived from the live task list, and that list grows: a task
+   * merged after the PR was opened contributes its own `Closes #n`. Returning
+   * the existing PR without writing the new body back froze it at whatever the
+   * first INTEGRATING pass computed, and every issue for a task merged later
+   * survived the merge that shipped it. Revetment run bc691359 is the worked
+   * example — rollup PR #334 opened 2026-08-22 carrying closing refs up to
+   * #333, merged 2026-08-30 having also shipped tasks #335-#423, and left 79
+   * finished issues open for a human to close by hand. `markPrReady` refreshed
+   * the body on the way out of draft, which is why the bug only bites a run
+   * that keeps merging after its PR is ready.
+   *
+   * Only a body this run still owns is rewritten. The marker is the proof of
+   * ownership: a human who has taken the PR over and written their own summary
+   * drops it, and their prose outranks ours. The title is left alone for the
+   * same reason — nothing about it goes stale the way the task list does.
+   */
+  private async refreshPrBody(runId: string, taskId: string, prNumber: number, current: string, body: string): Promise<void> {
+    const marker = this.marker(runId, `pr-${taskId}`);
+    if (!current.includes(marker)) return;
+    const next = `${body}\n\n${marker}`;
+    if (current === next) return;
+    // A refused body write is not a pull request that failed to open. Until this
+    // call existed the already-open path could not fail at all, and everything
+    // `openRunPr` does after `ensurePR` returns — flipping the draft ready,
+    // pointing every merged task at the PR number, publishing `github.pr_opened`
+    // — is what keeps `hasRecoverableWork`, the dashboard chips and `status`
+    // truthful. Throwing would trade all of that for a description, and the
+    // caller would log "the pull request could not be opened" about a PR that is
+    // open. It is also the cheapest thing in the run to retry: every INTEGRATING
+    // pass recomputes and rewrites the body, and `markPrReady` writes it once
+    // more on the way out of draft.
+    await this.octokit!.rest.pulls.update({ owner: this.owner, repo: this.repo, pull_number: prNumber, body: next }).catch(() => undefined);
   }
 
   private async createPR(runId: string, taskId: string, head: string, base: string, title: string, body: string, draft: boolean): Promise<PrRef> {

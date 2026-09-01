@@ -6,13 +6,18 @@ import { GitHubAdapter, isDraftUnsupportedError } from "./github.js";
  * markPrReady / prState touch are stubbed; anything else throws on access.
  */
 function stubbed(overrides: {
-  list?: { state: string; number: number; html_url: string }[];
+  list?: { state: string; number: number; html_url: string; body?: string | null }[];
   createError?: unknown;
   draftError?: unknown;
+  updateError?: unknown;
   get?: { state: string; draft?: boolean; merged_at?: string | null; node_id?: string };
 }) {
   const adapter = new GitHubAdapter("token", "owner/repo");
-  const calls = { created: [] as { draft?: boolean }[], updated: [] as { title?: string; body?: string }[], graphql: [] as unknown[] };
+  const calls = {
+    created: [] as { draft?: boolean }[],
+    updated: [] as { pull_number?: number; title?: string; body?: string }[],
+    graphql: [] as unknown[],
+  };
   const octokit = {
     rest: {
       pulls: {
@@ -24,7 +29,8 @@ function stubbed(overrides: {
           return { data: { number: 42, html_url: "https://example.invalid/pr/42" } };
         },
         get: async () => ({ data: overrides.get }),
-        update: async (args: { title?: string; body?: string }) => {
+        update: async (args: { pull_number?: number; title?: string; body?: string }) => {
+          if (overrides.updateError) throw overrides.updateError;
           calls.updated.push(args);
           return { data: {} };
         },
@@ -47,6 +53,54 @@ describe("ensurePR after the branch outlived its PR", () => {
     const pr = await adapter.ensurePR("r", "run", "head", "main", "t", "b");
     expect(pr).toEqual({ number: 7, url: "u7" });
     expect(calls.created).toHaveLength(0);
+  });
+
+  it("rewrites the body of the PR it already opened, so tasks merged since bring their closing keywords", async () => {
+    // Run bc691359: the rollup PR was opened on pass one with `Closes #333` as
+    // its highest ref, then kept merging tasks for eight more days. The body
+    // was recomputed correctly every pass and thrown away every pass, so the
+    // merge shipped #335-#423 without closing one of their issues.
+    const { adapter, calls } = stubbed({
+      list: [{ state: "open", number: 334, html_url: "u334", body: "- one (closes #333)\n\n<!-- harness-run:r/pr-run -->" }],
+    });
+    const pr = await adapter.ensurePR("r", "run", "head", "main", "t", "- one (closes #333)\n- two (closes #421)");
+    expect(pr).toEqual({ number: 334, url: "u334" });
+    expect(calls.created).toHaveLength(0);
+    expect(calls.updated).toHaveLength(1);
+    expect(calls.updated[0]!.pull_number).toBe(334);
+    expect(calls.updated[0]!.body).toContain("closes #421");
+    expect(calls.updated[0]!.body).toContain("<!-- harness-run:r/pr-run -->");
+  });
+
+  it("still returns the open PR when GitHub refuses the body write", async () => {
+    // The refresh is a description; everything openRunPr does with the PR it
+    // gets back — flipping the draft ready, pointing merged tasks at the number,
+    // publishing pr_opened — is the run's bookkeeping. A 422 on an oversized
+    // body or a lost write scope must not cost the caller all of that, and the
+    // next INTEGRATING pass rewrites the body anyway.
+    const { adapter, calls } = stubbed({
+      list: [{ state: "open", number: 334, html_url: "u334", body: "old\n\n<!-- harness-run:r/pr-run -->" }],
+      updateError: err422("body is too long (maximum is 65536 characters)"),
+    });
+    const pr = await adapter.ensurePR("r", "run", "head", "main", "t", "new");
+    expect(pr).toEqual({ number: 334, url: "u334" });
+    expect(calls.updated).toHaveLength(0);
+  });
+
+  it("writes nothing when the recomputed body is the one already there", async () => {
+    const { adapter, calls } = stubbed({
+      list: [{ state: "open", number: 334, html_url: "u334", body: "same\n\n<!-- harness-run:r/pr-run -->" }],
+    });
+    await adapter.ensurePR("r", "run", "head", "main", "t", "same");
+    expect(calls.updated).toHaveLength(0);
+  });
+
+  it("leaves a body a human has taken over alone — no marker, not ours to rewrite", async () => {
+    const { adapter, calls } = stubbed({
+      list: [{ state: "open", number: 334, html_url: "u334", body: "I rewrote this summary myself." }],
+    });
+    await adapter.ensurePR("r", "run", "head", "main", "t", "generated body");
+    expect(calls.updated).toHaveLength(0);
   });
 
   it("a merged prior PR does not block a follow-up for the commits it never carried", async () => {
