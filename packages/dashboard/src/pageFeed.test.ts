@@ -44,6 +44,32 @@ suite("the skills.forged feed line", () => {
   });
 });
 
+suite("the skills.unresolved feed line", () => {
+  it("says what a run without its spec skill is about to be judged against", () => {
+    const describeEv = extractDescribe();
+    const [kind, who, text] = describeEv({
+      type: "skills.unresolved", runId: "r1", role: "spec", skill: "prd-to-tdd", reason: "missing", ts: 4,
+    });
+    expect(kind).toBe("bad");
+    expect(who).toBe("spec");
+    expect(text).toBe(
+      "pinned skill \u201cprd-to-tdd\u201d is in none of this run's skillsDirs \u2014 " +
+        "the spec phase is inventing its own scenarios, and the acceptance gate will hold this run to them"
+    );
+  });
+
+  it("keeps every other role's line to the role that lost the skill", () => {
+    const describeEv = extractDescribe();
+    const [, who, text] = describeEv({
+      type: "skills.unresolved", runId: "r1", role: "planner", skill: "product-manager", reason: "changed", ts: 5,
+    });
+    expect(who).toBe("planner");
+    expect(text).toBe(
+      "pinned skill \u201cproduct-manager\u201d changed on disk since it was indexed \u2014 the planner agent runs without it"
+    );
+  });
+});
+
 suite("the run.merge_status feed line", () => {
   it("names the files when the branch cannot merge", () => {
     const describeEv = extractDescribe();
@@ -133,8 +159,14 @@ suite("the specification feed lines", () => {
   /**
    * A red gate is the run telling the operator it has not kept a promise, so it
    * is coloured like a failure rather than like a state change.
+   *
+   * The kind has to be one the stylesheet actually paints. This asserted
+   * `error`, which no rule matches — `append` sets `class="ev k-error"` and the
+   * only `.ev.k-*` rules are tool/say/state/cost/git/you/bad — so the loudest
+   * negative signal on the page was the one failure that did not look like one,
+   * while a merge conflict two lines above it was red.
    */
-  it("names the failing scenarios, and colours a red gate as an error", () => {
+  it("names the failing scenarios, and colours a red gate like every other failure", () => {
     const describeEv = extractDescribe();
     const [kind, who, text] = describeEv({
       type: "run.acceptance_verdict",
@@ -146,7 +178,8 @@ suite("the specification feed lines", () => {
       line: "1 of 2 gating scenario(s) failing: SC-002",
       ts: 1,
     });
-    expect(kind).toBe("error");
+    expect(kind).toBe("bad");
+    expect(PAGE_HTML).toContain(".ev.k-" + kind + " .msg");
     expect(who).toBe("spec");
     expect(text).toBe("acceptance: 1 of 2 gating scenario(s) failing: SC-002");
   });

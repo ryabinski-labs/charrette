@@ -993,8 +993,11 @@ export const RunConfig = z.object({
    * vocabulary and is still a product decision.
    *
    * Keyed by role (`intake`, `planner`, `worker`, `qa`, `prod`). Named skills
-   * absent from `skillsDirs` are ignored, and these count against the same
-   * per-role cap as routed and scored skills.
+   * absent from `skillsDirs` are ignored — but said out loud rather than
+   * dropped in silence: the startup banner and a `skills.unresolved` event name
+   * every pin this machine cannot honour before the run dispatches anything
+   * (skillPins.ts). These count against the same per-role cap as routed and
+   * scored skills.
    */
   roleSkills: z
     .record(z.string(), z.array(z.string()))

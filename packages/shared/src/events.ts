@@ -399,6 +399,15 @@ export const HarnessEvent = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("github.issue_created"), taskId: z.string().optional(), epicId: z.string().optional(), issueNumber: z.number().int(), url: z.string() }),
   z.object({ ...base, type: z.literal("github.pr_opened"), taskId: z.string(), prNumber: z.number().int(), url: z.string() }),
   z.object({ ...base, type: z.literal("skills.injected"), taskId: z.string(), role: z.enum(["worker", "qa"]).optional(), skills: z.array(z.object({ name: z.string(), sha256: z.string(), mode: z.enum(["full", "reference"]) })) }),
+  // A `roleSkills` pin naming a skill this machine's `skillsDirs` do not hold.
+  // Skipping it is deliberate — the routing table outlives any one machine's
+  // collection — but it used to be skipped in silence, and the default pin is
+  // `spec` -> `prd-to-tdd`: a spec phase without it invents its own idea of
+  // what a scenario is, and the acceptance gate then holds the run to the
+  // invention. Published once per drive, before anything is dispatched, so the
+  // event log answers "was the run specified against the standard?" without
+  // anyone having to remember what was installed that day.
+  z.object({ ...base, type: z.literal("skills.unresolved"), role: z.string(), skill: z.string(), reason: z.enum(["missing", "changed"]) }),
   // A skill the harness wrote for itself because nothing in the operator's
   // collection matched a task (skillForge.ts). The event is the provenance
   // trail SEC-14 asks for: the file on disk says what the skill claims, this
