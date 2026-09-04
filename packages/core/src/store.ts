@@ -383,10 +383,10 @@ export class Store {
    * It began as a vendor migration — runs recorded before `reviewer` was pinned
    * to Google hold `claude-opus-5`, which `RunConfig` now refuses — and it
    * compared vendors, which is what a vendor migration needs. That left the
-   * ordinary case out. `gemini-3.6-flash` and `gemini-3.7-flash` are the same
+   * ordinary case out. `gemini-3.6-flash` and `gemini-3.8-flash` are the same
    * vendor, so a run frozen on 3.6 kept it through every `harness resume`, and
    * the only way onto the current default was to type
-   * `--model reviewer=gemini-3.7-flash` on every resume line for the rest of that
+   * `--model reviewer=gemini-3.8-flash` on every resume line for the rest of that
    * run's life. Comparing the *model* is what the operator meant by "resume
    * picks up the new reviewer", and it subsumes the vendor case: a model on the
    * wrong vendor is never the current default either.
@@ -441,7 +441,7 @@ export class Store {
       // failure `freezeLightTier` documents.
       //
       // Compared by `modelId`, so the two spellings of one model —
-      // `gemini-3.7-flash` and `google/gemini-3.7-flash` — are one model here
+      // `gemini-3.8-flash` and `google/gemini-3.8-flash` — are one model here
       // and a run written with the prefix is not rewritten every open.
       if (typeof current === "string" && modelId(current) === modelId(wanted)) continue;
       models.reviewer = wanted;

@@ -44,13 +44,14 @@ export const PRICES: Record<string, { in: number; out: number }> = {
   // Pro row would have to carry the >200k band to stay on the over-charging
   // side. Flash has no such band.
   //
-  // Both Flash rows carry the *standing* rate, not the one being charged today:
+  // Every Flash row carries the *standing* rate, not the one being charged today:
   // Google lists $0.75/$3.75 on each of them through 31 Dec 2026 and $1.50/$7.50
   // from 1 Jan 2027. A table holding the promotional half would silently start
   // under-charging on New Year's Day — for the one model every pit stop of every
   // run spends — which is the direction this table exists to never go.
   "gemini-3.6-flash": { in: 1.5, out: 7.5 },
   "gemini-3.7-flash": { in: 1.5, out: 7.5 },
+  "gemini-3.8-flash": { in: 1.5, out: 7.5 },
 };
 
 const CACHE_READ_MULT = 0.1;

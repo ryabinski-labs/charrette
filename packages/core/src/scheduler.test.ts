@@ -98,7 +98,7 @@ describe("parallel scheduler", () => {
     // the cap — and only the dependent one had to wait.
     expect(peak).toBe(3);
     expect(workedOrder[3]).toBe("task-d");
-  }, 20_000);
+  });
 
   it("keeps one-at-a-time execution when maxParallelWorkers is 1", async () => {
     let planning = 0;
@@ -213,7 +213,7 @@ describe("parallel scheduler", () => {
     expect(store.getTask(runId, "task-a")!.state).toBe("NEEDS_HUMAN");
     // The gate freed the slot; it did not create a second concurrent worker.
     expect(peakWorking).toBe(1);
-  }, 20_000);
+  });
 
   /**
    * Four tasks revived at 20:32-20:34 sat READY for eighteen minutes with two of

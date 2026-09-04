@@ -715,7 +715,7 @@ Run configuration is a zod-validated `RunConfig`
 | `models.prod` | `claude-opus-5` | — | ✅ | **Anthropic only** — the last word on whether the run delivered the assignment |
 | `models.demo` | `claude-haiku-4-5-20251001` | — | ✅ | starts the half-built product at a pit stop and drives it — mostly tool work, at an 80-turn ceiling. Cheap because the demo's thoroughness is checked in code rather than taken on trust: `plannedJourneys` is compared against what came back, and a demo that fell short of its own plan is published as INCONCLUSIVE rather than as thin evidence. |
 | `models.repair` | `claude-haiku-4-5-20251001` | — | ✅ | re-asks a finished QA session for the verdict JSON it produced but did not format. Two turns, against a resumed session, restating a conclusion reached on the judging model — there is no judgment left to degrade. Fires only when a QA agent ignores its output contract. |
-| `models.reviewer` | `gemini-3.7-flash` | — | ✅ | judges the demo through one named lens; this is the judgment a pit stop exists to buy. **Google only** — held off the family that wrote the code so its errors are uncorrelated with the ones already in the diff |
+| `models.reviewer` | `gemini-3.8-flash` | — | ✅ | judges the demo through one named lens; this is the judgment a pit stop exists to buy. **Google only** — held off the family that wrote the code so its errors are uncorrelated with the ones already in the diff |
 | `models.pm` | `claude-fable-5-1` | — | ✅ | every decision a skill makes instead of you: what the run does next at a pit stop, whether a failing plan goes back to the planner, and whether a cap that was reached is raised. The only agent whose output redirects the remaining work, re-plans it, or spends money on its own, so it is the last place to save money. |
 | `models.spec` | `claude-fable-5-1` | — | ✅ | writes the specification every downstream check is judged against, once per run, from a brief nobody has built against yet — the hardest reading task in the run |
 | `pitStop.every` | `"epic"` | — | ✅ | when the run stops to show you what it built: `"epic"`, `"never"`, `{"tasks":5}`, `{"usd":100}`, `{"minutes":90}` — see [PITSTOP.md](./PITSTOP.md) |
@@ -789,7 +789,7 @@ for. Spell the provider out as `openai/<model>` if you ever need a model whose
 name does not announce its family.
 
 **The default is all-Anthropic except one role.** `reviewer` is pinned to
-`gemini-3.7-flash`, so `GEMINI_API_KEY` is required for every run — see the
+`gemini-3.8-flash`, so `GEMINI_API_KEY` is required for every run — see the
 pinned-role table below for why. Nothing else routes off Anthropic unless you
 say so.
 
