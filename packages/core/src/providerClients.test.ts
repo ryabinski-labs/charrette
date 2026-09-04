@@ -203,7 +203,7 @@ describe("talking to Google", () => {
         },
       }],
     });
-    const first = await googleClient("k", impl)({ model: "gemini-3.7-flash", system: "s", messages: [], tools: [echoTool], signal });
+    const first = await googleClient("k", impl)({ model: "gemini-3.8-flash", system: "s", messages: [], tools: [echoTool], signal });
 
     expect(first.signature).toBe("sig-text");
     expect(first.toolCalls).toEqual([{ id: "call_1", name: "Bash", input: { command: "git status" }, signature: "sig-call" }]);
@@ -211,7 +211,7 @@ describe("talking to Google", () => {
     // Now the turn the model refused: its own call, handed back as history.
     const { impl: again, calls } = stubFetch(answer);
     await googleClient("k", again)({
-      model: "gemini-3.7-flash",
+      model: "gemini-3.8-flash",
       system: "s",
       messages: [
         { role: "user", text: "review it" },

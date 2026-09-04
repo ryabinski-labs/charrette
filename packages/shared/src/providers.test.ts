@@ -194,7 +194,7 @@ describe("the run config refuses a routing it cannot honour", () => {
     // failure mode, and budget.ts for the row that prices this id.
     expect({ qa: d.qa, reviewer: d.reviewer, prod: d.prod, pm: d.pm, advisor: d.advisor }).toEqual({
       qa: "claude-sonnet-5",
-      reviewer: "gemini-3.7-flash",
+      reviewer: "gemini-3.8-flash",
       prod: "claude-opus-5",
       pm: "claude-fable-5-1",
       advisor: "claude-sonnet-5",

@@ -23,8 +23,11 @@ import { PINNED_ROLES } from "@harness/shared";
  * a control at all (see `LOCKED_ROLES`), so nothing here is offered for
  * `reviewer` even though it now runs on Gemini. A run whose key for a vendor is
  * not exported is refused by `missingKeys` before the config is touched.
+ *
+ * Exported for the test that holds the first sentence to its word: nothing
+ * here may be missing from `PRICES`.
  */
-const MODEL_CHOICES = [
+export const MODEL_CHOICES = [
   "claude-fable-5-1",
   "claude-opus-5",
   "claude-sonnet-5",
@@ -34,7 +37,7 @@ const MODEL_CHOICES = [
   "gpt-5.6-luna",
   "gemini-3.5-flash-lite",
   "gemini-3.6-flash",
-  "gemini-3.7-flash",
+  "gemini-3.8-flash",
 ];
 
 export const PAGE_HTML = `<!doctype html>

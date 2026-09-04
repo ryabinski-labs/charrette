@@ -15,7 +15,8 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { PAGE_HTML } from "./page.js";
+import { PRICES } from "@harness/core";
+import { MODEL_CHOICES, PAGE_HTML } from "./page.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- the page is untyped JS. */
 type Any = any;
@@ -1506,5 +1507,26 @@ describe("the board's card container", () => {
     input.value = "";
     input.dispatchEvent(new Event("input"));
     expect(board.classList.contains("flat")).toBe(false);
+  });
+});
+
+describe("the models the dropdown offers", () => {
+  /**
+   * The comment above `MODEL_CHOICES` says the list is "the priced tiers from
+   * `budget.ts`", and until now nothing held it to that. `priceFor` bills an
+   * unlisted model at the top tier — $10/$50, the Fable rate — so a choice
+   * missing from `PRICES` is the dropdown offering the operator a saving the
+   * ledger will not give them, at four to thirty times the price they picked.
+   *
+   * It is a rename that breaks this, not a typo. Moving a role onto a new
+   * model means editing this array and the price table, in two packages, and
+   * the build cannot notice when only one of them is done: both files stay
+   * fully covered, every test stays green, and the first evidence is a run
+   * that costs more than the ledger predicted.
+   */
+  it("prices every model it offers", () => {
+    const unpriced = MODEL_CHOICES.filter((model) => !(model in PRICES));
+
+    expect(unpriced).toEqual([]);
   });
 });

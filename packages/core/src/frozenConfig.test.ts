@@ -326,7 +326,7 @@ describe("a run created before the reviewer was pinned to Google", () => {
   });
 
   it("reads the two spellings of the default as one model, so a prefixed row is left alone", () => {
-    // `google/gemini-3.7-flash` and `gemini-3.7-flash` name the same model, and
+    // `google/gemini-3.8-flash` and `gemini-3.8-flash` name the same model, and
     // a config written with the prefix must not be rewritten on every open —
     // that is a row churning in the database to say what it already said.
     const { dbPath, cleanup } = onDisk();
