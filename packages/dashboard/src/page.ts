@@ -550,6 +550,7 @@ export const PAGE_HTML = `<!doctype html>
             placeholder="What should change? (sent to the planner on reject)"></textarea>
   <button onclick="resolveGate(true)">Approve &amp; build</button>
   <button class="reject" onclick="resolveGate(false)">Reject with feedback</button>
+  <div id="gate-error" class="apierr" role="alert"></div>
 </section>
 
 <section id="taskgates" aria-labelledby="taskgates-h">
@@ -725,6 +726,7 @@ const syncChildren = (parent, nodes, keep) => {
 };
 
 const streaming = new Set();
+const streamCursors = new Map();
 const sessionRole = {};   // sessionId -> role
 const lastAction = {};    // sessionId -> newest formatted tool line
 let runs = [];
@@ -2602,7 +2604,13 @@ function notifyRunState(ev) {
 
 /* ---------- data ---------- */
 
-async function refresh() {
+let refreshPending = null;
+function refresh() {
+  if (!refreshPending) refreshPending = refreshState().finally(() => { refreshPending = null; });
+  return refreshPending;
+}
+
+async function refreshState() {
   let res;
   try {
     res = await fetch("/api/state", { headers });
@@ -2686,9 +2694,11 @@ async function refresh() {
 async function stream(runId) {
   if (streaming.has(runId)) return;
   streaming.add(runId);
+  let reader;
   try {
-    const res = await fetch("/api/runs/" + runId + "/events", { headers });
-    const reader = res.body.getReader();
+    const res = await fetch("/api/runs/" + encodeURIComponent(runId) + "/events?after=" + (streamCursors.get(runId) || 0), { headers });
+    if (!res.ok || !res.body) return;
+    reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = "";
     for (;;) {
@@ -2700,25 +2710,49 @@ async function stream(runId) {
       for (const frame of frames) {
         const data = frame.split("\\n").find((l) => l.indexOf("data: ") === 0);
         if (!data) continue;
+        const id = frame.split("\\n").find((l) => l.indexOf("id: ") === 0);
+        const seq = id ? Number(id.slice(4)) : 0;
+        if (seq && seq <= (streamCursors.get(runId) || 0)) continue;
         const ev = JSON.parse(data.slice(6));
         append(ev);
+        if (Number.isSafeInteger(seq) && seq > 0) streamCursors.set(runId, seq);
         if (ev.type === "run.state_changed") notifyRunState(ev);
         if (ev.type.indexOf("state_changed") >= 0 || ev.type.indexOf("gate_") >= 0 ||
             ev.type === "agent.spawned" || ev.type === "agent.ended" || ev.type === "agent.usage") refresh();
       }
     }
+  } catch (e) {
+    // The next state poll reconnects from the last rendered event. A dropped
+    // connection must not become an unhandled promise rejection.
   } finally {
+    if (reader) { await reader.cancel().catch(() => {}); reader.releaseLock(); }
     streaming.delete(runId);
   }
 }
 
 async function resolveGate(approved) {
-  await fetch("/api/gates/plan", {
-    method: "POST",
-    headers: Object.assign({ "content-type": "application/json" }, headers),
-    body: JSON.stringify({ approved: approved, feedback: $("gate-feedback").value }),
-  });
-  refresh();
+  const buttons = [...$("gate").querySelectorAll("button")];
+  if (buttons.some((b) => b.disabled)) return;
+  buttons.forEach((b) => { b.disabled = true; });
+  const error = $("gate-error");
+  error.textContent = "";
+  try {
+    const res = await fetch("/api/gates/plan", {
+      method: "POST",
+      headers: Object.assign({ "content-type": "application/json" }, headers),
+      body: JSON.stringify({ approved: approved, feedback: $("gate-feedback").value }),
+    });
+    if (!res.ok) {
+      error.textContent = (await res.json().catch(() => ({}))).error || "Could not submit the plan decision (HTTP " + res.status + "). Try again.";
+      return;
+    }
+    $("gate-feedback").value = "";
+    await refresh();
+  } catch (e) {
+    error.textContent = "Could not reach the harness. Your feedback is saved here; reconnect and try again.";
+  } finally {
+    buttons.forEach((b) => { b.disabled = false; });
+  }
 }
 
 /**

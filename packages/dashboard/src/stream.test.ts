@@ -1,5 +1,5 @@
 import { connect } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { RunConfig } from "@harness/shared";
 import { Bus, Store } from "@harness/core";
 import { Dashboard } from "./index.js";
@@ -358,6 +358,19 @@ describe("finding a port when every one is taken", () => {
 });
 
 describe("the plan gate", () => {
+  it.each([null, {}, { approved: "false" }, { approved: 1 }, { approved: false, feedback: 42 }])(
+    "refuses malformed decisions without consuming the open gate: %j", async (body) => {
+      const { dash, url } = await serving();
+      const pending = dash.resolvePlanGate("prd", "summary");
+      const post = (payload: unknown) => fetch(new URL("/api/gates/plan", url), {
+        method: "POST", headers: { ...auth(dash), "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      expect((await post(body)).status).toBe(400);
+      expect((await post({ approved: false, feedback: "fix the scope" })).status).toBe(200);
+      await expect(pending).resolves.toEqual({ approved: false, feedback: "fix the scope" });
+    }
+  );
   it("shows the PRD and the breakdown, then hands the approval back", async () => {
     const { dash, url } = await serving();
     const pending = dash.resolvePlanGate("# The PRD", "3 tasks");
@@ -417,6 +430,34 @@ describe("the plan gate", () => {
 });
 
 describe("the event stream", () => {
+  it("leaves the database alone while idle and wakes up for new events", async () => {
+    const { dash, url, store, bus } = await serving();
+    makeRun(store);
+    const reads = vi.spyOn(store, "eventsSince");
+    const res = await fetch(new URL("/api/runs/r1/events", url), { headers: auth(dash) });
+    const reader = res.body!.getReader();
+    await reader.read();
+    reader.releaseLock();
+    const calls = reads.mock.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(reads).toHaveBeenCalledTimes(calls);
+    bus.publish({ type: "agent.log", runId: "r1", sessionId: "s", text: "awake again", ts: 1 });
+    expect((await readFrames(res, 1)).join("\n")).toContain("awake again");
+    reads.mockRestore();
+  });
+
+  it("replays the entire history across pages and socket backpressure", async () => {
+    const { dash, url, store, bus } = await serving();
+    makeRun(store);
+    for (let i = 0; i < 1600; i++) {
+      bus.publish({ type: "agent.log", runId: "r1", sessionId: "s", text: `line ${i} ${"x".repeat(200)}`, ts: i });
+    }
+    const res = await fetch(new URL("/api/runs/r1/events", url), { headers: auth(dash) });
+    const frames = await readFrames(res, 1601);
+    expect(frames).toHaveLength(1601);
+    const ids = frames.map((frame) => Number(frame.split("\n")[0]!.slice(4)));
+    expect(ids).toEqual(store.eventsSince("r1", 0, 2000).map((row) => row.seq));
+  });
   it("replays what the run has already done, from the cursor the browser held", async () => {
     const { dash, url, store, bus } = await serving();
     makeRun(store);
@@ -448,7 +489,7 @@ describe("the event stream", () => {
     expect(frames.join("\n")).not.toContain("already seen");
   });
 
-  it("replays from the start when the cursor is not a number", async () => {
+  it.each(["abc", "Infinity", "-1", "1.5", "9007199254740992"])("replays from the start when the cursor is invalid: %s", async (after) => {
     // `Number("abc")` is NaN and every `seq > NaN` is false, so a garbled cursor
     // used to replay nothing at all — a feed that silently begins mid-run, which
     // reads exactly like a harness that has not done anything yet.
@@ -456,7 +497,7 @@ describe("the event stream", () => {
     makeRun(store);
     bus.publish({ type: "agent.log", runId: "r1", sessionId: "s", text: "already done", ts: 1 });
 
-    const res = await fetch(new URL("/api/runs/r1/events?after=abc", url), { headers: auth(dash) });
+    const res = await fetch(new URL(`/api/runs/r1/events?after=${after}`, url), { headers: auth(dash) });
     const frames = await readFrames(res, 2);
 
     expect(frames.join("\n")).toContain("already done");
@@ -507,20 +548,20 @@ describe("the event stream", () => {
     expect(() => bus.publish({ type: "agent.log", runId: "r1", sessionId: "s", text: "after", ts: 2 })).not.toThrow();
   });
 
-  it("drops frames rather than growing without bound when nothing is reading", async () => {
+  it("delivers a burst above the old buffer limit, including its terminal event", async () => {
     const { dash, url, store, bus } = await serving();
     makeRun(store);
-    await tailing(url, dash, bus, cursor(store), () => {
+    const res = await tailing(url, dash, bus, cursor(store), () => {
       bus.publish({ type: "agent.log", runId: "r1", sessionId: "s", text: "first", ts: 0 });
     });
 
     for (let i = 0; i < 600; i++) {
       bus.publish({ type: "agent.log", runId: "r1", sessionId: "s", text: `line ${i}`, ts: i });
     }
-
-    // 500 is the ceiling on what is buffered for the browser; the run keeps
-    // recording everything regardless of whether anyone is watching.
-    // run.created + the one published to open the tail + 600.
-    expect(store.eventsSince("r1", 0, 1000).length).toBe(602);
+    bus.publish({ type: "run.state_changed", runId: "r1", from: "INTEGRATING", to: "PR_REVIEW", reason: "ready for review", ts: 601 });
+    const frames = await readFrames(res, 602);
+    expect(frames).toHaveLength(602);
+    expect(frames[600]).toContain('"text":"line 599"');
+    expect(frames[601]).toContain('"to":"PR_REVIEW"');
   });
 });
