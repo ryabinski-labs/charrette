@@ -1,10 +1,11 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  agentBinaryFiles,
   ceilingNote,
   binaryName,
   ceilingTable,
@@ -105,6 +106,19 @@ describe("a bundle it cannot read the registry out of", () => {
 });
 
 describe("the SDK this harness is actually installed against", () => {
+  it("names the binary and manifest the platform package should have installed", () => {
+    const { binary, manifest } = agentBinaryFiles();
+
+    // Both are read by `harness version`, which exists because a platform
+    // package that never downloaded is invisible until an agent is spawned:
+    // pnpm records the optional dependency as installed, the symlink resolves,
+    // and the 190MB payload is simply absent.
+    expect(binary.endsWith(binaryName(process.platform))).toBe(true);
+    expect(existsSync(binary)).toBe(true);
+    expect(manifest.endsWith("manifest.json")).toBe(true);
+    expect(existsSync(manifest)).toBe(true);
+  });
+
   beforeEach(() => forgetCeilingTable());
 
   it("still has a registry in the shape this parses", async () => {

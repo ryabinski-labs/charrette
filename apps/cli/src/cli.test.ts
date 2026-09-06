@@ -118,6 +118,7 @@ const h = vi.hoisted(() => {
     createInterfaceMock: vi.fn(),
     notifyDoneMock: vi.fn(),
     armCrashLogMock: vi.fn(),
+    agentBinaryFilesMock: vi.fn(() => ({ binary: "/sdk/claude", manifest: "/sdk/manifest.json" })),
     promptSeedMock: vi.fn(async () => "seed from the conversation"),
     chatCloseMock: vi.fn(),
     TerminalChatMock: vi.fn(),
@@ -170,6 +171,9 @@ vi.mock("@harness/core", () => ({
   // Pinned, so the banner assertion is about the line existing rather than
   // about whatever commit this checkout happens to be on.
   harnessBuild: () => "0.0.1@7453d60",
+  // Handed straight through to the version check, which is tested against
+  // real files in version.test.ts; here it only has to be the same reference.
+  agentBinaryFiles: h.agentBinaryFilesMock,
   // The rule this stands in for is unit-tested against the real implementation
   // in core; here it exists so a test can prove `harness run` actually refuses
   // when a routed provider has no key.
@@ -206,6 +210,24 @@ vi.mock("./defaults.js", async (importOriginal) => {
 vi.mock("./chat.js", () => ({ TerminalChat: h.TerminalChatMock }));
 vi.mock("./crashlog.js", () => ({ armCrashLog: h.armCrashLogMock }));
 vi.mock("./notify.js", () => ({ notifyDone: h.notifyDoneMock }));
+
+/**
+ * The build check is exercised against real files in `version.test.ts`. Here
+ * only the wiring is under test — that the command hands it the same build
+ * string every agent session is stamped with, and prints what it gets back.
+ */
+const v = vi.hoisted(() => ({
+  collectVersionMock: vi.fn(() => ({
+    build: "0.0.1@7453d60",
+    node: "v22.0.0",
+    platform: "linux x64",
+    root: "/repo",
+    packages: [],
+    agent: { ok: true, version: "2.1.257", path: "/sdk/claude" },
+  })),
+  formatVersionMock: vi.fn(() => "harness    0.0.1@7453d60\n"),
+}));
+vi.mock("./version.js", () => ({ collectVersion: v.collectVersionMock, formatVersion: v.formatVersionMock }));
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return { ...actual, existsSync: h.existsSyncMock, mkdirSync: h.mkdirSyncMock, writeFileSync: h.writeFileSyncMock };
@@ -3245,5 +3267,58 @@ describe("the closing report", () => {
 
     expect(shown).toContain("4 task(s) never started");
     expect(shown).toContain("No tokens were spent on them.");
+  });
+});
+
+describe("version", () => {
+  beforeEach(() => {
+    v.collectVersionMock.mockClear();
+    v.formatVersionMock.mockClear();
+  });
+
+  it("prints the build as a flag, without running a command", async () => {
+    // Commander answers `--version` by exiting the process; overridden here so
+    // the assertion is on what was printed rather than on the test runner dying.
+    const program = buildProgram().exitOverride();
+
+    await expect(program.parseAsync(["--version"], { from: "user" })).rejects.toMatchObject({
+      code: "commander.version",
+    });
+
+    // The same string `harnessBuild()` stamps on every agent session, so an
+    // operator holding a session record can match it against a binary.
+    expect(printed()).toContain("0.0.1@7453d60");
+  });
+
+  it("answers -V the same way", async () => {
+    const program = buildProgram().exitOverride();
+
+    await expect(program.parseAsync(["-V"], { from: "user" })).rejects.toMatchObject({ code: "commander.version" });
+
+    expect(printed()).toContain("0.0.1@7453d60");
+  });
+
+  it("reports the build against the compiled output, read from this binary's own directory", async () => {
+    await cli("version");
+
+    // Not the cwd: `harness version` is typed from inside the repo being
+    // worked on far more often than from the harness checkout, and the
+    // question is which harness is running.
+    expect(v.collectVersionMock).toHaveBeenCalledWith("0.0.1@7453d60", expect.stringContaining("cli"), h.agentBinaryFilesMock);
+    expect(printed()).toBe("harness    0.0.1@7453d60\n");
+  });
+
+  it("emits the same facts as JSON for a script that gates on the build", async () => {
+    await cli("version", "--json");
+
+    expect(JSON.parse(printed())).toEqual({
+      build: "0.0.1@7453d60",
+      node: "v22.0.0",
+      platform: "linux x64",
+      root: "/repo",
+      packages: [],
+      agent: { ok: true, version: "2.1.257", path: "/sdk/claude" },
+    });
+    expect(v.formatVersionMock).not.toHaveBeenCalled();
   });
 });

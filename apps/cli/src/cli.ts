@@ -2,8 +2,9 @@ import { Command } from "commander";
 import { createInterface } from "node:readline/promises";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { DEFAULT_CHECK_TIMEOUT_MINUTES, ModelRoutingShape, RunConfig, SubscriptionConfig } from "@harness/shared";
-import { AgentPool, Bus, GateHandler, BridgedIntake, IntakeBridge, GitHubAdapter, RunController, Store, accountEnv, assembleReport, checkMemoryBanner, detectToolbelt, ensureIgnored, harnessBuild, missingKeys, originSlug, postmortem, renderPostmortem, reportPath, pinsInPlay, runLockHolder, skillPinBanner, standaloneReport, repoUnusable, wasMerged } from "@harness/core";
+import { AgentPool, Bus, GateHandler, BridgedIntake, IntakeBridge, GitHubAdapter, RunController, Store, accountEnv, agentBinaryFiles, assembleReport, checkMemoryBanner, detectToolbelt, ensureIgnored, harnessBuild, missingKeys, originSlug, postmortem, renderPostmortem, reportPath, pinsInPlay, runLockHolder, skillPinBanner, standaloneReport, repoUnusable, wasMerged } from "@harness/core";
 import { Dashboard } from "@harness/dashboard";
 import { promptForNewCap, watchBudgetCommands } from "./budget.js";
 import { promptForAccount } from "./subscription.js";
@@ -22,6 +23,7 @@ import { armCrashLog } from "./crashlog.js";
 import { clearDashboard, liveDashboardUrl, recordDashboard, recordedDashboard } from "./dashboardLink.js";
 import { notifyDone } from "./notify.js";
 import { mailBanner, mailTarget, watchGateMail } from "./gateMail.js";
+import { collectVersion, formatVersion } from "./version.js";
 
 /**
  * The run a dashboard is currently working on, so `harness pause` does not make
@@ -668,6 +670,11 @@ async function repoBlocked(repoPath: string): Promise<boolean> {
 export function buildProgram(): Command {
   const program = new Command();
   program.name("harness").description("Multi-agent development harness: assignment in, reviewed PRs out");
+  // The same string every agent session is stamped with, so the answer to
+  // "which harness ran this?" is one flag rather than a cross-reference
+  // between `git log` and process start times in `.harness/harness.log`.
+  // `harness version` says whether that sha is also what is compiled.
+  program.version(harnessBuild(), "-V, --version", "print the build this binary runs as");
 
   program
     .command("run")
@@ -1422,6 +1429,18 @@ export function buildProgram(): Command {
         if (detected.skipped.length > SHOWN) out(`  … and ${detected.skipped.length - SHOWN} more`);
       }
       out(`\nEdit it and re-run \`harness run "<assignment>"\` — no flags needed.`);
+    });
+
+  program
+    .command("version")
+    .description("the build this binary is, and whether its compiled output is current with the source")
+    .option("--json", "emit the same facts as JSON, for a script that gates on the build")
+    .action((opts: { json?: boolean }) => {
+      // Resolved from this module's own location rather than the cwd: the
+      // question is which harness is running, and `harness version` is most
+      // often typed from inside the repo being worked on, not this one.
+      const info = collectVersion(harnessBuild(), fileURLToPath(new URL(".", import.meta.url)), agentBinaryFiles);
+      process.stdout.write(opts.json ? `${JSON.stringify(info, null, 2)}\n` : formatVersion(info));
     });
 
   return program;
