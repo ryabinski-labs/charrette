@@ -4826,7 +4826,16 @@ export class RunController {
       );
       if (issue) {
         this.store.updateTask(runId, task.id, { githubIssueNumber: issue.number });
-        this.bus.publish({ type: "github.issue_created", runId, taskId: task.id, issueNumber: issue.number, url: issue.url, ts: Date.now() });
+        // Only the call that actually opened the issue. `fileIssues` runs at
+        // every phase boundary the plan can cross, and `ensureIssue` is
+        // idempotent, so announcing every task on every pass told the feed the
+        // same issues had just been created over and over: run a8df0107 wrote
+        // 1262 `github.issue_created` events for 127 issues, and 1135 of the
+        // "issue #N" lines in the one feed an operator reads to see what the
+        // run just did had no issue behind them.
+        if (issue.fresh) {
+          this.bus.publish({ type: "github.issue_created", runId, taskId: task.id, issueNumber: issue.number, url: issue.url, ts: Date.now() });
+        }
       }
     }
   }
