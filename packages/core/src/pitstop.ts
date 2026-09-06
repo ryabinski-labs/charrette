@@ -168,6 +168,22 @@ export interface ReviewReport {
   findings: string[];
   /** The one question this lens would put to the operator. May be empty. */
   question: string;
+  /**
+   * False when the session died before it reached a verdict.
+   *
+   * Such a report carries `verdict: "on-track"` because there is no honest
+   * verdict to carry, and for a while that was only half-told: `runReviews`
+   * threaded this into the second-pass decision but dropped it on the way to
+   * the renderer, which reads the heading off the verdict alone. So pit stop 26
+   * of ledger-app a8df0107 printed three lenses that had died with `TypeError:
+   * fetch failed` as three headings saying "on track", and an operator scanning
+   * headings saw four endorsements where there was one. That stop was the only
+   * one of 26 that paid for the deep lenses.
+   *
+   * Optional so stops recorded before it existed still parse; absent means
+   * finished, which is what every one of them was assumed to be anyway.
+   */
+  finished?: boolean;
 }
 
 /** Everything the operator is shown when a pit stop opens. */
@@ -317,7 +333,10 @@ export function renderPitStop(stop: Omit<PitStop, "markdown">): string {
   if (stop.reviews.length) {
     lines.push("## What the reviewers think", "");
     for (const r of stop.reviews) {
-      lines.push(`### ${r.lens} — ${VERDICT_MARK[r.verdict]}`);
+      // A transport error must never be typographically indistinguishable from
+      // an opinion. `finished === false` is the only case where the verdict
+      // beside it is a placeholder rather than a judgment.
+      lines.push(`### ${r.lens} — ${r.finished === false ? "DID NOT FINISH" : VERDICT_MARK[r.verdict]}`);
       for (const f of r.findings) lines.push(`- ${f}`);
       if (r.question) lines.push("", `> ${r.question}`);
       lines.push("");

@@ -421,3 +421,64 @@ describe("a resume that cannot catch the base either", () => {
     expect(transitions(store, runId).slice(-2)).toEqual(["PR_REVIEW->INTEGRATING", "INTEGRATING->PAUSED"]);
   });
 });
+
+describe("a run that merged work it could not publish", () => {
+  it("holds, instead of reading the missing PR number as nothing to publish", async () => {
+    // The gap the hold was written to close and did not. `greenGate` keys every
+    // check off the rollup PR number, and a run with no number reached its
+    // `proceed` escape hatch — which is correct for a run whose foundation
+    // tasks parked and has no diff, and catastrophic for one that merged 127
+    // tasks and had its body refused as oversized. ledger-app a8df0107 arrived
+    // here the second way and reported "in review" over a branch nothing had
+    // ever checked, with `holdUntilGreen` on: a sixth outcome the hold's own
+    // docstring does not contemplate — proceed, unchecked, silently.
+    const repo = repoWithOrigin();
+    const { adapter } = fakeGitHub();
+    (adapter as unknown as { ensurePR: unknown }).ensurePR = async () => {
+      // The message octokit actually raises, from the run's own event log.
+      throw Object.assign(
+        new Error('Validation Failed: {"resource":"Issue","code":"custom","field":"body","message":"body is too long (maximum is 65536 characters)"}'),
+        { status: 422, response: { data: { errors: [{ message: "body is too long (maximum is 65536 characters)" }] } } }
+      );
+    };
+    const { store, runId, logs } = await build(adapter, pool(), repo, { holdUntilGreen: true });
+
+    expect(store.getRun(runId)!.state).toBe("PAUSED");
+    expect(store.lastRunStateChange(runId)!.reason).toMatch(/no pull request could be opened, so nothing has checked this branch/);
+    expect(store.lastRunStateChange(runId)!.reason).toContain("body is too long");
+    expect(logs.join("\n")).toMatch(/merged locally, but the pull request could not be opened/);
+    // The task's work is untouched: publishing failed, merging did not.
+    expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
+  });
+
+  it("records the failure as something later reads, not only as something a human reads", async () => {
+    const repo = repoWithOrigin();
+    const { adapter } = fakeGitHub();
+    (adapter as unknown as { ensurePR: unknown }).ensurePR = async () => {
+      throw new Error("boom");
+    };
+    const { store, runId } = await build(adapter, pool(), repo, { holdUntilGreen: true });
+
+    expect(store.publishFailure(runId)).toContain("boom");
+  });
+
+  it("clears the failure once a pull request actually opens", async () => {
+    // Ordering is the whole mechanism: a failure a later success does not clear
+    // is a run that can never report itself finished again.
+    const repo = repoWithOrigin();
+    const { adapter } = fakeGitHub();
+    let fail = true;
+    (adapter as unknown as { ensurePR: unknown }).ensurePR = async () => {
+      if (fail) throw new Error("boom");
+      return { number: 7, url: "https://example.test/pull/7", fresh: true };
+    };
+    const { store, runId, controller } = await build(adapter, pool(), repo, { holdUntilGreen: true });
+    expect(store.publishFailure(runId)).toContain("boom");
+
+    fail = false;
+    await controller.resume(runId);
+
+    expect(store.publishFailure(runId)).toBeNull();
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+  });
+});

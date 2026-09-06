@@ -337,6 +337,37 @@ describe("the report the operator reads", () => {
     expect(md).toContain("- `pnpm test` — the suite is green on this branch");
   });
 
+  it("marks a reviewer that died as one that died, not as one that approved", () => {
+    // Pit stop 26 of ledger-app a8df0107. Three of four lenses died within eleven
+    // seconds with `TypeError: fetch failed`; each carried the placeholder
+    // verdict `on-track`, because there is no honest verdict for a session that
+    // never reached one — and the heading was rendered from that verdict alone.
+    // An operator scanning headings saw four endorsements. It was the one stop
+    // out of twenty-six that had paid for the deep lenses.
+    const md = renderPitStop({
+      ...STOP,
+      reviews: [
+        { lens: "product-manager", verdict: "on-track", findings: [], question: "" },
+        {
+          lens: "critical-challenger",
+          verdict: "on-track",
+          findings: ["(this reviewer did not finish: Error: TypeError: fetch failed)"],
+          question: "",
+          finished: false,
+        },
+      ],
+    });
+
+    expect(md).toContain("### product-manager — on track");
+    expect(md).toContain("### critical-challenger — DID NOT FINISH");
+    expect(md).not.toContain("### critical-challenger — on track");
+  });
+
+  it("reads a report with no `finished` field as one that finished", () => {
+    // Stops recorded before the field existed. Absent is not false.
+    expect(renderPitStop(STOP)).toContain("### qa-agent — on track");
+  });
+
   it("leaves the reviewer section out when nobody reviewed", () => {
     expect(renderPitStop({ ...STOP, reviews: [] })).not.toContain("## What the reviewers think");
   });

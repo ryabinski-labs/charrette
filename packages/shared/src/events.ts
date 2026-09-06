@@ -185,6 +185,20 @@ export const HarnessEvent = z.discriminatedUnion("type", [
     line: z.string().default(""),
   }),
   z.object({ ...base, type: z.literal("run.intent_verdict"), verdict: z.enum(["PASS", "FAIL"]), gaps: z.array(z.string()).default([]), summary: z.string().default("") }),
+  /**
+   * The intent check ran and produced no verdict — the third answer the run
+   * had no way to record.
+   *
+   * A validator that cannot evidence an answer and says so in prose is behaving
+   * correctly; it was the harness that had nowhere to put "I could not tell".
+   * So the parse error was swallowed as a log line and `intentVerdict` went on
+   * returning the last verdict that *did* parse, which is how ledger-app
+   * a8df0107 closed with "intent check found 2 gaps" — the fifth pass's answer,
+   * one gap of which the run had since closed itself and the other of which was
+   * never real. A verdict is a statement about the tree that was read; carrying
+   * one forward silently attributes it to a tree nobody read.
+   */
+  z.object({ ...base, type: z.literal("run.intent_unknown"), why: z.string().default("") }),
   // The same judgment, made of the plan instead of the result, at the gate where
   // acting on it costs a re-plan rather than a run.
   z.object({ ...base, type: z.literal("run.plan_intent_verdict"), verdict: z.enum(["PASS", "FAIL"]), gaps: z.array(z.string()).default([]), summary: z.string().default("") }),
@@ -410,6 +424,19 @@ export const HarnessEvent = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("git.merge_conflict"), taskId: z.string(), branch: z.string(), files: z.array(z.string()) }),
   z.object({ ...base, type: z.literal("github.issue_created"), taskId: z.string().optional(), epicId: z.string().optional(), issueNumber: z.number().int(), url: z.string() }),
   z.object({ ...base, type: z.literal("github.pr_opened"), taskId: z.string(), prNumber: z.number().int(), url: z.string() }),
+  /**
+   * A run that merged work it could not publish.
+   *
+   * The distinction this carries is the whole reason it exists. "Nothing to
+   * publish" and "publishing failed" both leave a run with no pull request
+   * number, and every gate downstream reads that number: with only a log line
+   * to tell them apart, `greenGate` took the second for the first and skipped
+   * the CI hold entirely. ledger-app a8df0107 merged 127 tasks, had its rollup
+   * body refused as oversized, and reported itself in review over a branch
+   * nothing had ever checked — with `holdUntilGreen` on. A log line cannot be
+   * gated on; this can.
+   */
+  z.object({ ...base, type: z.literal("github.pr_publish_failed"), taskId: z.string(), error: z.string().default("") }),
   z.object({ ...base, type: z.literal("skills.injected"), taskId: z.string(), role: z.enum(["worker", "qa"]).optional(), skills: z.array(z.object({ name: z.string(), sha256: z.string(), mode: z.enum(["full", "reference"]) })) }),
   // A `roleSkills` pin naming a skill this machine's `skillsDirs` do not hold.
   // Skipping it is deliberate — the routing table outlives any one machine's

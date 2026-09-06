@@ -634,6 +634,40 @@ export class Store {
     return { passed: p.passed, failing: p.failing ?? [], named: p.named ?? true, blocked: p.blocked ?? [], line: p.line ?? "" };
   }
 
+  /**
+   * Why this run has no rollup pull request: because it had nothing to publish,
+   * or because publishing failed.
+   *
+   * Returns the error when the last thing that happened to this run's
+   * publishing was a failure, and `null` when a pull request opened afterwards
+   * (a later resume that succeeded) or when none was ever attempted. Ordering
+   * is the whole of it — the seq comparison is what makes a failure something a
+   * subsequent success clears, rather than a flag a run wears forever.
+   */
+  publishFailure(runId: string): string | null {
+    if (this.lastEventSeq(runId, "github.pr_publish_failed") <= this.lastEventSeq(runId, "github.pr_opened")) return null;
+    const row = this.db
+      .prepare("SELECT payload FROM events WHERE runId = ? AND type = 'github.pr_publish_failed' ORDER BY seq DESC LIMIT 1")
+      .get(runId) as { payload: string } | undefined;
+    /* v8 ignore next */
+    if (!row) return null;
+    return (JSON.parse(row.payload) as { error?: string }).error || "the pull request could not be opened";
+  }
+
+  /**
+   * Did the newest intent check end without a verdict?
+   *
+   * `intentVerdict` returns the last verdict that parsed, which is the right
+   * answer to "what did the validator last conclude" and the wrong answer to
+   * "what does this run know about the tree it merged". When a later pass ran
+   * and could not conclude anything, the stored verdict describes a tree that
+   * has since changed, and reporting it as this pass's result is how a run
+   * closes by naming gaps it had already closed.
+   */
+  intentCheckStale(runId: string): boolean {
+    return this.lastEventSeq(runId, "run.intent_unknown") > this.lastEventSeq(runId, "run.intent_verdict");
+  }
+
   intentVerdict(runId: string): { verdict: "PASS" | "FAIL"; gaps: string[]; summary: string } | null {
     const row = this.db
       .prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.intent_verdict' ORDER BY seq DESC LIMIT 1")
