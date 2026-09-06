@@ -291,3 +291,22 @@ describe("what intake writes back", () => {
     expect(s.listSessions("run1")).toMatchObject([{ id: "sess-1", role: "planner", state: "running" }]);
   });
 });
+
+describe("a publish failure written without its reason", () => {
+  it("still answers that publishing failed, rather than answering nothing", () => {
+    // `error` is defaulted in the schema, so an event written by an older
+    // harness — or by a throw whose String() was empty — arrives with none.
+    // The gates key on whether this returns a value at all: an empty string
+    // would read as "no failure" and let a run past the CI hold, which is the
+    // exact confusion the event was added to end.
+    const { store, bus } = withRun();
+    bus.publish({ type: "github.pr_publish_failed", runId: "run1", taskId: "run", error: "", ts: Date.now() });
+
+    expect(store.publishFailure("run1")).toBe("the pull request could not be opened");
+  });
+
+  it("has nothing to report before anything has tried to publish", () => {
+    const { store } = withRun();
+    expect(store.publishFailure("run1")).toBeNull();
+  });
+});

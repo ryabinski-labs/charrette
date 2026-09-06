@@ -252,17 +252,40 @@ describe("opening the component PR", () => {
     expect(store.getRun(runId)!.config.baseBranch).toBe("release");
   });
 
-  it("keeps a merged task merged when GitHub refuses the PR", async () => {
+  it("keeps a merged task merged when GitHub refuses the PR, and parks the run rather than reporting it in review", async () => {
     // The reported failure: a 422 from GitHub propagated out of the integrator and
     // killed the whole run, discarding work that was already committed and merged.
+    //
+    // Keeping the work is half of it. The other half is what the run then says
+    // about itself: this used to settle in PR_REVIEW, because `greenGate` read
+    // the missing PR number as "nothing to publish" and proceeded. ledger-app
+    // a8df0107 merged 127 tasks that way and reported "in review" over a branch
+    // nothing had ever checked, with `holdUntilGreen` on. A run that merged work
+    // it could not publish is exactly a run that must not read as finished.
     const { adapter } = fakeGitHub(() => {
       throw Object.assign(new Error("Validation Failed"), { status: 422 });
     });
     const { store, runId, logs } = await build(adapter);
 
     expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
-    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    expect(store.getRun(runId)!.state).toBe("PAUSED");
+    expect(store.lastRunStateChange(runId)!.reason).toMatch(/no pull request could be opened, so nothing has checked this branch/);
     expect(logs.join("\n")).toMatch(/merged locally, but the pull request could not be opened/);
+  });
+
+  it("proceeds to review when there was genuinely nothing to publish", async () => {
+    // The other half of the same guard, and the reason it cannot simply hold on
+    // a missing PR number: a run whose foundation tasks parked has no diff, and
+    // pausing it over a pull request it was never going to open would stop it
+    // twice for one outcome it has already reported.
+    // `commit: false` is the shape: the worker's branch carries nothing, the task
+    // parks, and nothing ever reaches MERGED.
+    const { adapter } = fakeGitHub(() => ({ number: 7, url: "u" }));
+    const { store, runId, logs } = await build(adapter, false);
+
+    expect(store.getTask(runId, "task-a")!.state).toBe("NEEDS_HUMAN");
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    expect(logs.join("\n")).toMatch(/no pull request opened: no task reached MERGED/);
   });
 
   it("says so plainly when the integration branch adds nothing to the base", async () => {
@@ -273,8 +296,55 @@ describe("opening the component PR", () => {
 
     expect(store.getTask(runId, "task-a")!.prNumber).toBeNull();
     expect(logs.join("\n")).toMatch(/no commits that release does not already have/);
+    // Not a publish failure: nothing was refused, so the run reports and rests.
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    expect(store.publishFailure(runId)).toBeNull();
+  });
+
+  it("re-enters integration, not execution, when a resume finds merged work with no PR and nothing parked", async () => {
+    // `reopen` picks the state from what it found: parked tasks or revivable
+    // ones are work for agents and go back to EXECUTING, while merged work that
+    // simply never got published is the integrator's job alone. Sending it to
+    // EXECUTING would re-open the whole scheduler over a publishing step.
+    const { adapter } = fakeGitHub(() => null);
+    const { store, runId, repo } = await build(adapter);
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    expect(store.listTasks(runId).every((t) => t.state === "MERGED")).toBe(true);
+
+    const { adapter: working, prs } = fakeGitHub(() => ({ number: 77, url: "u" }));
+    const silent = {
+      async run() {
+        throw new Error("no agent should run to publish a PR");
+      },
+    } as unknown as AgentPool;
+    const controller = new RunController(store, new Bus(store), silent, working, {
+      async resolvePlanGate() {
+        return { approved: true, feedback: "" };
+      },
+      async resolveBudgetGate() {
+        return null;
+      },
+    }, repo);
+
+    expect(controller.hasRecoverableWork(runId)).toBe(true);
+    await controller.resume(runId);
+
+    expect(enterReason(store, runId, "INTEGRATING")).toBe("reopened by the operator");
+    expect(prs).toHaveLength(1);
+    expect(store.getTask(runId, "task-a")!.prNumber).toBe(77);
   });
 });
+
+/** The reason recorded on the run's most recent entry into `to`. */
+function enterReason(store: Store, runId: string, to: string): string {
+  return (
+    store
+      .eventsSince(runId, 0)
+      .map((r) => r.event)
+      .filter((e): e is Extract<typeof e, { type: "run.state_changed" }> => e.type === "run.state_changed" && e.to === to)
+      .at(-1)?.reason ?? ""
+  );
+}
 
 describe("what the run says it produced", () => {
   const reason = (store: Store, runId: string) =>
@@ -511,7 +581,13 @@ describe("resuming to open the missing PRs", () => {
       },
     }, repo);
 
-    expect(controller.hasRecoverableWork(runId)).toBe(true);
+    // Parked rather than "in review": the publish failed, and `greenGate` now
+    // says so instead of reading the missing PR number as nothing to publish.
+    // That is what makes the run resumable at all — `harness resume` offers any
+    // state but ABORTED/DONE/FAILED, and PR_REVIEW is the one that needs
+    // `hasRecoverableWork` to argue its way back in.
+    expect(store.getRun(runId)!.state).toBe("PAUSED");
+    expect(controller.hasRecoverableWork(runId)).toBe(false);
     await controller.resume(runId);
 
     expect(prs).toEqual([{ head: `harness/${runId}/task-a`, base: "release" }]);

@@ -1324,6 +1324,7 @@ export class RunController {
       // this machine still has them. A run resumed on another laptop, or after
       // the operator moved their skills directory, has a different answer.
       this.preflightSkillPins(runId);
+      await this.backfillBaseBranch(runId);
       // A run the green hold paused — CI red with the rounds spent, no CI at
       // all, a base it could not catch — is being resumed by the one person
       // who can grant what it was waiting for. Remembered here because the
@@ -1362,6 +1363,28 @@ export class RunController {
       const landed = (await this.wt.taskBranchDelta(runId, t.id)).landed;
       if (landed) this.bookAlreadyLanded(runId, t.id, landed, t.id);
     }
+  }
+
+  /**
+   * Give a run back the branch its pull requests have to target.
+   *
+   * Runs recorded before the base branch was captured have none, and every
+   * publish then fails with "no base branch (detached HEAD)" — the marrymath
+   * shape. This repair lived inside `reopen`, which only examines a run sitting
+   * in PR_REVIEW, and that was fine for exactly as long as a run that could not
+   * publish still settled there. It does not any more: `greenGate` parks one, so
+   * the retry arrived with the same empty config and failed a second time for a
+   * reason that had nothing to do with why it was parked.
+   *
+   * Only ever fills a blank. A run that captured its base keeps it — the base is
+   * frozen at creation for the same reason the repo path is, and a resume run
+   * from a different branch must not quietly re-aim the pull request.
+   */
+  private async backfillBaseBranch(runId: string): Promise<void> {
+    const run = this.store.getRun(runId);
+    if (!run || run.config.baseBranch) return;
+    const branch = await this.currentBranch();
+    if (branch) this.store.patchRunConfig(runId, { baseBranch: branch });
   }
 
   /**
@@ -1504,10 +1527,6 @@ export class RunController {
       return;
     }
     if (!run || run.state !== "PR_REVIEW") return;
-    if (!run.config.baseBranch) {
-      const branch = await this.currentBranch();
-      if (branch) this.store.patchRunConfig(runId, { baseBranch: branch });
-    }
     const tasks = this.store.listTasks(runId);
     const parked = tasks.filter((t) => t.state === "NEEDS_HUMAN");
     const revivable = this.revivableCancelled(runId, tasks);
@@ -2123,6 +2142,13 @@ export class RunController {
       if (stopsTheRun(e)) throw e;
       // An unvalidated run is reportable; an unfinished one is not. Say so and move on.
       this.bus.publish({ type: "agent.log", runId, sessionId: "validator", text: `intent validation did not complete: ${String(e).slice(0, 300)}`, ts: Date.now() });
+      // And say it where a reader other than a human can find it. A validator
+      // that runs to completion, costs real money and declines to invent a
+      // verdict it cannot evidence has behaved correctly — ledger-app a8df0107's
+      // did exactly that, eight times, under a tool denial it reported in
+      // prose. What had no home was the answer "I could not tell", so the run
+      // went on quoting the fifth pass's verdict at a tree three merges newer.
+      this.bus.publish({ type: "run.intent_unknown", runId, why: String(e).slice(0, 300), ts: Date.now() });
     }
   }
 
@@ -2149,6 +2175,12 @@ export class RunController {
     const run = this.store.getRun(runId)!;
     const verdict = this.store.intentVerdict(runId);
     if (!verdict || verdict.verdict === "PASS" || !verdict.gaps.length) return [];
+    // A verdict this run has since failed to reproduce is not a work list. The
+    // gaps describe the tree the validator last managed to read, and the run has
+    // merged into that tree since; queueing from it spends a worker on something
+    // that may already be done. a8df0107's stale FAIL named two gaps — one the
+    // run had closed itself an hour earlier, one that was never real.
+    if (this.store.intentCheckStale(runId)) return [];
     const tasks = this.store.listTasks(runId);
     const rounds = new Set(tasks.map((t) => /^intent-fix-(\d+)-/.exec(t.id)?.[1]).filter(Boolean));
     if (rounds.size >= run.config.intentFixRounds) return [];
@@ -2569,7 +2601,20 @@ export class RunController {
     // Nothing published, nothing to hold: `openPrs` said why, and the outcome
     // line carries it. A hold here would pause a run over parked tasks it has
     // already reported.
-    if (prNumber === undefined) return { call: "proceed" };
+    //
+    // But "nothing to publish" and "publishing failed" are not the same run,
+    // and until `publishFailure` existed they arrived here identically. The
+    // premise above is true of a run whose foundation tasks parked and false of
+    // one that merged 127 tasks and had its body refused (ledger-app a8df0107):
+    // that run proceeded, unchecked and silently, which is a sixth outcome the
+    // list in this method's docstring does not contemplate and the hold was
+    // written to make impossible. A run that merged work it could not publish
+    // is precisely a run that must not read as finished.
+    if (prNumber === undefined) {
+      const failed = this.store.publishFailure(runId);
+      if (failed) return { call: "stop", why: `merged locally, but no pull request could be opened, so nothing has checked this branch: ${failed}` };
+      return { call: "proceed" };
+    }
     let resumed = Boolean(opts.resumed) || this.greenHoldResumed.delete(runId);
     const spendResume = () => {
       const r = resumed;
@@ -2718,7 +2763,21 @@ export class RunController {
     const run = this.store.getRun(runId)!;
     if (!run.config.waitForChecks || !this.github.enabled) return { call: "proceed" };
     const prNumber = this.rollupPr(runId);
-    if (prNumber === undefined) return { call: "proceed" };
+    // As in `greenGate`: a resume must not walk past a branch whose publish
+    // failed just because the failure left no number to ask GitHub about.
+    if (prNumber === undefined) {
+      const failed = this.store.publishFailure(runId);
+      // Not reachable from `drive` as it stands, and kept because it is the
+      // invariant this method shares with `greenGate` rather than a guess. A
+      // failed publish leaves a MERGED task with no `prNumber`, which is
+      // precisely what makes `reopen`'s `prless` true — so such a run is routed
+      // back to INTEGRATING and republishes before the loop reaches here. This
+      // is what would stop a resume walking past an unchecked branch if that
+      // routing ever changed, and it is one line.
+      /* v8 ignore next */
+      if (failed) return { call: "stop", why: `merged locally, but no pull request could be opened, so nothing has checked this branch: ${failed}` };
+      return { call: "proceed" };
+    }
     const hold = this.holdsUntilGreen(run);
     const ci = this.store.ciStatus(runId);
     const merge = this.store.mergeStatus(runId);
@@ -2785,6 +2844,11 @@ export class RunController {
           text: `merged locally, but the pull request could not be opened: ${String(e).slice(0, 300)}`,
           ts: Date.now(),
         });
+        // The same sentence as a value. The log line above says it to a human
+        // reading the feed; this says it to `greenGate`, which otherwise cannot
+        // tell a run that published nothing from a run that failed to publish
+        // and would let the second one past the CI hold.
+        this.bus.publish({ type: "github.pr_publish_failed", runId, taskId: "run", error: String(e).slice(0, 300), ts: Date.now() });
       }
       return;
     }
@@ -2801,6 +2865,11 @@ export class RunController {
           text: `merged locally, but the pull request could not be opened: ${String(e).slice(0, 300)}`,
           ts: Date.now(),
         });
+        // Per-task mode reaches the same hole by a longer road: one failure
+        // among many still leaves a rollup for the gates to read, but a run
+        // whose every task failed to publish looks exactly like a run with
+        // nothing to publish. Only the latter may proceed.
+        this.bus.publish({ type: "github.pr_publish_failed", runId, taskId: task.id, error: String(e).slice(0, 300), ts: Date.now() });
       }
     }
   }
@@ -3327,19 +3396,53 @@ export class RunController {
     for (const n of priors) if ((await this.github.prState?.(n)) === "merged") shipped.push(n);
 
     const intent = this.store.intentVerdict(runId);
+    // Whether that verdict is this run's newest word on the tree, or an older
+    // pass's answer left standing by a check that ended without one. The
+    // reviewer is told which — a stale verdict presented as current describes a
+    // tree nobody read.
+    const intentStale = this.store.intentCheckStale(runId);
     // Every criterion the run passed on without settling, gathered from the
     // tasks that are actually in this diff. See `QaVerdict`'s PASS branch.
     const unsettled = merged.flatMap((t) => t.unverified.map((u) => ({ task: t.title, gap: u })));
+    /**
+     * How many lines any one enumeration below may contribute.
+     *
+     * Every entry was already bounded; the lists were not, and a body assembled
+     * from per-task records grows with the run. ledger-app a8df0107 merged 127
+     * tasks carrying 159 unsettled criteria, and that one section came to 73,908
+     * characters — past GitHub's 65,536-character limit on its own, before the
+     * task list, the verdict or the conflicts were added. The 422 cost the run
+     * its pull request at the one step it cannot retry itself.
+     *
+     * "The more the run builds, the more certainly it fails at the last step"
+     * is the shape to design out, so the bound is on the count rather than on
+     * the total: what is dropped is named, and `REPORT.md` has all of it. The
+     * conflict list below has always been written this way.
+     */
+    const MAX_LISTED = 40;
+    /** `- …and N more` for whatever a cap left out, or nothing when it left out nothing. */
+    const andMore = (total: number, shown: number): string[] =>
+      total > shown ? [`- …and ${total - shown} more — the full list is in \`.harness/${runId}/REPORT.md\``] : [];
     const body = [
       `${merged.length} task${merged.length === 1 ? "" : "s"} merged on the run's integration branch, one \`--no-ff\` merge commit each. Opened by harness — merge is always human.`,
       "",
       ...merged.map((t) => `- ${t.title} (QA iterations: ${t.qaIterations}${t.githubIssueNumber ? `, closes #${t.githubIssueNumber}` : ""})`),
-      // The reviewer arrives with the validator's answer in hand, PASS or not.
-      ...(intent
+      // The reviewer arrives with the validator's answer in hand, PASS or not —
+      // or with the fact that there is no answer, which is not the same as a
+      // pass and must not be read as one.
+      ...(intentStale
+        ? [
+            "",
+            "Intent check: **DID NOT COMPLETE**. Nothing has judged this tree against the assignment." +
+              (intent ? " An earlier pass reached a verdict, but it read a different tree and is not repeated here." : ""),
+          ]
+        : []),
+      ...(intent && !intentStale
         ? [
             "",
             intent.verdict === "PASS" ? "Intent check: **PASS**." : `Intent check: **FAIL** — ${intent.gaps.length || "unstated"} gap${intent.gaps.length === 1 ? "" : "s"}:`,
-            ...intent.gaps.map((g) => `- ${g.slice(0, 500)}`),
+            ...intent.gaps.slice(0, MAX_LISTED).map((g) => `- ${g.slice(0, 500)}`),
+            ...andMore(intent.gaps.length, MAX_LISTED),
             ...(intent.verdict === "FAIL"
               ? [
                   "",
@@ -3356,7 +3459,8 @@ export class RunController {
         ? [
             "",
             `Passed but **not verified** — ${unsettled.length} criteri${unsettled.length === 1 ? "on" : "a"} QA could not settle in its environment:`,
-            ...unsettled.map((u) => `- ${u.task}: ${u.gap.slice(0, 500)}`),
+            ...unsettled.slice(0, MAX_LISTED).map((u) => `- ${u.task}: ${u.gap.slice(0, 500)}`),
+            ...andMore(unsettled.length, MAX_LISTED),
             "",
             "**This PR is held as a draft because of that.** Each line is something the",
             "run reports as unproven, not something it found wrong — QA said so itself",
@@ -3606,9 +3710,24 @@ export class RunController {
               : "CI still running"
       );
     }
-    // The validator's answer to the only question the operator actually asked.
-    const intent = this.store.intentVerdict(runId);
-    if (intent) parts.push(intent.verdict === "PASS" ? "intent check passed" : `intent check found ${intent.gaps.length || "unstated"} gap${intent.gaps.length === 1 ? "" : "s"}`);
+    // The validator's answer to the only question the operator actually asked —
+    // and only when this run's newest check is the one that produced it. A
+    // verdict is a statement about the tree that was read, so a later check
+    // that ended without one does not inherit it: ledger-app a8df0107 closed
+    // with "intent check found 2 gaps", the fifth pass's answer, one gap of
+    // which the run had merged a fix for an hour earlier and the other of which
+    // was never real.
+    // Null, not stale: the structured field feeds the delivery ledger, which
+    // turns a FAIL's gaps into the completion report's "Gaps" section under the
+    // heading "what the end-of-run intent check found missing". Handing it an
+    // older pass's gap list prints work the run may already have done as work
+    // still outstanding, which is what a8df0107's report did with both of its.
+    const intent = this.store.intentCheckStale(runId) ? null : this.store.intentVerdict(runId);
+    if (this.store.intentCheckStale(runId)) {
+      parts.push("the intent check did not complete — nothing has judged the merged tree");
+    } else if (intent) {
+      parts.push(intent.verdict === "PASS" ? "intent check passed" : `intent check found ${intent.gaps.length || "unstated"} gap${intent.gaps.length === 1 ? "" : "s"}`);
+    }
     // Whether any of it reached anyone. This is the end of the cycle, so it goes
     // last: the operator reads left to right and this is the part that decides
     // whether the work is finished or merely merged.
@@ -5459,7 +5578,7 @@ export class RunController {
           maxTurns: 30,
           budgetCheck: () => this.checkStops(runId),
         });
-        return { report: { lens, ...ReviewJson.parse(extractJson(result.resultText)) }, finished: true };
+        return { report: { lens, ...ReviewJson.parse(extractJson(result.resultText)), finished: true }, finished: true };
       } catch (e) {
         if (stopsTheRun(e)) throw e;
         // A lens that failed is reported as a lens that failed. Dropping it
@@ -5469,8 +5588,14 @@ export class RunController {
         // the verdict `on-track` because there is no honest verdict to carry,
         // and letting a crashed session's placeholder suppress the second pass
         // would turn a transport error into a cheaper, quieter pit stop.
+        //
+        // It rides on the report as well as beside it. Both callers below reduce
+        // to `.map((r) => r.report)`, so the field the staging decision reads
+        // used to stop at this method's edge, and `renderPitStop` — which takes
+        // the heading from the verdict — printed a dead session as an
+        // endorsement.
         return {
-          report: { lens, verdict: "on-track", findings: [`(this reviewer did not finish: ${String(e).slice(0, 200)})`], question: "" },
+          report: { lens, verdict: "on-track", findings: [`(this reviewer did not finish: ${String(e).slice(0, 200)})`], question: "", finished: false },
           finished: false,
         };
       }

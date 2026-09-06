@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { GitHubAdapter, isDraftUnsupportedError } from "./github.js";
+import { GitHubAdapter, MAX_PR_BODY, fitPrBody, isBodyTooLongError, isDraftUnsupportedError } from "./github.js";
 
 /**
  * The adapter with a hand-rolled Octokit. Only the surfaces ensurePR /
@@ -8,13 +8,16 @@ import { GitHubAdapter, isDraftUnsupportedError } from "./github.js";
 function stubbed(overrides: {
   list?: { state: string; number: number; html_url: string; body?: string | null }[];
   createError?: unknown;
+  /** Fails the first create only — for testing a retry that has to succeed. */
+  createErrorOnce?: unknown;
   draftError?: unknown;
   updateError?: unknown;
   get?: { state: string; draft?: boolean; merged_at?: string | null; node_id?: string };
 }) {
   const adapter = new GitHubAdapter("token", "owner/repo");
+  let firstCreateFailed = false;
   const calls = {
-    created: [] as { draft?: boolean }[],
+    created: [] as { draft?: boolean; body?: string }[],
     updated: [] as { pull_number?: number; title?: string; body?: string }[],
     graphql: [] as unknown[],
   };
@@ -22,9 +25,13 @@ function stubbed(overrides: {
     rest: {
       pulls: {
         list: async () => ({ data: overrides.list ?? [] }),
-        create: async (args: { draft?: boolean }) => {
+        create: async (args: { draft?: boolean; body?: string }) => {
           if (args.draft && overrides.draftError) throw overrides.draftError;
           if (overrides.createError) throw overrides.createError;
+          if (overrides.createErrorOnce && !firstCreateFailed) {
+            firstCreateFailed = true;
+            throw overrides.createErrorOnce;
+          }
           calls.created.push(args);
           return { data: { number: 42, html_url: "https://example.invalid/pr/42" } };
         },
@@ -226,5 +233,90 @@ describe("telling the draft 422 apart", () => {
     expect(isDraftUnsupportedError(err422("Draft pull requests are not supported in this repository."))).toBe(true);
     expect(isDraftUnsupportedError(err422("No commits between a and b"))).toBe(false);
     expect(isDraftUnsupportedError({ status: 404, message: "Draft pull requests are not supported" })).toBe(false);
+  });
+});
+
+describe("a body GitHub will not take", () => {
+  const tooLong = () =>
+    Object.assign(new Error("Validation Failed"), {
+      status: 422,
+      response: { data: { errors: [{ message: "body is too long (maximum is 65536 characters)" }] } },
+    });
+
+  it("recognises the refusal, and does not mistake it for the other 422s", () => {
+    expect(isBodyTooLongError(tooLong())).toBe(true);
+    expect(isBodyTooLongError(err422("no commits between main and head"))).toBe(false);
+    expect(isBodyTooLongError(new Error("body is too long"))).toBe(false);
+  });
+
+  it("leaves a body that fits exactly as it was", () => {
+    expect(fitPrBody("- one\n- two", "r")).toBe("- one\n- two");
+  });
+
+  it("cuts to the limit, on a line boundary, and says where the rest is", () => {
+    const body = Array.from({ length: 5_000 }, (_, i) => `- criterion ${i}`).join("\n");
+    const cut = fitPrBody(body, "a8df0107");
+    expect(body.length).toBeGreaterThan(MAX_PR_BODY);
+    expect(cut.length).toBeLessThanOrEqual(MAX_PR_BODY);
+    // The top survives — it is where the task list and its closing refs live.
+    expect(cut).toContain("- criterion 0");
+    expect(cut).toContain(".harness/a8df0107/REPORT.md");
+    // Never mid-item: a half-written criterion reads as a finding.
+    expect(cut.split("\n").filter((l) => l.startsWith("- criterion")).every((l) => /^- criterion \d+$/.test(l))).toBe(true);
+  });
+
+  it("never leaves half a character behind when it cuts", () => {
+    // GitHub counts characters; this process counts UTF-16 units. Every astral
+    // character is two units and one character, so a fit measured in units is
+    // conservative — never optimistic — which is the direction that matters.
+    // What it must not do is cut between a surrogate pair and emit a lone half.
+    const cut = fitPrBody("🎉".repeat(60_000), "r");
+    expect(cut.length).toBeLessThanOrEqual(MAX_PR_BODY);
+    expect([...cut].length).toBeLessThanOrEqual(MAX_PR_BODY);
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(cut)).toBe(false);
+  });
+
+  it("still produces something when the limit is smaller than the notice itself", () => {
+    // Degenerate, but it must not throw or return a negative slice.
+    expect(fitPrBody("- one\n- two\n- three", "r", 10)).toContain("REPORT.md");
+  });
+
+  it("opens the pull request anyway when GitHub refuses the body it was given", async () => {
+    // The ledger-app a8df0107 failure. `refreshPrBody` has always survived this
+    // on the update path; the create path threw, and the 422 cost not just the
+    // description but the entire pull request — and with it the PR number every
+    // downstream gate reads, which is how a 127-task run walked past its own CI
+    // hold. A description is worth one retry; it is never worth the PR.
+    const { adapter, calls } = stubbed({ createErrorOnce: tooLong() });
+    const pr = await adapter.ensurePR("r", "run", "head", "main", "t", "x".repeat(80_000));
+    expect(pr).toEqual({ number: 42, url: "https://example.invalid/pr/42", fresh: true });
+    expect(calls.created).toHaveLength(1);
+    expect(calls.created[0]!.body!.length).toBeLessThanOrEqual(MAX_PR_BODY);
+  });
+
+  it("bounds the body before the first attempt, so the retry is the backstop and not the plan", async () => {
+    const { adapter, calls } = stubbed({});
+    await adapter.ensurePR("r", "run", "head", "main", "t", "y".repeat(120_000));
+    expect(calls.created).toHaveLength(1);
+    // The marker is appended after the fit, and still has to fit.
+    expect(calls.created[0]!.body!.length).toBeLessThanOrEqual(MAX_PR_BODY);
+    expect(calls.created[0]!.body).toContain("<!-- harness-run:r/pr-run -->");
+  });
+
+  it("opens the retry as the draft it was asked for, not as a ready pull request", async () => {
+    // The draft flag is a control: `openRunPr` holds a rollup as a draft when
+    // the intent check failed or criteria went unsettled, and GitHub refuses to
+    // merge one. Losing it on the retry would turn "GitHub disliked the body"
+    // into "the run published a mergeable PR over work it had reported as
+    // unproven".
+    const { adapter, calls } = stubbed({ createErrorOnce: tooLong() });
+    await adapter.ensurePR("r", "run", "head", "main", "t", "x".repeat(80_000), { draft: true });
+    expect(calls.created).toHaveLength(1);
+    expect(calls.created[0]!.draft).toBe(true);
+  });
+
+  it("still lets every other 422 through — a create that fails for a real reason must not look like a success", async () => {
+    const { adapter } = stubbed({ createError: err422("some other problem entirely") });
+    await expect(adapter.ensurePR("r", "run", "head", "main", "t", "b")).rejects.toThrow(/some other problem/);
   });
 });

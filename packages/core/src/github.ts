@@ -312,6 +312,14 @@ export class GitHubAdapter {
     opts?: { draft?: boolean }
   ): Promise<PrRef | null> {
     if (!this.octokit) return null;
+    // Bounded once, here, so both paths below send a body GitHub will take.
+    // The update path has always survived a refusal (`refreshPrBody`); the
+    // create path could not, and a 422 there costs the entire pull request —
+    // and, because every gate downstream keys off the PR number, the CI hold
+    // behind it. ledger-app a8df0107 merged 127 tasks, was refused a body 19,555
+    // characters over the limit, and walked to PR_REVIEW over a branch nothing
+    // had ever checked with `holdUntilGreen` on.
+    const fitted = fitPrBody(body, runId, MAX_PR_BODY - this.marker(runId, `pr-${taskId}`).length - 2);
     const prior = await this.octokit.rest.pulls.list({
       owner: this.owner,
       repo: this.repo,
@@ -322,7 +330,7 @@ export class GitHubAdapter {
     });
     const open = prior.data.find((p) => p.state === "open");
     if (open) {
-      await this.refreshPrBody(runId, taskId, open.number, open.body ?? "", body);
+      await this.refreshPrBody(runId, taskId, open.number, open.body ?? "", fitted);
       return { number: open.number, url: open.html_url };
     }
 
@@ -333,12 +341,20 @@ export class GitHubAdapter {
     // holds anything the base lacks is GitHub's call: try to create, and let
     // the "no commits between" 422 say otherwise.
     try {
-      const created = await this.createPR(runId, taskId, head, base, title, body, opts?.draft ?? false);
+      const created = await this.createPR(runId, taskId, head, base, title, fitted, opts?.draft ?? false);
       return { ...created, fresh: true };
     } catch (e) {
       if (isNoCommitsError(e)) {
         const last = prior.data[0];
         return last ? { number: last.number, url: last.html_url } : null;
+      }
+      // `fitted` was measured in UTF-16 units and GitHub counts characters, so
+      // a body can clear our arithmetic and fail theirs. Half the limit clears
+      // it by any counting. A description is worth retrying for; it is not
+      // worth the pull request, which is what throwing here spends.
+      if (isBodyTooLongError(e)) {
+        const created = await this.createPR(runId, taskId, head, base, title, fitPrBody(fitted, runId, MAX_PR_BODY / 2), opts?.draft ?? false);
+        return { ...created, fresh: true };
       }
       throw e;
     }
@@ -412,12 +428,13 @@ export class GitHubAdapter {
     if (!this.octokit) return false;
     const { data } = await this.octokit.rest.pulls.get({ owner: this.owner, repo: this.repo, pull_number: prNumber });
     if (data.state !== "open" || !data.draft) return false;
+    const marker = this.marker(runId, `pr-${taskId}`);
     await this.octokit.rest.pulls.update({
       owner: this.owner,
       repo: this.repo,
       pull_number: prNumber,
       title,
-      body: `${body}\n\n${this.marker(runId, `pr-${taskId}`)}`,
+      body: `${fitPrBody(body, runId, MAX_PR_BODY - marker.length - 2)}\n\n${marker}`,
     });
     await this.octokit.graphql(
       `mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { pullRequest { number } } }`,
@@ -701,6 +718,36 @@ export function tailOfLog(log: string, lines = 120, bytes = 8_000): string {
   return tail.length > bytes ? tail.slice(-bytes) : tail;
 }
 
+/** GitHub's hard limit on a pull request or issue body. */
+export const MAX_PR_BODY = 65_536;
+
+/**
+ * Cut a body down to something GitHub will accept, keeping the top.
+ *
+ * The top is the part that has to survive. The rollup body is written summary
+ * first — the merged task list with its `closes #n` refs, then the intent
+ * verdict, then the draft-hold explanations — so a reviewer who reads only the
+ * first screen has read the run, and the refs that close the run's issues are
+ * never the thing that gets dropped. What gets dropped is the tail of the
+ * longest enumeration, and the notice says where the whole of it lives: the
+ * run's own report, written to disk, subject to nobody's character limit.
+ *
+ * Never cuts mid-line. A truncated markdown list item renders as prose, and a
+ * half-sentence about a criterion QA could not settle reads as a finding
+ * rather than as a fragment.
+ *
+ * This is the last line of defence, not the first: a caller that assembles a
+ * body out of per-task records bounds its own lists, because "the more the run
+ * built, the less of it this describes" is a poor way to report a large run.
+ */
+export function fitPrBody(body: string, runId: string, limit = MAX_PR_BODY): string {
+  if (body.length <= limit) return body;
+  const notice = `\n\n…truncated: this body hit GitHub's 65,536-character limit. The full list is in \`.harness/${runId}/REPORT.md\`.`;
+  const head = body.slice(0, Math.max(0, limit - notice.length));
+  const nl = head.lastIndexOf("\n");
+  return `${nl > 0 ? head.slice(0, nl) : head}${notice}`;
+}
+
 export function isNoCommitsError(e: unknown): boolean {
   return is422Matching(e, /no commits between/i);
 }
@@ -708,6 +755,19 @@ export function isNoCommitsError(e: unknown): boolean {
 /** Draft PRs are a paid feature on private repos; GitHub says so with a 422. */
 export function isDraftUnsupportedError(e: unknown): boolean {
   return is422Matching(e, /draft pull requests are not supported/i);
+}
+
+/**
+ * GitHub's refusal of an oversized body.
+ *
+ * The backstop, not the bound — `fitPrBody` is the bound. This exists because
+ * the two do not count the same thing: GitHub counts characters, this process
+ * counts UTF-16 units, and an emoji in a task title makes them disagree. A body
+ * that fits by our arithmetic and not by theirs must not cost the whole pull
+ * request, which is exactly what it cost ledger-app a8df0107.
+ */
+export function isBodyTooLongError(e: unknown): boolean {
+  return is422Matching(e, /body is too long/i);
 }
 
 function is422Matching(e: unknown, pattern: RegExp): boolean {

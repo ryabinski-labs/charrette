@@ -488,6 +488,128 @@ describe("the pull request's title and body", () => {
     expect(logs(events).some((t) => /could not settle 2 criteria[\s\S]*no live DynamoDB run/.test(t))).toBe(true);
   });
 
+  it("reports an intent check that reached no verdict as one that reached no verdict", async () => {
+    // ledger-app a8df0107's validator was denied Bash, said so in prose, and
+    // ended `done` having cost $2.58 and concluded nothing. That is honest
+    // behaviour from the agent; what the harness lacked was anywhere to put
+    // "could not tell", so the parse error became a log line and the run went
+    // on quoting an earlier pass's verdict at a tree nobody had read. The run
+    // closed with "intent check found 2 gaps" — one of which it had merged a
+    // fix for an hour earlier, the other of which was never real.
+    const dir = repo({ remote: true });
+    const { adapter } = fakeGithub();
+    const created: { body: string }[] = [];
+    (adapter as unknown as { octokit: { rest: { pulls: { create: unknown } } } }).octokit.rest.pulls.create = async (a: { body: string }) =>
+      (created.push(a), { data: { number: 57, html_url: "https://x.invalid/pull/57" } });
+    const { pool } = rolePool({
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS("no heading here, just prose") : dagJson()),
+      worker,
+      qa: () => '```json\n{"verdict":"PASS","notes":"ok","unverified":[]}\n```',
+      // The shape of the real thing: a refusal to invent a verdict, in prose.
+      validator: () => "Stopping tool use as instructed — Bash is being explicitly denied right now, so I won't retry it.",
+    });
+    const { controller, store } = build({ repoPath: dir, pool, github: adapter });
+
+    const runId = await controller.startRun("move session revocation to its own table", RunConfig.parse({ ...BASE, intentFixRounds: 0 }));
+
+    expect(store.intentCheckStale(runId)).toBe(true);
+    expect(controller.outcome(runId).line).toContain("the intent check did not complete");
+    expect(controller.outcome(runId).line).not.toContain("intent check passed");
+    // And the reviewer is told the same thing, rather than being shown a
+    // verdict about some other tree.
+    expect(created[0]!.body).toContain("Intent check: **DID NOT COMPLETE**");
+  });
+
+  it("does not repeat an earlier pass's verdict when a later check reached none", async () => {
+    // The full ledger-app a8df0107 shape, which needs two passes to reproduce:
+    // the validator reaches a FAIL, the run queues the fixes and merges them,
+    // and the next pass — the one that would have judged the tree those fixes
+    // produced — ends without a verdict. The stored verdict then describes a
+    // tree that no longer exists, and every surface went on quoting it: the PR
+    // body, the closing line, the delivery ledger's "Gaps" section, and
+    // `queueIntentFixes`, which would have paid a worker to close a gap the run
+    // had already closed itself.
+    const dir = repo({ remote: true });
+    const { adapter } = fakeGithub();
+    const created: { body: string }[] = [];
+    (adapter as unknown as { octokit: { rest: { pulls: { create: unknown } } } }).octokit.rest.pulls.create = async (a: { body: string }) =>
+      (created.push(a), { data: { number: 58, html_url: "https://x.invalid/pull/58" } });
+    // The plan-intent check shares the `validator` role, so the two are told
+    // apart the way the planner's two calls are: it is the one given no tools.
+    let endOfRun = 0;
+    const { pool } = rolePool({
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS("no heading here, just prose") : dagJson()),
+      worker,
+      qa: () => '```json\n{"verdict":"PASS","notes":"ok","unverified":[]}\n```',
+      validator: (s) => {
+        if (Array.isArray(s.tools) && s.tools.length === 0) return '```json\n{"verdict":"PASS","gaps":[],"summary":"the plan covers it"}\n```';
+        endOfRun += 1;
+        return endOfRun === 1
+          ? '```json\n{"verdict":"FAIL","gaps":["the worker is scheduled nowhere"],"summary":"half wired"}\n```'
+          : "I could not run the checks I needed, so I am not going to state a verdict.";
+      },
+    });
+    const { controller, store } = build({ repoPath: dir, pool, github: adapter });
+
+    const runId = await controller.startRun("wire up the disbursement worker", RunConfig.parse({ ...BASE, intentFixRounds: 1 }));
+
+    // Both passes happened: a verdict is on record, and so is a later failure.
+    expect(endOfRun).toBeGreaterThan(1);
+    expect(store.intentVerdict(runId)!.verdict).toBe("FAIL");
+    expect(store.intentCheckStale(runId)).toBe(true);
+
+    // The reviewer is told there is no current answer, and told that the older
+    // one is being withheld rather than silently dropped.
+    const body = created.at(-1)!.body;
+    expect(body).toContain("Intent check: **DID NOT COMPLETE**");
+    expect(body).toContain("read a different tree and is not repeated here");
+    expect(body).not.toContain("Intent check: **FAIL**");
+    // The gap is not re-listed as an outstanding one. It survives only as the
+    // title of the task the run queued to close it, which is the merged list
+    // doing its job.
+    expect(body).not.toContain("\n- the worker is scheduled nowhere");
+    expect(body).toContain("- Close intent gap: the worker is scheduled nowhere (QA iterations:");
+
+    // And the run's own closing line does not inherit it either.
+    expect(controller.outcome(runId).line).toContain("the intent check did not complete");
+    expect(controller.outcome(runId).intent).toBeNull();
+  });
+
+  it("caps the unsettled list rather than letting it grow the body past what GitHub accepts", async () => {
+    // ledger-app a8df0107: 127 merged tasks carrying 159 unsettled criteria made
+    // that one section 73,908 characters — over GitHub's 65,536-character limit
+    // on its own, before the task list or the verdict were added. The 422 cost
+    // the run its pull request at the one step it cannot retry itself, and
+    // every entry was already capped at 500 chars: it was the count that was
+    // unbounded. "The more the run builds, the more certainly it fails at the
+    // last step" is the shape being designed out.
+    const dir = repo({ remote: true });
+    const { adapter } = fakeGithub();
+    const created: { body: string }[] = [];
+    (adapter as unknown as { octokit: { rest: { pulls: { create: unknown } } } }).octokit.rest.pulls.create = async (a: { body: string }) =>
+      (created.push(a), { data: { number: 56, html_url: "https://x.invalid/pull/56" } });
+    const many = Array.from({ length: 95 }, (_, i) => `criterion ${i} was never exercised against anything live`);
+    const { pool } = rolePool({
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS("no heading here, just prose") : dagJson()),
+      worker,
+      qa: () => `\`\`\`json\n${JSON.stringify({ verdict: "PASS", notes: "ok", unverified: many })}\n\`\`\``,
+      validator: () => '```json\n{"verdict":"PASS","gaps":[],"summary":"ok"}\n```',
+    });
+    const { controller } = build({ repoPath: dir, pool, github: adapter });
+
+    await controller.startRun("move session revocation to its own table", RunConfig.parse({ ...BASE, intentFixRounds: 0 }));
+
+    const body = created[0]!.body;
+    // The count is still reported in full — what is bounded is how many lines
+    // it spends saying it.
+    expect(body).toMatch(/Passed but \*\*not verified\*\* — 95 criteria/);
+    expect(body).toContain("criterion 0 was never exercised");
+    expect(body).toContain("…and 55 more");
+    expect(body).toContain("REPORT.md");
+    expect(body).not.toContain("criterion 94 was never exercised");
+    expect(body.length).toBeLessThanOrEqual(65_536);
+  });
+
   it("still flips the rollup ready when the intent check passed", async () => {
     const dir = repo({ remote: true });
     const { adapter } = fakeGithub();
