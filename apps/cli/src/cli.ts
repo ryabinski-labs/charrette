@@ -796,14 +796,28 @@ export function buildProgram(): Command {
       // A run that failed *in planning* has built nothing to talk over and holds
       // an intake conversation worth more than the phase that failed, so it
       // resumes by planning again rather than being started from scratch.
-      const resumable = (id: string, state: string) =>
-        state === "FAILED"
-          ? controller.replannable(id)
-          : !["ABORTED", "DONE"].includes(state) &&
-            (state !== "PR_REVIEW" || controller.hasRecoverableWork(id) || controller.awaitingVerification(id));
+      // A run in review is asked about only after GitHub has been asked about
+      // its pull request: the CI verdict on the record is a snapshot, and a
+      // branch that went red after the run stood down — a re-run, a nightly,
+      // a pass it should never have believed — is work only the run can do.
+      // Run de2cb7aa's #527 was red on `test` with "passing" on the record,
+      // and this line read the record.
+      const resumable = async (id: string, state: string): Promise<boolean> => {
+        if (state === "FAILED") return controller.replannable(id);
+        if (["ABORTED", "DONE"].includes(state)) return false;
+        if (state !== "PR_REVIEW") return true;
+        await controller.refreshCiStatus(id);
+        return controller.hasRecoverableWork(id) || controller.awaitingVerification(id);
+      };
       let runId = runIdArg;
       if (!runId) {
-        const pick = store.listRuns().find((r) => resumable(r.id, r.state));
+        let pick: ReturnType<typeof store.listRuns>[number] | undefined;
+        for (const r of store.listRuns()) {
+          if (await resumable(r.id, r.state)) {
+            pick = r;
+            break;
+          }
+        }
         if (!pick) {
           process.stdout.write("No run to resume: every run in this repo either finished cleanly, was aborted, or failed with work already in flight.\n");
           return;
@@ -812,7 +826,7 @@ export function buildProgram(): Command {
         process.stdout.write(`Resuming run ${runId} [${pick.state}] — ${pick.assignment.slice(0, 80).replace(/\n.*/s, "")}\n`);
       }
       const existing = store.getRun(runId);
-      if (existing && !resumable(runId, existing.state)) {
+      if (existing && !(await resumable(runId, existing.state))) {
         process.stdout.write(`Run ${runId} already finished (${existing.state}); there is nothing to resume.\n`);
         await reportOutcome(controller, repo, runId, { notify: false });
         return;

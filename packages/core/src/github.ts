@@ -8,6 +8,28 @@ export interface PrChecks {
   /** Names of the checks that failed, for the operator to go and read. */
   failing: string[];
   total: number;
+  /**
+   * Every check run and status context the commit carried when it was read —
+   * skipped and neutral ones included, which `total` leaves out.
+   *
+   * This is what lets a caller tell a settled answer from an incomplete one.
+   * A re-run drops a workflow's check runs out of GitHub's answer for the
+   * moment before it re-attaches them, and the checks left behind — the ones
+   * that had already passed — read, correctly and uselessly, as `passing`.
+   * Names are stable across that gap where a count is not: a job that ends up
+   * `skipped` leaves `total` and stays here.
+   *
+   * Optional only so an adapter that reads a verdict and nothing else (the
+   * test fakes) still satisfies the type; `checksForRef` always fills it.
+   */
+  names?: string[];
+  /**
+   * The commit the answer is about — the pull request's head when read through
+   * `prChecks`. What `names` are compared against is the last answer for the
+   * *same* commit: a new head can honestly carry a different set of checks
+   * (a path-filtered workflow), and only the same head cannot lose one.
+   */
+  sha?: string;
 }
 
 export interface PrRef {
@@ -643,9 +665,11 @@ export class GitHubAdapter {
     // is a green branch, and reporting them as pending would wait forever.
     const BAD = new Set(["failure", "timed_out", "cancelled", "action_required", "startup_failure"]);
     const failing: string[] = [];
+    const names: string[] = [];
     let pending = 0;
     let total = 0;
     for (const c of runs) {
+      names.push(c.name);
       // Skipped and neutral checks are deliberate non-answers, not results.
       if (c.status === "completed" && (c.conclusion === "skipped" || c.conclusion === "neutral")) continue;
       total++;
@@ -653,11 +677,12 @@ export class GitHubAdapter {
       else if (c.conclusion && BAD.has(c.conclusion)) failing.push(c.name);
     }
     for (const s of combined?.statuses ?? []) {
+      names.push(s.context);
       total++;
       if (s.state === "pending") pending++;
       else if (s.state === "failure" || s.state === "error") failing.push(s.context);
     }
-    if (!total) return { state: "none", failing: [], total: 0 };
+    if (!total) return { state: "none", failing: [], total: 0, names, sha: ref };
     // A failure with other checks still pending is not yet the whole answer —
     // only report "failing" once nothing is left running. web-app run 428d77f8
     // reported "CI is red: Frontend" the moment that one job failed, while
@@ -670,8 +695,8 @@ export class GitHubAdapter {
     // finish first — exactly the false confidence `awaitChecks`'s "a timeout is
     // reported as pending, never as a pass" rule exists to prevent, just from
     // the other direction.
-    if (failing.length && !pending) return { state: "failing", failing, total };
-    return { state: pending ? "pending" : "passing", failing: [], total };
+    if (failing.length && !pending) return { state: "failing", failing, total, names, sha: ref };
+    return { state: pending ? "pending" : "passing", failing: [], total, names, sha: ref };
   }
 
   /**

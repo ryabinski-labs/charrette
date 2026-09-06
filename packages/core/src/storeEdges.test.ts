@@ -131,7 +131,7 @@ describe("reading back a row an older harness wrote", () => {
     const { store: s } = withRun();
     legacyEvent(s, "run.ci_status", { prNumber: 7, state: "passing" });
 
-    expect(s.ciStatus("run1")).toEqual({ prNumber: 7, state: "passing", failing: [], total: 0 });
+    expect(s.ciStatus("run1")).toEqual({ prNumber: 7, state: "passing", failing: [], total: 0, names: [], sha: "" });
   });
 
   it("survives a deploy status recorded before the failing list existed", () => {
@@ -195,7 +195,7 @@ describe("reading back an event that was written without every field", () => {
     const { store: s, bus } = withRun();
     bus.publish({ type: "run.ci_status", runId: "run1", prNumber: 7, state: "passing", ts: 1 } as never);
 
-    expect(s.ciStatus("run1")).toEqual({ prNumber: 7, state: "passing", failing: [], total: 0 });
+    expect(s.ciStatus("run1")).toEqual({ prNumber: 7, state: "passing", failing: [], total: 0, names: [], sha: "" });
   });
 
   it("fills in a deploy status the same way", () => {
@@ -242,12 +242,12 @@ describe("reading back an event that carried everything", () => {
     expect(s.intentVerdict("run1")).toEqual({ verdict: "FAIL", gaps: ["no offline mode"], summary: "two thirds delivered" });
   });
 
-  it("keeps the names of the checks that failed", () => {
+  it("keeps the names of the checks that failed, and of every check the head carried", () => {
     const { store: s, bus } = withRun();
-    bus.publish({ type: "run.ci_status", runId: "run1", prNumber: 7, state: "failing", failing: ["build"], total: 3, ts: 1 } as never);
+    bus.publish({ type: "run.ci_status", runId: "run1", prNumber: 7, state: "failing", failing: ["build"], total: 3, names: ["build", "test", "lint"], sha: "abc", ts: 1 } as never);
     bus.publish({ type: "run.deploy_status", runId: "run1", sha: "abc", state: "failing", failing: ["deploy"], total: 1, ts: 2 } as never);
 
-    expect(s.ciStatus("run1")).toEqual({ prNumber: 7, state: "failing", failing: ["build"], total: 3 });
+    expect(s.ciStatus("run1")).toEqual({ prNumber: 7, state: "failing", failing: ["build"], total: 3, names: ["build", "test", "lint"], sha: "abc" });
     expect(s.deployStatus("run1")).toEqual({ sha: "abc", state: "failing", failing: ["deploy"], total: 1 });
   });
 

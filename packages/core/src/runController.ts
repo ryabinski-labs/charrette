@@ -28,7 +28,7 @@ import { seedWorktreeDeps } from "./deps.js";
 import { coChangeIndex, coChangeNote } from "./coChange.js";
 import { nextDispatch } from "./dispatchOrder.js";
 import { git, pushRunBranch, repoFileList, WorktreeManager } from "./git.js";
-import { GitHubAdapter, type PrRef } from "./github.js";
+import { GitHubAdapter, type PrChecks, type PrRef } from "./github.js";
 import { unsatisfiableCriteria } from "./infraGuard.js";
 import { answerBy, answerText, runIntake, type IntakeUi } from "./intake.js";
 import { AgentIntake } from "./intakeDecider.js";
@@ -304,6 +304,39 @@ export function refusedByClassifier(e: unknown): boolean {
 
 /** What the green hold tells the run to do next. */
 type GateCall = { call: "proceed" } | { call: "back-to-work" | "stop"; why: string };
+
+/**
+ * The checks a head has been seen to carry, as a multiset of names.
+ *
+ * A multiset because one name can honestly appear twice — the same job in a
+ * `push` and a `pull_request` workflow both attached to the head — and a
+ * re-run that has re-attached one of them has not re-attached both. GitHub's
+ * default `latest` filter lists each check once per suite, the newest attempt
+ * only, so a name's multiplicity is stable across a re-run: it drops to zero
+ * for the moment before the new attempt is attached and comes back, and never
+ * doubles.
+ */
+function absorbChecks(seen: Map<string, number>, names: string[]): void {
+  const now = new Map<string, number>();
+  for (const n of names) now.set(n, (now.get(n) ?? 0) + 1);
+  for (const [n, k] of now) if (k > (seen.get(n) ?? 0)) seen.set(n, k);
+}
+
+/** Every check `seen` holds that `names` does not, once per missing copy. */
+function missingChecks(seen: Map<string, number>, names: string[]): string[] {
+  const now = new Map<string, number>();
+  for (const n of names) now.set(n, (now.get(n) ?? 0) + 1);
+  const gone: string[] = [];
+  for (const [n, k] of seen) for (let i = now.get(n) ?? 0; i < k; i++) gone.push(n);
+  return gone;
+}
+
+/** `seen` back as a list, one entry per copy — what goes on the record. */
+function listChecks(seen: Map<string, number>): string[] {
+  const out: string[] = [];
+  for (const [n, k] of seen) for (let i = 0; i < k; i++) out.push(n);
+  return out;
+}
 /**
  * How long to wait for GitHub to say whether the pull request merges.
  *
@@ -1318,6 +1351,7 @@ export class RunController {
     try {
       await this.wt.pruneAndReconcile();
       await this.bookLandedParked(runId);
+      await this.refreshCiStatus(runId);
       await this.reopen(runId);
       // Asked again rather than trusted from the run's creation: the frozen
       // config records which skills this run wants, and nothing records whether
@@ -1408,6 +1442,60 @@ export class RunController {
   replannable(runId: string): boolean {
     const run = this.store.getRun(runId);
     return Boolean(run && run.state === "FAILED" && this.store.listTasks(runId).length === 0);
+  }
+
+  /**
+   * Ask GitHub what it says about a run's pull request now, and put the answer
+   * on the record.
+   *
+   * The record is a snapshot, and everything that decides whether a run in
+   * review is finished reads the snapshot: `hasRecoverableWork` counts a red or
+   * unsettled CI as work, `recheckGreen` re-asks only when the record was not
+   * green. A run whose record said "passing" was therefore unresumable however
+   * red its pull request had since become — a nightly re-run, a job somebody
+   * re-ran by hand, or a pass the run should never have believed. Run de2cb7aa
+   * moved to PR_REVIEW at 18:08:29Z on "CI green" over #527; `test` re-ran and
+   * failed at 18:33:27Z on the same commit; and `harness resume` had nothing
+   * to resume, because the only thing it consulted was the record.
+   *
+   * Only a run in review, with an open pull request, is asked about: a merged
+   * or closed pull request has nothing left to hold, and a run anywhere else
+   * is either still working or never published. GitHub being unreadable is
+   * not an answer, and the record keeps what it had.
+   */
+  async refreshCiStatus(runId: string): Promise<void> {
+    const run = this.store.getRun(runId);
+    if (run?.state !== "PR_REVIEW" || !run.config.waitForChecks || !this.github.enabled) return;
+    const prNumber = this.rollupPr(runId);
+    if (prNumber === undefined) return;
+    const state = await (this.github.prState?.(prNumber) ?? Promise.resolve(null));
+    if (state === "merged" || state === "closed") return;
+    let now = await (this.github.prChecks?.(prNumber) ?? Promise.resolve(null));
+    if (!now) return;
+    const was = this.store.ciStatus(runId);
+    // The same hold `settleChecks` applies: one reading of a commit the record
+    // already knows, missing checks that commit carried, is a re-run being
+    // re-attached, not a verdict. It goes on the record as the pending it is —
+    // carrying the fuller list, so the wait the resume enters is held to it.
+    let names = now.names ?? [];
+    if (was?.prNumber === prNumber && was.sha && was.sha === now.sha) {
+      const seen = new Map<string, number>();
+      absorbChecks(seen, was.names);
+      if (missingChecks(seen, names).length) {
+        absorbChecks(seen, names);
+        names = listChecks(seen);
+        now = { ...now, state: "pending", failing: [] };
+      }
+    }
+    if (was?.state === now.state && JSON.stringify(was.failing) === JSON.stringify(now.failing)) return;
+    this.bus.publish({ type: "run.ci_status", runId, prNumber, state: now.state, failing: now.failing, total: now.total, names, sha: now.sha ?? "", ts: Date.now() });
+    this.bus.publish({
+      type: "agent.log",
+      runId,
+      sessionId: "integrator",
+      text: `asked GitHub about #${prNumber} again: CI is ${now.state}${now.failing.length ? ` on ${now.failing.join(", ")}` : ""} over ${now.total} check(s), where the record said ${was?.state ?? "nothing"}`,
+      ts: Date.now(),
+    });
   }
 
   /** Does a finished run still have work `resume` can pick up? */
@@ -2416,6 +2504,13 @@ export class RunController {
           ts: Date.now(),
         });
         const red = ci; // the verdict that sent us here, before the re-ask
+        // The red verdict is the newest answer on the record, and `awaitChecks`
+        // holds every reading of the same commit to the checks it carried: the
+        // re-run has not settled until each of them is back in GitHub's answer.
+        // Without that, the two or three seconds in which a re-run's jobs are
+        // absent from the listing read as a pass over whatever was left — which
+        // is how #527 (run de2cb7aa) and #450 (run 418049e4) were both reported
+        // "CI green" over a `test` job that then failed again.
         await this.awaitChecks(runId, prNumber);
         // Non-null by the same construction as `prNumber` above: a status was
         // on the record before the re-run, and events only accumulate.
@@ -2990,13 +3085,66 @@ export class RunController {
    * A timeout is reported as whatever it last was — pending, never passing. The
    * answer is "not known yet", and anything stronger is the failure this whole
    * phase exists to prevent.
+   *
+   * `seen` is the set of checks this head has already been observed to carry,
+   * and an answer missing any of them is not an answer. GitHub drops a
+   * workflow's check runs out of its listing for the moment between a re-run
+   * being requested and the new attempt being attached, and what is left —
+   * the checks that had already passed — reads as `passing`. Run de2cb7aa's
+   * #527 was red on `test` over 28 checks at 18:08:25Z, the failed jobs were
+   * re-run at 18:08:26Z, and the read at 18:08:28Z came back `passing` over
+   * 17: the whole `ci.yml` workflow, `test` included, was simply not in the
+   * list yet. The run took that as the answer, reported "CI green", and stood
+   * down; `test` started at 18:08:30Z and failed again at 18:33:27Z on the
+   * same commit. Run 418049e4's #450 went the same way five days earlier, 25
+   * to 15. So a reading missing a seen check is treated as pending — the
+   * re-run has not settled — and every reading that is whole grows the set,
+   * which also catches a job somebody re-ran by hand part-way through a wait.
+   * Checks only ever re-attach; nothing legitimately removes one from a head.
+   * The first short reading of each round is said out loud, once, so the
+   * record shows why a wait went on past a listing that looked green.
+   *
+   * `seed` is the last answer on the record: its checks join `seen` the moment
+   * a reading proves to be about the same commit, and never otherwise, so a
+   * wait that starts inside a re-run's gap — a job somebody re-ran seconds
+   * before `harness resume` — is held to the head's full set too, while a
+   * head pushed since is judged on its own checks. `seen` is the one commit's:
+   * a push that moves the head part-way through a wait starts it over, since
+   * the new head can honestly carry fewer checks than the old.
    */
   private async settleChecks<T>(
-    _runId: string,
-    read: (ref: T) => Promise<{ state: "passing" | "failing" | "pending" | "none"; failing: string[]; total: number } | null>,
+    runId: string,
+    read: (ref: T) => Promise<PrChecks | null>,
     ref: T,
-    timeoutMinutes: number
-  ): Promise<{ state: "passing" | "failing" | "pending" | "none"; failing: string[]; total: number } | null> {
+    timeoutMinutes: number,
+    expect?: { seen: Map<string, number>; label: string; seed?: { sha: string; names: string[] }; sha?: string }
+  ): Promise<(PrChecks & { missing?: string[] }) | null> {
+    let saidShort = false;
+    const ask = async (): Promise<(PrChecks & { missing?: string[] }) | null> => {
+      const c = await read(ref).catch(() => null);
+      if (!c || !expect) return c;
+      if (c.sha !== expect.sha) {
+        expect.seen.clear();
+        expect.sha = c.sha;
+      }
+      if (expect.seed && c.sha === expect.seed.sha) absorbChecks(expect.seen, expect.seed.names);
+      const missing = missingChecks(expect.seen, c.names ?? []);
+      if (missing.length) {
+        if (!saidShort) {
+          saidShort = true;
+          this.bus.publish({
+            type: "agent.log",
+            runId,
+            sessionId: "integrator",
+            text: `GitHub's answer for ${expect.label} is missing ${missing.length} check(s) this head carried (${missing.slice(0, 5).join(", ")}${missing.length > 5 ? ", …" : ""}) — a re-run is re-attaching them, and the ${c.total} left are not a verdict; waiting for the whole answer`,
+            ts: Date.now(),
+          });
+        }
+        return { ...c, state: "pending", failing: [], missing };
+      }
+      absorbChecks(expect.seen, c.names ?? []);
+      return c;
+    };
     const budgetMs = timeoutMinutes * 60_000;
     const deadline = Date.now() + budgetMs;
     const pollMs = Math.min(15_000, Math.max(250, Math.floor(budgetMs / 40)));
@@ -3009,13 +3157,13 @@ export class RunController {
     // configured budget still lets a genuinely CI-less repo resolve quickly on
     // a short timeout, while giving a slow-to-queue real CI room to appear.
     const graceDeadline = Date.now() + Math.min(budgetMs, Math.max(pollMs, Math.floor(budgetMs / 4)));
-    let checks = await read(ref).catch(() => null);
+    let checks = await ask();
     while (checks && Date.now() < deadline) {
       if (checks.state === "none") {
         if (Date.now() >= graceDeadline) break;
       } else if (checks.state !== "pending") break;
       await new Promise((r) => setTimeout(r, pollMs));
-      const next = await read(ref).catch(() => null);
+      const next = await ask();
       if (!next) break;
       checks = next;
     }
@@ -3043,27 +3191,41 @@ export class RunController {
    * so, and asks again. An operator's pause lands between rounds, and only
    * GitHub going unreadable ends the wait unsettled — leaving "pending" on the
    * record, which `hasRecoverableWork` counts as work, so a resume re-asks.
+   *
+   * An answer missing a check the head is already known to carry — from the
+   * last answer on the record for the same commit, which after a re-run is the
+   * red verdict itself — is waited on rather than believed. See `settleChecks`.
    */
   private async awaitChecks(runId: string, prNumber: number): Promise<void> {
     const run = this.store.getRun(runId)!;
     if (!run.config.waitForChecks || !this.github.enabled) return;
+    const seen = new Map<string, number>();
+    const record = this.store.ciStatus(runId);
+    const seed = record?.prNumber === prNumber && record.sha ? { sha: record.sha, names: record.names } : undefined;
+    // One object for the whole wait, so what one round saw holds the next.
+    const expect = { seen, label: `#${prNumber}`, seed };
     const settle = () =>
-      this.settleChecks(runId, (n: number) => this.github.prChecks?.(n) ?? Promise.resolve(null), prNumber, run.config.checkTimeoutMinutes);
+      this.settleChecks(runId, (n: number) => this.github.prChecks?.(n) ?? Promise.resolve(null), prNumber, run.config.checkTimeoutMinutes, expect);
     let checks = await settle();
     while (checks !== null && checks.state === "pending") {
-      this.bus.publish({ type: "run.ci_status", runId, prNumber, state: "pending", failing: [], total: checks.total, ts: Date.now() });
+      // The record carries every check the head has been seen with, not the
+      // short list of this reading: it is what the next wait is held to.
+      this.bus.publish({ type: "run.ci_status", runId, prNumber, state: "pending", failing: [], total: checks.total, names: listChecks(seen), sha: checks.sha ?? "", ts: Date.now() });
+      const missing = checks.missing ?? [];
       this.bus.publish({
         type: "agent.log",
         runId,
         sessionId: "integrator",
-        text: `CI on #${prNumber} has not settled after another ${run.config.checkTimeoutMinutes} minute(s): ${checks.total} check(s) still running — waiting for the repo's answer`,
+        text: missing.length
+          ? `CI on #${prNumber} has not settled after another ${run.config.checkTimeoutMinutes} minute(s): ${missing.length} check(s) this head carried are still missing from GitHub's answer — waiting for the repo's answer`
+          : `CI on #${prNumber} has not settled after another ${run.config.checkTimeoutMinutes} minute(s): ${checks.total} check(s) still running — waiting for the repo's answer`,
         ts: Date.now(),
       });
       if (this.pauseAsked.has(runId)) throw new RunPaused(runId);
       checks = await settle();
     }
     if (!checks) return;
-    this.bus.publish({ type: "run.ci_status", runId, prNumber, state: checks.state, failing: checks.failing, total: checks.total, ts: Date.now() });
+    this.bus.publish({ type: "run.ci_status", runId, prNumber, state: checks.state, failing: checks.failing, total: checks.total, names: listChecks(seen), sha: checks.sha ?? "", ts: Date.now() });
     if (checks.state === "failing") {
       this.bus.publish({
         type: "agent.log",
