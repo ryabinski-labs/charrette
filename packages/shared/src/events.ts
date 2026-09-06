@@ -212,6 +212,16 @@ export const HarnessEvent = z.discriminatedUnion("type", [
     state: z.enum(["passing", "failing", "pending", "none"]),
     failing: z.array(z.string()).default([]),
     total: z.number().int().default(0),
+    // Every check the head carried when this was read, skipped ones included.
+    // A later read that is missing any of them is GitHub mid-way through
+    // re-attaching a re-run, not a verdict — which is only decidable with
+    // the earlier list on the record. Run de2cb7aa's #527 went "failing over
+    // 28" to "passing over 17" in the three seconds around a re-run, and the
+    // count alone was all the log had to say about it.
+    names: z.array(z.string()).default([]),
+    // The commit `names` were read on. A later read of the same commit is held
+    // to them; a new head is not.
+    sha: z.string().default(""),
   }),
   // The run asked GitHub to re-run the failed jobs before spending a fix task
   // on them. CI flakes; a task queued against a flake "fixes" code that was

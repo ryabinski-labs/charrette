@@ -45,6 +45,7 @@ const h = vi.hoisted(() => {
     hasRecoverableWork: vi.fn(() => false),
     awaitingVerification: vi.fn(() => false),
     replannable: vi.fn(() => false),
+    refreshCiStatus: vi.fn(async () => undefined),
     raiseBudget: vi.fn(() => "ok"),
   };
   const dashboardMethods = {
@@ -1568,6 +1569,35 @@ describe("harness resume", () => {
     await cli("resume", "--repo", "/repo", "--no-dashboard");
 
     expect(h.controllerMethods.resume).toHaveBeenCalledWith("run-pr", undefined);
+  });
+
+  it("asks GitHub about a run in review before deciding whether it has work, and finds the red that the record did not carry", async () => {
+    // Run de2cb7aa sat in PR_REVIEW with "CI green" on the record while #527
+    // was red on `test`, and `harness resume de2cb7aa` answered "already
+    // finished" — from the record. Refreshing is what makes the record say
+    // what the pull request says, and it has to happen before the decision.
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-pr", state: "PR_REVIEW", assignment: "a" }]);
+    h.storeMethods.getRun.mockReturnValue({ id: "run-pr", state: "PR_REVIEW", config: {} });
+    let refreshed = false;
+    h.controllerMethods.refreshCiStatus.mockImplementation(async () => {
+      refreshed = true;
+    });
+    h.controllerMethods.hasRecoverableWork.mockImplementation(() => refreshed);
+
+    await cli("resume", "run-pr", "--repo", "/repo", "--no-dashboard");
+
+    expect(h.controllerMethods.refreshCiStatus).toHaveBeenCalledWith("run-pr");
+    expect(printed()).not.toContain("nothing to resume");
+    expect(h.controllerMethods.resume).toHaveBeenCalledWith("run-pr", undefined);
+  });
+
+  it("does not ask GitHub about runs that are not in review", async () => {
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-open", state: "EXECUTING", assignment: "a" }]);
+
+    await cli("resume", "--repo", "/repo", "--no-dashboard");
+
+    expect(h.controllerMethods.refreshCiStatus).not.toHaveBeenCalled();
+    expect(h.controllerMethods.resume).toHaveBeenCalledWith("run-open", undefined);
   });
 
   it("treats a run that failed in planning as resumable", async () => {

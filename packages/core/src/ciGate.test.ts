@@ -50,14 +50,14 @@ function repoWithOrigin(): string {
   return repo;
 }
 
-type Checks = { state: "passing" | "failing" | "pending" | "none"; failing: string[]; total: number } | null;
+type Checks = { state: "passing" | "failing" | "pending" | "none"; failing: string[]; total: number; names?: string[]; sha?: string } | null;
 
 /**
  * A GitHub whose CI answers from a script, one entry per read, last entry
  * sticky — so "failing, then passing after the fix round" is a two-line story.
  */
-function fakeGitHub(script: Checks[], opts: { rerun?: boolean; logs?: { name: string; log: string }[] } = {}) {
-  const reads: Checks[] = [...script];
+function fakeGitHub(script: Checks[], opts: { rerun?: boolean; logs?: { name: string; log: string }[]; prState?: "open" | "merged" | "closed" } = {}) {
+  let reads: Checks[] = [...script];
   let rerunAsked = 0;
   const adapter = {
     enabled: true,
@@ -83,18 +83,38 @@ function fakeGitHub(script: Checks[], opts: { rerun?: boolean; logs?: { name: st
     async failingJobLogs() {
       return opts.logs ?? [];
     },
+    ...(opts.prState ? { async prState() { return opts.prState; } } : {}),
   };
-  return { adapter: adapter as unknown as GitHubAdapter, rerunAsked: () => rerunAsked };
+  return { adapter: adapter as unknown as GitHubAdapter, rerunAsked: () => rerunAsked, setChecks: (next: Checks[]) => void (reads = [...next]) };
 }
 
+/**
+ * The 28 checks #527 carried, by name, and the 17 that were still listed
+ * three seconds after the re-run: `ci.yml`'s eleven jobs — `test` among them
+ * — had dropped out of GitHub's answer while the new attempt was attached.
+ */
+const CI_YML = ["build", "test", "fmt", "clippy", "fuzz", "a11y", "e2e (operator path)", "e2e (screen witness)", "e2e (product demo)", "coverage (project floor)", "patch coverage (diff floor)"];
+const OTHERS = [
+  "cargo-audit", "cargo-deny check", "unsafe scan", "crs-subset --check", "equal-coverage-subset --check", "cargo xtask check-repo",
+  "frozen-baseline changelog guard", "network-capability check", "helm chart controller surface", "revetment-k8s-controller attachment write witness",
+  "build all three images", "build both images, validate compose topology", "build, a11y, assets, copy", "email capture form — stubbed suite",
+  "R6 DoS attack suites", "dev-loop bench + p99 regression gate", "dev-loop added-latency pair",
+];
+const ALL_28 = [...OTHERS, ...CI_YML];
+/** #527's head — the same commit before and after the re-run. */
+const HEAD = "cdc9d3518bcc74a46b77b18a171bfa44843d59f8";
+
 /** Plans one task, passes QA, validator says PASS; every worker commit is unique. */
-function pool(): AgentPool {
+function pool(opts: { qaFails?: boolean } = {}): AgentPool {
   const outputs = [DOCS, DAG, "worker done"];
   let i = 0;
   let files = 0;
   const impl = {
     async run(spec: AgentSpec): Promise<AgentResult> {
-      if (spec.role === "qa") return { sessionId: "sq", resultText: '{"verdict":"PASS","notes":"good","unverified":[]}', costUsd: 0, turns: 1, outcome: "done" };
+      if (spec.role === "qa") {
+        const verdict = opts.qaFails ? '{"verdict":"FAIL","reasons":["no"],"mustFix":["everything"]}' : '{"verdict":"PASS","notes":"good","unverified":[]}';
+        return { sessionId: "sq", resultText: verdict, costUsd: 0, turns: 1, outcome: "done" };
+      }
       if (spec.role === "validator") return { sessionId: "sv", resultText: PASS, costUsd: 0, turns: 1, outcome: "done" };
       if (spec.role === "worker") {
         writeFileSync(path.join(spec.cwd, `work-${++files}.txt`), `commit ${files}\n`);
@@ -258,6 +278,85 @@ describe("a CI that outlives the wait budget", () => {
     expect(fixes[0]!.spec).toContain("under the 75% floor");
     expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
     expect(store.ciStatus(runId)).toMatchObject({ state: "passing" });
+  });
+
+  it("waits for the re-run's jobs to be back in GitHub's answer before believing a pass, instead of reading the checks left behind as green", async () => {
+    // Run de2cb7aa, and the way the two guards below are not enough. Both of
+    // them catch the re-run window arriving as "not knowing" — a `pending`, or
+    // a `none`. This one arrived as an affirmative `passing`: #527 was red on
+    // `test` over 28 checks at 18:08:25Z, the failed jobs were re-run at
+    // 18:08:26Z, and the read at 18:08:28Z came back `passing` over 17 —
+    // `ci.yml`'s eleven jobs, `test` among them, had dropped out of GitHub's
+    // listing while the new attempt was attached. The run believed it, moved
+    // to PR_REVIEW reporting "CI green", and stood down; `test` started at
+    // 18:08:30Z and failed again at 18:33:27Z on the same commit. Run
+    // 418049e4's #450 went the same way five days earlier, 25 to 15.
+    //
+    // The names are the tell, and the answer is to wait: a reading missing a
+    // check the red verdict saw is the re-run not having settled, and the
+    // whole answer comes a beat later. Here it comes back green, which is an
+    // ordinary flake, and costs no fix task.
+    const { adapter, rerunAsked } = fakeGitHub([
+      { state: "failing", failing: ["test"], total: 28, names: ALL_28, sha: HEAD }, // the wait's real answer
+      { state: "passing", failing: [], total: 17, names: OTHERS, sha: HEAD }, // re-run went out; ci.yml not re-attached yet
+      null, // GitHub hiccups, which ends the round the way an expired budget does
+      { state: "passing", failing: [], total: 28, names: ALL_28, sha: HEAD }, // the whole answer, next round
+    ]);
+    const { store, runId, logs } = await build(adapter, pool(), repoWithOrigin());
+
+    expect(rerunAsked()).toBe(1);
+    expect(logs.join("\n")).toMatch(/GitHub's answer for #7 is missing 11 check\(s\) this head carried \(build, test, fmt, clippy, fuzz, …\) — a re-run is re-attaching them, and the 17 left are not a verdict/);
+    // A round that ends still short goes on the record as the pending it is,
+    // and says why, rather than as the pass the listing resembled.
+    expect(logs.join("\n")).toMatch(/has not settled after another 1 minute\(s\): 11 check\(s\) this head carried are still missing from GitHub's answer/);
+    expect(ciFixTasks(store, runId)).toHaveLength(0);
+    // The record carries the whole answer, not the short one.
+    expect(store.ciStatus(runId)).toMatchObject({ state: "passing", total: 28, sha: HEAD });
+    expect(store.ciStatus(runId)!.names).toHaveLength(28);
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+  });
+
+  it("queues the fix when the re-attached re-run fails again, carrying the log, rather than the pass that preceded it", async () => {
+    // The same three seconds, with the ending #527 actually had: the re-run
+    // came back, `test` ran for twenty-five minutes, and failed on the same
+    // assertion. That is not flake, and it is the run's work.
+    const { adapter, rerunAsked } = fakeGitHub(
+      [
+        { state: "failing", failing: ["test"], total: 28, names: ALL_28, sha: HEAD },
+        { state: "passing", failing: [], total: 17, names: OTHERS, sha: HEAD }, // the short answer that used to end the run
+        { state: "failing", failing: ["test"], total: 28, names: ALL_28, sha: HEAD }, // the re-run, settled
+        { state: "passing", failing: [], total: 28, names: ALL_28, sha: "5ec50b9" }, // the fix task lands, on a new head
+      ],
+      { logs: [{ name: "test", log: "coverage_diff_floor_passes_against_a_fully_covered_synthetic_lcov ... FAILED" }] }
+    );
+    const { store, runId } = await build(adapter, pool(), repoWithOrigin());
+
+    expect(rerunAsked()).toBe(1);
+    const fixes = ciFixTasks(store, runId);
+    expect(fixes.map((t) => t.id)).toEqual(["ci-fix-1-1"]);
+    expect(fixes[0]!.spec).toContain("coverage_diff_floor_passes_against_a_fully_covered_synthetic_lcov");
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    expect(store.ciStatus(runId)).toMatchObject({ state: "passing", total: 28 });
+  });
+
+  it("judges a head pushed part-way through the wait on its own checks, not the last head's", async () => {
+    // The hold is per commit. A push that moves the branch mid-wait — an
+    // operator's own fix — can honestly carry fewer checks than the head
+    // before it (a path-filtered workflow that does not run for it), and
+    // holding the new head to the old head's list would wait for checks that
+    // are never coming.
+    const { adapter, rerunAsked } = fakeGitHub([
+      { state: "pending", failing: [], total: 28, names: ALL_28, sha: HEAD },
+      { state: "passing", failing: [], total: 17, names: OTHERS, sha: "5ec50b9" }, // a new head, with fewer checks
+    ]);
+    const { store, runId, logs } = await build(adapter, pool(), repoWithOrigin());
+
+    expect(rerunAsked()).toBe(0);
+    expect(logs.join("\n")).not.toMatch(/is missing/);
+    expect(ciFixTasks(store, runId)).toHaveLength(0);
+    expect(store.ciStatus(runId)).toMatchObject({ state: "passing", total: 17, sha: "5ec50b9" });
+    expect(store.ciStatus(runId)!.names).toHaveLength(17);
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
   });
 
   it("keeps the red verdict when the re-run comes back with no checks attached at all", async () => {
@@ -636,9 +735,11 @@ describe("a resume onto a branch whose CI moved while the run was parked", () =>
 
     // The world moves: a nightly re-run flips the same head red.
     bus.publish({ type: "run.ci_status", runId, prNumber: 7, state: "failing", failing: ["Backend test"], total: 1, ts: Date.now() } as never);
-    // What GitHub will answer from here on: red until the fix lands.
+    // What GitHub will answer from here on: red until the fix lands. The
+    // resume asks once to refresh the record before deciding, then waits.
     (adapter as unknown as { prChecks: () => Promise<Checks> }).prChecks = (() => {
       const reads: Checks[] = [
+        { state: "failing", failing: ["Backend test"], total: 1 },
         { state: "failing", failing: ["Backend test"], total: 1 },
         { state: "passing", failing: [], total: 1 },
       ];
@@ -678,7 +779,7 @@ describe("a resume onto a branch whose CI moved while the run was parked", () =>
 
   it("treats a run that stopped waiting mid-CI as unfinished, and resumes into the answer", async () => {
     const repo = repoWithOrigin();
-    const { adapter, rerunAsked } = fakeGitHub([{ state: "passing", failing: [], total: 1 }]);
+    const { adapter, rerunAsked, setChecks } = fakeGitHub([{ state: "passing", failing: [], total: 1 }]);
     const { store, bus, runId, controller } = await build(adapter, pool(), repo);
     expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
 
@@ -686,6 +787,8 @@ describe("a resume onto a branch whose CI moved while the run was parked", () =>
     // which is not an answer — the run never learned what the repo said.
     bus.publish({ type: "run.ci_status", runId, prNumber: 7, state: "pending", failing: [], total: 12, ts: Date.now() } as never);
     expect(controller.hasRecoverableWork(runId)).toBe(true);
+    // CI is still running when the resume asks, and settles during the wait.
+    setChecks([{ state: "pending", failing: [], total: 12 }, { state: "passing", failing: [], total: 12 }]);
 
     await controller.resume(runId);
 
@@ -765,18 +868,160 @@ describe("the run that reports whatever the repo said, with the hold off", () =>
   });
 });
 
+describe("a branch that went red after the run stood down", () => {
+  it("asks GitHub again before trusting the pass on the record, and turns the red into work", async () => {
+    // What the operator found on #527: the run in PR_REVIEW with "CI green"
+    // on the record, `test` red on GitHub, and `harness resume` answering that
+    // there was nothing to resume — because the only thing anyone consulted
+    // was the record. The record is a snapshot; the pull request is live.
+    const repo = repoWithOrigin();
+    const THREE = ["build", "test", "lint"];
+    const { adapter, rerunAsked, setChecks } = fakeGitHub([{ state: "passing", failing: [], total: 3, names: THREE, sha: HEAD }], {
+      logs: [{ name: "test", log: "fatal: bad object a7fdc9ab177d58ad411309cc93551a2ff2108ef2" }],
+    });
+    const { store, runId, logs, controller } = await build(adapter, pool(), repo);
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    expect(store.ciStatus(runId)).toMatchObject({ state: "passing" });
+    expect(controller.hasRecoverableWork(runId)).toBe(false);
+
+    // The head is re-run by hand, or by a nightly, and fails.
+    const RED: Checks = { state: "failing", failing: ["test"], total: 3, names: THREE, sha: HEAD };
+    setChecks([RED, RED, RED, RED, { state: "passing", failing: [], total: 3, names: THREE, sha: "5ec50b9" }]);
+
+    await controller.refreshCiStatus(runId);
+
+    expect(store.ciStatus(runId)).toMatchObject({ state: "failing", failing: ["test"] });
+    expect(logs.join("\n")).toMatch(/asked GitHub about #7 again: CI is failing on test over 3 check\(s\), where the record said passing/);
+    expect(controller.hasRecoverableWork(runId)).toBe(true);
+
+    await controller.resume(runId);
+
+    expect(rerunAsked()).toBe(1);
+    const fixes = ciFixTasks(store, runId);
+    expect(fixes.map((t) => t.id)).toEqual(["ci-fix-1-1"]);
+    expect(fixes[0]!.spec).toContain("bad object a7fdc9ab");
+    expect(store.ciStatus(runId)).toMatchObject({ state: "passing" });
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+  });
+
+  it("holds the fresh reading to the checks the record saw on the same commit, so a resume inside a re-run's gap waits rather than believing it", async () => {
+    // The same three seconds as the re-run tests above, met by `harness
+    // resume` instead of by the wait: the operator re-runs `test` by hand and
+    // resumes at once. The one reading the refresh takes is the short one, and
+    // read as a pass it would say "nothing to resume" over a job that is about
+    // to fail again. On the record as pending, with the whole list, the resume
+    // enters the wait and the wait is held to the list.
+    const repo = repoWithOrigin();
+    const { adapter, rerunAsked, setChecks } = fakeGitHub([{ state: "passing", failing: [], total: 28, names: ALL_28, sha: HEAD }]);
+    const { store, runId, logs, controller } = await build(adapter, pool(), repo);
+    expect(controller.hasRecoverableWork(runId)).toBe(false);
+
+    setChecks([
+      { state: "passing", failing: [], total: 17, names: OTHERS, sha: HEAD }, // the refresh's reading
+      { state: "passing", failing: [], total: 17, names: OTHERS, sha: HEAD }, // the resume's own refresh
+      { state: "passing", failing: [], total: 27, names: ALL_28.filter((n) => n !== "test"), sha: HEAD }, // only `test` still absent
+      { state: "failing", failing: ["test"], total: 28, names: ALL_28, sha: HEAD }, // the wait's first whole reading
+      { state: "failing", failing: ["test"], total: 28, names: ALL_28, sha: HEAD }, // and after the flake re-run
+      { state: "passing", failing: [], total: 28, names: ALL_28, sha: "5ec50b9" }, // the fix task lands
+    ]);
+    await controller.refreshCiStatus(runId);
+
+    expect(store.ciStatus(runId)).toMatchObject({ state: "pending", total: 17, sha: HEAD });
+    expect(store.ciStatus(runId)!.names).toHaveLength(28);
+    expect(controller.hasRecoverableWork(runId)).toBe(true);
+
+    await controller.resume(runId);
+
+    // The wait was held to the record's list: 27 with `test` absent is not 28.
+    expect(logs.join("\n")).toMatch(/GitHub's answer for #7 is missing 1 check\(s\) this head carried \(test\) — a re-run is re-attaching them, and the 27 left are not a verdict/);
+    expect(rerunAsked()).toBe(1);
+    expect(ciFixTasks(store, runId).map((t) => t.id)).toEqual(["ci-fix-1-1"]);
+    expect(store.ciStatus(runId)).toMatchObject({ state: "passing", total: 28 });
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+  });
+
+  it("asks about a run that never waited for CI, once the wait is switched on for its resume", async () => {
+    // `harness resume` patches `waitForChecks` from the config file before
+    // resuming, which is how a run recorded with the wait off comes to be
+    // asked: it is in review, its pull request is open, and nothing is on the
+    // record at all.
+    const repo = repoWithOrigin();
+    const { adapter, setChecks } = fakeGitHub([{ state: "passing", failing: [], total: 3, names: ["build", "test", "lint"], sha: HEAD }]);
+    const { store, runId, logs, controller } = await build(adapter, pool(), repo, { waitForChecks: false });
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    expect(store.ciStatus(runId)).toBeNull();
+
+    await controller.refreshCiStatus(runId);
+    expect(store.ciStatus(runId)).toBeNull();
+
+    store.patchRunConfig(runId, { waitForChecks: true });
+    setChecks([{ state: "failing", failing: ["test"], total: 3, names: ["build", "test", "lint"], sha: HEAD }]);
+    await controller.refreshCiStatus(runId);
+
+    expect(store.ciStatus(runId)).toMatchObject({ state: "failing", failing: ["test"] });
+    expect(logs.join("\n")).toMatch(/where the record said nothing/);
+    expect(controller.hasRecoverableWork(runId)).toBe(true);
+  });
+
+  it("leaves the record alone when GitHub cannot be read, and writes nothing when the answer has not changed", async () => {
+    const repo = repoWithOrigin();
+    const { adapter, setChecks } = fakeGitHub([{ state: "passing", failing: [], total: 3 }]);
+    const { store, runId, controller } = await build(adapter, pool(), repo);
+    const before = store.eventCount(runId, "run.ci_status");
+
+    setChecks([null]);
+    await controller.refreshCiStatus(runId);
+    expect(store.eventCount(runId, "run.ci_status")).toBe(before);
+
+    setChecks([{ state: "passing", failing: [], total: 3 }]);
+    await controller.refreshCiStatus(runId);
+    expect(store.eventCount(runId, "run.ci_status")).toBe(before);
+    expect(controller.hasRecoverableWork(runId)).toBe(false);
+  });
+
+  it("leaves a pull request a human has already merged alone, however red its head went", async () => {
+    // Nothing left to hold: the merge is the operator's, and a red on a merged
+    // head is theirs to read, not work for a run that has handed over.
+    const repo = repoWithOrigin();
+    const { adapter, setChecks } = fakeGitHub([{ state: "passing", failing: [], total: 3 }], { prState: "merged" });
+    const { store, runId, controller } = await build(adapter, pool(), repo);
+
+    setChecks([{ state: "failing", failing: ["test"], total: 3 }]);
+    await controller.refreshCiStatus(runId);
+
+    expect(store.ciStatus(runId)).toMatchObject({ state: "passing" });
+    expect(controller.hasRecoverableWork(runId)).toBe(false);
+  });
+
+  it("has nothing to ask about a run that merged nothing, or one that is not in review", async () => {
+    const repo = repoWithOrigin();
+    const { adapter, setChecks } = fakeGitHub([{ state: "failing", failing: ["test"], total: 3 }]);
+    const { store, runId, controller } = await build(adapter, pool({ qaFails: true }), repo);
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    expect(store.ciStatus(runId)).toBeNull();
+
+    setChecks([{ state: "failing", failing: ["test"], total: 3 }]);
+    await controller.refreshCiStatus(runId);
+    await controller.refreshCiStatus("no-such-run");
+
+    expect(store.ciStatus(runId)).toBeNull();
+  });
+});
+
 describe("a run that stopped waiting mid-CI, with the hold off", () => {
   it("treats the pending it left behind as unfinished and resumes into the answer", async () => {
     // Pending is not an answer, and that was true before the hold existed: the
     // process died mid-wait, so the run never learned what the repo said. The
     // resume re-asks whether or not the hold is on.
     const repo = repoWithOrigin();
-    const { adapter, rerunAsked } = fakeGitHub([{ state: "passing", failing: [], total: 1 }]);
+    const { adapter, rerunAsked, setChecks } = fakeGitHub([{ state: "passing", failing: [], total: 1 }]);
     const { store, bus, runId, controller } = await build(adapter, pool(), repo, NO_HOLD);
     expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
 
     bus.publish({ type: "run.ci_status", runId, prNumber: 7, state: "pending", failing: [], total: 12, ts: Date.now() } as never);
     expect(controller.hasRecoverableWork(runId)).toBe(true);
+    // Still running when the resume asks; settles during the wait.
+    setChecks([{ state: "pending", failing: [], total: 12 }, { state: "passing", failing: [], total: 12 }]);
 
     await controller.resume(runId);
 

@@ -743,13 +743,13 @@ export class Store {
 
   /** Sequence number of the newest event of `type` for the run, or 0 if none. */
   /** The last thing the repo's CI said about this run's pull request. */
-  ciStatus(runId: string): { prNumber: number; state: "passing" | "failing" | "pending" | "none"; failing: string[]; total: number } | null {
+  ciStatus(runId: string): { prNumber: number; state: "passing" | "failing" | "pending" | "none"; failing: string[]; total: number; names: string[]; sha: string } | null {
     const row = this.db
       .prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.ci_status' ORDER BY seq DESC LIMIT 1")
       .get(runId) as { payload: string } | undefined;
     if (!row) return null;
-    const p = JSON.parse(row.payload) as { prNumber: number; state: "passing" | "failing" | "pending" | "none"; failing?: string[]; total?: number };
-    return { prNumber: p.prNumber, state: p.state, failing: p.failing ?? [], total: p.total ?? 0 };
+    const p = JSON.parse(row.payload) as { prNumber: number; state: "passing" | "failing" | "pending" | "none"; failing?: string[]; total?: number; names?: string[]; sha?: string };
+    return { prNumber: p.prNumber, state: p.state, failing: p.failing ?? [], total: p.total ?? 0, names: p.names ?? [], sha: p.sha ?? "" };
   }
 
   /** Whether the run's pull request can be merged into its base, and what broke if not. */
