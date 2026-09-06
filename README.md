@@ -133,7 +133,15 @@ harness run --check "npm test" --run-cap 50 --no-dashboard
 harness init                 # write harness.config.json with the resolved defaults
 harness resume <runId>       # continue after any interruption; nothing re-executes
 harness status               # run/task states, QA iterations, spend
+harness version              # the build this binary is, and whether `dist/` is current with `src/`
 ```
+
+`harness --version` prints that build on its own — `version@sha`, with a `+`
+when the checkout is dirty. It is the same string every agent session is
+stamped with, so a session record and a binary can be matched without
+cross-referencing `git log` against process start times. `harness version`
+adds the part a sha cannot answer: Node loads `dist/`, so a fix that is
+committed but never compiled leaves a clean sha in front of an old build.
 
 Full configuration reference, recovery playbook, and troubleshooting: [docs/OPERATIONS.md](./docs/OPERATIONS.md).
 
@@ -145,7 +153,7 @@ Full configuration reference, recovery playbook, and troubleshooting: [docs/OPER
 | `packages/core` | store, event bus, budget, git/worktrees, agent pool, intake conversation, run controller, GitHub adapter |
 | `packages/skills-mcp` | SKILL.md indexer + stdio MCP server (`search_skills`, `describe_skill`) |
 | `packages/dashboard` | Fastify backend + single-file SPA (SSE via fetch-stream) |
-| `apps/cli` | `harness run / resume / status / init`, terminal intake chat, repo-root and default resolution |
+| `apps/cli` | `harness run / resume / status / init / version`, terminal intake chat, repo-root and default resolution |
 
 ## Security model (v0 summary)
 

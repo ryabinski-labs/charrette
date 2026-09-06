@@ -170,6 +170,24 @@ function binaryPath(): string {
 }
 
 /**
+ * The two files the SDK's platform package should have put on disk: the Claude
+ * Code binary every agent session is spawned from, and the manifest that says
+ * how big it ought to be.
+ *
+ * Exported for `harness version`, which reports whether they are actually
+ * there. The platform package is an `optionalDependencies` entry, and a failed
+ * fetch of one is not an install error — run de2cb7aa was resumed onto a
+ * 0-byte package behind a valid-looking symlink, with pnpm recording the
+ * install as complete and `--force` answering "Already up to date" twice. The
+ * first thing that noticed was the run dying on `Native CLI binary for
+ * darwin-arm64 not found`, which is late: by then the operator has restarted a
+ * run to find out.
+ */
+export function agentBinaryFiles(): { binary: string; manifest: string } {
+  return { binary: binaryPath(), manifest: path.join(path.dirname(bundlePath()), "manifest.json") };
+}
+
+/**
  * What the SDK's CLI binary is called. Only Windows differs, and only one
  * platform's binary package is ever installed — so this is a rule about a
  * machine the harness may run on tomorrow, not one it can resolve today.
