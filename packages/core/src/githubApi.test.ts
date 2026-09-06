@@ -128,7 +128,7 @@ describe("filing a run's issues", () => {
 
     const ref = await adapter.ensureIssue("run1", "auth-task", "Auth", "Build the auth flow", ["harness"]);
 
-    expect(ref).toEqual({ number: 7, url: "https://example.invalid/issues/7" });
+    expect(ref).toEqual({ number: 7, url: "https://example.invalid/issues/7", fresh: true });
     const args = (api.rest.issues.create.mock.calls[0] as unknown[])[0] as { body: string; labels: string[] };
     expect(args.body).toBe("Build the auth flow\n\n<!-- harness-run:run1/auth-task -->");
     expect(args.labels).toEqual(["harness", "harness-run:run1"]);
@@ -163,8 +163,12 @@ describe("filing a run's issues", () => {
     const first = await adapter.ensureIssue("run1", "a", "A", "body", []);
     const again = await adapter.ensureIssue("run1", "a", "A", "body", []);
 
-    expect(again).toEqual(first);
+    expect(again).toEqual({ number: first!.number, url: first!.url });
     expect(api.rest.issues.create).toHaveBeenCalledOnce();
+    // The same issue, but only the first call opened it. Callers that announce
+    // a filing read `fresh`, so the replay must not carry it.
+    expect(first!.fresh).toBe(true);
+    expect(again!.fresh).toBeUndefined();
   });
 
   it("keeps separate runs apart", async () => {
@@ -184,6 +188,7 @@ describe("filing a run's issues", () => {
     await expect(adapter.ensureIssue("run1", "a", "A", "body", [])).resolves.toEqual({
       number: 7,
       url: "https://example.invalid/issues/7",
+      fresh: true,
     });
   });
 
@@ -201,6 +206,7 @@ describe("filing a run's issues", () => {
     await expect(adapter.ensureIssue("run1", "a", "A", "body", [])).resolves.toEqual({
       number: 7,
       url: "https://example.invalid/issues/7",
+      fresh: true,
     });
   });
 });

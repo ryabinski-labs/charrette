@@ -133,8 +133,10 @@ export class GitHubAdapter {
     });
     const ref = { number: res.data.number, url: res.data.html_url };
     // Keep the cache authoritative: the next task must see this one immediately.
+    // The cached copy is deliberately not `fresh`: this call opened the issue,
+    // the next call that finds it in the cache did not.
     issues.set(marker, ref);
-    return ref;
+    return { ...ref, fresh: true };
   }
 
   /**
