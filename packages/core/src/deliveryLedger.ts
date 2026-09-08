@@ -73,7 +73,7 @@ export interface LedgerInput {
   deploy: { state: "passing" | "failing" | "pending" | "none"; failing: string[] } | null;
   prod: { url: string; verdict: "PASS" | "FAIL"; findings: string[] } | null;
   ci: { state: "passing" | "failing" | "pending" | "none"; failing: string[] } | null;
-  intent: { verdict: "PASS" | "FAIL"; gaps: string[] } | null;
+  intent: { verdict: "PASS" | "FAIL" | "UNKNOWN"; gaps: string[] } | null;
   switches: DarkSwitch[];
 }
 

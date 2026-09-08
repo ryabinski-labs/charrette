@@ -61,7 +61,7 @@ const PORT_SCAN = 32;
  * soon as one of these lands, so the event announcing it is the last thing the
  * browser can ever be told — it is flushed immediately rather than on the timer.
  */
-const TERMINAL_RUN_STATES = new Set(["PR_REVIEW", "FAILED", "ABORTED"]);
+const TERMINAL_RUN_STATES = new Set(["PR_REVIEW", "BLOCKED", "FAILED", "ABORTED"]);
 
 /**
  * The repo the issue/PR numbers belong to, so the UI can link straight to them.

@@ -3086,6 +3086,17 @@ describe("the closing report", () => {
     expect(shown).toContain("    two thirds delivered");
   });
 
+  it("lists what went unchecked when the intent check abstained", async () => {
+    const shown = await reportFor({
+      intent: { verdict: "UNKNOWN", gaps: [], unchecked: ["whether the poller runs", "the Stripe client"], summary: "ran out of turns" } as never,
+    });
+
+    expect(shown).toContain("Intent check: UNKNOWN — the validator ran out of turns before it could judge the merged tree. Not checked:");
+    expect(shown).toContain("    - whether the poller runs");
+    expect(shown).toContain("    - the Stripe client");
+    expect(shown).toContain("    ran out of turns");
+  });
+
   it("omits the trailing summary when the validator gave none", async () => {
     const shown = await reportFor({ intent: { verdict: "FAIL", gaps: ["a gap"], summary: "" } as never });
 

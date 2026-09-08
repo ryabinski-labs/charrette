@@ -138,6 +138,7 @@ const ROLES = {
   planner: (s: AgentSpec) => (s.prompt.includes("PRD") ? dagJson() : DOCS),
   worker,
   qa: () => QA_PASS,
+  validator: () => '```json\n{"verdict":"PASS","gaps":[],"summary":"ok"}\n```',
 };
 
 const ACCOUNTS = [

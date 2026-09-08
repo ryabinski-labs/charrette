@@ -124,7 +124,7 @@ describe("reading back a row an older harness wrote", () => {
     const { store: s } = withRun();
     legacyEvent(s, "run.intent_verdict", { verdict: "PASS" });
 
-    expect(s.intentVerdict("run1")).toEqual({ verdict: "PASS", gaps: [], summary: "" });
+    expect(s.intentVerdict("run1")).toEqual({ verdict: "PASS", gaps: [], unchecked: [], summary: "" });
   });
 
   it("survives a CI status recorded before the failing list existed", () => {
@@ -188,7 +188,7 @@ describe("reading back an event that was written without every field", () => {
     const { store: s, bus } = withRun();
     bus.publish({ type: "run.intent_verdict", runId: "run1", verdict: "PASS", ts: 1 } as never);
 
-    expect(s.intentVerdict("run1")).toEqual({ verdict: "PASS", gaps: [], summary: "" });
+    expect(s.intentVerdict("run1")).toEqual({ verdict: "PASS", gaps: [], unchecked: [], summary: "" });
   });
 
   it("fills in a CI status with nothing failing and no total", () => {
@@ -239,7 +239,7 @@ describe("reading back an event that carried everything", () => {
       gaps: ["no offline mode"], summary: "two thirds delivered", ts: 1,
     } as never);
 
-    expect(s.intentVerdict("run1")).toEqual({ verdict: "FAIL", gaps: ["no offline mode"], summary: "two thirds delivered" });
+    expect(s.intentVerdict("run1")).toEqual({ verdict: "FAIL", gaps: ["no offline mode"], unchecked: [], summary: "two thirds delivered" });
   });
 
   it("keeps the names of the checks that failed, and of every check the head carried", () => {

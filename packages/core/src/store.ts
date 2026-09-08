@@ -89,6 +89,23 @@ CREATE TABLE IF NOT EXISTS memory (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_fact ON memory(kind, subject, verdict);
 `;
 
+/**
+ * The three things the intent check can say. UNKNOWN is the one it could not
+ * say until issue #121: "I did not get to check this", which a validator with
+ * only PASS and FAIL resolves as a PASS with the unchecked list underneath.
+ */
+export type IntentCall = "PASS" | "FAIL" | "UNKNOWN";
+
+/** The newest `run.intent_verdict`, as every reader of it sees it. */
+export interface StoredIntentVerdict {
+  verdict: IntentCall;
+  /** What a FAIL found missing. */
+  gaps: string[];
+  /** What an UNKNOWN never reached. */
+  unchecked: string[];
+  summary: string;
+}
+
 export interface RunRow {
   id: string;
   repoPath: string;
@@ -624,14 +641,21 @@ export class Store {
     return parsed.success ? parsed.data : null;
   }
 
-  /** What the acceptance gate last said about the merged whole. */
-  acceptanceVerdict(runId: string): { passed: boolean; failing: string[]; named: boolean; blocked: string[]; line: string } | null {
+  /**
+   * What the acceptance gate last said about the merged whole.
+   *
+   * Three answers, never two. An event written before the gate could say
+   * "no opinion" carries only `passed`, and for those the boolean is read the
+   * only way it can be — true is green, false is red — because the run that
+   * wrote it was held to exactly that reading.
+   */
+  acceptanceVerdict(runId: string): { verdict: "green" | "red" | "no-opinion"; failing: string[]; named: boolean; blocked: string[]; line: string } | null {
     const row = this.db.prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.acceptance_verdict' ORDER BY seq DESC LIMIT 1").get(runId) as
       | { payload: string }
       | undefined;
     if (!row) return null;
-    const p = JSON.parse(row.payload) as { passed: boolean; failing?: string[]; named?: boolean; blocked?: string[]; line?: string };
-    return { passed: p.passed, failing: p.failing ?? [], named: p.named ?? true, blocked: p.blocked ?? [], line: p.line ?? "" };
+    const p = JSON.parse(row.payload) as { verdict?: "green" | "red" | "no-opinion"; passed: boolean; failing?: string[]; named?: boolean; blocked?: string[]; line?: string };
+    return { verdict: p.verdict ?? (p.passed ? "green" : "red"), failing: p.failing ?? [], named: p.named ?? true, blocked: p.blocked ?? [], line: p.line ?? "" };
   }
 
   /**
@@ -668,13 +692,13 @@ export class Store {
     return this.lastEventSeq(runId, "run.intent_unknown") > this.lastEventSeq(runId, "run.intent_verdict");
   }
 
-  intentVerdict(runId: string): { verdict: "PASS" | "FAIL"; gaps: string[]; summary: string } | null {
+  intentVerdict(runId: string): StoredIntentVerdict | null {
     const row = this.db
       .prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.intent_verdict' ORDER BY seq DESC LIMIT 1")
       .get(runId) as { payload: string } | undefined;
     if (!row) return null;
-    const parsed = JSON.parse(row.payload) as { verdict: "PASS" | "FAIL"; gaps?: string[]; summary?: string };
-    return { verdict: parsed.verdict, gaps: parsed.gaps ?? [], summary: parsed.summary ?? "" };
+    const parsed = JSON.parse(row.payload) as { verdict: IntentCall; gaps?: string[]; unchecked?: string[]; summary?: string };
+    return { verdict: parsed.verdict, gaps: parsed.gaps ?? [], unchecked: parsed.unchecked ?? [], summary: parsed.summary ?? "" };
   }
 
   /**

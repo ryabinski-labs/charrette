@@ -79,7 +79,7 @@ describe("the four facts the ledger turns on", () => {
     const { store, bus } = run();
     bus.publish({ type: "run.deploy_status", runId: "run-1", sha: "abc", state: "passing", failing: [], total: 2, ts: 1 });
     bus.publish({ type: "run.prod_verdict", runId: "run-1", url: "https://x.test", verdict: "FAIL", findings: ["500s"], summary: "s", ts: 2 });
-    bus.publish({ type: "run.intent_verdict", runId: "run-1", verdict: "FAIL", gaps: ["no admin"], summary: "s", ts: 3 });
+    bus.publish({ type: "run.intent_verdict", runId: "run-1", verdict: "FAIL", gaps: ["no admin"], unchecked: [], summary: "s", ts: 3 });
 
     const facts = outcomeFacts(store, "run-1");
     expect(facts.deploy?.state).toBe("passing");
@@ -558,6 +558,15 @@ describe("what the specification proves, on the finished page", () => {
     const coverage = buildCompletionReport(sources(store)).coverage!;
     expect(coverage).toMatchObject({ proven: 1, broken: 1 });
     expect(coverage.line).toContain("The acceptance gate is red: 1 of 2 failing.");
+  });
+
+  /** "No opinion" used to be spelled `passed: true`; the report must not read it as green. */
+  it("says the gate had no opinion rather than carrying its line through as a pass", () => {
+    const { store, bus } = run();
+    bus.publish({ type: "run.spec_ready", runId: "run-1", spec: SPEC, ts: 1 });
+    bus.publish({ type: "run.acceptance_verdict", runId: "run-1", verdict: "no-opinion", passed: false, failing: [], named: true, blocked: ["SC-001"], line: "all 1 gating scenario(s) are blocked", ts: 2 });
+    const coverage = buildCompletionReport(sources(store)).coverage!;
+    expect(coverage.line).toBe("The acceptance gate has no opinion: all 1 gating scenario(s) are blocked — nothing below was proven either way.");
   });
 
   it("carries a green gate's own sentence through", () => {

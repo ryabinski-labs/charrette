@@ -90,7 +90,12 @@ describe("what the validator is now required to judge", () => {
     // Otherwise every prototype gets a FAIL for having no Kubernetes, the
     // verdict stops meaning anything, and the operator stops reading it.
     expect(prompt).toContain("Judge these against what the operator asked for");
-    expect(prompt).toContain("deliberately scoped live vendors out has no gap here");
+    // …but not against what the repository says about itself. A run that could
+    // not finish something can always write down that it chose not to, and that
+    // sentence is not the operator's (issue #119).
+    expect(prompt).toContain("Scope is fixed by the brief, not read from the tree");
+    expect(prompt).toContain("a gap those documents disclose is still a gap");
+    expect(prompt).not.toContain("if the repo says so");
   });
 
   it("keeps the seam reading it already did well", () => {

@@ -128,7 +128,7 @@ async function build(
   prMode: "single" | "per-task" = "single",
   pool?: AgentPool,
   checkTimeoutMinutes = 20,
-  extra?: { prodUrl?: string; prodOut?: string; ciFixRounds?: number; holdUntilGreen?: boolean }
+  extra?: { prodUrl?: string; prodOut?: string; ciFixRounds?: number; holdUntilGreen?: boolean; holdUntilProven?: boolean }
 ) {
   const { repo } = repoWithOrigin();
   const store = new Store(":memory:");
@@ -159,6 +159,7 @@ async function build(
       prodUrl: extra?.prodUrl ?? "",
       ciFixRounds: extra?.ciFixRounds ?? 2,
       holdUntilGreen: extra?.holdUntilGreen ?? false,
+      ...(extra?.holdUntilProven === undefined ? {} : { holdUntilProven: extra.holdUntilProven }),
     })
   );
   return { store, runId, logs, repo, controller };
@@ -273,18 +274,20 @@ describe("opening the component PR", () => {
     expect(logs.join("\n")).toMatch(/merged locally, but the pull request could not be opened/);
   });
 
-  it("proceeds to review when there was genuinely nothing to publish", async () => {
-    // The other half of the same guard, and the reason it cannot simply hold on
-    // a missing PR number: a run whose foundation tasks parked has no diff, and
-    // pausing it over a pull request it was never going to open would stop it
-    // twice for one outcome it has already reported.
+  it("holds rather than pausing when there was genuinely nothing to publish", async () => {
+    // The other half of the same guard, and the reason it cannot simply pause
+    // on a missing PR number: a run whose foundation tasks parked has no diff,
+    // and pausing it over a pull request it was never going to open would stop
+    // it twice for one outcome. It is not in review either — there is nothing
+    // to review — so the closing gate holds it in BLOCKED and says why.
     // `commit: false` is the shape: the worker's branch carries nothing, the task
     // parks, and nothing ever reaches MERGED.
     const { adapter } = fakeGitHub(() => ({ number: 7, url: "u" }));
     const { store, runId, logs } = await build(adapter, false);
 
     expect(store.getTask(runId, "task-a")!.state).toBe("NEEDS_HUMAN");
-    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    expect(store.getRun(runId)!.state).toBe("BLOCKED");
+    expect(store.lastRunStateChange(runId)!.reason).toBe("nothing merged, so there is nothing to review");
     expect(logs.join("\n")).toMatch(/no pull request opened: no task reached MERGED/);
   });
 
@@ -535,17 +538,21 @@ describe("validating intent before the PRs", () => {
     const events = store.eventsSince(runId, 0);
     const seqOf = (type: string) => events.find((e) => e.event.type === type)?.seq ?? Infinity;
     expect(seqOf("run.intent_verdict")).toBeLessThan(seqOf("github.pr_opened"));
-    expect(controller.outcome(runId).intent).toEqual({ verdict: "PASS", gaps: [], summary: "" });
+    expect(controller.outcome(runId).intent).toEqual({ verdict: "PASS", gaps: [], unchecked: [], summary: "" });
   });
 
   it("reports the gaps when the validator says the intent is not met", async () => {
     const { adapter } = fakeGitHub(() => ({ number: 7, url: "u" }));
-    const { runId, controller } = await build(adapter, true, '{"verdict":"FAIL","summary":"half a feature","gaps":["the toggle is never wired to the call screen"]}');
+    const { runId, controller } = await build(adapter, true, '{"verdict":"FAIL","summary":"half a feature","gaps":["the toggle is never wired to the call screen"]}', "single", undefined, 20, {
+      holdUntilProven: false,
+    });
     const out = controller.outcome(runId);
-    expect(out.intent).toEqual({ verdict: "FAIL", summary: "half a feature", gaps: ["the toggle is never wired to the call screen"] });
+    expect(out.intent).toEqual({ verdict: "FAIL", summary: "half a feature", gaps: ["the toggle is never wired to the call screen"], unchecked: [] });
     expect(out.line).toContain("intent check found 1 gap");
-    // A FAIL does not block the PRs — the harness never merges, and the human
-    // review the PRs exist for is exactly where the gap list belongs.
+    // With the hold off, a FAIL does not block the PRs — the harness never
+    // merges, and the human review the PRs exist for is where the gap list
+    // belongs. With it on (the default) the run holds instead; see
+    // closingProof.test.ts.
     expect(out.prs).toHaveLength(1);
   });
 });

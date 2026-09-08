@@ -214,10 +214,12 @@ describe("a failing intent verdict", () => {
 
     const runId = await controller.startRun("build a thing", RunConfig.parse(BASE));
 
-    // One round, then the PRs open carrying the verdict — which is where a gap
-    // the harness could not close belongs.
+    // One round, then the run holds. A gap the harness could not close is not
+    // a clause in a closing line; with `holdUntilProven` it is the reason the
+    // run is BLOCKED, and no pull request opens over it.
     expect(store.listTasks(runId).filter((t) => t.id.startsWith("intent-fix-")).length).toBe(2);
-    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    expect(store.getRun(runId)!.state).toBe("BLOCKED");
+    expect(store.lastRunStateChange(runId)!.reason).toContain("the intent check found 2 gaps");
   });
 
   it("does nothing at all when the operator has turned it off", async () => {
@@ -264,7 +266,9 @@ describe("a failing intent verdict", () => {
     const runId = await controller.startRun("build a thing", RunConfig.parse(BASE));
 
     expect(store.listTasks(runId).some((t) => t.id.startsWith("intent-fix-"))).toBe(false);
-    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    // Nothing judged the tree, and that is not a pass: the run holds on it.
+    expect(store.getRun(runId)!.state).toBe("BLOCKED");
+    expect(store.lastRunStateChange(runId)!.reason).toContain("nothing has judged the merged tree");
   });
 
   it("says out loud which gaps it did not queue", async () => {

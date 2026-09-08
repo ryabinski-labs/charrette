@@ -32,9 +32,22 @@ export interface SuiteRun {
   error?: string;
 }
 
+/**
+ * The three answers this gate can give.
+ *
+ * Not a boolean, because a boolean had only two, and the third — "nothing here
+ * was proven either way" — got spelled as the first. A specification with no
+ * gating scenario, or whose every gating scenario is blocked on a question
+ * nobody answered, returned `passed: true`, and the one caller tested exactly
+ * that field: waf de2cb7aa carried four blocked P0 scenarios through the gate
+ * that way. A caller handed this type cannot confuse the cases without saying
+ * so in its own code.
+ */
+export type AcceptanceCall = "green" | "red" | "no-opinion";
+
 export interface AcceptanceVerdict {
   /** The answer. Derived from the exit code, never from the parsed ids. */
-  passed: boolean;
+  verdict: AcceptanceCall;
   /** Scenario ids the output named as failing, worst first. */
   failing: string[];
   /**
@@ -50,7 +63,16 @@ export interface AcceptanceVerdict {
   blocked: string[];
   /** One sentence for the operator, the pit stop, and the pull request body. */
   line: string;
+  /**
+   * The tail of what the runner wrote, for the one task a red suite that named
+   * no scenario can honestly queue: make the suite runnable and readable. Empty
+   * for every other answer — a green suite's output is nobody's work.
+   */
+  output: string;
 }
+
+/** How much of a red suite's output travels with the verdict into a task. */
+const OUTPUT_TAIL = 4000;
 
 /**
  * A failing line, in the vocabularies the runners this harness meets actually
@@ -108,7 +130,7 @@ const bySeverity = (a: SpecScenario, b: SpecScenario): number => RANK[a.priority
 /**
  * Read one run of the scenario suite as a verdict on the run.
  *
- * `passed` is the exit code and nothing else. A suite that exits zero while
+ * Green is the exit code and nothing else. A suite that exits zero while
  * printing the word FAIL in a fixture has passed; a suite that exits one having
  * named no scenario has failed. Deriving the answer from the parsed ids instead
  * would make the gate as good as the parser, which is exactly the trade this
@@ -122,27 +144,31 @@ export function acceptanceVerdict(spec: RunSpec, run: SuiteRun): AcceptanceVerdi
     .map((s) => s.id);
 
   // Nothing to hold the run to. Not a pass and not a failure — a statement that
-  // this gate has no opinion, which the caller must be able to tell apart from
-  // a green suite.
+  // this gate has no opinion, which the caller can tell apart from a green suite
+  // because it is spelled differently. Blocked scenarios are named so that the
+  // caller can put the question behind them to the operator: a P0 nobody could
+  // run because nobody answered is the harness's question, not its pass.
   if (!scenarios.length) {
     return {
-      passed: true,
+      verdict: "no-opinion",
       failing: [],
       named: true,
       blocked,
       line: blocked.length
         ? `no scenario could be run: all ${blocked.length} gating scenario(s) are blocked on an unanswered question`
         : "the specification declares no gating scenario, so nothing here was proven either way",
+      output: "",
     };
   }
 
   if (run.error) {
     return {
-      passed: false,
+      verdict: "red",
       failing: [],
       named: false,
       blocked,
       line: `the scenario suite could not be run (${run.error}) — ${scenarios.length} gating scenario(s) are therefore unproven, not passing`,
+      output: run.output.slice(-OUTPUT_TAIL),
     };
   }
 
@@ -151,26 +177,51 @@ export function acceptanceVerdict(spec: RunSpec, run: SuiteRun): AcceptanceVerdi
   // the head of this sentence and stops; a P0 listed fourth is a P0 nobody saw.
   const order = new Map([...scenarios].sort(bySeverity).map((s, i) => [s.id, i]));
   const sorted = [...failing].sort((a, b) => order.get(a)! - order.get(b)!);
-  const passed = run.exitCode === 0;
 
-  if (passed) {
+  if (run.exitCode === 0) {
     return {
-      passed: true,
+      verdict: "green",
       failing: [],
       named: true,
       blocked,
       line: `${scenarios.length} gating scenario(s) green${blocked.length ? `, ${blocked.length} still blocked on an unanswered question` : ""}`,
+      output: "",
     };
   }
   return {
-    passed: false,
+    verdict: "red",
     failing: sorted,
     named: sorted.length > 0,
     blocked,
     line: sorted.length
       ? `${sorted.length} of ${scenarios.length} gating scenario(s) failing: ${sorted.slice(0, 4).join(", ")}${sorted.length > 4 ? `, +${sorted.length - 4} more` : ""}`
       : `the scenario suite is red and its output named no scenario — ${scenarios.length} gating scenario(s) are unproven`,
+    output: run.output.slice(-OUTPUT_TAIL),
   };
+}
+
+/**
+ * The open questions behind the gating scenarios a verdict could not run, so
+ * the caller can ask them rather than pass over them.
+ *
+ * A blocked scenario carries no question of its own; it is blocked because its
+ * requirement is, and the requirement names the question. Walked here, in the
+ * pure module, so the sentence the operator is shown is testable without a
+ * run. A scenario whose chain does not reach a question is reported under its
+ * own id, never dropped — the whole point is that nothing blocked goes unsaid.
+ */
+export function blockingQuestionsFor(spec: RunSpec, blocked: Iterable<string>): string[] {
+  const scenarios = new Map(spec.scenarios.map((s) => [s.id, s]));
+  const requirements = new Map(spec.requirements.map((r) => [r.id, r]));
+  const questions = new Map(spec.openQuestions.map((q) => [q.id, q]));
+  const out: string[] = [];
+  for (const id of blocked) {
+    const req = requirements.get(scenarios.get(id)?.requirement ?? "");
+    const asked = (req?.blockedBy ?? []).map((q) => questions.get(q)?.question ?? q);
+    const line = asked.length ? `${id} waits on: ${asked.join(" / ")}` : `${id} is blocked and names no question`;
+    if (!out.includes(line)) out.push(line);
+  }
+  return out;
 }
 
 /**

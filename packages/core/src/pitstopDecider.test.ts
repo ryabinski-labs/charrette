@@ -357,8 +357,10 @@ describe("the closing pit stop, which is the one that repeats", () => {
     expect(specs.filter((s) => s.role === "pm")).toHaveLength(2);
     expect(asked).toHaveLength(1);
     expect(resolved(events).map((e) => (e as { decidedBy: string }).decidedBy)).toEqual(["product-manager", "product-manager", "operator"]);
-    expect(logs(events)).toContainEqual(expect.stringMatching(/come back FAIL 3 times[\s\S]*this one is yours to answer/));
-    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    expect(logs(events)).toContainEqual(expect.stringMatching(/held this run 3 times[\s\S]*this one is yours to answer/));
+    // The operator's "continue" ends the loop; it does not make the FAIL a
+    // pass. The run holds on the verdict it could not fix.
+    expect(store.getRun(runId)!.state).toBe("BLOCKED");
     // The second decider was shown what the first one already tried — a fresh
     // session with no memory is free to give the same answer forever.
     const second = specs.filter((s) => s.role === "pm")[1]!;

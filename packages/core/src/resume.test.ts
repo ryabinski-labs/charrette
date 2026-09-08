@@ -97,7 +97,7 @@ async function parkedRun() {
   const store = new Store(":memory:");
   const bus = new Bus(store);
   const first = new RunController(store, bus, failingPool(), noGithub, gates(), repoPath);
-  const runId = await first.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], qaIterationCap: 1 }));
+  const runId = await first.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], qaIterationCap: 1, holdUntilProven: false }));
   expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
   expect(store.getTask(runId, "task-a")!.state).toBe("NEEDS_HUMAN");
   expect(store.getTask(runId, "task-b")!.state).toBe("CANCELLED");
@@ -129,7 +129,7 @@ describe("surviving agent crashes", () => {
     } as unknown as AgentPool;
     const controller = new RunController(store, bus, pool, noGithub, gates(), repoPath);
 
-    const runId = await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [] }));
+    const runId = await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], holdUntilProven: false }));
 
     // The run closed instead of crashing; the un-verifiable task parked with the
     // crash on record, and its dependent was cancelled as unreachable.
@@ -288,7 +288,7 @@ describe("resuming a run whose planning phase failed", () => {
       },
     } as unknown as AgentPool;
     const controller = new RunController(store, bus, pool, noGithub, gates(), repoPath);
-    await expect(controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [] }))).rejects.toThrow(/planner attempts rejected/);
+    await expect(controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], holdUntilProven: false }))).rejects.toThrow(/planner attempts rejected/);
     const runId = store.listRuns()[0]!.id;
     expect(store.getRun(runId)!.state).toBe("FAILED");
     return { repoPath, store, bus, runId };
@@ -422,7 +422,7 @@ describe("two harness processes on one run", () => {
       },
     };
     const first = new RunController(store, bus, pool as unknown as AgentPool, noGithub, gates(), repoPath);
-    const runId = await first.startRun("do a thing", RunConfig.parse({ deterministicChecks: [] }));
+    const runId = await first.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], holdUntilProven: false }));
 
     expect(refusal).not.toBeNull();
     expect(refusal!.name).toBe("RunLocked");
@@ -439,7 +439,7 @@ describe("two harness processes on one run", () => {
     const store = new Store(":memory:");
     const bus = new Bus(store);
     const first = new RunController(store, bus, failingPool(), noGithub, gates(), repoPath);
-    const runId = await first.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], qaIterationCap: 1 }));
+    const runId = await first.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], qaIterationCap: 1, holdUntilProven: false }));
     const { pool } = healedPool();
     const second = new RunController(store, bus, pool, noGithub, gates(async () => "try again"), repoPath);
     await expect(second.resume(runId)).resolves.not.toThrow();

@@ -444,14 +444,25 @@ describe("the run's specification, read back", () => {
   it("reads the acceptance verdict back whole", () => {
     const { store, bus } = runWith();
     bus.publish({ type: "run.acceptance_verdict", runId: "run-1", passed: false, failing: ["SC-001"], named: true, blocked: ["SC-009"], line: "one failing", ts: 1 });
-    expect(store.acceptanceVerdict("run-1")).toEqual({ passed: false, failing: ["SC-001"], named: true, blocked: ["SC-009"], line: "one failing" });
+    expect(store.acceptanceVerdict("run-1")).toEqual({ verdict: "red", failing: ["SC-001"], named: true, blocked: ["SC-009"], line: "one failing" });
   });
 
   /** A row from before these fields existed reads as the absence they describe. */
   it("fills in what an older row does not carry", () => {
     const { store } = runWith();
     store.db.prepare("INSERT INTO events (runId, type, payload, ts) VALUES (?,?,?,?)").run("run-1", "run.acceptance_verdict", JSON.stringify({ passed: true }), 1);
-    expect(store.acceptanceVerdict("run-1")).toEqual({ passed: true, failing: [], named: true, blocked: [], line: "" });
+    expect(store.acceptanceVerdict("run-1")).toEqual({ verdict: "green", failing: [], named: true, blocked: [], line: "" });
+  });
+
+  /**
+   * The event that could say "no opinion" was written by a gate that used to
+   * spell it `passed: true`. A row that carries the word is read by the word,
+   * whatever the boolean beside it says.
+   */
+  it("reads the three-way verdict ahead of the boolean when a row carries both", () => {
+    const { store } = runWith();
+    store.db.prepare("INSERT INTO events (runId, type, payload, ts) VALUES (?,?,?,?)").run("run-1", "run.acceptance_verdict", JSON.stringify({ verdict: "no-opinion", passed: true }), 1);
+    expect(store.acceptanceVerdict("run-1")!.verdict).toBe("no-opinion");
   });
 });
 
@@ -488,12 +499,24 @@ describe("what the intent check left behind", () => {
     expect(store.planIntentVerdict("run1")).toEqual({ verdict: "FAIL", gaps: [] });
   });
 
+  it("reads an UNKNOWN verdict back with what it left unchecked, and defaults it on an older row", () => {
+    const store = makeStore();
+    makeRun(store);
+    const bus = new Bus(store);
+    bus.publish({ type: "run.intent_verdict", runId: "run1", verdict: "UNKNOWN", gaps: [], unchecked: ["the poller"], summary: "out of turns", ts: 1 });
+    expect(store.intentVerdict("run1")).toEqual({ verdict: "UNKNOWN", gaps: [], unchecked: ["the poller"], summary: "out of turns" });
+    store.db
+      .prepare("INSERT INTO events (runId, taskId, sessionId, type, payload, ts) VALUES (?, NULL, NULL, ?, ?, ?)")
+      .run("run1", "run.intent_verdict", JSON.stringify({ verdict: "PASS" }), 2);
+    expect(store.intentVerdict("run1")).toEqual({ verdict: "PASS", gaps: [], unchecked: [], summary: "" });
+  });
+
   it("counts how far the tree moved after a point, which is what makes a verdict stale", () => {
     const store = makeStore();
     makeRun(store);
     const bus = new Bus(store);
     bus.publish({ type: "git.merged", runId: "run1", taskId: "t1", branch: "harness/run1/t1", sha: "a", ts: 1 });
-    bus.publish({ type: "run.intent_verdict", runId: "run1", verdict: "FAIL", gaps: ["g"], summary: "", ts: 2 });
+    bus.publish({ type: "run.intent_verdict", runId: "run1", verdict: "FAIL", gaps: ["g"], unchecked: [], summary: "", ts: 2 });
     bus.publish({ type: "git.merged", runId: "run1", taskId: "t2", branch: "harness/run1/t2", sha: "b", ts: 3 });
     bus.publish({ type: "git.merged", runId: "run1", taskId: "t3", branch: "harness/run1/t3", sha: "c", ts: 4 });
 

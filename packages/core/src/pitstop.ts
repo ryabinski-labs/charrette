@@ -239,7 +239,7 @@ export interface PitStop {
   stopCostUsd: number;
   /** What the whole plan looks like it will cost at the current rate. */
   projectedUsd: number;
-  intent: { verdict: "PASS" | "FAIL"; gaps: string[]; summary: string } | null;
+  intent: { verdict: "PASS" | "FAIL" | "UNKNOWN"; gaps: string[]; unchecked?: string[]; summary: string } | null;
   artifactsDir: string;
   /** The report as markdown — what a terminal prints and a browser renders. */
   markdown: string;
@@ -357,8 +357,10 @@ export function renderPitStop(stop: Omit<PitStop, "markdown">): string {
       "",
       stop.intent.verdict === "PASS"
         ? `PASS — ${stop.intent.summary}`
-        : `**FAIL** — ${stop.intent.summary || "the merged result does not deliver what was asked"}`,
-      ...stop.intent.gaps.map((g) => `- ${g}`),
+        : stop.intent.verdict === "UNKNOWN"
+          ? `**UNKNOWN** — ${stop.intent.summary || "the validator ran out of turns before it could judge the tree"}; not checked:`
+          : `**FAIL** — ${stop.intent.summary || "the merged result does not deliver what was asked"}`,
+      ...(stop.intent.verdict === "UNKNOWN" ? (stop.intent.unchecked ?? []) : stop.intent.gaps).map((g) => `- ${g}`),
       ""
     );
   }

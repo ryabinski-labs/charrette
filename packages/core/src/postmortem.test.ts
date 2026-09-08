@@ -93,7 +93,7 @@ describe("why a run produced what it produced", () => {
 
   it("says how many of the end verdict's gaps became work", () => {
     const { store, bus } = run();
-    bus.publish({ type: "run.intent_verdict", runId: "run-1", verdict: "FAIL", gaps: ["nothing schedules the workers", "the budget is never enforced"], summary: "s", ts: 1 });
+    bus.publish({ type: "run.intent_verdict", runId: "run-1", verdict: "FAIL", gaps: ["nothing schedules the workers", "the budget is never enforced"], unchecked: [], summary: "s", ts: 1 });
     task(store, { id: "intent-fix-1-1", title: "gap 1" });
 
     const p = postmortem(store, "run-1");
@@ -101,9 +101,18 @@ describe("why a run produced what it produced", () => {
     expect(renderPostmortem(p)).toContain("2 gap(s), 1 queued as work");
   });
 
+  it("says the run was never judged when the end verdict abstained", () => {
+    const { store, bus } = run();
+    bus.publish({ type: "run.intent_verdict", runId: "run-1", verdict: "UNKNOWN", gaps: [], unchecked: ["the poller"], summary: "s", ts: 1 });
+
+    const out = renderPostmortem(postmortem(store, "run-1"));
+    expect(out).toContain("was never judged against the assignment");
+    expect(out).not.toContain("did NOT match");
+  });
+
   it("says so plainly when the finished run did match", () => {
     const { store, bus } = run();
-    bus.publish({ type: "run.intent_verdict", runId: "run-1", verdict: "PASS", gaps: [], summary: "ok", ts: 1 });
+    bus.publish({ type: "run.intent_verdict", runId: "run-1", verdict: "PASS", gaps: [], unchecked: [], summary: "ok", ts: 1 });
 
     expect(renderPostmortem(postmortem(store, "run-1"))).toContain("The finished run matched the assignment.");
   });

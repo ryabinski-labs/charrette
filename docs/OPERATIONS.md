@@ -67,6 +67,17 @@ working, not a fault, but it means **`PR_REVIEW` is where the harness stops, not
 proof that it succeeded.** Read what it produced, which the closing line and
 `harness status` both spell out.
 
+Since issue #115 there is a second way for a run to stop, and it reads
+differently on purpose. A run whose task list has emptied but which **cannot
+prove itself** — its acceptance suite is red or has no opinion, its intent check
+came back FAIL or UNKNOWN or never finished, or nothing merged at all — does not
+enter `PR_REVIEW`. It enters **`BLOCKED`**, opens no pull request, and puts the
+unmet list in the transition reason, the closing line, the dashboard notification
+and a `run.closing_proof` event. `PR_REVIEW` asks you to review; `BLOCKED` asks
+you for help. Fix what it names and `harness resume` re-enters the gates.
+`holdUntilProven: false` restores the older shape, where every one of those was a
+clause in the closing line and the run reported in review anyway.
+
 Before a task parks, though, somebody is asked first. Hitting a cap opens a
 **task-escalation gate**: an advisor agent reads the failure in the task's own
 worktree, checks QA's claims against the code, and writes the answer — one
@@ -132,14 +143,28 @@ allowed. The gaps are stated against a tree that already exists, which is what
 makes them the cheapest work in the run — and leaving them for the human meant
 the harness declined to make exactly the fixes it was best placed to make. If a
 round of fixing does not satisfy the validator, the second verdict is reported
-and the PRs open carrying it.
+and — with `holdUntilProven` (the default) — the run stops in `BLOCKED` rather
+than opening a pull request over it.
 
-Second, only after that verdict is the pull request opened — by default **one
-rollup PR for the whole run**, from the integration branch, listing every merged
-task (one `--no-ff` merge commit each) with the validator's verdict in the body,
-so a reviewer never sees a PR the harness has not finished judging. A FAIL
-verdict does not withhold the PR — the harness never merges, and human review is
-exactly where a gap it could not close belongs — but it is printed first, above it.
+The validator has three answers, not two. **UNKNOWN** is for what its turn budget
+did not reach: it names the items it never checked in `unchecked`, the harness
+buys one more, narrower pass over exactly those items, and if that pass abstains
+too the run holds on it — an abstention is not a pass. A PASS that lists gaps is
+two verdicts; the harness sends the session back to choose one, and if it will
+not, keeps the cautious reading (UNKNOWN, with the gaps as what was not settled).
+Scope, for the validator, is the brief and the specification derived from it
+before any code existed — a `KNOWN-GAPS.md`, a "non-goals" section or an
+"out of scope" card the run wrote for itself does not change what was asked for;
+a gap those documents disclose is still a gap, reported as disclosed.
+
+Second, only after that verdict — and only when the run can prove itself — is
+the pull request opened: by default **one rollup PR for the whole run**, from
+the integration branch, listing every merged task (one `--no-ff` merge commit
+each) with the validator's verdict in the body, so a reviewer never sees a PR the
+harness has not finished judging. With `holdUntilProven: false` a FAIL verdict
+does not withhold the PR — the harness never merges, and human review is where
+a gap it could not close belongs — but it is printed first, above it, and the PR
+is held as a draft.
 
 Why a rollup and not one PR per task: task branches are cut from the
 integration branch, so each carries every merge that landed before it — by the
@@ -416,9 +441,12 @@ What you will see:
 6. Each accepted task merges into `harness/<runId>/main` and gets a PR.
 7. The run ends in `PR_REVIEW` and prints what it actually produced — every pull
    request as a URL, plus anything parked or cancelled. `PR_REVIEW` means *the
-   harness is finished*, not *it succeeded*: a run whose early tasks all park
-   cancels everything downstream and ends there having opened nothing. The
-   closing line distinguishes the two; read it before going to GitHub.
+   harness is finished and could prove it*: the acceptance suite is green, the
+   intent check passed, and there is a pull request. A run that ran out of tasks
+   without proving itself — a red suite, a FAIL or UNKNOWN verdict, nothing
+   merged because the early tasks all parked — ends in `BLOCKED` instead, with
+   the reason in the closing line, and opens nothing. Read the line before going
+   to GitHub.
 
 Local-only first run (no GitHub, no dashboard, no conversation) is a good smoke
 test:
@@ -697,6 +725,7 @@ Run configuration is a zod-validated `RunConfig`
 | `qaIterationCap` | `3` | — | ✅ | worker↔QA round trips before a task is parked as `NEEDS_HUMAN` |
 | `heavyTierAfterRejections` | `2` | — | ✅ | how many of those round trips a task may be sent back before its next worker runs on `models.workerHeavy`, whatever tier it started on. Counted on the same `qaIterations` as the cap above, so a gate answer resets it too. |
 | `holdUntilGreen` | `true` | — | ✅ | the run never reports itself in review while its pull request is red, unchecked (no CI at all), unread (GitHub unreachable), conflicting or behind its base. Fix rounds spent, it holds at a pit stop where `pitStop.decidedBy` (or you) can grant another `ciFixRounds` or stop it; with pit stops off it pauses with the reason on the record, and `harness resume` is the grant. `false` restores the old shape: the failure goes into the outcome line and the run reports in review anyway. |
+| `holdUntilProven` | `true` | — | ✅ | the run never reports itself in review before it has proved itself: the acceptance suite green (not red, and not "no opinion" because nothing gating was declared or everything gating is blocked on an unanswered question), the intent check PASS with no gaps (not FAIL, not UNKNOWN, not a check that never finished), and something merged so there is a pull request to review. Anything short of that, once the fix rounds are spent, holds at the closing pit stop and then parks the run in `BLOCKED` with the unmet list on the record; `harness resume` re-enters the gates. `false` restores the shape both runs in issue #115 closed with: every one of those is a clause in the outcome line, and the run reports in review over it. |
 | `ciFixRounds` | `2` | — | ✅ | rounds of fix tasks a red CI may queue on its own before it asks. Each round re-runs the failed jobs once first (flakes), then queues one task per failing check with that job's log. `0` never fixes CI itself. |
 | `workerRespawnCap` | `3` | — | ✅ | crashed-session restarts before parking; the replacement gets a "read your own git log and continue" note |
 | `workerMaxTurns` | `120` | — | ✅ | turns before the SDK cuts a worker off. A session that hits it is the most expensive kind of failure — it dies having done the most work — so hitting it raises the ceiling **for the whole run**, not just that task: the repository is the same size for all of them. |
@@ -1089,8 +1118,9 @@ one alone is reliable:
   bell) and after the dashboard has already shut down.
 - **The dashboard.** Press **Notify me** in the header to grant permission, and
   the page raises a browser notification on the states worth interrupting you
-  for: `PR_REVIEW` (done), `FAILED`, `ABORTED`, `PAUSED`, `BUDGET_HOLD`,
-  `LIMIT_HOLD` and `PLAN_REVIEW`. The last four are the ones that pay for
+  for: `PR_REVIEW` (done), `BLOCKED` (the run ran out of tasks without proving
+  the product — fix what it names and resume), `FAILED`, `ABORTED`, `PAUSED`,
+  `BUDGET_HOLD`, `LIMIT_HOLD` and `PLAN_REVIEW`. The last five are the ones that pay for
   themselves — the run has stopped and will not move again until you act. The
   subscription gate raises one of its own the moment it opens, before the run is
   parked, because that one is worth nothing unless it is answered while the
@@ -1830,16 +1860,37 @@ remote — so this now means the repo has no `origin`, or `origin` is not on
 link to the wrong host is worse than no link). Set `HARNESS_GITHUB_REPO=owner/repo`
 to force it. Note the issue itself is fine either way; only the link is missing.
 
+**The run ended in `BLOCKED`**
+The task list emptied and the run could not prove the product. The transition
+reason (and the closing line, and the newest `run.closing_proof` event) lists
+exactly what is unmet, in this vocabulary:
+- *the acceptance gate is red* — a gating scenario failed, or the suite could not
+  run or named no scenario, and the fix rounds (`spec.gateRounds`) are spent.
+  Fix the product or the suite in the integration worktree and resume.
+- *the acceptance gate is without an opinion* — the specification declares no
+  P0/P1 scenario, or every one of them is blocked on a question nobody answered.
+  The event feed names the questions; answer them by resuming (the spec agent
+  re-folds answers) or amend the specification, then resume.
+- *the intent check found N gaps* / *could not finish* / *did not complete* —
+  the validator's verdict was FAIL, UNKNOWN, or never parsed, and
+  `intentFixRounds` are spent. Resume buys another check.
+- *nothing merged, so there is nothing to review* — see the next entry; the
+  usual cause is a foundation task parking.
+A run in `BLOCKED` opened no pull request on purpose. `harness resume` re-enters
+the gates; `holdUntilProven: false` in the config turns the hold off.
+
 **The run ended in `PR_REVIEW` but there are no pull requests**
-`PR_REVIEW` means the harness has stopped, not that it succeeded. If the closing
-line reads `no pull requests opened`, nothing was pushed and there is nothing on
-GitHub to look for. The usual cause is a foundation task parking: everything that
-depends on it, directly or through another task, becomes unreachable and is
-cancelled without being attempted. The closing line names each parked task, why
-it stopped, its issue, the branch its work is on, and how many tasks were queued
-behind it; `harness status` prints the same after the fact. Two earlier builds
-printed `PRs opened; human review on GitHub` unconditionally here — that message
-was wrong, not a sign that the PRs went missing.
+On builds with `holdUntilProven` (the default) this no longer happens: a run
+with nothing merged ends in `BLOCKED`. Where it is off, `PR_REVIEW` means the
+harness has stopped, not that it succeeded. If the closing line reads `no pull
+requests opened`, nothing was pushed and there is nothing on GitHub to look for.
+The usual cause is a foundation task parking: everything that depends on it,
+directly or through another task, becomes unreachable and is cancelled without
+being attempted. The closing line names each parked task, why it stopped, its
+issue, the branch its work is on, and how many tasks were queued behind it;
+`harness status` prints the same after the fact. Two earlier builds printed
+`PRs opened; human review on GitHub` unconditionally here — that message was
+wrong, not a sign that the PRs went missing.
 
 **`harness resume` says there is nothing to resume**
 The run is already in a terminal state (`PR_REVIEW` with nothing recoverable,

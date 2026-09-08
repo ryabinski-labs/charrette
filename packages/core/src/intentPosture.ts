@@ -106,7 +106,7 @@ export interface IntentMilestone {
 
 export interface IntentInput {
   /** The newest `run.intent_verdict` — a read of the merged tree. */
-  intent: { verdict: "PASS" | "FAIL"; gaps: string[] } | null;
+  intent: { verdict: "PASS" | "FAIL" | "UNKNOWN"; gaps: string[]; unchecked?: string[] } | null;
   /** The newest `run.plan_intent_verdict` — a read of the plan, before any code. */
   plan: { verdict: string; gaps: string[] } | null;
   /** Every `intent-fix-*` task in the run, whichever round queued it. */
@@ -140,7 +140,7 @@ export interface IntentPosture {
 
   stance: IntentStance;
   /** The newest verdict's own word, or null before one ran. */
-  verdict: "PASS" | "FAIL" | null;
+  verdict: "PASS" | "FAIL" | "UNKNOWN" | null;
   /** What that verdict actually read. `nothing` is not a passing grade. */
   judged: "tree" | "plan" | "nothing";
   /**
@@ -336,6 +336,23 @@ export function intentPosture(input: IntentInput): IntentPosture {
       headline: gaps.length
         ? `The plan was read against your assignment and ${plural(gaps.length, "thing")} it asks for ${gaps.length === 1 ? "was" : "were"} not in it; nothing built has been checked yet.`
         : "The plan covers what you asked for; nothing built has been checked against it yet.",
+    };
+  }
+
+  // The check ran and abstained. Not `met`, because nothing was found to be
+  // there; not `unowned`, because nothing was found to be missing either. It
+  // wears the same stance as a run nobody has read, which is what it is, and
+  // its verdict says why.
+  if (input.intent.verdict === "UNKNOWN") {
+    const unchecked = input.intent.unchecked ?? [];
+    return {
+      ...base,
+      stance: "unjudged",
+      verdict: "UNKNOWN",
+      judged: "tree",
+      gaps: [],
+      gapProgress: null,
+      headline: `The last check ran out of turns before it could judge the merged tree${unchecked.length ? ` — ${plural(unchecked.length, "thing")} it was asked about went unchecked` : ""}${staleClause(input.staleMerges)}.`,
     };
   }
 

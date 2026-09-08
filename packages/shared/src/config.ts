@@ -1152,6 +1152,23 @@ export const RunConfig = z.object({
    */
   holdUntilGreen: z.boolean().default(true),
   /**
+   * Whether the run may report itself in review before it has proved itself.
+   *
+   * `holdUntilGreen` is about what the repo's CI said; this is about what the
+   * run's own gates said. With it on — the default — a run reaches PR_REVIEW
+   * only when the acceptance suite is green (not red, and not "no opinion"
+   * because nothing gating was declared or everything gating is blocked on an
+   * unanswered question), the intent check returned PASS with no gaps (not
+   * FAIL, not UNKNOWN, not a check that never finished), and something merged
+   * so there is a pull request to review. Anything short of that, once the
+   * fix rounds are spent, parks the run in BLOCKED with the unmet list on the
+   * record, and `harness resume` re-enters the gates once the operator has
+   * acted. Off restores the shape both runs in issue #115 closed with: every
+   * one of those is a clause in the outcome line, and the run reports in
+   * review over it.
+   */
+  holdUntilProven: z.boolean().default(true),
+  /**
    * The live URL this repo deploys to. Set it and a run does not end at the
    * pull request: once a human merges, the harness follows the deploy and sends
    * an agent to check the running system against the original assignment.

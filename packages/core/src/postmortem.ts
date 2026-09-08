@@ -214,8 +214,10 @@ export function renderPostmortem(p: Postmortem): string {
     out.push(
       p.intent.verdict === "PASS"
         ? "The finished run matched the assignment."
-        : `The finished run did NOT match the assignment — ${p.intent.gaps.length} gap(s), ${p.intent.queued} queued as work:`,
-      ...(p.intent.verdict === "PASS" ? [] : p.intent.gaps.map((g) => `  - ${g.slice(0, 200)}`)),
+        : p.intent.verdict === "UNKNOWN"
+          ? "The finished run was never judged against the assignment: the intent check ran out of turns and said so."
+          : `The finished run did NOT match the assignment — ${p.intent.gaps.length} gap(s), ${p.intent.queued} queued as work:`,
+      ...(p.intent.verdict === "FAIL" ? p.intent.gaps.map((g) => `  - ${g.slice(0, 200)}`) : []),
       ""
     );
   }

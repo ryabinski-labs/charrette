@@ -1369,7 +1369,7 @@ describe("what the run is delivering against its assignment", () => {
     const bus = new Bus(store);
     bus.publish({ type: "git.merged", runId: "run1", taskId: "t1", branch: "harness/run1/t1", sha: "a", ts: 1 });
     if (withVerdict) {
-      bus.publish({ type: "run.intent_verdict", runId: "run1", verdict: "FAIL", gaps: ["ingestion is absent", "nothing schedules the worker"], summary: "s", ts: 2 });
+      bus.publish({ type: "run.intent_verdict", runId: "run1", verdict: "FAIL", gaps: ["ingestion is absent", "nothing schedules the worker"], unchecked: [], summary: "s", ts: 2 });
       bus.publish({ type: "git.merged", runId: "run1", taskId: "intent-fix-1-1", branch: "harness/run1/f", sha: "b", ts: 3 });
     }
     return store;

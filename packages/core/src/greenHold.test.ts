@@ -393,7 +393,8 @@ describe("what the hold leaves alone", () => {
 
     expect(prs()).toBe(0);
     expect(logs.join("\n")).toMatch(/no pull request opened: no task reached MERGED/);
-    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    // Not a hold the green gate placed — the closing gate's, over nothing merged.
+    expect(store.getRun(runId)!.state).toBe("BLOCKED");
   });
 });
 

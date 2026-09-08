@@ -228,7 +228,7 @@ export const PAGE_HTML = `<!doctype html>
           white-space:nowrap; font-family:var(--mono); }
   .s-MERGED,.s-ACCEPTED,.s-PR_REVIEW,.s-DONE { color:var(--green); }
   .s-WORKING,.s-QA,.s-EXECUTING,.s-INTEGRATING,.s-PLANNING,.s-INTAKE,.s-VERIFYING { color:var(--amber); }
-  .s-NEEDS_HUMAN,.s-QA_FAILED,.s-FAILED,.s-BUDGET_HOLD,.s-LIMIT_HOLD { color:var(--red); }
+  .s-NEEDS_HUMAN,.s-QA_FAILED,.s-FAILED,.s-BUDGET_HOLD,.s-LIMIT_HOLD,.s-BLOCKED { color:var(--red); }
   .s-PLAN_REVIEW { color:var(--blue); }
   .s-PENDING,.s-READY,.s-CREATED,.s-CANCELLED,.s-PAUSED,.s-ABORTED { color:var(--dim); }
 
@@ -938,7 +938,14 @@ function describe(ev) {
       // nothing about k-error, so a failing acceptance verdict — the loudest
       // negative signal the run has — was printing in the ordinary body colour
       // while a merge conflict beside it printed in red.
-      return [ev.passed ? "state" : "bad", "spec", "acceptance: " + ev.line];
+      // "no-opinion" is painted red too: it is the gate saying it proved
+      // nothing, and a run that reads that as green is the one issue #115 is
+      // about. Older events carry only "passed", which was true for both.
+      return [(ev.verdict ? ev.verdict === "green" : ev.passed) ? "state" : "bad", "spec", "acceptance: " + ev.line];
+    case "run.closing_proof":
+      return [ev.proven ? "state" : "bad", "run",
+        ev.proven ? "closing gate: proven \\u2014 the run may report itself in review"
+                  : "closing gate: NOT proven \\u2014 " + ev.unmet.join("; ") + (ev.held ? "" : " (holdUntilProven is off, so the run reports in review anyway)")];
     case "skills.forged":
       return ["tool", ev.taskId, ev.action + " skill \\u201c" + ev.name + "\\u201d (~" + ev.tokensApprox + " tokens) \\u2014 " + ev.path];
     default:
@@ -1079,6 +1086,7 @@ function intentGapNote(it) {
       ? { text: "plan: " + it.gaps.length + " not covered", tone: "warn" }
       : { text: "plan covers it", tone: "" };
   }
+  if (it.verdict === "UNKNOWN") return { text: "the check ran out of turns", tone: "warn" };
   const parts = [];
   if (!it.gaps.length) parts.push(it.stance === "met" ? "no gaps open" : "checked, and it disagreed");
   else parts.push(it.gaps.length + (it.gaps.length === 1 ? " gap open" : " gaps open"));
@@ -2223,7 +2231,7 @@ function renderPrs() {
   const rows = [];
   let ended = false;
   for (const run of runs) {
-    ended = ended || ["PR_REVIEW", "INTEGRATING", "VERIFYING", "DONE"].includes(run.state);
+    ended = ended || ["PR_REVIEW", "BLOCKED", "INTEGRATING", "VERIFYING", "DONE"].includes(run.state);
     for (const t of run.tasks) if (t.prNumber) rows.push({ t, run });
   }
   // This list is the answer to "what do I review?", so it is read and copied
@@ -2368,6 +2376,10 @@ function renderRunInfo() {
  */
 const NOTIFY = {
   PR_REVIEW:   ["done", "Every accepted task is merged and its pull request is open for review."],
+  // The run finished its task list and could not prove the product: a red or
+  // opinionless acceptance suite, an intent check that failed or never
+  // finished, or nothing merged at all. It is asking for help, not a review.
+  BLOCKED:     ["waiting", "The run ran out of tasks without proving the product. The activity feed has what is unmet; fix it and resume."],
   // Merged, but the cycle did not close: the deploy went red, or production
   // disagreed. Both need the operator, and neither is visible from the repo.
   VERIFYING:   ["waiting", "The pull request is merged, but the deploy or the production check has not passed. The activity feed has the reason."],

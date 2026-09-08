@@ -145,10 +145,12 @@ describe("the pit stop a FAIL verdict opens", () => {
     // Run ec40b527 printed exactly this verdict once, at the end, to a terminal
     // that had scrolled. Now it is a gate.
     expect(stops.length).toBe(1);
-    expect(stops[0]!.reason).toBe("the intent check came back FAIL");
+    expect(stops[0]!.reason).toMatch(/^the run cannot prove itself: the intent check found \d+ gaps?$/);
     expect(stops[0]!.intent).toMatchObject({ verdict: "FAIL" });
     expect(stops[0]!.markdown).toContain("the pack endpoint is singular on one side");
-    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    // Shown, answered "continue" — and still not proven. The run holds on the
+    // verdict rather than opening a pull request over it.
+    expect(store.getRun(runId)!.state).toBe("BLOCKED");
   });
 
   it("does not open when the verdict passed", async () => {

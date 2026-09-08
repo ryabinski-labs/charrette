@@ -29,6 +29,26 @@ function input(over: Partial<IntentInput> = {}): IntentInput {
 }
 
 describe("intentPosture", () => {
+  /**
+   * A check that abstained is not a pass and not a failure. It wears the stance
+   * of a run nobody has read, and says why, so the meter cannot draw it green.
+   */
+  it("reads an UNKNOWN verdict as unjudged, with what went unchecked in the headline", () => {
+    const p = intentPosture(input({ intent: { verdict: "UNKNOWN", gaps: [], unchecked: ["a", "b"] }, staleMerges: 0 }));
+    expect(p.stance).toBe("unjudged");
+    expect(p.verdict).toBe("UNKNOWN");
+    expect(p.judged).toBe("tree");
+    expect(p.gapProgress).toBeNull();
+    expect(p.headline).toContain("ran out of turns");
+    expect(p.headline).toContain("2 things it was asked about went unchecked");
+  });
+
+  it("reads an UNKNOWN that named nothing as simply unfinished", () => {
+    const p = intentPosture(input({ intent: { verdict: "UNKNOWN", gaps: [] } }));
+    expect(p.stance).toBe("unjudged");
+    expect(p.headline).toBe("The last check ran out of turns before it could judge the merged tree.");
+  });
+
   it("says nothing has measured the run rather than drawing it as zero", () => {
     const p = intentPosture(input());
     expect(p.stance).toBe("unjudged");

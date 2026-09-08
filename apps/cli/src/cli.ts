@@ -259,6 +259,10 @@ async function reportOutcome(
   if (out.intent) {
     if (out.intent.verdict === "PASS") {
       lines.push("", `  Intent check: PASS — ${out.intent.summary.replace(/\s+/g, " ").slice(0, 240)}`);
+    } else if (out.intent.verdict === "UNKNOWN") {
+      lines.push("", `  Intent check: UNKNOWN — the validator ran out of turns before it could judge the merged tree. Not checked:`);
+      for (const item of out.intent.unchecked) lines.push(`    - ${item.replace(/\s+/g, " ").slice(0, 240)}`);
+      if (out.intent.summary) lines.push(`    ${out.intent.summary.replace(/\s+/g, " ").slice(0, 240)}`);
     } else {
       lines.push("", `  Intent check: FAIL — the merged result does not fully deliver what you asked for:`);
       for (const gap of out.intent.gaps) lines.push(`    - ${gap.replace(/\s+/g, " ").slice(0, 240)}`);

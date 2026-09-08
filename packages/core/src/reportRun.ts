@@ -27,7 +27,7 @@ export interface OutcomeFacts {
   deploy: { state: "passing" | "failing" | "pending" | "none"; failing: string[] } | null;
   prod: { url: string; verdict: "PASS" | "FAIL"; findings: string[] } | null;
   ci: { state: "passing" | "failing" | "pending" | "none"; failing: string[] } | null;
-  intent: { verdict: "PASS" | "FAIL"; gaps: string[] } | null;
+  intent: { verdict: "PASS" | "FAIL" | "UNKNOWN"; gaps: string[] } | null;
 }
 
 export interface ReportSources {
@@ -119,11 +119,13 @@ function coverageOf(store: Store, runId: string): (ReturnType<typeof specCoverag
   const coverage = specCoverage(spec, verdict?.failing ?? []);
   const line = !verdict
     ? "The scenarios were written, and the acceptance gate never ran — so nothing here has been checked against what shipped."
-    : verdict.passed
+    : verdict.verdict === "green"
       ? verdict.line
-      : verdict.named
-        ? `The acceptance gate is red: ${verdict.line}.`
-        : `The acceptance gate is red and its output named no scenario, so which promise broke is not known — every requirement below is unproven rather than passing.`;
+      : verdict.verdict === "no-opinion"
+        ? `The acceptance gate has no opinion: ${verdict.line} — nothing below was proven either way.`
+        : verdict.named
+          ? `The acceptance gate is red: ${verdict.line}.`
+          : `The acceptance gate is red and its output named no scenario, so which promise broke is not known — every requirement below is unproven rather than passing.`;
   return { ...coverage, line };
 }
 

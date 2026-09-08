@@ -217,6 +217,21 @@ describe("asking whether the plan could deliver the assignment", () => {
     expect(JSON.parse(row.payload).gaps).toHaveLength(2);
   }, 30_000);
 
+  /**
+   * The plan check is never short of turns and is not offered UNKNOWN. One that
+   * answers it anyway has said the plan cannot be shown to cover the brief,
+   * which is a FAIL with its unchecked items as the gaps — not a pass.
+   */
+  it("reads an UNKNOWN answer as a FAIL over what went unchecked", async () => {
+    const unknown = "```json\n" + JSON.stringify({ verdict: "UNKNOWN", summary: "ran out", unchecked: ["whether ach is real"] }) + "\n```";
+    const { controller, store, summaries } = harness(unknown);
+    await controller.startRun("build a thing", RunConfig.parse({})).catch(() => undefined);
+
+    const row = store.db.prepare("SELECT payload FROM events WHERE type = 'run.plan_intent_verdict'").get() as { payload: string };
+    expect(JSON.parse(row.payload)).toMatchObject({ verdict: "FAIL", gaps: ["whether ach is real"] });
+    expect(summaries[0]).toContain("whether ach is real");
+  }, 30_000);
+
   it("spends nothing when the operator has turned it off", async () => {
     const { controller, specs, summaries } = harness(FAIL, true);
     await controller.startRun("build a thing", RunConfig.parse({ planIntentCheck: false })).catch(() => undefined);
