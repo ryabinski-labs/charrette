@@ -281,7 +281,21 @@ const lines = (out: string): string[] =>
  * that says it because the run left nothing off, and that is precisely the
  * confusion this whole feature exists to prevent.
  */
-export async function changedFiles(repoPath: string, base: string, ref: string, startedAt: number): Promise<RunDiff> {
+export async function changedFiles(
+  repoPath: string,
+  base: string,
+  ref: string,
+  startedAt: number,
+  /**
+   * Which of the changed paths are worth reading.
+   *
+   * `scannable` by default, which is the dark-switch scanner's question: which
+   * files can declare a switch. The gap ledger asks a different one — which
+   * files are documentation — and a filter that answers only the first reads
+   * no markdown at all, which is every file the gap ledger exists to measure.
+   */
+  keep: (path: string) => boolean = scannable
+): Promise<RunDiff> {
   const resolved = await git(repoPath, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).catch(() => "");
   if (!resolved.trim()) {
     return {
@@ -309,7 +323,7 @@ export async function changedFiles(repoPath: string, base: string, ref: string, 
   // Filtered before the read, not after: fetching a blob is a subprocess each,
   // and a run that touched a thousand lockfile lines and six templates should
   // cost six reads.
-  for (const p of paths.filter(scannable).slice(0, MAX_FILES)) {
+  for (const p of paths.filter(keep).slice(0, MAX_FILES)) {
     // A file the run deleted has no content at the tip and nothing to scan, so
     // it is simply absent — a switch cannot be declared by a file that is gone.
     const text = await git(repoPath, ["show", `${from}:${p}`]).catch(() => "");

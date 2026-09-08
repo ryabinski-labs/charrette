@@ -130,6 +130,15 @@ describe("what the closing gate says about scope", () => {
     expect(scopeUnmet(l)).toEqual([]);
   });
 
+  it("caps the unclaimed list the same way", () => {
+    const many = RunSpec.parse({
+      feature: "f",
+      requirements: Array.from({ length: 6 }, (_, i) => ({ id: `REQ-${i + 1}`, text: `thing ${i + 1}`, priority: "P0" })),
+      scenarios: [],
+    });
+    expect(scopeUnmet(scopeLedger(many, []))[0]).toContain("+2 more");
+  });
+
   it("names the worst few and says how many it left out", () => {
     const many = RunSpec.parse({
       feature: "f",

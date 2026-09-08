@@ -33,6 +33,8 @@ import { GitHubAdapter, type PrChecks, type PrRef } from "./github.js";
 import { unsatisfiableCriteria } from "./infraGuard.js";
 import { skeletonShortfall } from "./skeleton.js";
 import { gatingRequirement, replanDrops, scopeLedger, scopeUnmet, type ScopeLedger } from "./scopeLedger.js";
+import { gapLedger, gapLedgerSignal, readableForGaps } from "./gapLedger.js";
+import { changedFiles } from "./reportRun.js";
 import { answerBy, answerText, runIntake, type IntakeUi } from "./intake.js";
 import { AgentIntake } from "./intakeDecider.js";
 import { acquireRunLock, type RunLock } from "./runLock.js";
@@ -5629,6 +5631,11 @@ export class RunController {
     // invisible is one the operator cannot decide they do not want.
     const afterUsd = this.store.spentUsd(runId);
 
+    // What this run has written about what it did not build. Read here rather
+    // than at the end because the only decision available — buy the work, or
+    // accept the gaps — needs budget left to be a decision at all (issue #119).
+    const gaps = await this.gapSignal(runId);
+    if (gaps) this.bus.publish({ type: "agent.log", runId, sessionId: `pitstop-${number}`, text: `gap ledger: ${gaps}`, ts: Date.now() });
     const stop: PitStop = {
       runId,
       number,
@@ -5783,6 +5790,22 @@ export class RunController {
    * pull requests opened; intent check found 2 gaps". Published every time it
    * is read, so the reason a run stopped is one query away.
    */
+  /**
+   * How much of what this run has written is a record of what it did not build.
+   *
+   * Empty for the ordinary amount, and empty when the diff cannot be read —
+   * a signal nobody can evidence is one nobody should be asked about.
+   */
+  private async gapSignal(runId: string): Promise<string> {
+    const run = this.store.getRun(runId)!;
+    try {
+      const diff = await changedFiles(this.repoPath, run.config.baseBranch || "HEAD", this.wt.integrationBranch(runId), run.createdAt, readableForGaps);
+      return diff.read ? gapLedgerSignal(gapLedger(diff.files)) : "";
+    } catch {
+      return "";
+    }
+  }
+
   /**
    * Write off every gating requirement nothing is building any more, against
    * the answer that let the run go on.

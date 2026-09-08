@@ -999,6 +999,77 @@ describe("requirements nothing is building any more", () => {
   });
 });
 
+describe("what a run has written about what it did not build", () => {
+  /**
+   * waf's gaps file reached 118.6 KB and its own intent verdict offered
+   * "though this is honestly disclosed rather than hidden" as mitigation for a
+   * core deliverable that did not work. The operator was shown it after the
+   * run; the only decision available — buy the work, or accept the gaps —
+   * needs budget left to be a decision at all (issue #119).
+   */
+  it("puts the gap ledger to the operator at a pit stop, while there is budget to act on it", async () => {
+    const dir = repo();
+    const stops: PitStop[] = [];
+    const { pool } = rolePool(
+      specified("exit 0", {
+        // The worker writes the run's own gaps file, as waf's did.
+        worker: (spec: AgentSpec, nth: number) => {
+          writeFileSync(path.join(spec.cwd, "KNOWN-GAPS.md"), `# Known gaps\n\n${"Everything here was deliberately left out of this run's budget. ".repeat(400)}`);
+          return worker(spec, nth);
+        },
+        demo: () => DEMO_OK,
+        reviewer: () => REVIEW_OK,
+        validator: () => fence({ verdict: "FAIL", summary: "half", gaps: ["the poller is never scheduled"] }),
+      })
+    );
+    const { controller, store, events } = build({
+      repoPath: dir,
+      pool,
+      gates: {
+        async resolvePitStop(stop) {
+          stops.push(stop);
+          return { action: "continue", feedback: "" };
+        },
+      },
+    });
+
+    await controller.startRun("build a checkout", RunConfig.parse({ ...BASE, intentFixRounds: 0, pitStop: { every: { usd: 1000 } } }), operator());
+
+    void store;
+    expect(stops).not.toHaveLength(0);
+    expect(logs(events)).toContainEqual(expect.stringContaining("gap ledger:"));
+    expect(logs(events)).toContainEqual(expect.stringContaining("KB of documentation whose subject is what it did not build"));
+    expect(logs(events)).toContainEqual(expect.stringContaining("is this work you want bought, or gaps you accept?"));
+  });
+
+  it("says nothing about the ordinary amount of documentation", async () => {
+    const dir = repo();
+    const stops: PitStop[] = [];
+    const { pool } = rolePool(
+      specified("exit 0", {
+        demo: () => DEMO_OK,
+        reviewer: () => REVIEW_OK,
+        validator: () => fence({ verdict: "FAIL", summary: "half", gaps: ["a gap"] }),
+      })
+    );
+    const { controller, events } = build({
+      repoPath: dir,
+      pool,
+      gates: {
+        async resolvePitStop(stop) {
+          stops.push(stop);
+          return { action: "continue", feedback: "" };
+        },
+      },
+    });
+
+    await controller.startRun("build a checkout", RunConfig.parse({ ...BASE, intentFixRounds: 0, pitStop: { every: { usd: 1000 } } }), operator());
+
+    expect(stops).not.toHaveLength(0);
+    expect(logs(events).some((t) => t.startsWith("gap ledger:"))).toBe(false);
+  });
+});
+
 describe("resuming a blocked run", () => {
   /**
    * A run whose one task parked merged nothing, and a run with nothing merged
