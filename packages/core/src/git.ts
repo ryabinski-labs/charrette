@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { promisify } from "node:util";
 import path from "node:path";
 
@@ -382,6 +382,31 @@ export class WorktreeManager {
     const next = this.baselineLock.then(run, run);
     this.baselineLock = next.catch(() => undefined);
     return next;
+  }
+
+  /**
+   * A checkout of the merged branch that nothing in this run has ever built in.
+   *
+   * The live-exercise gate's tree. Deliberately not the integration worktree
+   * and not the baseline one: both have had installs, builds and suites run in
+   * them all run long, and a product that only starts because a previous agent
+   * left a `node_modules`, a built binary or a seeded database behind is a
+   * product that does not start. `-fdx` removes ignored files too, which is
+   * exactly the difference from `withBaselineWorktree` — there, the seeded
+   * install surviving is the point; here, it is the thing being tested.
+   *
+   * Removed and re-added rather than cleaned when it already exists, so a
+   * resume gets the same clean tree as a first run.
+   */
+  async freshWorktree(runId: string, name: string): Promise<string> {
+    const wtPath = path.join(this.worktreeRoot(), runId, name);
+    if (existsSync(wtPath)) {
+      await git(this.repoPath, ["worktree", "remove", "--force", wtPath], { serialize: true }).catch(() => undefined);
+      rmSync(wtPath, { recursive: true, force: true });
+    }
+    await git(this.repoPath, ["worktree", "add", "--detach", wtPath, this.integrationBranch(runId)], { serialize: true });
+    await git(wtPath, ["clean", "-fdx"], { serialize: true }).catch(() => undefined);
+    return wtPath;
   }
 
   /** The integration branch checked out on disk — where merges land and the validator reads. */

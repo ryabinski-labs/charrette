@@ -57,6 +57,22 @@ export interface CompletionReport {
    * nothing — and the page says which.
    */
   coverage: (SpecCoverage & { line: string }) | null;
+  /**
+   * What happened when something started the product and used it.
+   *
+   * The only line in this report not derived from reading. Null means nothing
+   * ever did, which the page says in those words rather than leaving out: a
+   * report with no live section reads as a report of a product that works,
+   * and that reading is what issue #115 is about.
+   */
+  live: {
+    verdict: "worked" | "broken" | "not-run";
+    path: string;
+    steps: { step: string; result: "worked" | "broken" | "not-reached" }[];
+    howStarted: string;
+    why: string;
+    artifactsDir: string;
+  } | null;
 }
 
 const escapeHtml = (s: string): string => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
@@ -594,6 +610,19 @@ ${
       )
     : ""
 }
+
+${section(
+  "Exercised",
+  "What happened when someone used it",
+  report.live
+    ? `<p>An agent checked this branch out clean, followed the repository's own documented start, and drove the critical path the brief was turned into before any code existed. Everything else in this report is a reading of the code; this is the only part of it that ran.</p>
+       <p class="${report.live.verdict === "worked" ? "" : "bad"}">${escapeHtml(report.live.why)}</p>
+       ${report.live.path ? `<p>The path: ${escapeHtml(report.live.path)}</p>` : ""}
+       ${report.live.steps.length ? list(report.live.steps.map((s) => `${s.result === "worked" ? "worked" : s.result === "broken" ? "BROKE" : "not reached"} — ${s.step}`)) : ""}
+       ${report.live.howStarted ? `<p>Started with: ${code(report.live.howStarted)}</p>` : ""}
+       ${report.live.artifactsDir ? `<p>What it captured: ${code(report.live.artifactsDir)}</p>` : ""}`
+    : `<p class="bad">Nothing started this product and used it. Every check in this run read the code — the tests, the reviews, the intent check — and none of them can tell a product that runs from one that does not. Treat everything above as a statement about the source.</p>`
+)}
 
 ${
   report.coverage

@@ -139,6 +139,9 @@ const DEMO: DemoReport = {
 };
 
 const STOP: Omit<PitStop, "markdown"> = {
+  // Null is the honest default for a mid-run stop: the live-exercise gate runs
+  // once, at the end, against the finished tree.
+  live: null,
   runId: "run1",
   number: 2,
   reason: 'the "Sign-in" epic is finished',
@@ -217,6 +220,45 @@ describe("the report the operator reads", () => {
 
     expect(md).toContain("**FAIL** — the merged result does not deliver what was asked");
     expect(md).toContain("- the pack endpoint is singular on one side");
+  });
+
+  /**
+   * Above the intent check on purpose: an operator deciding what a run does
+   * next is better served by "the payment step returns 500" than by any number
+   * of agreeing opinions about the source.
+   */
+  it("prints what happened when someone used the product, above the readings of it", () => {
+    const md = renderPitStop({
+      ...STOP,
+      live: {
+        verdict: "broken",
+        path: "take a payment",
+        steps: [
+          { step: "open the checkout", result: "worked" },
+          { step: "pay with a test card", result: "broken" },
+          { step: "see the receipt", result: "not-reached" },
+        ],
+        why: "1 of 3 step(s) worked; it broke at \"pay with a test card\" — POST /pay returned 500",
+        artifactsDir: "/r/.harness/run1/live",
+      },
+      intent: { verdict: "PASS", gaps: [], summary: "everything asked for is there" },
+    });
+
+    expect(md).toContain("## Using the product");
+    expect(md).toContain("**The critical path is broken.**");
+    expect(md).toContain("- **BROKE** — pay with a test card");
+    expect(md).toContain("- not reached — see the receipt");
+    expect(md).toContain("What it captured: /r/.harness/run1/live");
+    expect(md.indexOf("## Using the product")).toBeLessThan(md.indexOf("## Intent check"));
+  });
+
+  it("says a working path worked, and one nothing drove was never exercised", () => {
+    const worked = renderPitStop({ ...STOP, live: { verdict: "worked", path: "", steps: [], why: "all 3 step(s) worked", artifactsDir: "" } });
+    expect(worked).toContain("**The critical path works.** all 3 step(s) worked");
+    expect(worked).not.toContain("The path:");
+
+    const never = renderPitStop({ ...STOP, live: { verdict: "not-run", path: "p", steps: [], why: "it did not start", artifactsDir: "" } });
+    expect(never).toContain("**Nothing exercised the product.** it did not start");
   });
 
   it("prints an abstaining intent verdict as what was not checked, never as a pass", () => {

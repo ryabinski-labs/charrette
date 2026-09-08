@@ -101,6 +101,7 @@ export function buildCompletionReport(src: ReportSources): CompletionReport {
     couldNotCheck: src.couldNotCheck,
     method: src.method,
     coverage: coverageOf(src.store, src.runId),
+    live: src.store.liveVerdict(src.runId),
   };
 }
 

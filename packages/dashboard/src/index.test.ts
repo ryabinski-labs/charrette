@@ -343,6 +343,8 @@ describe("the pit stop gate", () => {
   });
 
   const STOP = {
+    // Null: a mid-run stop, and the live-exercise gate runs once at the end.
+    live: null,
     runId: "r1",
     number: 2,
     skippedReviewers: [],

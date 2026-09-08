@@ -59,6 +59,11 @@ answer it at the start, from a plan, or at the end, from a diff.
 2. Their reaction — "keep going", "not this, do that instead", "stop" — reaches the
    tasks that have not run yet.
 3. A run's own FAIL verdict is never delivered for the first time after the run ends.
+4. The closing stop shows what happened when the finished product was actually
+   used — the live-exercise gate's verdict, above the readings of the code, with
+   each step of the critical path and where its captures are. An operator
+   deciding what a run does next is better served by "the payment step returns
+   500" than by any number of agreeing opinions about the source.
 
 ## Non-goals
 

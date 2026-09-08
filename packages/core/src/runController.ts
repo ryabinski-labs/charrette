@@ -18,6 +18,7 @@ import {
   blockingQuestions,
   briefToAssignment,
   gating,
+  hasCriticalPath,
   validatePlanDag,
 } from "@harness/shared";
 import { indexSkills, matchSkills, verifyHash, type IndexedSkill } from "@harness/skills-mcp";
@@ -59,12 +60,15 @@ import {
   checkEvidence,
   demoCoverage,
   evidenceFaults,
+  liveVerdict,
   repeatable,
   retryableFaults,
   strikeCommands,
   strikeEvidence,
   type CommandCheck,
+  type CommandClaim,
   type EvidenceCheck,
+  type LiveFindings,
   type Rerun,
 } from "./evidence.js";
 import {
@@ -79,6 +83,9 @@ import {
   demoEvidenceReaskPrompt,
   demoPrompt,
   demoSystemPrompt,
+  liveSystemPrompt,
+  livePrompt,
+  liveEvidenceReaskPrompt,
   emptyBranchPrompt,
   abandonedJobPrompt,
   extractJson,
@@ -140,7 +147,7 @@ import { renderProduction, scanProduction } from "./productionScan.js";
 import { detectToolbelt, toolbeltBlock } from "./toolbelt.js";
 import { extendForged, forgeDir, installForged, SkillForgeDecision, validateDraft } from "./skillForge.js";
 import { workerModelFor } from "./modelTier.js";
-import { Store, TaskRow, type RunRow, type StoredIntentVerdict } from "./store.js";
+import { Store, TaskRow, type RunRow, type StoredIntentVerdict, type StoredLiveVerdict } from "./store.js";
 
 const execFileP = promisify(execFile);
 
@@ -168,6 +175,15 @@ const CI_FIX_EPIC = { id: "ci-red", title: "Checks the repo's CI failed" };
  * promises this run has not kept".
  */
 const SPEC_FIX_EPIC = { id: "spec-red", title: "Scenarios the specification says are unmet" };
+const LIVE_FIX_EPIC = { id: "live-path", title: "Steps of the critical path that did not work" };
+/**
+ * How many broken steps one round may queue.
+ *
+ * A critical path is three to seven steps and a broken one usually breaks the
+ * rest, so this is a bound on pathological reports rather than on real ones —
+ * the same reason the intent gaps and the failing scenarios have theirs.
+ */
+const MAX_LIVE_FIXES = 6;
 
 /** A planner's task as it enters the store: everything it said, nothing started yet. */
 function pendingRow(t: PlannedTask): Omit<TaskRow, "runId" | "unverified" | "scenarioIds" | "emptyDeliveries" | "conflictFixes" | "abandonedJobs"> & { scenarioIds: string[] } {
@@ -778,6 +794,24 @@ export interface GateHandler {
 }
 
 /** The demo agent's report, as it comes back over the wire. */
+/** What the live-exercise agent must come back with. Lenient here, strict at the evidence gate. */
+const LiveJson = z.object({
+  started: z.boolean(),
+  howStarted: z.string().default(""),
+  documentedStart: z.string().default(""),
+  steps: z
+    .array(z.object({ step: z.string(), result: z.enum(["worked", "broken", "not-reached"]), observed: z.string().default("") }))
+    .default([]),
+  couldNotReach: z.array(z.string()).default([]),
+  artifacts: z
+    .array(z.union([z.string().transform((file) => ({ file, shows: "" })), z.object({ file: z.string(), shows: z.string().default("") })]))
+    .default([]),
+  commands: z
+    .array(z.union([z.string().transform((command) => ({ command, shows: "" })), z.object({ command: z.string(), shows: z.string().default("") })]))
+    .default([]),
+  summary: z.string().default(""),
+});
+
 const DemoJson = z.object({
   started: z.boolean(),
   howStarted: z.string().default(""),
@@ -1152,7 +1186,14 @@ export class RunController {
         type: "agent.log",
         runId,
         sessionId: "spec",
-        text: `specification: ${final.requirements.length} requirement(s), ${final.scenarios.length} scenario(s), ${gating(final).length} of them gating${final.openQuestions.length ? `, ${final.openQuestions.length} open question(s)` : ""}`,
+        text:
+        `specification: ${final.requirements.length} requirement(s), ${final.scenarios.length} scenario(s), ${gating(final).length} of them gating${final.openQuestions.length ? `, ${final.openQuestions.length} open question(s)` : ""}` +
+        // Said out loud at intake, while the operator is still there to
+        // disagree with it: this is the path the run will be held to at the
+        // end, and a run that named none will be reported as never exercised.
+        (hasCriticalPath(final)
+          ? `. Critical path (${final.criticalPath.name || "unnamed"}): ${final.criticalPath.steps.join(" → ")}`
+          : ". No critical path was named, so nothing will exercise the product at the end of the run"),
         ts: Date.now(),
       });
       return true;
@@ -1979,6 +2020,14 @@ export class RunController {
           // the operator is then shown the gaps *and* what is already queued to
           // close them, and "stop, none of that is worth it" stays sayable.
           fixes = await this.queueIntentFixes(runId);
+          // Then the only check that uses the product. After the reading gates
+          // because standing a product up is the most expensive thing in the
+          // closing phase, and a tree the validator has already found a gap in
+          // is going back to work anyway.
+          if (!fixes.length) {
+            await this.exerciseLive(runId);
+            fixes = await this.queueLiveFixes(runId);
+          }
         }
         // What the run can prove about itself, read once and shown to the pit
         // stop and the gate alike, so the operator is asked about the same
@@ -1993,7 +2042,11 @@ export class RunController {
           this.store.transitionRun(
             runId,
             "EXECUTING",
-            after === "back-to-work" ? "the pit stop sent the run back to work" : `closing ${fixes.length} gap(s) the intent check found`
+            after === "back-to-work"
+              ? "the pit stop sent the run back to work"
+              : fixes[0]?.startsWith("live-fix-")
+                ? `fixing ${fixes.length} step(s) of the critical path that did not work`
+                : `closing ${fixes.length} gap(s) the intent check found`
           );
           run = this.store.getRun(runId)!;
           continue;
@@ -3754,6 +3807,10 @@ export class RunController {
     for (const n of priors) if ((await this.github.prState?.(n)) === "merged") shipped.push(n);
 
     const intent = this.store.intentVerdict(runId);
+    // Null when nothing exercised the product, and stale when the tree has
+    // merged past what was exercised — the same rule the intent verdict
+    // follows, for the same reason: a verdict describes the tree it read.
+    const live = this.store.liveCheckStale(runId) ? null : this.store.liveVerdict(runId);
     // Whether that verdict is this run's newest word on the tree, or an older
     // pass's answer left standing by a check that ended without one. The
     // reviewer is told which — a stale verdict presented as current describes a
@@ -3793,6 +3850,30 @@ export class RunController {
             "",
             "Intent check: **DID NOT COMPLETE**. Nothing has judged this tree against the assignment." +
               (intent ? " An earlier pass reached a verdict, but it read a different tree and is not repeated here." : ""),
+          ]
+        : []),
+      // What using the product showed, ahead of every reading of it: a
+      // reviewer who is told the critical path is broken does not need the
+      // rest of this body to decide what to do.
+      ...(live
+        ? [
+            "",
+            live.verdict === "worked"
+              ? `Live exercise: **the critical path works** — ${live.why}${live.path ? ` (${live.path})` : ""}.`
+              : live.verdict === "broken"
+                ? `Live exercise: **THE CRITICAL PATH IS BROKEN** — ${live.why}`
+                : `Live exercise: **not run** — ${live.why}`,
+            ...live.steps.map((st) => `- ${st.result === "worked" ? "worked" : st.result === "broken" ? "**BROKE**" : "not reached"} — ${st.step}`),
+            ...(live.howStarted ? ["", `Started with: \`${live.howStarted.slice(0, 300)}\``] : []),
+            ...(live.verdict === "worked"
+              ? []
+              : [
+                  "",
+                  "**This PR is held as a draft because of that.** An agent checked this branch out",
+                  "clean, followed the repository's own documented start, and could not get the path",
+                  "the specification names to work. Nothing else in this description is evidence that",
+                  "it does: every other check read the code.",
+                ]),
           ]
         : []),
       ...(intent && !intentStale
@@ -3915,7 +3996,18 @@ export class RunController {
      * dashboard.
      */
     const cannotMerge = merge.state === "conflicting";
-    const draft = stillWorking || intentFailed || unsettled.length > 0 || cannotMerge;
+    /**
+     * And the hold for the one thing no reading can establish.
+     *
+     * The intent check judges whether the work is there; this is whether it
+     * runs. A task whose criteria are all satisfied against mocks reaches
+     * every other gate looking exactly like one that was run for real, which
+     * is how both products in issue #115 shipped "done" without ever having
+     * started. A path that broke, or that nothing drove, holds the pull
+     * request as a draft for the same reason a FAIL does.
+     */
+    const neverRan = Boolean(live) && live!.verdict !== "worked";
+    const draft = stillWorking || intentFailed || neverRan || unsettled.length > 0 || cannotMerge;
     const pr = await this.github.ensurePR(runId, "run", this.wt.integrationBranch(runId), base, title, body, { draft });
     if (!pr) {
       this.bus.publish({
@@ -3994,6 +4086,8 @@ export class RunController {
     intent: StoredIntentVerdict | null;
     /** What the acceptance gate last said, or null for a run with no specification. */
     acceptance: { verdict: "green" | "red" | "no-opinion"; line: string } | null;
+    /** What the live-exercise gate observed, or null when nothing ran the product. */
+    live: StoredLiveVerdict | null;
     ci: { prNumber: number; state: "passing" | "failing" | "pending" | "none"; failing: string[]; total: number } | null;
     mergeable: { state: "mergeable" | "conflicting" | "behind" | "unknown"; baseBranch: string; conflicts: string[] } | null;
     deploy: { sha: string; state: "passing" | "failing" | "pending" | "none"; failing: string[]; total: number } | null;
@@ -4112,6 +4206,19 @@ export class RunController {
     if (acceptance) {
       parts.push(acceptance.verdict === "green" ? "acceptance green" : acceptance.verdict === "red" ? `acceptance RED (${acceptance.line})` : `acceptance has no opinion (${acceptance.line})`);
     }
+    // The only clause in this sentence written by something that used the
+    // product. It goes last of the pre-merge readings, because it outranks
+    // them: a run can be green on every one of them and never have run.
+    const live = this.store.liveVerdict(runId);
+    if (live) {
+      parts.push(
+        live.verdict === "worked"
+          ? `the critical path works (${live.path || "unnamed"})`
+          : live.verdict === "broken"
+            ? `CRITICAL PATH BROKEN — ${live.why}`
+            : `the product was never exercised — ${live.why}`
+      );
+    }
     // Whether any of it reached anyone. This is the end of the cycle, so it goes
     // last: the operator reads left to right and this is the part that decides
     // whether the work is finished or merely merged.
@@ -4141,6 +4248,7 @@ export class RunController {
       total: tasks.length,
       intent,
       acceptance: acceptance ? { verdict: acceptance.verdict, line: acceptance.line } : null,
+      live,
       ci,
       mergeable: mergeable ? { state: mergeable.state, baseBranch: mergeable.baseBranch, conflicts: mergeable.conflicts } : null,
       deploy,
@@ -5513,6 +5621,7 @@ export class RunController {
       stopCostUsd: afterUsd - spentUsd,
       projectedUsd,
       intent: this.store.intentVerdict(runId),
+      live: this.store.liveCheckStale(runId) ? null : this.store.liveVerdict(runId),
       artifactsDir: dir,
       markdown: "",
     };
@@ -5612,6 +5721,8 @@ export class RunController {
     const projects = [
       ...tasks.map((t) => taskIsolation(runId, t.id).composeProject),
       ...Array.from({ length: this.store.pitStopHistory(runId, 0).count + 1 }, (_, i) => taskIsolation(runId, `pitstop-${i + 1}`).composeProject),
+      // And the live-exercise gate's, which starts the whole product once.
+      taskIsolation(runId, "live").composeProject,
     ];
     const [stacks, processes] = await Promise.all([
       composeDown(projects, async (bin, args, timeoutMs) => (await execFileP(bin, args, { timeout: timeoutMs })).stdout).catch(() => [] as string[]),
@@ -5668,6 +5779,18 @@ export class RunController {
       if (!intent || this.store.intentCheckStale(runId)) unmet.push("the intent check did not complete — nothing has judged the merged tree");
       else if (intent.verdict === "FAIL") unmet.push(`the intent check found ${intent.gaps.length || "unstated"} gap${intent.gaps.length === 1 ? "" : "s"}`);
       else if (intent.verdict === "UNKNOWN") unmet.push(`the intent check could not finish: ${intent.unchecked.length} item${intent.unchecked.length === 1 ? "" : "s"} unchecked`);
+      // Last, and the only one of these written by something that used the
+      // product rather than read it. A run may be green on every reading gate
+      // and still never have run — which is what both products in issue #115
+      // were.
+      const live = this.store.liveVerdict(runId);
+      // Only for a run that has a specification: the gate is derived from one,
+      // and `exerciseLive` declines to judge a run that never had one.
+      if (run.config.live.enabled && merged && this.store.runSpec(runId)) {
+        if (!live) unmet.push("nothing has started the product and driven its critical path");
+        else if (live.verdict === "not-run") unmet.push(`the product was never exercised: ${live.why}`);
+        else if (live.verdict === "broken") unmet.push(`the critical path is broken: ${live.why}`);
+      }
     }
     const proof = { proven: unmet.length === 0, unmet, held: run.config.holdUntilProven };
     this.bus.publish({ type: "run.closing_proof", runId, ...proof, ts: Date.now() });
@@ -5766,6 +5889,225 @@ export class RunController {
     if (action !== "stop") return false;
     this.store.transitionRun(runId, "PAUSED", "the run was stopped at a pit stop");
     return true;
+  }
+
+  /**
+   * Start the finished product from a clean checkout and drive the critical
+   * path — the one check in the run that uses the product rather than reading
+   * it.
+   *
+   * Everything before this reads: QA judged each task inside its own worktree,
+   * the acceptance suite runs the repository's own tests, the intent validator
+   * is forbidden to start anything, and the production validator needs a
+   * deployed URL. So across waf and ledger-app — five runs, $4,763, 510 merged
+   * tasks — nothing ever started the product and used it, and both shipped
+   * "done" having never run (issue #116).
+   *
+   * A fresh worktree with `-fdx`, deliberately: a product that only starts
+   * because an earlier agent left a `node_modules` or a built binary behind is
+   * a product that does not start. The session is told nothing about how the
+   * run went, so it cannot infer that the product works from an account of it
+   * being built, and the evidence it offers is struck by the same gate the pit
+   * stop's demo answers to.
+   *
+   * Never throws for a failure of the product or of itself: a live check that
+   * could not run is recorded as `not-run`, which the closing gate reads as
+   * unproven rather than as a pass.
+   */
+  private async exerciseLive(runId: string): Promise<void> {
+    const run = this.store.getRun(runId)!;
+    const spec = this.store.runSpec(runId);
+    if (!run.config.live.enabled) return;
+    // A run with no specification at all has opted out of every gate derived
+    // from one — the acceptance gate returns null for exactly the same case,
+    // and holding a run here that was never specified would be the harness
+    // inventing a standard nobody agreed to. A specification that exists and
+    // named no path is a different answer, and it is given below.
+    if (!spec) return;
+    if (!this.store.listTasks(runId).some((t) => t.state === "MERGED")) return; // nothing merged, nothing to run
+    // A verdict about this exact tree already stands. Re-exercising it would
+    // pay the most expensive session in the closing phase to learn it twice.
+    if (!this.store.liveCheckStale(runId)) return;
+    if (!hasCriticalPath(spec)) {
+      this.bus.publish({
+        type: "run.live_verdict",
+        runId,
+        verdict: "not-run",
+        path: "",
+        steps: [],
+        howStarted: "",
+        why: "the specification named no critical path, so there was nothing to drive",
+        artifactsDir: "",
+        proof: [],
+        couldNotReach: [],
+        ts: Date.now(),
+      });
+      return;
+    }
+
+    const dir = path.join(this.repoPath, ".harness", runId, "live");
+    mkdirSync(dir, { recursive: true });
+    const steps = spec.criticalPath.steps;
+    let wtPath: string | null = null;
+    let report: LiveFindings | null = null;
+    let checks: EvidenceCheck[] = [];
+    let commandChecks: CommandCheck[] = [];
+    let why = "the live-exercise agent did not run";
+    try {
+      wtPath = await this.wt.freshWorktree(runId, "__live__");
+      const skills = this.selectSkills(indexSkills(run.config.skillsDirs), "live", run.assignment, run.config);
+      const common = {
+        runId,
+        role: "live" as const,
+        model: run.config.models.live,
+        systemPrompt: liveSystemPrompt(dir, wtPath, toolbeltBlock(detectToolbelt(run.config.externalTools)), skillsBlock(skills)),
+        skills: skills.map((s) => s.name),
+        cwd: wtPath,
+        disallowedTools: ["WebSearch"],
+        // Its own port block and compose project, like a task worktree: the
+        // operator may well have the same product running on its usual ports.
+        env: isolationEnv(taskIsolation(runId, "live")),
+        budgetCheck: () => this.checkStops(runId),
+      };
+      const result = await this.pool.run({
+        ...common,
+        prompt: livePrompt(run.assignment, spec.criticalPath.name, steps),
+        maxTurns: run.config.live.maxTurns,
+        // The product stays up for the evidence re-ask below; the sweep runs
+        // from this method's `finally` instead.
+        reapOnEnd: false,
+      });
+      report = LiveJson.parse(extractJson(result.resultText));
+      checks = checkEvidence(report.artifacts, (file) => this.readArtifact(dir, file));
+      if (retryableFaults(checks) && result.outcome === "done" && result.sdkSessionId) {
+        this.bus.publish({
+          type: "agent.log",
+          runId,
+          sessionId: result.sessionId,
+          text: `evidence rejected, asking the live-exercise agent again: ${evidenceFaults(checks).join("; ").slice(0, 500)}`,
+          ts: Date.now(),
+        });
+        const retry = await this.pool.run({ ...common, prompt: liveEvidenceReaskPrompt(evidenceFaults(checks)), resume: result.sdkSessionId, maxTurns: EVIDENCE_REASK_TURNS });
+        try {
+          const second = LiveJson.parse(extractJson(retry.resultText));
+          report = second;
+          checks = checkEvidence(second.artifacts, (file) => this.readArtifact(dir, file));
+        } catch {
+          // Keep the first report: its step results are real findings, and
+          // losing them to a failed retake of a screenshot is the worse trade.
+        }
+      }
+      // While the product it was made about is still up.
+      commandChecks = await this.verifyDemoCommands(runId, wtPath, { commands: report.commands });
+    } catch (e) {
+      if (stopsTheRun(e)) throw e;
+      why = `the live-exercise agent did not finish: ${String(e).slice(0, 300)}`;
+      report = null;
+    } finally {
+      // It starts servers, databases and emulators by design; nothing it
+      // started outlives this gate.
+      if (wtPath) await reapUnder(wtPath).catch(() => []);
+    }
+
+    if (!report) {
+      this.bus.publish({ type: "run.live_verdict", runId, verdict: "not-run", path: spec.criticalPath.name, steps: [], howStarted: "", why, artifactsDir: dir, proof: [], couldNotReach: [], ts: Date.now() });
+      return;
+    }
+    // Struck first: the coverage of a step whose only proof was a blank
+    // capture is what the operator would otherwise be shown as evidence.
+    const withFiles = checks.length ? strikeEvidence(report, checks) : report;
+    const verified = commandChecks.length ? strikeCommands(withFiles, commandChecks) : withFiles;
+    const verdict = liveVerdict(steps, verified);
+    this.bus.publish({
+      type: "run.live_verdict",
+      runId,
+      verdict: verdict.verdict,
+      path: spec.criticalPath.name,
+      steps: verdict.steps,
+      howStarted: verified.howStarted,
+      why: verdict.why,
+      artifactsDir: dir,
+      proof: [...verified.artifacts.map((a) => `${a.file} — ${a.shows}`), ...verified.commands.map((c) => `\`${c.command}\` — ${c.shows}`)],
+      couldNotReach: verified.couldNotReach,
+      ts: Date.now(),
+    });
+    this.bus.publish({ type: "run.live_observed", runId, steps: verified.steps.map((s) => ({ step: s.step, observed: s.observed })), ts: Date.now() });
+    this.bus.publish({ type: "agent.log", runId, sessionId: "live", text: `live exercise: ${verdict.why}`, ts: Date.now() });
+  }
+
+  /** Read one file the live agent offered, refusing anything outside its own directory. */
+  private readArtifact(dir: string, file: string): Buffer | null {
+    const full = path.resolve(dir, file);
+    if (full !== dir && !full.startsWith(dir + path.sep)) return null;
+    try {
+      return readFileSync(full);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Turn a broken critical path into work, the way a red scenario and a failing
+   * CI check are turned into work.
+   *
+   * One task per step that did not work, carrying what the agent observed at
+   * it — which is the most specific failure report anything in the run
+   * produces, because it is the only one written by something that used the
+   * product. Chained: a broken step and the steps behind it are usually one
+   * defect seen from several places.
+   *
+   * Returns the queued ids — empty when the path worked, when the rounds are
+   * spent, or when nothing ran at all, which is a thing to tell a person
+   * rather than a thing to hand a worker.
+   */
+  private async queueLiveFixes(runId: string): Promise<string[]> {
+    const run = this.store.getRun(runId)!;
+    const verdict = this.store.liveVerdict(runId);
+    if (!run.config.live.fixRounds || !verdict || verdict.verdict !== "broken") return [];
+    const tasks = this.store.listTasks(runId);
+    const rounds = new Set(tasks.map((t) => /^live-fix-(\d+)-/.exec(t.id)?.[1]).filter(Boolean));
+    if (rounds.size >= run.config.live.fixRounds) return [];
+    const round = rounds.size + 1;
+    const broken = verdict.steps.filter((s) => s.result !== "worked");
+    const observed = new Map(this.store.liveSteps(runId).map((s) => [s.step, s.observed]));
+
+    const queued: PlannedTask[] = broken.slice(0, MAX_LIVE_FIXES).map((s, i) => ({
+      id: `live-fix-${round}-${i + 1}`,
+      epicId: LIVE_FIX_EPIC.id,
+      title: `Make this work: ${s.step.slice(0, 70)}`,
+      spec:
+        `An agent started the finished product from a clean checkout, by the repository's own documented start, and drove the critical path the specification names. This step did not work.\n\n` +
+        `The path: ${verdict.path || "(unnamed)"}\n` +
+        `The step: ${s.step}\n` +
+        (observed.get(s.step) ? `What it observed: ${observed.get(s.step)}\n` : "") +
+        (verdict.howStarted ? `How it started the product: ${verdict.howStarted}\n` : "") +
+        (s.result === "not-reached" ? `\nIt never reached this step, because an earlier one failed. It may already work; check before changing anything.\n` : "") +
+        `\nThis is not a reading of the code — it is what happened when someone used the product. Fix it so that step works for a user who has just checked the repository out and followed its documentation. If what is broken is the documented start rather than the product, fix the documentation; if the step needs a credential or a service nobody has, say so plainly and escalate rather than making the step pass against a mock.`,
+      acceptanceCriteria: [
+        `A user following the repository's documented start can complete this step: ${s.step.slice(0, 240)}`,
+        "Demonstrated by running it, not by a test that stands in for running it",
+      ],
+      dependsOn: i === 0 ? [] : [`live-fix-${round}-${i}`],
+      touchedPaths: [],
+      completionProbe: "",
+      scenarioIds: [],
+      estimatedSize: "M",
+    }));
+    if (!queued.length) return [];
+
+    if (broken.length > MAX_LIVE_FIXES) {
+      this.bus.publish({
+        type: "agent.log",
+        runId,
+        sessionId: "live",
+        text: `${broken.length - MAX_LIVE_FIXES} more broken step(s) were not queued this round: ${broken.slice(MAX_LIVE_FIXES).map((s) => s.step).join(" | ")}`,
+        ts: Date.now(),
+      });
+    }
+    this.store.insertTasks(runId, [LIVE_FIX_EPIC], queued.map(pendingRow));
+    await this.fileIssues(runId);
+    this.wakeScheduler();
+    return queued.map((t) => t.id);
   }
 
   /**
@@ -5912,7 +6254,7 @@ export class RunController {
    * stop could not check, with the command printed beside them so the operator
    * can run it themselves.
    */
-  private async verifyDemoCommands(runId: string, wtPath: string, report: DemoFindings): Promise<CommandCheck[]> {
+  private async verifyDemoCommands(runId: string, wtPath: string, report: { commands: CommandClaim[] }): Promise<CommandCheck[]> {
     const claims = report.commands;
     if (!claims.length) return [];
     const runnable = [...new Set(claims.map((c) => c.command.trim()).filter((c) => c && repeatable(c).ok))];

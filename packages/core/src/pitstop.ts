@@ -240,6 +240,16 @@ export interface PitStop {
   /** What the whole plan looks like it will cost at the current rate. */
   projectedUsd: number;
   intent: { verdict: "PASS" | "FAIL" | "UNKNOWN"; gaps: string[]; unchecked?: string[]; summary: string } | null;
+  /**
+   * What happened when an agent started the finished product and drove its
+   * critical path, or null when nothing did.
+   *
+   * The only reading in this report not made by looking at code, which is why
+   * it is rendered above the intent check: an operator deciding what a run
+   * does next is better served by "the payment step returns 500" than by any
+   * number of agreeing opinions about the source.
+   */
+  live: { verdict: "worked" | "broken" | "not-run"; path: string; steps: { step: string; result: "worked" | "broken" | "not-reached" }[]; why: string; artifactsDir: string } | null;
   artifactsDir: string;
   /** The report as markdown — what a terminal prints and a browser renders. */
   markdown: string;
@@ -349,6 +359,22 @@ export function renderPitStop(stop: Omit<PitStop, "markdown">): string {
         ""
       );
     }
+  }
+
+  if (stop.live) {
+    lines.push(
+      "## Using the product",
+      "",
+      stop.live.verdict === "worked"
+        ? `**The critical path works.** ${stop.live.why}`
+        : stop.live.verdict === "broken"
+          ? `**The critical path is broken.** ${stop.live.why}`
+          : `**Nothing exercised the product.** ${stop.live.why}`,
+      ...(stop.live.path ? ["", `The path: ${stop.live.path}`] : []),
+      ...stop.live.steps.map((s) => `- ${s.result === "worked" ? "worked" : s.result === "broken" ? "**BROKE**" : "not reached"} — ${s.step}`),
+      ...(stop.live.artifactsDir ? ["", `What it captured: ${stop.live.artifactsDir}`] : []),
+      ""
+    );
   }
 
   if (stop.intent) {

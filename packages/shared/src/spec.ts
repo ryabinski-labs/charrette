@@ -104,6 +104,27 @@ export const SpecCommands = z.object({
 });
 export type SpecCommands = z.infer<typeof SpecCommands>;
 
+/**
+ * The shortest sequence a real user performs that makes the product worth
+ * having. ledger-app: connect a Stripe account, ingest, produce a return. waf:
+ * install on a cluster, send an attack, get a 403.
+ *
+ * Named at intake, from the brief, before any code exists — for the same
+ * reason the scenarios are. It is what the live-exercise gate drives at the
+ * end of the run, from a clean checkout, by the repository's own documented
+ * start: across five runs and $4,763 on those two products, nothing ever
+ * started the product and used it, and both were internally coherent and
+ * neither one ran (issue #116). Empty when the spec agent could not name one,
+ * which the gate reports as "never exercised" rather than as a pass.
+ */
+export const CriticalPath = z.object({
+  /** What the path is, in one line: "connect a Stripe account and produce a return". */
+  name: z.string().default(""),
+  /** The steps a user takes, in order, each observable on its own. */
+  steps: z.array(z.string().min(1)).default([]),
+});
+export type CriticalPath = z.infer<typeof CriticalPath>;
+
 export const RunSpec = z.object({
   feature: z.string().default(""),
   /** Repo-relative path to the artifact the skill wrote, e.g. `tdd/checkout.tdd.yaml`. */
@@ -114,10 +135,16 @@ export const RunSpec = z.object({
   scenarios: z.array(SpecScenario).default([]),
   openQuestions: z.array(SpecOpenQuestion).default([]),
   commands: SpecCommands.default({}),
+  criticalPath: CriticalPath.default({}),
   /** What the spec agent could not derive, in its own words. */
   notCovered: z.array(z.string()).default([]),
 });
 export type RunSpec = z.infer<typeof RunSpec>;
+
+/** Whether the specification names a critical path the live-exercise gate can drive. */
+export function hasCriticalPath(spec: RunSpec | null): spec is RunSpec & { criticalPath: { name: string; steps: [string, ...string[]] } } {
+  return spec !== null && spec.criticalPath.steps.length > 0;
+}
 
 /** The scenarios the acceptance gate is allowed to stop a run over. */
 export function gating(spec: RunSpec): SpecScenario[] {

@@ -106,6 +106,20 @@ export interface StoredIntentVerdict {
   summary: string;
 }
 
+/** The newest `run.live_verdict` — the only reading in the store written by something that used the product. */
+export interface StoredLiveVerdict {
+  verdict: "worked" | "broken" | "not-run";
+  /** The critical path's name, as the specification gave it. */
+  path: string;
+  steps: { step: string; result: "worked" | "broken" | "not-reached" }[];
+  /** The command sequence that actually started the product, or why none did. */
+  howStarted: string;
+  why: string;
+  artifactsDir: string;
+  proof: string[];
+  couldNotReach: string[];
+}
+
 export interface RunRow {
   id: string;
   repoPath: string;
@@ -806,6 +820,59 @@ export class Store {
     if (!row) return null;
     const p = JSON.parse(row.payload) as { sha: string; state: "passing" | "failing" | "pending" | "none"; failing?: string[]; total?: number };
     return { sha: p.sha, state: p.state, failing: p.failing ?? [], total: p.total ?? 0 };
+  }
+
+  /**
+   * What the live-exercise gate observed when it started the finished product
+   * and drove its critical path.
+   *
+   * The only reading in the store written by something that used the product
+   * rather than read it. Null means nothing ever did, which the closing gate
+   * must be able to tell apart from a path that was driven and worked.
+   */
+  liveVerdict(runId: string): StoredLiveVerdict | null {
+    const row = this.db
+      .prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.live_verdict' ORDER BY seq DESC LIMIT 1")
+      .get(runId) as { payload: string } | undefined;
+    if (!row) return null;
+    const p = JSON.parse(row.payload) as Partial<StoredLiveVerdict> & { verdict: StoredLiveVerdict["verdict"] };
+    return {
+      verdict: p.verdict,
+      path: p.path ?? "",
+      steps: p.steps ?? [],
+      howStarted: p.howStarted ?? "",
+      why: p.why ?? "",
+      artifactsDir: p.artifactsDir ?? "",
+      proof: p.proof ?? [],
+      couldNotReach: p.couldNotReach ?? [],
+    };
+  }
+
+  /**
+   * What the live-exercise agent observed at each step, in its own words.
+   *
+   * Kept apart from `liveVerdict` because only the fix tasks need it: the
+   * verdict is a judgment the whole run reads, and this is the raw prose one
+   * worker is handed about one step.
+   */
+  liveSteps(runId: string): { step: string; observed: string }[] {
+    const row = this.db
+      .prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.live_observed' ORDER BY seq DESC LIMIT 1")
+      .get(runId) as { payload: string } | undefined;
+    if (!row) return [];
+    return (JSON.parse(row.payload) as { steps?: { step: string; observed: string }[] }).steps ?? [];
+  }
+
+  /**
+   * Is the newest live verdict older than the newest merge?
+   *
+   * A verdict is a statement about the tree that was exercised. The run merges
+   * fix tasks after a broken path and comes back through the gate; reading the
+   * old verdict then would hold it on a step it has since fixed, or pass it on
+   * a tree nobody ran.
+   */
+  liveCheckStale(runId: string): boolean {
+    return this.lastEventSeq(runId, "git.merged") > this.lastEventSeq(runId, "run.live_verdict");
   }
 
   /** What an agent found when it went and looked at production. */

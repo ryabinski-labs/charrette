@@ -254,7 +254,25 @@ async function reportOutcome(
   const link = (kind: "pull" | "issues", n: number) => (slug ? `https://github.com/${slug}/${kind}/${n}` : `#${n}`);
   const lines = [`\nRun ${runId} finished — ${out.line}.`];
 
-  // The validator's verdict comes first: it is the answer to "did this do what
+  // What using the product showed comes first — ahead even of the validator,
+  // which read the code. A run whose critical path is broken has one thing
+  // worth telling the operator, and this is it.
+  if (out.live) {
+    if (out.live.verdict === "worked") {
+      lines.push("", `  Live exercise: the critical path works${out.live.path ? ` (${out.live.path})` : ""} — ${out.live.why}`);
+    } else {
+      lines.push(
+        "",
+        out.live.verdict === "broken"
+          ? `  Live exercise: THE CRITICAL PATH IS BROKEN — ${out.live.why}`
+          : `  Live exercise: the product was never exercised — ${out.live.why}`
+      );
+      for (const st of out.live.steps) lines.push(`    ${st.result === "worked" ? "  ok" : st.result === "broken" ? "BROKE" : "  ..."}  ${st.step}`);
+      if (out.live.artifactsDir) lines.push(`    What it captured: ${out.live.artifactsDir}`);
+    }
+  }
+
+  // The validator's verdict comes next: it is the answer to "did this do what
   // I asked?", which outranks the list of artifacts that tried to.
   if (out.intent) {
     if (out.intent.verdict === "PASS") {
