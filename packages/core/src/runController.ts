@@ -31,6 +31,7 @@ import { nextDispatch } from "./dispatchOrder.js";
 import { git, pushRunBranch, repoFileList, WorktreeManager } from "./git.js";
 import { GitHubAdapter, type PrChecks, type PrRef } from "./github.js";
 import { unsatisfiableCriteria } from "./infraGuard.js";
+import { skeletonShortfall } from "./skeleton.js";
 import { answerBy, answerText, runIntake, type IntakeUi } from "./intake.js";
 import { AgentIntake } from "./intakeDecider.js";
 import { acquireRunLock, type RunLock } from "./runLock.js";
@@ -186,7 +187,7 @@ const LIVE_FIX_EPIC = { id: "live-path", title: "Steps of the critical path that
 const MAX_LIVE_FIXES = 6;
 
 /** A planner's task as it enters the store: everything it said, nothing started yet. */
-function pendingRow(t: PlannedTask): Omit<TaskRow, "runId" | "unverified" | "scenarioIds" | "emptyDeliveries" | "conflictFixes" | "abandonedJobs"> & { scenarioIds: string[] } {
+function pendingRow(t: PlannedTask): Omit<TaskRow, "runId" | "unverified" | "scenarioIds" | "skeleton" | "emptyDeliveries" | "conflictFixes" | "abandonedJobs"> & { scenarioIds: string[]; skeleton: boolean } {
   return {
     id: t.id,
     epicId: t.epicId,
@@ -205,6 +206,7 @@ function pendingRow(t: PlannedTask): Omit<TaskRow, "runId" | "unverified" | "sce
     errorSummary: null,
     touchedPaths: t.touchedPaths,
     estimatedSize: t.estimatedSize,
+    skeleton: t.skeleton,
     completionProbe: usableProbe(t.completionProbe),
     // The promises this task is the one to make good on. See
     // `PlannedTask.scenarioIds` — empty is honest and common.
@@ -2172,6 +2174,13 @@ export class RunController {
     // check: a criterion naming a command `infraGuardHook` denies is a task no
     // worker can finish, and run bc691359 spent three workers rediscovering one.
     const denied = unsatisfiableCriteria(tasks);
+    // Free and deterministic like the criteria scan, and about the same moment:
+    // a plan that names no spine, or spends itself on scaffolding, is cheapest
+    // to change here, where it costs a re-plan rather than a run (issue #118).
+    const shape = skeletonShortfall(this.store.runSpec(runId), tasks);
+    if (shape.length) {
+      this.bus.publish({ type: "agent.log", runId, sessionId: "plan-gate", text: shape.join(" "), ts: Date.now() });
+    }
     const deniedGaps = denied.map(
       (d) =>
         `Task ${d.taskId}'s criterion names ${d.what}, which every agent session is denied — the harness produces reviewed configuration and never provisions. If satisfying it needs that command to actually run, no worker can ever pass it and the task will spend its attempts and escalate; rewrite it as a hand-off the operator executes. If it only asks for a document that names the command, it is satisfiable as written — say which reading this is. Criterion: "${d.criterion.slice(0, 300)}"`
@@ -2200,7 +2209,8 @@ export class RunController {
             "and QA checks. Rejecting sends this back to the planner with the list",
             "attached; approving accepts it as the scope.",
           ].join("\n");
-    if (!run.config.planIntentCheck) return { block: render(deniedGaps), gaps: deniedGaps };
+    const free = [...deniedGaps, ...shape];
+    if (!run.config.planIntentCheck) return { block: render(free), gaps: free };
     try {
       const result = await this.pool.run({
         runId,
@@ -2226,7 +2236,7 @@ export class RunController {
           ? { verdict: "FAIL", summary: parsed.summary, gaps: parsed.unchecked }
           : { verdict: parsed.verdict, summary: parsed.summary, gaps: parsed.gaps };
       this.bus.publish({ type: "run.plan_intent_verdict", runId, verdict: verdict.verdict, gaps: verdict.gaps, summary: verdict.summary, ts: Date.now() });
-      const gaps = verdict.verdict === "PASS" ? deniedGaps : [...deniedGaps, ...verdict.gaps];
+      const gaps = verdict.verdict === "PASS" ? free : [...free, ...verdict.gaps];
       return { block: render(gaps), gaps };
     } catch (e) {
       if (stopsTheRun(e)) throw e;
@@ -2235,7 +2245,7 @@ export class RunController {
       // and the denied-command findings stand either way: they never depended
       // on the check that failed.
       this.bus.publish({ type: "agent.log", runId, sessionId: "validator", text: `the plan-intent check did not complete: ${String(e).slice(0, 300)}`, ts: Date.now() });
-      return { block: `${render(deniedGaps)}\n\nThe plan-intent check did not complete, so nothing has compared this plan to your assignment.`, gaps: deniedGaps };
+      return { block: `${render(free)}\n\nThe plan-intent check did not complete, so nothing has compared this plan to your assignment.`, gaps: free };
     }
   }
 
@@ -2487,6 +2497,7 @@ export class RunController {
       // and inventing one here would be the harness guessing at a check it has
       // no basis for.
       completionProbe: "",
+      skeleton: false,
       estimatedSize: "M",
     }));
     this.store.insertTasks(runId, [...this.store.listEpics(runId), INTENT_FIX_EPIC], queued.map(pendingRow));
@@ -2654,6 +2665,8 @@ export class RunController {
         touchedPaths: [],
         completionProbe: "",
         scenarioIds: [],
+        // Never the spine: a fix to a tree that already has one.
+        skeleton: false,
         estimatedSize: "M",
       };
       this.store.insertTasks(runId, [SPEC_FIX_EPIC], [pendingRow(suite)]);
@@ -2688,6 +2701,9 @@ export class RunController {
         touchedPaths: [],
         completionProbe: usableProbe(scenarioCommand(spec.commands, [id])),
         scenarioIds: [id],
+        // Never the spine: the spine is what the plan builds, and this is a fix
+        // to a tree that already has one.
+        skeleton: false,
         estimatedSize: "S",
       };
     });
@@ -2819,6 +2835,8 @@ export class RunController {
         // The workflow's own command is in the spec; inventing a probe here
         // would be the harness guessing at a second one.
         completionProbe: "",
+        // Never the spine: a fix to a tree that already has one.
+        skeleton: false,
         estimatedSize: "M",
       };
     });
@@ -6091,6 +6109,7 @@ export class RunController {
       touchedPaths: [],
       completionProbe: "",
       scenarioIds: [],
+      skeleton: false,
       estimatedSize: "M",
     }));
     if (!queued.length) return [];

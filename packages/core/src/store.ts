@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   touchedPaths TEXT NOT NULL DEFAULT '[]', estimatedSize TEXT NOT NULL DEFAULT 'M',
   completionProbe TEXT NOT NULL DEFAULT '', unverified TEXT NOT NULL DEFAULT '[]',
   scenarioIds TEXT NOT NULL DEFAULT '[]',
+  skeleton INTEGER NOT NULL DEFAULT 0,
   emptyDeliveries INTEGER NOT NULL DEFAULT 0, conflictFixes INTEGER NOT NULL DEFAULT 0,
   abandonedJobs INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (runId, id)
@@ -174,6 +175,12 @@ export interface TaskRow {
    */
   scenarioIds: string[];
   /**
+   * Whether this task is part of the walking skeleton — the thinnest slice
+   * that makes the run's critical path run at all. See `PlannedTask.skeleton`;
+   * dispatch holds everything else behind these (issue #118).
+   */
+  skeleton: boolean;
+  /**
    * How many times this task's branch has arrived carrying nothing, and how
    * many merges have been handed back to its worker to resolve.
    *
@@ -293,6 +300,10 @@ export class Store {
         // Empty is honest for a run planned before the specification phase
         // existed: no scenario covered it, so none is claimed to.
         scenarioIds: "TEXT NOT NULL DEFAULT '[]'",
+        // False is honest for a run planned before the spine existed: it named
+        // no skeleton, so dispatch holds nothing back and orders it by leverage
+        // exactly as it always did.
+        skeleton: "INTEGER NOT NULL DEFAULT 0",
         // Zero is honest for a run whose attempts were counted in a variable
         // that died with the process — see `TaskRow.emptyDeliveries`.
         emptyDeliveries: "INTEGER NOT NULL DEFAULT 0",
@@ -1296,11 +1307,11 @@ export class Store {
   insertTasks(
     runId: string,
     epics: { id: string; title: string }[],
-    tasks: (Omit<TaskRow, "runId" | "unverified" | "scenarioIds" | "emptyDeliveries" | "conflictFixes" | "abandonedJobs"> & { scenarioIds?: string[] })[]
+    tasks: (Omit<TaskRow, "runId" | "unverified" | "scenarioIds" | "skeleton" | "emptyDeliveries" | "conflictFixes" | "abandonedJobs"> & { scenarioIds?: string[]; skeleton?: boolean })[]
   ): void {
     const insEpic = this.db.prepare("INSERT OR REPLACE INTO epics (id, runId, title, ord) VALUES (?,?,?,?)");
     const insTask = this.db.prepare(
-      "INSERT OR REPLACE INTO tasks (id, runId, epicId, title, spec, acceptanceCriteria, dependsOn, state, branch, worktreePath, githubIssueNumber, prNumber, qaIterations, respawns, assignedSkills, errorSummary, touchedPaths, estimatedSize, completionProbe, scenarioIds) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+      "INSERT OR REPLACE INTO tasks (id, runId, epicId, title, spec, acceptanceCriteria, dependsOn, state, branch, worktreePath, githubIssueNumber, prNumber, qaIterations, respawns, assignedSkills, errorSummary, touchedPaths, estimatedSize, completionProbe, scenarioIds, skeleton) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
     );
     this.txn(() => {
       epics.forEach((e, i) => insEpic.run(e.id, runId, e.title, i));
@@ -1310,7 +1321,7 @@ export class Store {
           JSON.stringify(t.acceptanceCriteria), JSON.stringify(t.dependsOn), t.state,
           t.branch, t.worktreePath, t.githubIssueNumber, t.prNumber,
           t.qaIterations, t.respawns, JSON.stringify(t.assignedSkills), t.errorSummary,
-          JSON.stringify(t.touchedPaths), t.estimatedSize, t.completionProbe ?? "", JSON.stringify(t.scenarioIds ?? [])
+          JSON.stringify(t.touchedPaths), t.estimatedSize, t.completionProbe ?? "", JSON.stringify(t.scenarioIds ?? []), t.skeleton ? 1 : 0
         );
       }
     });
@@ -1356,6 +1367,7 @@ export class Store {
       touchedPaths: JSON.parse(r.touchedPaths as string),
       unverified: JSON.parse(r.unverified as string),
       scenarioIds: JSON.parse(r.scenarioIds as string),
+      skeleton: Boolean(r.skeleton),
     } as TaskRow;
   }
 

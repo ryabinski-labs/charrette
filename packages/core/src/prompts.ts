@@ -233,7 +233,7 @@ Rules:
 - Emit AT MOST ${perMessage} tasks in one message. If the plan needs more, emit the first ${perMessage}, set \`"more": true\`, and you will be asked to continue — the remaining tasks are not lost and nothing is repeated. Never merge tasks or drop scope to fit a message: the message is not the limit, and a DAG made coarser to fit one is a plan that gave up its parallelism for nothing.
 - Your FINAL message must be exactly one JSON object inside a \`\`\`json fence with the shape:
 { "epics": [{"id": kebab, "title": string, "summary": string}],
-  "tasks": [{"id": kebab, "epicId": kebab, "title": string, "spec": markdown, "acceptanceCriteria": [string], "dependsOn": [taskId], "touchedPaths": [string], "completionProbe": string, "estimatedSize": "S"|"M"|"L"}],
+  "tasks": [{"id": kebab, "epicId": kebab, "title": string, "spec": markdown, "acceptanceCriteria": [string], "dependsOn": [taskId], "touchedPaths": [string], "completionProbe": string, "scenarioIds": [string], "skeleton": boolean, "estimatedSize": "S"|"M"|"L"}],
   "more": boolean }
 ${skills}`;
 }
@@ -1751,19 +1751,38 @@ Then emit the same JSON object as before, complete and current.`;
  * with it, the worker is handed the exact checks it has to satisfy.
  */
 export function specPlanBlock(spec: RunSpec): string {
-  if (!spec.scenarios.length) return "";
   const lines = spec.scenarios
     .filter((s) => !s.blocked)
     .map((s) => `- ${s.id} [${s.priority}/${s.level}] ${s.title || s.oracle}${s.requirement ? ` (${s.requirement})` : ""}`)
     .join("\n");
-  if (!lines) return "";
-  return `
+  const path = spec.criticalPath.steps.length
+    ? `
+
+## The critical path
+
+The shortest sequence a real user performs that makes this product worth having, written from the brief before any code existed${spec.criticalPath.name ? ` — ${spec.criticalPath.name}` : ""}:
+
+${spec.criticalPath.steps.map((s, i) => `${i + 1}. ${s}`).join("\n")}
+
+At the end of the run an agent checks the finished tree out clean, starts the product by the repository's own documented start, and drives exactly those steps. The run does not report itself finished until they work.`
+    : "";
+  if (!lines && !path) return "";
+  const scenarios = lines
+    ? `
 
 ## The specification this run is held to
 
 A specification agent has already turned the brief into failing tests on the branch you are planning against. These scenarios exist, they are red, and the run does not finish until every P0 and P1 among them is green.
 
-${lines}
+${lines}`
+    : "";
+  return `${path}${scenarios}
+
+## The walking skeleton
+
+Before anything else, decide which tasks make the critical path above run END TO END, however crudely, and mark each of them \`"skeleton": true\`. That set is the walking skeleton: a real entry point, real storage, a real external call and a real output, connected — ugly, unstyled, single-tenant, one hard-coded case is all fine. What it may not be is mocked at any seam, because the point of it is that something runs.
+
+The harness dispatches the skeleton first and holds every other task behind it until the skeleton is finished. So mark the smallest set that makes the path run, and nothing else: a task is in the skeleton when the path cannot run without it, and out of it when the path can run badly while it is missing. Infrastructure, CI, benchmarks, documentation, dashboards, marketing surfaces and second implementations are out — every one of them is real work, none of them makes the product run, and each one has to be maintained by the same budget afterwards. One run built 13 crates, an operator UI, a marketing site, a fuzzing workspace and 56,491 lines of documentation before anything installed it and watched it work, and then spent its last budget on Dockerfile build contexts while the product itself had never done its job once.
 
 Every task you write must carry \`scenarioIds\`: the scenarios that task is the one to turn green. Between them, your tasks must cover every scenario above — a scenario no task claims is a promise nobody was asked to keep, and the run will fail its acceptance gate holding work nobody planned. A task that turns none of them green (scaffolding, a refactor, a dependency bump) carries an empty list, which is honest and expected.
 

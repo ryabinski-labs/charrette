@@ -343,7 +343,7 @@ describe("what the advisor is told about the repository", () => {
     id: "task-a", runId: "r", epicId: "e", title: "A", spec: "s", acceptanceCriteria: ["x"],
     dependsOn: [], state: "WORKING" as const, branch: null, worktreePath: null,
     githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0,
-    assignedSkills: [], errorSummary: null, touchedPaths: [], completionProbe: "", unverified: [], scenarioIds: [],
+    assignedSkills: [], errorSummary: null, touchedPaths: [], completionProbe: "", unverified: [], scenarioIds: [], skeleton: false,
     emptyDeliveries: 0, conflictFixes: 0, abandonedJobs: 0, estimatedSize: "M" as const,
   };
 
@@ -589,10 +589,35 @@ describe("what the specification agent and the planner are told", () => {
   });
 
   /**
+   * The path is what the run is exercised on at the end, so the planner is
+   * shown it and told what the harness will do with it (issue #118).
+   */
+  it("hands the planner the critical path, and asks it to mark the walking skeleton", () => {
+    const block = specPlanBlock(spec({ criticalPath: { name: "take a payment", steps: ["open the checkout", "pay"] } }));
+    expect(block).toContain("## The critical path");
+    expect(block).toContain("take a payment");
+    expect(block).toContain("1. open the checkout");
+    expect(block).toContain("drives exactly those steps");
+    expect(block).toContain("## The walking skeleton");
+  });
+
+  it("plans against a path even when no scenario is runnable", () => {
+    // A specification whose scenarios are all blocked still names the path the
+    // run will be exercised on, and a planner that never saw it cannot
+    // sequence anything around it.
+    const block = specPlanBlock(
+      spec({ scenarios: [{ id: "SC-001", blocked: true, level: "unit", priority: "P0" }], criticalPath: { name: "", steps: ["pay"] } })
+    );
+    expect(block).toContain("## The critical path");
+    expect(block).toContain("1. pay");
+    expect(block).not.toContain("## The specification this run is held to");
+  });
+
+  /**
    * A blocked scenario is waiting on a question nobody answered. Planning
    * against it would put a task on the board for work that cannot be specified.
    */
-  it("says nothing at all when there is no runnable scenario to plan against", () => {
+  it("says nothing at all when there is neither a runnable scenario nor a path", () => {
     expect(specPlanBlock(RunSpec.parse({}))).toBe("");
     expect(specPlanBlock(spec({ scenarios: [{ id: "SC-001", blocked: true, level: "unit", priority: "P0" }] }))).toBe("");
   });
