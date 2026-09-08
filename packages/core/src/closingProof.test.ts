@@ -1085,6 +1085,110 @@ describe("requirements nothing is building any more", () => {
     );
   }, 60_000);
 
+  /**
+   * The same run merged `seclang ast types` twice under two ids and each of its
+   * three body parsers twice, then paid a further task to consolidate the
+   * duplicates. The pit stop that approved the second plan had both lists in
+   * front of it and compared neither (issue #128).
+   */
+  it("says which tasks in a re-plan repeat work this run has already merged", async () => {
+    const dir = repo();
+    let replanned = false;
+    const first = fence({
+      epics: [{ id: "epic-e", title: "E", summary: "s" }],
+      tasks: [
+        { id: "task-a", title: "Body parser: multipart" },
+        { id: "task-b", title: "Route requests by host header" },
+      ].map((t) => ({
+        id: t.id,
+        epicId: "epic-e",
+        title: t.title,
+        spec: "s",
+        acceptanceCriteria: ["x"],
+        dependsOn: [],
+        touchedPaths: [],
+        completionProbe: "",
+        scenarioIds: [],
+        estimatedSize: "S" as const,
+      })),
+    });
+    const again = fence({
+      epics: [{ id: "epic-e", title: "E", summary: "s" }],
+      tasks: [
+        {
+          id: "task-uploads",
+          epicId: "epic-e",
+          title: "Implement the multipart body parser",
+          spec: "s",
+          acceptanceCriteria: ["x"],
+          dependsOn: [],
+          touchedPaths: [],
+          completionProbe: "",
+          scenarioIds: [],
+          estimatedSize: "S" as const,
+        },
+      ],
+    });
+    const { pool } = rolePool({
+      intake: BRIEF,
+      // By call order, not by tools: the re-planning session carries tools too.
+      planner: (_s: AgentSpec, nth: number) => (nth === 1 ? DOCS : nth === 2 ? first : again),
+      worker,
+      qa: () => QA_PASS,
+      validator: () => INTENT_PASS,
+      demo: () => DEMO_OK,
+      reviewer: () => REVIEW_OK,
+    });
+    const { controller, events } = build({
+      repoPath: dir,
+      pool,
+      gates: {
+        async resolvePitStop() {
+          if (replanned) return { action: "continue", feedback: "" };
+          replanned = true;
+          return { action: "replan", feedback: "handle uploads properly" };
+        },
+      },
+    });
+
+    await controller.startRun("build a checkout", RunConfig.parse({ ...BASE, maxParallelWorkers: 1, pitStop: { every: { tasks: 1 } } }), operator());
+
+    expect(logs(events)).toContainEqual(
+      expect.stringContaining(
+        '1 task(s) in this plan look like work this run has already merged: task-uploads ("Implement the multipart body parser") repeats task-a ("Body parser: multipart")'
+      )
+    );
+  }, 60_000);
+
+  it("says nothing about repeats when a re-plan builds something new", async () => {
+    const dir = repo();
+    let replanned = false;
+    const { pool } = rolePool({
+      intake: BRIEF,
+      planner: (_s: AgentSpec, nth: number) => (nth === 1 ? DOCS : nth === 2 ? dag([{ id: "task-a" }, { id: "task-b" }]) : dag([{ id: "task-zebra" }])),
+      worker,
+      qa: () => QA_PASS,
+      validator: () => INTENT_PASS,
+      demo: () => DEMO_OK,
+      reviewer: () => REVIEW_OK,
+    });
+    const { controller, events } = build({
+      repoPath: dir,
+      pool,
+      gates: {
+        async resolvePitStop() {
+          if (replanned) return { action: "continue", feedback: "" };
+          replanned = true;
+          return { action: "replan", feedback: "do the other thing" };
+        },
+      },
+    });
+
+    await controller.startRun("build a checkout", RunConfig.parse({ ...BASE, maxParallelWorkers: 1, pitStop: { every: { tasks: 1 } } }), operator());
+
+    expect(logs(events).filter((l) => l.includes("already merged"))).toEqual([]);
+  }, 60_000);
+
   it("says nothing about scope for a run with no specification", async () => {
     const dir = repo();
     const { pool } = rolePool({

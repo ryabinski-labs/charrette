@@ -170,7 +170,13 @@ whose P0/P1 requirements are in the last two states, and names them. Answering
 "continue" at the closing pit stop *is* the write-off: the answer is recorded
 against each requirement as a `run.scope_written_off` event, so the run does not
 stop twice for one decision and the completion report can print what you said.
-A re-plan says which requirements it stops covering before it cancels anything.
+A re-plan says which requirements it stops covering before it cancels anything,
+and which of the tasks it proposes look like work this run has already merged.
+The second is a comparison of titles and touched paths, not a verdict: a repeat
+is sometimes what you asked for, so nothing is cancelled and the pit stop is
+simply told. waf merged `seclang ast types` twice under two ids, built each of
+its three body parsers twice, and then paid a further task to consolidate its
+own duplicates.
 
 Every pit stop also measures **what the run has written about what it did not
 build**: the size of documents whose subject is gaps (`KNOWN-GAPS`, `HANDOVER`,

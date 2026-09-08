@@ -33,6 +33,7 @@ import { GitHubAdapter, type PrChecks, type PrRef } from "./github.js";
 import { unsatisfiableCriteria } from "./infraGuard.js";
 import { skeletonShortfall } from "./skeleton.js";
 import { gatingRequirement, replanDrops, scopeLedger, scopeUnmet, type ScopeLedger } from "./scopeLedger.js";
+import { planRepeats, planRepeatsNote } from "./planRepeats.js";
 import { gapLedger, gapLedgerSignal, readableForGaps } from "./gapLedger.js";
 import { changedFiles } from "./reportRun.js";
 import { answerBy, answerText, runIntake, type IntakeUi } from "./intake.js";
@@ -6808,6 +6809,19 @@ export class RunController {
           ts: Date.now(),
         });
       }
+      // And what it builds for a second time. The same run that dropped 39
+      // tasks unseen went on to plan `seclang ast types` twice and three body
+      // parsers twice each, then paid a fourth task to consolidate them — all
+      // of it visible in the titles, none of it looked at (issue #128). Said
+      // here rather than enforced anywhere: a repeat is sometimes the right
+      // call, and only the operator reading this pit stop knows which.
+      const repeats = planRepeatsNote(
+        planRepeats(
+          tasks.filter((t) => t.state === "MERGED").map((t) => ({ id: t.id, title: t.title, touchedPaths: t.touchedPaths })),
+          breakdown.tasks.map((t) => ({ id: t.id, title: t.title, touchedPaths: t.touchedPaths }))
+        )
+      );
+      if (repeats) this.bus.publish({ type: "agent.log", runId, sessionId: "pitstop", text: repeats, ts: Date.now() });
       for (const t of dropped) {
         this.store.transitionTask(runId, t.id, "CANCELLED", "replaced when you re-planned at a pit stop");
         this.queueIssueSync(runId, t.id);
