@@ -136,7 +136,12 @@ function operator(answer = "use the Stripe sandbox"): IntakeUi & { asked: Intake
   };
 }
 
-const BASE = { deterministicChecks: [] as string[], waitForChecks: false, planIntentCheck: false };
+// The live-exercise gate is off for everything but the two cases below that are
+// about it: a specified run that named no critical path otherwise holds on
+// "never exercised", which is true and is not what the other cases are testing.
+const BASE = { deterministicChecks: [] as string[], waitForChecks: false, planIntentCheck: false, live: { enabled: false } };
+/** The same, with the live gate on — the critical path's own base. */
+const LIVE_BASE = { ...BASE, live: {} };
 const worker = (spec: AgentSpec, nth: number) => (commit(spec.cwd, `w-${path.basename(spec.cwd)}-${nth}.txt`), "did the work");
 
 describe("writing the specification before anything is planned", () => {
@@ -543,6 +548,53 @@ describe("writing the specification before anything is planned", () => {
 
     expect(specs.some((s) => s.role === "spec")).toBe(false);
     expect(store.runSpec(store.listRuns()[0]!.id)).toBeNull();
+  });
+});
+
+describe("the critical path the run is exercised on", () => {
+  /**
+   * Named at intake, from the brief, before any code exists — the same
+   * provenance as the scenarios and for the same reason. At the end of the run
+   * an agent drives exactly these steps against the finished product, so the
+   * operator is told what they are while they are still there to disagree.
+   */
+  it("records it and says it out loud, while the operator is still at the keyboard", async () => {
+    const dir = repo();
+    const { pool } = rolePool({
+      intake: BRIEF,
+      spec: specJson({ criticalPath: { name: "take a payment", steps: ["open the checkout", "pay with a test card"] } }),
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS : dag([{ id: "task-a" }])),
+      worker,
+      qa: () => QA_PASS,
+      validator: () => INTENT_PASS,
+      live: () => '```json\n{"started":true,"howStarted":"pnpm dev","documentedStart":"README","steps":[{"step":"open the checkout","result":"worked","observed":"200"},{"step":"pay with a test card","result":"worked","observed":"receipt"}],"couldNotReach":[],"artifacts":[],"commands":[{"command":"echo ok","shows":"it answers"}],"summary":""}\n```',
+    });
+    const { controller, store, events } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a checkout", RunConfig.parse(LIVE_BASE), operator());
+
+    const runId = store.listRuns()[0]!.id;
+    expect(store.runSpec(runId)!.criticalPath).toEqual({ name: "take a payment", steps: ["open the checkout", "pay with a test card"] });
+    expect(events.some((e) => e.type === "agent.log" && e.text.includes("Critical path (take a payment): open the checkout → pay with a test card"))).toBe(true);
+    expect(store.liveVerdict(runId)!.verdict).toBe("worked");
+  });
+
+  it("says plainly when a specification named none, so nothing will exercise the product", async () => {
+    const dir = repo();
+    const { pool } = rolePool({
+      intake: BRIEF,
+      spec: specJson(),
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS : dag([{ id: "task-a" }])),
+      worker,
+      qa: () => QA_PASS,
+      validator: () => INTENT_PASS,
+    });
+    const { controller, store, events } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a checkout", RunConfig.parse(LIVE_BASE), operator());
+
+    expect(events.some((e) => e.type === "agent.log" && e.text.includes("No critical path was named, so nothing will exercise the product"))).toBe(true);
+    expect(store.getRun(store.listRuns()[0]!.id)!.state).toBe("BLOCKED");
   });
 });
 

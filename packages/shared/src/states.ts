@@ -65,6 +65,12 @@ export const AgentRole = z.enum([
   "demo",
   "reviewer",
   "pm",
+  // The closing gate's agent: starts the finished product from a clean checkout
+  // by the repository's own documented start, drives the critical path the
+  // specification names, and reports what it observed. Its own role rather
+  // than `demo` because it decides whether the run may report itself in
+  // review, and the ledger has to show what that decision cost.
+  "live",
   // Resumes a session that finished without formatting its answer and asks for
   // nothing but the answer. Its own role rather than the role it is repairing,
   // so that a cheap two-turn re-ask cannot be mistaken for the judgment it is

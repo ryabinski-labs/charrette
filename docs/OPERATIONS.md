@@ -70,7 +70,8 @@ proof that it succeeded.** Read what it produced, which the closing line and
 Since issue #115 there is a second way for a run to stop, and it reads
 differently on purpose. A run whose task list has emptied but which **cannot
 prove itself** — its acceptance suite is red or has no opinion, its intent check
-came back FAIL or UNKNOWN or never finished, or nothing merged at all — does not
+came back FAIL or UNKNOWN or never finished, **the critical path did not work when
+an agent drove it**, or nothing merged at all — does not
 enter `PR_REVIEW`. It enters **`BLOCKED`**, opens no pull request, and puts the
 unmet list in the transition reason, the closing line, the dashboard notification
 and a `run.closing_proof` event. `PR_REVIEW` asks you to review; `BLOCKED` asks
@@ -157,7 +158,27 @@ before any code existed — a `KNOWN-GAPS.md`, a "non-goals" section or an
 "out of scope" card the run wrote for itself does not change what was asked for;
 a gap those documents disclose is still a gap, reported as disclosed.
 
-Second, only after that verdict — and only when the run can prove itself — is
+Third, an agent **starts the product and uses it**. It gets a clean checkout of
+everything the run merged — a fresh worktree, `git clean -fdx`, so a product that
+only starts because an earlier agent left a `node_modules` behind is caught — and
+no account of how the run went, so it cannot infer that the product works from
+having watched it being built. It finds how the repository starts from the
+repository's own documentation, starts it, and drives the **critical path**: the
+shortest sequence a real user performs that makes the product worth having, named
+by the spec agent at intake, from the brief, before any code existed. It stops at
+the first step that does not work and reports what it saw.
+
+Everything before this reads code. Across waf and ledger-app — five runs, $4,763,
+510 merged tasks, a month of wall clock — nothing ever started the product and
+used it, and both shipped "done" without ever having run. A broken step becomes a
+fix task carrying the observation verbatim (`live.fixRounds`, one round by
+default); a path that stays broken, or a product that never starts, holds the run
+in `BLOCKED`. `live.enabled: false` switches the whole gate off, and a
+specification that named no critical path is reported as never exercised rather
+than as a pass. The transcript, screenshots and captures are kept under
+`.harness/<runId>/live/`.
+
+Fourth, only after all of that — and only when the run can prove itself — is
 the pull request opened: by default **one rollup PR for the whole run**, from
 the integration branch, listing every merged task (one `--no-ff` merge commit
 each) with the validator's verdict in the body, so a reviewer never sees a PR the
@@ -725,7 +746,10 @@ Run configuration is a zod-validated `RunConfig`
 | `qaIterationCap` | `3` | — | ✅ | worker↔QA round trips before a task is parked as `NEEDS_HUMAN` |
 | `heavyTierAfterRejections` | `2` | — | ✅ | how many of those round trips a task may be sent back before its next worker runs on `models.workerHeavy`, whatever tier it started on. Counted on the same `qaIterations` as the cap above, so a gate answer resets it too. |
 | `holdUntilGreen` | `true` | — | ✅ | the run never reports itself in review while its pull request is red, unchecked (no CI at all), unread (GitHub unreachable), conflicting or behind its base. Fix rounds spent, it holds at a pit stop where `pitStop.decidedBy` (or you) can grant another `ciFixRounds` or stop it; with pit stops off it pauses with the reason on the record, and `harness resume` is the grant. `false` restores the old shape: the failure goes into the outcome line and the run reports in review anyway. |
-| `holdUntilProven` | `true` | — | ✅ | the run never reports itself in review before it has proved itself: the acceptance suite green (not red, and not "no opinion" because nothing gating was declared or everything gating is blocked on an unanswered question), the intent check PASS with no gaps (not FAIL, not UNKNOWN, not a check that never finished), and something merged so there is a pull request to review. Anything short of that, once the fix rounds are spent, holds at the closing pit stop and then parks the run in `BLOCKED` with the unmet list on the record; `harness resume` re-enters the gates. `false` restores the shape both runs in issue #115 closed with: every one of those is a clause in the outcome line, and the run reports in review over it. |
+| `live.enabled` | `true` | — | ✅ | an agent starts the finished product from a clean checkout and drives the critical path before the run may report itself in review. Off restores the older shape, where nothing in the run ever used the product — which is how both products in issue #115 shipped "done" without ever having run. |
+| `live.maxTurns` | `140` | — | ✅ | the live-exercise agent's turn ceiling. It has to find how a repository it has never seen starts, install it, start it, and drive a path end to end. |
+| `live.fixRounds` | `1` | — | ✅ | rounds of fix tasks a broken critical path may queue on its own before it holds. Each queues one task per broken step, carrying what the agent observed. `0` reports the verdict and holds without queueing. |
+| `holdUntilProven` | `true` | — | ✅ | the run never reports itself in review before it has proved itself: the acceptance suite green (not red, and not "no opinion" because nothing gating was declared or everything gating is blocked on an unanswered question), the intent check PASS with no gaps (not FAIL, not UNKNOWN, not a check that never finished), the critical path driven and working (see `live.enabled`), and something merged so there is a pull request to review. Anything short of that, once the fix rounds are spent, holds at the closing pit stop and then parks the run in `BLOCKED` with the unmet list on the record; `harness resume` re-enters the gates. `false` restores the shape both runs in issue #115 closed with: every one of those is a clause in the outcome line, and the run reports in review over it. |
 | `ciFixRounds` | `2` | — | ✅ | rounds of fix tasks a red CI may queue on its own before it asks. Each round re-runs the failed jobs once first (flakes), then queues one task per failing check with that job's log. `0` never fixes CI itself. |
 | `workerRespawnCap` | `3` | — | ✅ | crashed-session restarts before parking; the replacement gets a "read your own git log and continue" note |
 | `workerMaxTurns` | `120` | — | ✅ | turns before the SDK cuts a worker off. A session that hits it is the most expensive kind of failure — it dies having done the most work — so hitting it raises the ceiling **for the whole run**, not just that task: the repository is the same size for all of them. |
@@ -1874,6 +1898,15 @@ exactly what is unmet, in this vocabulary:
 - *the intent check found N gaps* / *could not finish* / *did not complete* —
   the validator's verdict was FAIL, UNKNOWN, or never parsed, and
   `intentFixRounds` are spent. Resume buys another check.
+- *the critical path is broken* — an agent started the product from a clean
+  checkout and a step of the critical path did not work. The closing line names
+  the step and what it saw; `.harness/<runId>/live/` has the captures. Fix it and
+  resume, or set `live.fixRounds` higher to let the run try again itself.
+- *the product was never exercised* — it never started, the live agent crashed,
+  or the specification named no critical path to drive. The first two are worth
+  looking at by hand: run the repository's own documented start yourself.
+- *nothing has started the product and driven its critical path* — the gate is on
+  and never ran, which a resume fixes.
 - *nothing merged, so there is nothing to review* — see the next entry; the
   usual cause is a foundation task parking.
 A run in `BLOCKED` opened no pull request on purpose. `harness resume` re-enters

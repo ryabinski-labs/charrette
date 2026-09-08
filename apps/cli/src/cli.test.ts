@@ -291,6 +291,8 @@ const RUN_OUTCOME = {
   cancelled: 0,
   total: 0,
   intent: null,
+  acceptance: null,
+  live: null,
   mergeable: null,
   ci: null,
   deploy: null,
@@ -1356,6 +1358,8 @@ describe("the terminal gates", () => {
 
 /** A pit stop with nothing filled in — each case overrides what it is about. */
 const STOP = {
+  // Null: a mid-run stop, and the live-exercise gate runs once at the end.
+  live: null,
   runId: "run-1",
   number: 1,
   reason: 'the "Sign-in" epic is finished',
@@ -3067,6 +3071,45 @@ describe("the closing report", () => {
     expect(shown).toContain("Run run-1 finished — 3 of 4 tasks merged.");
     expect(shown).toContain("Full picture: harness status --repo /repo");
     expect(h.notifyDoneMock).toHaveBeenCalledWith("repo — run done", "run-1: 3 of 4 tasks merged.");
+  });
+
+  /**
+   * Above the validator's verdict on purpose: this is the only line in the
+   * report written by something that used the product rather than read it.
+   */
+  it("leads with what happened when the product was driven, and lists the steps when it broke", async () => {
+    const shown = await reportFor({
+      live: {
+        verdict: "broken",
+        path: "take a payment",
+        steps: [
+          { step: "open the checkout", result: "worked" },
+          { step: "pay with a test card", result: "broken" },
+          { step: "see the receipt", result: "not-reached" },
+        ],
+        howStarted: "pnpm dev",
+        why: "1 of 3 step(s) worked",
+        artifactsDir: "/r/.harness/run-1/live",
+        proof: [],
+        couldNotReach: [],
+      } as never,
+    });
+
+    expect(shown).toContain("Live exercise: THE CRITICAL PATH IS BROKEN — 1 of 3 step(s) worked");
+    expect(shown).toContain("BROKE  pay with a test card");
+    expect(shown).toContain("What it captured: /r/.harness/run-1/live");
+  });
+
+  it("says a working path worked, and one nothing drove was never exercised", async () => {
+    const worked = await reportFor({ live: { verdict: "worked", path: "take a payment", steps: [], howStarted: "", why: "all 3 step(s) worked", artifactsDir: "", proof: [], couldNotReach: [] } as never });
+    expect(worked).toContain("Live exercise: the critical path works (take a payment) — all 3 step(s) worked");
+
+    // An unnamed path is not printed as an empty pair of brackets.
+    const unnamed = await reportFor({ live: { verdict: "worked", path: "", steps: [], howStarted: "", why: "all 1 step(s) worked", artifactsDir: "", proof: [], couldNotReach: [] } as never });
+    expect(unnamed).toContain("Live exercise: the critical path works — all 1 step(s) worked");
+
+    const never = await reportFor({ live: { verdict: "not-run", path: "", steps: [], howStarted: "", why: "it did not start", artifactsDir: "", proof: [], couldNotReach: [] } as never });
+    expect(never).toContain("Live exercise: the product was never exercised — it did not start");
   });
 
   it("puts the intent verdict above the artifacts when it passed", async () => {

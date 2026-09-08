@@ -47,7 +47,50 @@ const report = (over: Partial<CompletionReport> = {}): CompletionReport => ({
   // Null is the honest default: most fixtures describe a run that was never
   // specified, which is not the same as one whose scenarios proved nothing.
   coverage: null,
+  // And null here means nothing started the product, which the page says in
+  // those words — see the "Exercised" cases.
+  live: null,
   ...over,
+});
+
+describe("what happened when someone used it", () => {
+  it("says in those words when nothing ever started the product", () => {
+    const html = renderCompletionReport(report());
+    expect(html).toContain("Nothing started this product and used it");
+    expect(html).toContain("Treat everything above as a statement about the source.");
+  });
+
+  it("prints the path, the steps, and where the captures are when something did", () => {
+    const html = renderCompletionReport(
+      report({
+        live: {
+          verdict: "broken",
+          path: "take a payment",
+          steps: [
+            { step: "open the checkout", result: "worked" },
+            { step: "pay with a test card", result: "broken" },
+            { step: "see the receipt", result: "not-reached" },
+          ],
+          howStarted: "pnpm dev",
+          why: "1 of 3 step(s) worked",
+          artifactsDir: "/r/.harness/run/live",
+        },
+      })
+    );
+    expect(html).toContain("1 of 3 step(s) worked");
+    expect(html).toContain("The path: take a payment");
+    expect(html).toContain("BROKE — pay with a test card");
+    expect(html).toContain("not reached — see the receipt");
+    expect(html).toContain("Started with:");
+    expect(html).toContain("/r/.harness/run/live");
+  });
+
+  it("says a working path worked, without the noise of a run that has nothing to explain", () => {
+    const html = renderCompletionReport(report({ live: { verdict: "worked", path: "", steps: [], howStarted: "", why: "all 2 step(s) worked", artifactsDir: "" } }));
+    expect(html).toContain("all 2 step(s) worked");
+    expect(html).not.toContain("The path:");
+    expect(html).not.toContain("Started with:");
+  });
 });
 
 const secret = (over: Partial<DarkSwitch> = {}): DarkSwitch => ({

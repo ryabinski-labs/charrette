@@ -160,6 +160,18 @@ export const ModelRoutingShape = z.object({
    */
   demo: z.string().default(HAIKU),
   /**
+   * The closing gate's agent: starts the finished product from a clean checkout
+   * and drives the critical path.
+   *
+   * A tier above the pit-stop demo, and deliberately. The demo runs a dozen
+   * times a run against a half-built tree and its report informs a decision;
+   * this runs once, against everything the run merged, and its report *is* the
+   * decision — a run does not report itself in review over a product nothing
+   * has used. It also has the harder job: a clean checkout, no history to lean
+   * on, and a repository whose documented start it has to find and follow.
+   */
+  live: z.string().default("claude-sonnet-5"),
+  /**
    * Re-asks a finished session for output it already produced but did not format.
    *
    * The only role in the harness that is genuinely mechanical, and the reason is
@@ -699,6 +711,46 @@ export const UI_WHEN =
  * a person. It only reaches the operator once the rounds are spent — which is
  * the difference between a gate that closes a loop and one that interrupts.
  */
+/**
+ * The live-exercise gate: something starts the product and uses it before the
+ * run may report itself finished.
+ *
+ * Across waf and ledger-app — five runs, $4,763, 510 merged tasks, a month of
+ * wall clock — the number of times any agent started the product and used it
+ * was zero, and it was zero by design: the intent validator is forbidden to
+ * (that work costs more context than it has) and the production validator is
+ * gated on a deployed URL neither product had, because deploying was itself
+ * the unbuilt scope. So the check that exists to catch "correct code that
+ * never ran" was gated on the very thing it would have caught. Both products
+ * were internally coherent, well-tested, honestly documented. Neither ran.
+ *
+ * This is the operator's standing answer to that: block on real end-to-end
+ * proof. Runs get slower, cost more and finish less often, which is the trade
+ * being bought deliberately (issue #116).
+ */
+export const LiveConfig = z.object({
+  /**
+   * Off restores the older shape entirely: nothing starts the product, and the
+   * closing gate judges the run on what it read rather than on what it ran.
+   */
+  enabled: z.boolean().default(true),
+  /**
+   * Turns for the one session. It has to find how a repository it has never
+   * seen starts, install it, start it, and drive a path end to end — the same
+   * job as the pit-stop demo against a bigger tree, with no history to lean
+   * on, so it gets more room than `pitStop.demoMaxTurns`.
+   */
+  maxTurns: z.number().int().min(20).max(400).default(140),
+  /**
+   * How many times a broken critical path may send the run back to work before
+   * it escalates, mirroring `spec.gateRounds` and `intentFixRounds`. Each round
+   * queues one task per broken step, carrying what the agent observed. `0`
+   * reports the verdict and holds without queueing anything.
+   */
+  fixRounds: z.number().int().min(0).max(3).default(1),
+});
+export type LiveConfig = z.infer<typeof LiveConfig>;
+
 export const SpecConfig = z.object({
   enabled: z.boolean().default(true),
   /**
@@ -921,6 +973,7 @@ export const RunConfig = z.object({
    * reported as unproven rather than passed.
    */
   spec: SpecConfig.default({}),
+  live: LiveConfig.default({}),
   intake: IntakeConfig.default({}),
   skillsDirs: z.array(z.string()).default([]),
   /**

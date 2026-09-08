@@ -488,6 +488,80 @@ export function demoCoverage(report: {
   return { ...base, status: "demonstrated", why: `it reached all ${planned} planned journeys, with ${proof} piece(s) of surviving proof` };
 }
 
+/** One step of the critical path, as the live-exercise agent reported it. */
+export interface LiveStep {
+  step: string;
+  result: "worked" | "broken" | "not-reached";
+  /** What it actually saw there. Prose from the agent, kept verbatim. */
+  observed: string;
+}
+
+/** What the live-exercise agent came back with, before the harness scores it. */
+export interface LiveFindings {
+  started: boolean;
+  howStarted: string;
+  documentedStart: string;
+  steps: LiveStep[];
+  couldNotReach: string[];
+  artifacts: ArtifactClaim[];
+  commands: CommandClaim[];
+  summary: string;
+}
+
+export interface LiveReading {
+  verdict: "worked" | "broken" | "not-run";
+  /** Every step of the path, in the specification's order, with the agent's own word. */
+  steps: { step: string; result: "worked" | "broken" | "not-reached" }[];
+  /** One sentence for the operator, the closing gate and the pit stop. */
+  why: string;
+}
+
+/**
+ * Read one live exercise as a verdict on the run.
+ *
+ * The scoring is deliberately unkind in three specific ways, each of them a
+ * shape that would otherwise let a product that does not run report that it
+ * does. A step the agent did not mention is `not-reached`, not absent: the
+ * path is what the specification says it is, and an agent that answered about
+ * four of six steps has not driven six. A step it reported that the
+ * specification does not name is ignored, so a path cannot be quietly
+ * rewritten into an easier one. And a whole path that worked with nothing to
+ * show for it — every artifact struck as blank, every command unrepeatable —
+ * is `broken`, because "it all worked" on the strength of an agent having
+ * typed it is exactly the evidence both products in issue #115 shipped on.
+ *
+ * Pure, like the rest of this file: the caller supplies the report and the
+ * steps, so the rule is testable without a product, a worktree or a run.
+ */
+export function liveVerdict(steps: string[], report: LiveFindings): LiveReading {
+  const byStep = new Map(report.steps.map((s) => [s.step, s]));
+  const read = steps.map((step) => ({ step, result: byStep.get(step)?.result ?? ("not-reached" as const) }));
+  if (!report.started) {
+    return { verdict: "not-run", steps: read, why: report.howStarted || "the product did not start, and the agent did not say what it tried" };
+  }
+  const firstBad = read.find((s) => s.result !== "worked");
+  if (firstBad) {
+    const observed = byStep.get(firstBad.step)?.observed ?? "";
+    const worked = read.filter((s) => s.result === "worked").length;
+    return {
+      verdict: "broken",
+      steps: read,
+      why:
+        `${worked} of ${read.length} step(s) worked; it ${firstBad.result === "broken" ? "broke" : "never got"} at "${firstBad.step}"` +
+        (observed ? ` — ${observed}` : ""),
+    };
+  }
+  const proof = report.artifacts.length + report.commands.length;
+  if (!proof) {
+    return {
+      verdict: "broken",
+      steps: read,
+      why: `all ${read.length} step(s) were reported working, and nothing it offered as proof survived checking — so nothing here has been shown to work`,
+    };
+  }
+  return { verdict: "worked", steps: read, why: `all ${read.length} step(s) worked, with ${proof} piece(s) of surviving proof` };
+}
+
 /** The agent-facing list of what has to be fixed. Empty when nothing does. */
 export function evidenceFaults(checks: EvidenceCheck[]): string[] {
   return checks.filter((c) => !c.ok).map((c) => `${c.file || "(unnamed)"} — ${c.fault}`);

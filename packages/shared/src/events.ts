@@ -415,6 +415,43 @@ export const HarnessEvent = z.discriminatedUnion("type", [
     failing: z.array(z.string()).default([]),
     total: z.number().int().default(0),
   }),
+  /**
+   * What the live-exercise gate observed when it started the finished product
+   * from a clean checkout and drove the critical path (issue #116). `worked`
+   * means every step was reached, worked, and left proof that survived the
+   * evidence gate; `broken` names the first step that did not; `not-run`
+   * means the product never started, or the agent never answered. Never a
+   * reading of the code: this is the one event in the run written by something
+   * that used the product.
+   */
+  z.object({
+    ...base,
+    type: z.literal("run.live_verdict"),
+    verdict: z.enum(["worked", "broken", "not-run"]),
+    path: z.string().default(""),
+    /** One line per step: `worked`, `broken`, or `not-reached`. */
+    steps: z.array(z.object({ step: z.string(), result: z.enum(["worked", "broken", "not-reached"]) })).default([]),
+    howStarted: z.string().default(""),
+    why: z.string().default(""),
+    /** Where the transcript, screenshots and captures were kept. */
+    artifactsDir: z.string().default(""),
+    /** Artifacts and re-run commands that survived checking, as claims. */
+    proof: z.array(z.string()).default([]),
+    couldNotReach: z.array(z.string()).default([]),
+  }),
+  /**
+   * What the live-exercise agent saw at each step, verbatim.
+   *
+   * Its own event rather than a field on the verdict: the verdict is what
+   * every reader of the run is held to, and this is the prose one fix task is
+   * handed about one step. Keeping them apart means a long observation cannot
+   * crowd out the judgment in any reader that renders the verdict whole.
+   */
+  z.object({
+    ...base,
+    type: z.literal("run.live_observed"),
+    steps: z.array(z.object({ step: z.string(), observed: z.string().default("") })).default([]),
+  }),
   // The verdict of an agent that went and looked at production itself.
   z.object({
     ...base,

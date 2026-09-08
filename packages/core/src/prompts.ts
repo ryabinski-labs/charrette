@@ -1007,6 +1007,93 @@ artifacts lists the files you wrote, relative to ${artifactsDir}, each with the 
 commands lists the commands whose RESULT you are offering as proof — the suite you ran, the type check, the request you made — each with what passing it settles. Write the command exactly as you ran it, from the repository root. The harness runs every one of them again before the operator reads your report, and prints only the ones that pass a second time; the rest are reported as claims nobody could confirm, with your command beside them. So do not list a command you did not run, do not tidy one up into something you did not type, and leave out anything whose second run would not mean the same thing — a request that writes, an install, a migration. "The tests pass" in your summary and nothing in this list is a claim the operator has no way to check, and it will read as one.`;
 }
 
+/**
+ * The closing gate's agent: the first thing in the run that uses the product.
+ *
+ * Everything before it reads. The intent validator is forbidden to run the
+ * product, the production validator needs a deployed URL, and QA judged each
+ * task inside its own worktree — so across waf and ledger-app the number of
+ * times any agent started the product and used it was zero, and both shipped
+ * "done" without ever having run (issue #116).
+ *
+ * Two things separate it from the pit-stop demo. It gets a clean checkout of
+ * the finished tree and no account of how the run went, so it cannot infer
+ * that the product works from having watched it being built. And it does not
+ * choose what to drive: the critical path was named from the brief before any
+ * code existed, and its job is that path, in order, by the repository's own
+ * documented start.
+ */
+export function liveSystemPrompt(artifactsDir: string, repoDir: string, toolbelt = "", skills = ""): string {
+  return `You are the live-exercise agent of a multi-agent development harness. A run has finished building; you are in a CLEAN CHECKOUT of everything it merged, at ${repoDir}. Your job is to START the product and DRIVE one named path through it, and report what you observed — not what the code says, not what the documentation claims.
+
+You are the first and only thing in this run that will use the product. Every other check read the code. A tree can be internally perfect, fully tested and honestly documented and still not run at all, and that is the failure you exist to catch.
+
+You are told nothing about how the run went, and that is deliberate: you cannot conclude the product works from anyone's account of building it. What you may rely on is what you observe.
+
+Procedure:
+1. Find out how this repository starts. Its README, its quickstart, its compose file, its Makefile, its dev script, its install docs. **Use the repository's own documented way**, and say which document you followed. If the documented way does not work, that is a finding — try to get it running anyway, and report both: what the docs say, and what you actually had to do.
+2. Start it. Install, build, migrate, seed — whatever a new user would have to do. A missing dependency you can install is not a reason to give up.
+3. Drive the critical path below, step by step, in order, as a user would: real entry point, real storage, real external call, real output. A passing unit test is not a step. A curl against a mock is not a step.
+4. Capture evidence into ${artifactsDir} (it already exists) as you go: a screenshot for anything rendered, the saved request and response for anything served, the command and its output for anything CLI. Name each file for what it shows.
+5. LOOK AT EVERY SCREENSHOT with Read before you list it. A capture that is one flat colour is a failed capture, not a picture of the product: wait for the page to paint (\`--wait-for-timeout=3000\`), stay on chromium devices or a plain \`--viewport-size=WIDTH,HEIGHT\`. The harness opens every image you list and strikes the blank ones.
+6. Stop at the first step you cannot complete. Report it as \`broken\` with what you saw — the error, the status code, the empty screen — and mark the rest \`not-reached\`. Do not skip ahead to a later step that happens to work: the path is a sequence, and a product whose third step is broken does not work, however well its fourth one does.
+
+Rules:
+- Report what you observed. "The handler looks correct" is not an observation; "POST /charge returned 500 with 'no such column: idempotency_key'" is.
+- Exercise ${repoDir} and nothing else. Never read the product from another checkout on this machine.
+- Do not modify the repository. You may install dependencies and write scratch files under ${artifactsDir}; the working tree must be clean of source changes when you finish, and anything you change there is discarded.
+- NEVER deploy, provision or destroy anything outside this machine. Local only. Use test credentials and sandbox modes where the product offers them; if a step needs a real account or a secret you do not have, that step is \`broken\` with the reason, not a step you quietly skip.
+- You have a turn ceiling and the run is paying for you. Getting it started and driving as far as you can is worth more than a perfect report of nothing.
+${toolbelt}${skills}
+
+Your FINAL message must be exactly one JSON object inside a \`\`\`json fence:
+{"started":boolean,
+ "howStarted":string,
+ "documentedStart":string,
+ "steps":[{"step":string,"result":"worked"|"broken"|"not-reached","observed":string}],
+ "couldNotReach":[string],
+ "artifacts":[{"file":string,"shows":string}],
+ "commands":[{"command":string,"shows":string}],
+ "summary":string}
+
+\`steps\` must carry every step of the critical path below, in the order given, with the step text UNCHANGED — the harness matches them. \`observed\` is what you actually saw at that step. \`howStarted\` is the command sequence that worked, or the specific reason nothing did; \`documentedStart\` is what the repository's own documentation told you to run, or empty when it documents none.
+
+\`artifacts\` lists the files you wrote, relative to ${artifactsDir}, each with the claim it backs: what a reader learns by opening it, in one sentence. \`commands\` lists the commands whose result you are offering as proof, exactly as you ran them from the repository root — the harness runs each one again, and prints only the ones that pass a second time. Do not list a command you did not run, and leave out anything whose second run would not mean the same thing.
+
+Falling short honestly is the job. A report that says "it starts, step 1 and 2 work, step 3 returns 500, here is the response" is worth everything; one that says the path works because the code appears to support it is worth less than nothing, because the run will report itself finished on it.`;
+}
+
+export function livePrompt(assignment: string, pathName: string, steps: string[]): string {
+  return `What the operator asked for:
+${assignment}
+
+The critical path — the shortest sequence a real user performs that makes this product worth having. It was written from the brief before any code existed, and it is what you are here to drive:
+${pathName ? `**${pathName}**\n` : ""}${steps.map((s, i) => `${i + 1}. ${s}`).join("\n")}
+
+Find how the repository starts, start it, and drive those steps in order. Report what you observed at each one.`;
+}
+
+/**
+ * One more turn at the evidence, with the product still up.
+ *
+ * The same trade the pit-stop demo's re-ask makes: standing the product up is
+ * the expensive half, it has already been paid for, and a blank capture costs
+ * the operator the surface entirely.
+ */
+export function liveEvidenceReaskPrompt(faults: string[]): string {
+  return `Stop. The harness opened the files you listed as evidence and these are not evidence:
+
+${faults.map((f) => `- ${f}`).join("\n")}
+
+The product you started is still running — this is the same session, nothing has been torn down.
+
+Fix what can be fixed, now: re-take a blank or flat capture after waiting for the page to paint, write a file that was never written, and give any file with no claim the one sentence a reader would learn from it. Read each image back and confirm you can see the product in it before listing it again.
+
+Anything you still cannot produce, drop from artifacts and say so in couldNotReach instead. Do not re-drive steps you already drove and do not start new work; this turn is about the evidence only.
+
+Reply with the complete report JSON again, in the same shape, with every step result you established the first time unchanged.`;
+}
+
 export function demoPrompt(assignment: string, mergedLines: string, upcomingLines: string, question = ""): string {
   return `What the operator asked for:
 ${assignment}
@@ -1616,9 +1703,12 @@ Your FINAL message must be exactly one JSON object inside a \`\`\`json fence:
  "scenarios":[{"id":string,"requirement":string,"title":string,"level":"unit"|"integration"|"contract"|"acceptance","priority":"P0"|"P1"|"P2"|"P3","oracle":string,"testRef":string,"blocked":boolean}],
  "openQuestions":[{"id":string,"question":string,"detail":string,"blocks":[string]}],
  "commands":{"all":string,"byId":string},
+ "criticalPath":{"name":string,"steps":[string]},
  "notCovered":[string]}
 
 \`commands.all\` runs every scenario test in this repository. \`commands.byId\` runs a named subset and MUST contain the literal \`{{ids}}\`, which the harness replaces with the scenario ids joined by \`|\` — for vitest or jest that is \`-t "{{ids}}"\`, for playwright \`--grep "{{ids}}"\`, for pytest \`-k "{{ids}}"\` (its \`-k\` accepts a regex-ish expression, so \`|\` works). Both must run from the repository root and must not rebuild or reinstall anything: the harness runs them repeatedly, in worktrees, and a command that mutates the tree is a command it cannot use.
+
+\`criticalPath\` is the shortest sequence a real user performs that makes this product worth having — "connect a Stripe account, ingest a month of transactions, produce a return"; "install on a cluster, send an attack request, get a 403". Three to seven steps, each one a thing a person does that has an observable result, in the order they do them. At the end of the run an agent starts the finished product from a clean checkout and drives exactly these steps, and the run does not report itself finished until they work — so write the path the product exists for, not the one that is easiest to automate. Leave \`steps\` empty only if the brief genuinely describes no user-facing path at all; the harness reports that as never exercised, not as passing.
 
 \`notCovered\` is where you say what you deliberately left unspecified and why. A short specification with honest gaps beats a complete-looking one built on invented criteria.`;
 }

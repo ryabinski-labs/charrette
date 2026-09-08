@@ -499,6 +499,51 @@ describe("what the intent check left behind", () => {
     expect(store.planIntentVerdict("run1")).toEqual({ verdict: "FAIL", gaps: [] });
   });
 
+  it("reads the live verdict back whole, and fills in what a partial row does not carry", () => {
+    const store = makeStore();
+    makeRun(store);
+    const bus = new Bus(store);
+    bus.publish({
+      type: "run.live_verdict",
+      runId: "run1",
+      verdict: "broken",
+      path: "take a payment",
+      steps: [{ step: "pay", result: "broken" }],
+      howStarted: "pnpm dev",
+      why: "500 on /pay",
+      artifactsDir: "/r/.harness/run-1/live",
+      proof: ["shot.png — the error"],
+      couldNotReach: ["the receipt"],
+      ts: 1,
+    });
+    expect(store.liveVerdict("run1")).toEqual({
+      verdict: "broken",
+      path: "take a payment",
+      steps: [{ step: "pay", result: "broken" }],
+      howStarted: "pnpm dev",
+      why: "500 on /pay",
+      artifactsDir: "/r/.harness/run-1/live",
+      proof: ["shot.png — the error"],
+      couldNotReach: ["the receipt"],
+    });
+
+    store.db.prepare("INSERT INTO events (runId, type, payload, ts) VALUES (?,?,?,?)").run("run1", "run.live_verdict", JSON.stringify({ verdict: "worked" }), 2);
+    expect(store.liveVerdict("run1")).toEqual({ verdict: "worked", path: "", steps: [], howStarted: "", why: "", artifactsDir: "", proof: [], couldNotReach: [] });
+    expect(store.liveVerdict("no-such-run")).toBeNull();
+  });
+
+  /** The prose one fix task is handed, kept apart from the judgment the run is held to. */
+  it("reads back what the live agent observed at each step, and nothing when it never ran", () => {
+    const store = makeStore();
+    makeRun(store);
+    const bus = new Bus(store);
+    expect(store.liveSteps("run1")).toEqual([]);
+    bus.publish({ type: "run.live_observed", runId: "run1", steps: [{ step: "pay", observed: "POST /pay returned 500" }], ts: 1 });
+    expect(store.liveSteps("run1")).toEqual([{ step: "pay", observed: "POST /pay returned 500" }]);
+    store.db.prepare("INSERT INTO events (runId, type, payload, ts) VALUES (?,?,?,?)").run("run1", "run.live_observed", JSON.stringify({}), 2);
+    expect(store.liveSteps("run1")).toEqual([]);
+  });
+
   it("reads an UNKNOWN verdict back with what it left unchecked, and defaults it on an older row", () => {
     const store = makeStore();
     makeRun(store);

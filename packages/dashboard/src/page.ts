@@ -942,6 +942,12 @@ function describe(ev) {
       // nothing, and a run that reads that as green is the one issue #115 is
       // about. Older events carry only "passed", which was true for both.
       return [(ev.verdict ? ev.verdict === "green" : ev.passed) ? "state" : "bad", "spec", "acceptance: " + ev.line];
+    case "run.live_verdict":
+      // The one event in a run written by something that used the product.
+      return [ev.verdict === "worked" ? "state" : "bad", "live",
+        ev.verdict === "worked" ? "live exercise: the critical path works \u2014 " + ev.why
+        : ev.verdict === "broken" ? "live exercise: CRITICAL PATH BROKEN \u2014 " + ev.why
+        : "live exercise: the product was never exercised \u2014 " + ev.why];
     case "run.closing_proof":
       return [ev.proven ? "state" : "bad", "run",
         ev.proven ? "closing gate: proven \\u2014 the run may report itself in review"
