@@ -10,6 +10,11 @@ export interface Dispatchable {
   dependsOn: string[];
   /** What the planner expects this task to edit. Empty means it did not say. */
   touchedPaths: string[];
+  /**
+   * Whether this task is part of the walking skeleton. Optional so that a run
+   * planned before the spine existed is ordered exactly as it always was.
+   */
+  skeleton?: boolean;
 }
 
 /** Trim the spellings of one path that mean the same file: `./a/b/`, `a/b`. */
@@ -97,12 +102,60 @@ export function leverage(tasks: Dispatchable[], id: string): number {
  * next in line the moment the other one merges, and if nothing else is runnable
  * the run loses one slot for a few minutes rather than a whole re-run of a task.
  *
+ * Before any of that, the walking skeleton goes first. While any task the
+ * planner marked `skeleton` is still live, nothing else starts: the skeleton is
+ * the thinnest slice that makes the critical path run at all, and a run that
+ * builds breadth alongside it arrives at the end with thirteen crates, a
+ * marketing site and no thread that runs — which is what waf did with $3,755
+ * (issue #118). Leverage cannot express this on its own, because breadth is
+ * often exactly what everything else depends on: waf's Helm chart had leverage.
+ *
+ * What the hold lets through is the skeleton and whatever the skeleton is
+ * waiting on. A spine task can depend on something the planner did not mark —
+ * the schema it writes through, the client it calls — and holding those back
+ * too would leave a plan with nothing runnable at all, which the scheduler
+ * reads as a run whose every remaining task is unreachable. So the eligible set
+ * is the live skeleton plus its ancestors, and it is empty only when the whole
+ * spine is already in flight, which is a wait rather than a deadlock.
+ *
+ * A run whose skeleton has parked still dispatches the rest rather than
+ * stopping — `leverage` already counts only live dependents, and a spine nobody
+ * can finish should not take the run with it — and a plan that marked nothing
+ * behaves exactly as it did before.
+ *
  * `nearby` widens both sides of that comparison with files the repository has
  * historically shipped alongside the declared ones (see `coChange.ts`). Declared
  * paths alone catch 43% of the collisions that really happen, because the
  * planner names four or five files out of a dozen; widened, 70%. Omit it and
  * every line above still describes the behaviour exactly.
  */
+/**
+ * The live walking skeleton, plus everything still-live that it waits on.
+ *
+ * Empty when the plan marked no skeleton, or when every skeleton task has
+ * reached a terminal state — in both cases the caller orders the whole
+ * runnable set exactly as it did before this existed.
+ */
+function spineAndItsBlockers(tasks: Dispatchable[]): Set<string> {
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const live = (t: Dispatchable | undefined): boolean => Boolean(t) && !TERMINAL.includes(t!.state);
+  const out = new Set<string>();
+  const queue = tasks.filter((t) => t.skeleton && live(t)).map((t) => t.id);
+  for (const id of queue) out.add(id);
+  while (queue.length) {
+    // Every id in the queue was read off a task in this map, so the lookup
+    // cannot miss — `dependsOn` is the only thing being asked for.
+    for (const dep of byId.get(queue.shift()!)!.dependsOn) {
+      // A merged blocker is not waiting on anything and does not need a slot;
+      // a cancelled one is not reachable through, and the sweep owns that case.
+      if (out.has(dep) || !live(byId.get(dep))) continue;
+      out.add(dep);
+      queue.push(dep);
+    }
+  }
+  return out;
+}
+
 export function nextDispatch<T extends Dispatchable>(
   tasks: T[],
   inFlight: ReadonlySet<string>,
@@ -122,9 +175,15 @@ export function nextDispatch<T extends Dispatchable>(
       !pathsCollide(claim(t), busy),
   );
   if (runnable.length === 0) return undefined;
-  const rank = new Map(runnable.map((t) => [t.id, leverage(tasks, t.id)]));
+  // The spine first, while there is one to build. A skeleton whose every task
+  // is terminal — merged, parked, or cancelled — holds nothing.
+  const spine = spineAndItsBlockers(tasks);
+  const spineRunnable = runnable.filter((t) => spine.has(t.id));
+  const eligible = spine.size ? spineRunnable : runnable;
+  if (!eligible.length) return undefined;
+  const rank = new Map(eligible.map((t) => [t.id, leverage(tasks, t.id)]));
   const order = new Map(tasks.map((t, i) => [t.id, i]));
-  return runnable.sort(
+  return eligible.sort(
     (a, b) =>
       Number(b.state === "READY") - Number(a.state === "READY") ||
       rank.get(b.id)! - rank.get(a.id)! ||

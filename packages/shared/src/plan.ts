@@ -49,6 +49,25 @@ export const PlannedTask = z.object({
    * refactors, a dependency bump — which is honest and common.
    */
   scenarioIds: z.array(z.string()).default([]),
+  /**
+   * Whether this task is part of the walking skeleton: the thinnest vertical
+   * slice that makes the run's critical path run end to end, however crude.
+   *
+   * waf built 13 crates, an operator UI, a marketing site, a fuzz workspace, a
+   * benchmark harness, a parity suite, a Helm chart and 56,491 lines of
+   * documentation before anything installed it on a cluster and watched it
+   * block a request — and then spent its closing budget on Dockerfile build
+   * contexts and golden-file drift, which is what breadth costs once you own
+   * it. There was never a moment, in $3,755, when one thread ran end to end.
+   *
+   * The flag is what lets dispatch hold everything else behind it. It is not a
+   * priority and not a size: a task is in the skeleton when the critical path
+   * cannot run without it, and out of it when the path can run — badly,
+   * unstyled, single-tenant — while it is missing. Empty on every task is
+   * legal and means the plan named no spine, which the plan gate says out loud
+   * rather than silently ordering the run by leverage alone (issue #118).
+   */
+  skeleton: z.boolean().default(false),
   estimatedSize: z.enum(["S", "M", "L"]),
 });
 export type PlannedTask = z.infer<typeof PlannedTask>;

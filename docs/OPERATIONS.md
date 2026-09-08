@@ -158,6 +158,24 @@ before any code existed — a `KNOWN-GAPS.md`, a "non-goals" section or an
 "out of scope" card the run wrote for itself does not change what was asked for;
 a gap those documents disclose is still a gap, reported as disclosed.
 
+Before any of that, the plan is sequenced around the same path. The planner is
+told the critical path and marks the tasks that make it run end to end, however
+crudely, as the **walking skeleton**; dispatch then holds every other task behind
+them — and lets through whatever the skeleton itself is waiting on, so a spine
+with an unmarked blocker cannot deadlock the run. A skeleton that parks stops
+holding anything, and a plan that marked nothing is ordered by leverage exactly
+as it was before.
+
+The plan gate says two more things while a re-plan is still cheap: that a plan
+names no spine at all when the specification names a path, and that more than
+40% of a plan by estimated size is infrastructure, CI, benchmarking,
+documentation, dashboards or marketing rather than the product's own path. A
+task in the skeleton is never counted as scaffolding whatever it is named, so a
+run whose product *is* a CI tool is plannable. Neither finding blocks the plan —
+both are in front of you before a worker is paid, which is where waf's split
+(13 crates, a UI, a marketing site, a fuzz workspace and 56,491 lines of docs
+before anything ran) would have been the whole conversation.
+
 Third, an agent **starts the product and uses it**. It gets a clean checkout of
 everything the run merged — a fresh worktree, `git clean -fdx`, so a product that
 only starts because an earlier agent left a `node_modules` behind is caught — and

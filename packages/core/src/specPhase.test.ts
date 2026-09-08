@@ -110,9 +110,11 @@ function build(opts: { repoPath: string; pool: AgentPool }) {
   const store = new Store(":memory:");
   const bus = new Bus(store);
   const events: HarnessEvent[] = [];
+  const summaries: string[] = [];
   bus.subscribe(({ event }) => void events.push(event));
   const gates: GateHandler = {
-    async resolvePlanGate() {
+    async resolvePlanGate(_prd: string, summary: string) {
+      summaries.push(summary);
       return { approved: true, feedback: "" };
     },
     async resolveBudgetGate() {
@@ -120,7 +122,7 @@ function build(opts: { repoPath: string; pool: AgentPool }) {
     },
   };
   const controller = new RunController(store, bus, opts.pool, new GitHubAdapter(undefined, undefined), gates, opts.repoPath);
-  return { controller, store, events };
+  return { controller, store, events, summaries };
 }
 
 /** An operator at the keyboard, answering whatever they are asked. */
@@ -577,6 +579,104 @@ describe("the critical path the run is exercised on", () => {
     expect(store.runSpec(runId)!.criticalPath).toEqual({ name: "take a payment", steps: ["open the checkout", "pay with a test card"] });
     expect(events.some((e) => e.type === "agent.log" && e.text.includes("Critical path (take a payment): open the checkout → pay with a test card"))).toBe(true);
     expect(store.liveVerdict(runId)!.verdict).toBe("worked");
+  });
+
+  /**
+   * The split waf's plan would have shown, at the one gate where changing it
+   * costs a re-plan rather than a run. Neither finding blocks the plan; both
+   * are in front of the operator before a worker is paid (issue #118).
+   */
+  it("shows the operator a plan that names no spine, and one that is mostly scaffolding", async () => {
+    const dir = repo();
+    const breadth = [
+      { id: "add-ci", title: "Add CI" },
+      { id: "helm-chart", title: "Helm chart" },
+      { id: "write-docs", title: "Write the docs" },
+    ];
+    const { pool } = rolePool({
+      intake: BRIEF,
+      spec: specJson({ criticalPath: { name: "take a payment", steps: ["open the checkout", "pay with a test card"] } }),
+      planner: (s) =>
+        Array.isArray(s.tools) && s.tools.length > 0
+          ? DOCS
+          : "```json\n" +
+            JSON.stringify({
+              epics: [{ id: "epic-e", title: "E", summary: "s" }],
+              tasks: [{ id: "charge-a-card", title: "Charge a card" }, ...breadth].map((t) => ({
+                id: t.id,
+                epicId: "epic-e",
+                title: t.title,
+                spec: "s",
+                acceptanceCriteria: ["x"],
+                dependsOn: [],
+                touchedPaths: [],
+                completionProbe: "",
+                scenarioIds: [],
+                estimatedSize: "M" as const,
+              })),
+            }) +
+            "\n```",
+      worker,
+      qa: () => QA_PASS,
+      validator: () => INTENT_PASS,
+    });
+    const { controller, summaries } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a checkout", RunConfig.parse({ ...BASE, planIntentCheck: false }), operator());
+
+    const shown = summaries.join("\n");
+    expect(shown).toContain("No task in this plan is marked as part of the walking skeleton");
+    expect(shown).toContain("take a payment: open the checkout → pay with a test card");
+    expect(shown).toContain("75% of this plan");
+    expect(shown).toContain("add-ci (Add CI)");
+  });
+
+  it("tells the planner the path it is planning against, and holds breadth behind the spine", async () => {
+    const dir = repo();
+    const dispatched: string[] = [];
+    const { pool, specs } = rolePool({
+      intake: BRIEF,
+      spec: specJson({ criticalPath: { name: "take a payment", steps: ["pay"] } }),
+      planner: (s) =>
+        Array.isArray(s.tools) && s.tools.length > 0
+          ? DOCS
+          : "```json\n" +
+            JSON.stringify({
+              epics: [{ id: "epic-e", title: "E", summary: "s" }],
+              tasks: [
+                { id: "write-docs", skeleton: false },
+                { id: "charge-a-card", skeleton: true },
+              ].map((t) => ({
+                id: t.id,
+                epicId: "epic-e",
+                title: t.id,
+                spec: "s",
+                acceptanceCriteria: ["x"],
+                dependsOn: [],
+                touchedPaths: [],
+                completionProbe: "",
+                scenarioIds: [],
+                skeleton: t.skeleton,
+                estimatedSize: "M" as const,
+              })),
+            }) +
+            "\n```",
+      worker: (s, nth) => (dispatched.push(s.taskId ?? ""), worker(s, nth)),
+      qa: () => QA_PASS,
+      validator: () => INTENT_PASS,
+      live: () => '```json\n{"started":true,"howStarted":"pnpm dev","documentedStart":"","steps":[{"step":"pay","result":"worked","observed":"ok"}],"couldNotReach":[],"artifacts":[],"commands":[{"command":"echo ok","shows":"it answers"}],"summary":""}\n```',
+    });
+    const { controller, store } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a checkout", RunConfig.parse({ ...LIVE_BASE, maxParallelWorkers: 1 }), operator());
+
+    const runId = store.listRuns()[0]!.id;
+    // The planner is told the path, and what the harness will do with it.
+    expect(specs.filter((s) => s.role === "planner").map((s) => s.prompt).join("\n")).toContain("## The critical path");
+    // The spine goes first, though the plan listed the docs first.
+    expect(dispatched[0]).toBe("charge-a-card");
+    expect(store.getTask(runId, "charge-a-card")!.skeleton).toBe(true);
+    expect(store.getTask(runId, "write-docs")!.skeleton).toBe(false);
   });
 
   it("says plainly when a specification named none, so nothing will exercise the product", async () => {
