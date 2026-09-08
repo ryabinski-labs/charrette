@@ -6,6 +6,7 @@ import { git } from "./git.js";
 import { envNames, scanDarkSwitches, scannable, type ScannedFile } from "./darkSwitches.js";
 import { deliveryLedger, type LedgerTask } from "./deliveryLedger.js";
 import { specCoverage } from "./acceptance.js";
+import { scopeLedger } from "./scopeLedger.js";
 import type { CompletionReport, ReportPr } from "./completionReport.js";
 
 /**
@@ -102,6 +103,33 @@ export function buildCompletionReport(src: ReportSources): CompletionReport {
     method: src.method,
     coverage: coverageOf(src.store, src.runId),
     live: src.store.liveVerdict(src.runId),
+    scope: scopeOf(src.store, src.runId),
+  };
+}
+
+/**
+ * What became of each requirement the brief named.
+ *
+ * Null for a run with no specification: it promised nothing in this
+ * vocabulary, and a section of zeroes would read as a run that promised
+ * nothing and delivered it.
+ */
+function scopeOf(store: Store, runId: string): CompletionReport["scope"] {
+  const spec = store.runSpec(runId);
+  if (!spec || !spec.requirements.length) return null;
+  const tasks = store.listTasks(runId).map((t) => ({
+    id: t.id,
+    title: t.title,
+    state: t.state,
+    scenarioIds: t.scenarioIds,
+    why: t.errorSummary || store.taskStateReason(runId, t.id),
+  }));
+  const ledger = scopeLedger(spec, tasks, store.scopeWriteOffs(runId));
+  return {
+    shipped: ledger.shipped,
+    writtenOff: ledger.entries.filter((e) => e.status === "written-off").map((e) => ({ id: e.id, text: e.text, answer: e.answer })),
+    dropped: ledger.dropped.map((e) => ({ id: e.id, text: e.text, why: e.claimants.map((c) => `${c.id} ${c.state}${c.why ? ` (${c.why})` : ""}`).join("; ") })),
+    unclaimed: ledger.unclaimed.map((e) => ({ id: e.id, text: e.text })),
   };
 }
 

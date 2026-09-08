@@ -863,6 +863,142 @@ describe("the closing pit stop", () => {
   });
 });
 
+describe("requirements nothing is building any more", () => {
+  /**
+   * waf cancelled 177 tasks and carried none of their requirements anywhere.
+   * A run whose task list empties over a promise nobody decided about now
+   * holds, and says which promise (issue #120).
+   */
+  it("holds a run whose requirement was dropped when its only task parked", async () => {
+    const dir = repo();
+    const { pool } = rolePool({
+      intake: BRIEF,
+      spec: specJson({
+        requirements: [
+          { id: "REQ-001", text: "a card charge succeeds", priority: "P0", blockedBy: [] },
+          { id: "REQ-002", text: "a receipt is emailed", priority: "P0", blockedBy: [] },
+        ],
+        scenarios: [
+          { id: "SC-001", requirement: "REQ-001", title: "charges a card", level: "unit", priority: "P0", oracle: "o", testRef: "", blocked: false },
+          { id: "SC-002", requirement: "REQ-002", title: "emails a receipt", level: "unit", priority: "P0", oracle: "o", testRef: "", blocked: false },
+        ],
+      }),
+      planner: (s: AgentSpec) =>
+        Array.isArray(s.tools) && s.tools.length > 0 ? DOCS : dag([{ id: "task-a", scenarioIds: ["SC-001"] }, { id: "task-b", scenarioIds: ["SC-002"] }]),
+      // The second task never delivers and parks; its requirement goes with it.
+      worker: (s: AgentSpec, nth: number) => (s.taskId === "task-b" ? new Error("boom") : worker(s, nth)),
+      advisor: () => "",
+      qa: () => QA_PASS,
+      validator: () => INTENT_PASS,
+    });
+    const { controller, store } = build({
+      repoPath: dir,
+      pool,
+      gates: {
+        async resolveTaskGate() {
+          return null;
+        },
+      },
+    });
+
+    await controller.startRun("build a checkout", RunConfig.parse({ ...BASE, workerRespawnCap: 1 }), operator());
+
+    const runId = store.listRuns()[0]!.id;
+    expect(store.getTask(runId, "task-b")!.state).toBe("NEEDS_HUMAN");
+    expect(store.getRun(runId)!.state).toBe("BLOCKED");
+    expect(store.lastRunStateChange(runId)!.reason).toContain("REQ-002 (a receipt is emailed)");
+    expect(store.lastRunStateChange(runId)!.reason).toContain("nobody was asked whether that was acceptable");
+  });
+
+  it("holds a run over a requirement no task ever claimed", async () => {
+    const dir = repo();
+    const { pool } = rolePool(
+      specified("exit 0", {
+        spec: specJson({
+          requirements: [
+            { id: "REQ-001", text: "a card charge succeeds", priority: "P0", blockedBy: [] },
+            { id: "REQ-002", text: "a receipt is emailed", priority: "P0", blockedBy: [] },
+          ],
+          scenarios: [
+            { id: "SC-001", requirement: "REQ-001", title: "charges a card", level: "unit", priority: "P0", oracle: "o", testRef: "", blocked: false },
+            { id: "SC-002", requirement: "REQ-002", title: "emails a receipt", level: "unit", priority: "P0", oracle: "o", testRef: "", blocked: false },
+          ],
+        }),
+      })
+    );
+    const { controller, store } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a checkout", RunConfig.parse(BASE), operator());
+
+    const runId = store.listRuns()[0]!.id;
+    // The planner claimed SC-001 only, so REQ-002 was never anyone's job.
+    expect(store.getRun(runId)!.state).toBe("BLOCKED");
+    expect(store.lastRunStateChange(runId)!.reason).toContain("never claimed by any task: REQ-002");
+  });
+
+  /**
+   * "Continue" over a requirement nothing is building is the answer the epic
+   * asks for — accept it, or fund it — and what made it an omission was only
+   * that nobody wrote it down. Now it is written against the requirement.
+   */
+  it("records a write-off when the closing stop is answered, and does not stop twice for it", async () => {
+    const dir = repo();
+    const stops: PitStop[] = [];
+    const { pool } = rolePool(
+      specified("exit 0", {
+        spec: specJson({
+          requirements: [
+            { id: "REQ-001", text: "a card charge succeeds", priority: "P0", blockedBy: [] },
+            { id: "REQ-002", text: "a receipt is emailed", priority: "P0", blockedBy: [] },
+          ],
+          scenarios: [
+            { id: "SC-001", requirement: "REQ-001", title: "charges a card", level: "unit", priority: "P0", oracle: "o", testRef: "", blocked: false },
+            { id: "SC-002", requirement: "REQ-002", title: "emails a receipt", level: "unit", priority: "P0", oracle: "o", testRef: "", blocked: false },
+          ],
+        }),
+        demo: () => DEMO_OK,
+        reviewer: () => REVIEW_OK,
+      })
+    );
+    const { controller, store, events } = build({
+      repoPath: dir,
+      pool,
+      gates: {
+        async resolvePitStop(stop) {
+          stops.push(stop);
+          return { action: "continue", feedback: "receipts can wait for the next run" };
+        },
+      },
+    });
+
+    await controller.startRun("build a checkout", RunConfig.parse({ ...BASE, pitStop: { every: { usd: 1000 } } }), operator());
+
+    const runId = store.listRuns()[0]!.id;
+    expect(stops[0]!.reason).toContain("never claimed by any task: REQ-002");
+    expect(store.scopeWriteOffs(runId)).toEqual([{ requirementId: "REQ-002", answer: "receipts can wait for the next run", decidedBy: "operator" }]);
+    expect(logs(events)).toContainEqual(expect.stringContaining("1 requirement(s) the brief named will not ship in this run"));
+    // Written off, so the gate does not hold on it a second time: the run
+    // reports itself in review over a decision somebody made.
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+  });
+
+  it("says nothing about scope for a run with no specification", async () => {
+    const dir = repo();
+    const { pool } = rolePool({
+      planner: (s: AgentSpec) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS : dag()),
+      worker,
+      qa: () => QA_PASS,
+      validator: () => INTENT_PASS,
+    });
+    const { controller, store } = build({ repoPath: dir, pool });
+
+    const runId = await controller.startRun("build a thing", RunConfig.parse({ ...BASE, spec: { enabled: false } }));
+
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    expect(store.scopeWriteOffs(runId)).toEqual([]);
+  });
+});
+
 describe("resuming a blocked run", () => {
   /**
    * A run whose one task parked merged nothing, and a run with nothing merged

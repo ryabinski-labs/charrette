@@ -50,6 +50,9 @@ const report = (over: Partial<CompletionReport> = {}): CompletionReport => ({
   // And null here means nothing started the product, which the page says in
   // those words — see the "Exercised" cases.
   live: null,
+  // Null for a run with no specification, which promised nothing in the
+  // vocabulary the Scope section is written in.
+  scope: null,
   ...over,
 });
 

@@ -65,6 +65,17 @@ export interface CompletionReport {
    * report with no live section reads as a report of a product that works,
    * and that reading is what issue #115 is about.
    */
+  /**
+   * What became of each thing the brief asked for: shipped, written off with an
+   * answer, dropped without one, or never claimed by any task. Null for a run
+   * with no specification, which promised nothing in this vocabulary.
+   */
+  scope: {
+    shipped: number;
+    writtenOff: { id: string; text: string; answer: string }[];
+    dropped: { id: string; text: string; why: string }[];
+    unclaimed: { id: string; text: string }[];
+  } | null;
   live: {
     verdict: "worked" | "broken" | "not-run";
     path: string;
@@ -607,6 +618,25 @@ ${
         "Not checked",
         "What this report is not in a position to claim",
         `<p>Every line here is a claim that could not be settled. They are listed rather than resolved, because a report that quietly rounds an unknown up to a pass is worse than no report.</p>${list(cannot)}`
+      )
+    : ""
+}
+
+${
+  report.scope
+    ? section(
+        "Scope",
+        "What became of what you asked for",
+        `<p>Requirements, not tasks. A cancelled task's requirement used to go nowhere — it stopped existing, and came back months later as a section in a gaps file — so this asks the only question that matters about it: did it ship, did you write it off, or did it just stop?</p>
+         <div class="panel">
+           <div class="cell cell--live"><div class="cell-label">Shipped</div><div class="cell-value">${escapeHtml(reading(report.scope.shipped))}</div><p class="cell-note">A task that claimed it merged.</p></div>
+           <div class="cell cell--unproven"><div class="cell-label">Written off</div><div class="cell-value">${escapeHtml(reading(report.scope.writtenOff.length))}</div><p class="cell-note">Will not ship, and you said so.</p></div>
+           <div class="cell cell--dark"><div class="cell-label">Dropped</div><div class="cell-value">${escapeHtml(reading(report.scope.dropped.length))}</div><p class="cell-note">Every task that claimed it was cancelled or parked, and nobody was asked.</p></div>
+           <div class="cell cell--absent"><div class="cell-label">Unclaimed</div><div class="cell-value">${escapeHtml(reading(report.scope.unclaimed.length))}</div><p class="cell-note">No task ever took it on.</p></div>
+         </div>
+         ${report.scope.writtenOff.length ? `<p>Written off:</p>${list(report.scope.writtenOff.map((r) => `${r.id} — ${r.text} — your answer: ${r.answer}`))}` : ""}
+         ${report.scope.dropped.length ? `<p class="bad">Dropped without a decision:</p>${list(report.scope.dropped.map((r) => `${r.id} — ${r.text}${r.why ? ` — last seen: ${r.why}` : ""}`))}` : ""}
+         ${report.scope.unclaimed.length ? `<p>Never claimed by any task:</p>${list(report.scope.unclaimed.map((r) => `${r.id} — ${r.text}`))}` : ""}`
       )
     : ""
 }

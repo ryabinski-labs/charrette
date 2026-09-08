@@ -416,6 +416,26 @@ export const HarnessEvent = z.discriminatedUnion("type", [
     total: z.number().int().default(0),
   }),
   /**
+   * A requirement the brief named that this run will not deliver, and the
+   * answer that made that a decision rather than an omission.
+   *
+   * waf cancelled 177 tasks against 377 merged and carried none of their
+   * requirements anywhere: they stopped existing and reappeared as sections of
+   * a 118 KB gaps file. A write-off is the same outcome with a person's answer
+   * attached, and the difference is the whole of issue #120.
+   */
+  z.object({
+    ...base,
+    type: z.literal("run.scope_written_off"),
+    requirementId: z.string(),
+    requirement: z.string().default(""),
+    /** The operator's own words, or the skill's. */
+    answer: z.string().default(""),
+    decidedBy: z.string().default("operator"),
+    /** The tasks that claimed it, and what became of each. */
+    claimants: z.array(z.object({ id: z.string(), state: z.string(), why: z.string().default("") })).default([]),
+  }),
+  /**
    * What the live-exercise gate observed when it started the finished product
    * from a clean checkout and drove the critical path (issue #116). `worked`
    * means every step was reached, worked, and left proof that survived the
