@@ -117,8 +117,8 @@ describe("the verdict", () => {
    * exit code. Deriving the answer from the parsed ids instead would make the
    * gate exactly as good as the parser.
    */
-  it("takes the answer from the exit code, never from the ids it could read", () => {
-    const green = acceptanceVerdict(spec(), { exitCode: 0, output: "FAILED is a word in this fixture" });
+  it("requires positive execution evidence and never overrides a failing process", () => {
+    const green = acceptanceVerdict(spec(), { exitCode: 0, output: "FAILED is a word in this fixture\n✓ SC-001" });
     expect(green.verdict).toBe("green");
     expect(green.failing).toEqual([]);
 
@@ -194,12 +194,12 @@ describe("the verdict", () => {
     expect(v.line).toContain("unproven, not passing");
   });
 
-  it("reports a green run, and says what is still blocked alongside it", () => {
+  it("refuses green when a required scenario remains blocked", () => {
     const s = spec({ scenarios: [scenario({ id: "SC-001" }), scenario({ id: "SC-002", blocked: true })] });
     const v = acceptanceVerdict(s, { exitCode: 0, output: "  ✓ SC-001" });
-    expect(v.verdict).toBe("green");
+    expect(v.verdict).toBe("red");
     expect(v.blocked).toEqual(["SC-002"]);
-    expect(v.line).toBe("1 gating scenario(s) green, 1 still blocked on an unanswered question");
+    expect(v.line).toContain("1 required scenario(s) remain blocked: SC-002");
   });
 
   /**
@@ -216,7 +216,7 @@ describe("the verdict", () => {
     const red = acceptanceVerdict(spec(), { exitCode: 1, output: "x".repeat(5000) + "TAIL" });
     expect(red.output.endsWith("TAIL")).toBe(true);
     expect(red.output.length).toBe(4000);
-    expect(acceptanceVerdict(spec(), { exitCode: 0, output: "all fine" }).output).toBe("");
+    expect(acceptanceVerdict(spec(), { exitCode: 0, output: "✓ SC-001" }).output).toBe("");
     expect(acceptanceVerdict(spec(), { exitCode: 1, output: "boom", error: "no runner" }).output).toBe("boom");
   });
 

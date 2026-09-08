@@ -952,6 +952,15 @@ function describe(ev) {
       return [ev.proven ? "state" : "bad", "run",
         ev.proven ? "closing gate: proven \\u2014 the run may report itself in review"
                   : "closing gate: NOT proven \\u2014 " + ev.unmet.join("; ") + (ev.held ? "" : " (holdUntilProven is off, so the run reports in review anyway)")];
+    case "run.release_evidence":
+      return [ev.verdict === "passed" ? "state" : "bad", "release",
+        "release " + ev.releaseId + " / " + ev.phase + ": " + ev.verdict +
+        (ev.sha ? " at " + ev.sha : "") + (ev.unmet.length ? " — " + ev.unmet.join("; ") : "") +
+        (ev.evidencePath ? " · evidence: " + ev.evidencePath : "")];
+    case "run.deploy_status":
+      return [ev.state === "passing" ? "state" : "bad", "release", "deployment checks: " + ev.state + " at " + ev.sha + (ev.failing.length ? " — " + ev.failing.join(", ") : "")];
+    case "run.prod_verdict":
+      return [ev.verdict === "PASS" ? "state" : "bad", "release", "production validation: " + ev.verdict + " — " + ev.summary + (ev.findings.length ? " — " + ev.findings.join("; ") : "")];
     case "skills.forged":
       return ["tool", ev.taskId, ev.action + " skill \\u201c" + ev.name + "\\u201d (~" + ev.tokensApprox + " tokens) \\u2014 " + ev.path];
     default:
@@ -2388,7 +2397,7 @@ const NOTIFY = {
   BLOCKED:     ["waiting", "The run ran out of tasks without proving the product. The activity feed has what is unmet; fix it and resume."],
   // Merged, but the cycle did not close: the deploy went red, or production
   // disagreed. Both need the operator, and neither is visible from the repo.
-  VERIFYING:   ["waiting", "The pull request is merged, but the deploy or the production check has not passed. The activity feed has the reason."],
+  VERIFYING:   ["waiting", "Following the release through merge, deployment and production checks. Production delivery is not yet proven; the activity feed has the reason."],
   DONE:        ["done", "Merged, deployed, and verified against production."],
   FAILED:      ["failed", "The run stopped on an error. The activity feed has the reason."],
   ABORTED:     ["aborted", "The run was cancelled."],

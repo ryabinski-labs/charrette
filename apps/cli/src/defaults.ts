@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import { SUBPROJECT_DIRS, scanCiChecks, type CiCheck, type SkippedStep } from "@harness/core";
-import { DEFAULT_CHECK_TIMEOUT_MINUTES, PitStopConfig, PlanGateConfig, SubscriptionConfig, TaskGateConfig } from "@harness/shared";
+import { DEFAULT_CHECK_TIMEOUT_MINUTES, DeliveryConfig, LiveConfig, SpecConfig, PitStopConfig, PlanGateConfig, SubscriptionConfig, TaskGateConfig } from "@harness/shared";
 
 export const CONFIG_FILENAME = "harness.config.json";
 
@@ -461,6 +461,11 @@ export const FileConfig = z
     waitForChecks: z.boolean().optional(),
     checkTimeoutMinutes: z.number().int().min(1).max(120).optional(),
     prodUrl: z.string().optional(),
+    delivery: DeliveryConfig.partial().optional(),
+    spec: SpecConfig.partial().optional(),
+    live: LiveConfig.partial().optional(),
+    holdUntilProven: z.boolean().optional(),
+    holdUntilGreen: z.boolean().optional(),
     deployTimeoutMinutes: z.number().int().min(1).max(240).optional(),
     externalTools: z.array(z.string()).optional(),
     dashboard: z.boolean().optional(),

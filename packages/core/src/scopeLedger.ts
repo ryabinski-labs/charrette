@@ -42,8 +42,9 @@ export interface WriteOff {
 }
 
 export type ScopeStatus =
-  /** A merged task claimed a scenario of it. */
+  /** Every required scenario has a merged owner. */
   | "shipped"
+  | "in-progress"
   /** Nothing live claims it, and the operator said so. */
   | "written-off"
   /** Nothing live claims it, and nobody was asked. */
@@ -78,7 +79,7 @@ const LIVE: TaskState[] = ["PENDING", "READY", "WORKING", "QA", "QA_FAILED", "AC
  * Reconcile the specification's requirements against what the run did with
  * them.
  *
- * A requirement is `shipped` when a merged task claimed one of its scenarios —
+ * A requirement is `shipped` when merged tasks claim all its required scenarios —
  * not when the scenario passed, which is `specCoverage`'s question and a
  * different one. This asks whether anyone ever delivered the work; that asks
  * whether the work is proven. A run can ship a requirement whose scenario is
@@ -102,6 +103,9 @@ export function scopeLedger(spec: RunSpec, tasks: ScopedTask[], writeOffs: Write
 
   const entries: ScopeEntry[] = spec.requirements.map((r) => {
     const mine = claims.get(r.id) ?? [];
+    const scenarios = spec.scenarios.filter((s) => s.requirement === r.id);
+    const needed = scenarios.some(gatingRequirement) ? scenarios.filter(gatingRequirement) : scenarios;
+    const covered = (s: { id: string }, states: TaskState[]) => mine.some((t) => states.includes(t.state) && t.scenarioIds.includes(s.id));
     // An answer settles a requirement whichever way it was lost. Both buckets
     // are put to the operator at the closing stop, and one that could be
     // accepted but not recorded would hold the run for ever however many times
@@ -110,13 +114,10 @@ export function scopeLedger(spec: RunSpec, tasks: ScopedTask[], writeOffs: Write
       ? answered.has(r.id)
         ? "written-off"
         : "unclaimed"
-      : mine.some((t) => t.state === "MERGED")
+      : needed.length > 0 && needed.every((s) => covered(s, ["MERGED"]))
         ? "shipped"
-        : mine.some((t) => LIVE.includes(t.state))
-          ? // Still being built. Not a hole in the scope — the run has not
-            // finished with it — and the closing gate never sees this, because
-            // it only reads a run whose tasks are all terminal.
-            "shipped"
+        : needed.length > 0 && needed.every((s) => covered(s, ["MERGED", ...LIVE]))
+          ? "in-progress"
           : answered.has(r.id)
             ? "written-off"
             : "dropped";
@@ -156,9 +157,11 @@ export function scopeUnmet(ledger: ScopeLedger): string[] {
   const name = (e: ScopeEntry) => `${e.id} (${e.text.slice(0, 60)})`;
   const dropped = ledger.dropped.filter(gatingRequirement);
   const unclaimed = ledger.unclaimed.filter(gatingRequirement);
+  const unfinished = ledger.entries.filter((e) => e.status === "in-progress" && gatingRequirement(e));
+  if (unfinished.length) unmet.push(`required work is still in progress: ${unfinished.map(name).join(", ")}`);
   if (dropped.length) {
     unmet.push(
-      `${dropped.length} requirement(s) the brief named were dropped without a decision: ${dropped.slice(0, 4).map(name).join(", ")}${dropped.length > 4 ? `, +${dropped.length - 4} more` : ""} — every task that claimed them was cancelled or parked, and nobody was asked whether that was acceptable`
+      `${dropped.length} requirement(s) the brief named were dropped without a decision: ${dropped.slice(0, 4).map(name).join(", ")}${dropped.length > 4 ? `, +${dropped.length - 4} more` : ""} — at least one required scenario has no delivered or active owner, and nobody was asked whether that was acceptable`
     );
   }
   if (unclaimed.length) {
@@ -183,17 +186,15 @@ export function scopeUnmet(ledger: ScopeLedger): string[] {
  */
 export function replanDrops(spec: RunSpec, before: ScopedTask[], after: { id: string; scenarioIds: string[] }[]): string[] {
   const requirementOf = new Map(spec.scenarios.map((s) => [s.id, s.requirement]));
-  const covered = (list: { scenarioIds: string[] }[]) =>
-    new Set(list.flatMap((t) => t.scenarioIds.map((id) => requirementOf.get(id)).filter((r): r is string => Boolean(r))));
+  const covered = (list: { scenarioIds: string[] }[]) => new Set(list.flatMap((t) => t.scenarioIds));
   // Only what the *live* plan covers can be dropped by replacing it: a
   // requirement whose task already merged is delivered, and a re-plan that
   // does not mention it is not dropping anything.
   const now = covered(before.filter((t) => LIVE.includes(t.state)));
-  const next = covered(after);
+  const next = covered([...after, ...before.filter((t) => t.state === "MERGED")]);
   const byId = new Map(spec.requirements.map((r) => [r.id, r]));
-  return [...now]
-    .filter((id) => !next.has(id))
-    .map((id) => byId.get(id))
+  return [...new Set([...now].filter((id) => !next.has(id)).map((id) => requirementOf.get(id)))]
+    .map((id) => id ? byId.get(id) : undefined)
     .filter((r): r is SpecRequirement => Boolean(r))
     .filter(gatingRequirement)
     .map((r) => `${r.id} (${r.text.slice(0, 80)}) — the plan that stands has a task for it and the re-plan does not`);

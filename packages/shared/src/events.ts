@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ReleaseEvidence } from "./delivery.js";
 import { RunSpec } from "./spec.js";
 import { AgentRole, GateKind, GateState, RunState, TaskState } from "./states.js";
 
@@ -27,6 +28,7 @@ export const RunbookShape = z.object({
 export type Runbook = z.infer<typeof RunbookShape>;
 
 export const HarnessEvent = z.discriminatedUnion("type", [
+  z.object({ ...base, type: z.literal("run.release_evidence"), ...ReleaseEvidence.shape }),
   z.object({ ...base, type: z.literal("run.created"), assignment: z.string(), repoPath: z.string() }),
   z.object({ ...base, type: z.literal("run.state_changed"), from: RunState, to: RunState, reason: z.string().default("") }),
   z.object({ ...base, type: z.literal("run.gate_opened"), gateId: z.string(), kind: GateKind, payload: z.unknown() }),
@@ -479,6 +481,8 @@ export const HarnessEvent = z.discriminatedUnion("type", [
     url: z.string(),
     verdict: z.enum(["PASS", "FAIL"]),
     findings: z.array(z.string()).default([]),
+    unchecked: z.array(z.string()).optional(),
+    observations: z.array(z.object({ scenarioId: z.string(), evidence: z.string() })).optional(),
     summary: z.string().default(""),
   }),
   z.object({ ...base, type: z.literal("agent.spawned"), sessionId: z.string(), taskId: z.string().optional(), role: AgentRole, model: z.string() }),

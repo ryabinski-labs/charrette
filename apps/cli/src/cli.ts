@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { createInterface } from "node:readline/promises";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { sourceDigest, deliveryConfigProblems } from "@harness/core";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_CHECK_TIMEOUT_MINUTES, ModelRoutingShape, RunConfig, SubscriptionConfig } from "@harness/shared";
@@ -37,7 +38,7 @@ async function runningRunId(base: string, headers: Record<string, string>): Prom
   try {
     const res = await fetch(`${base}api/state`, { headers });
     const state = (await res.json()) as { runs?: { id: string; state: string }[] };
-    return state.runs?.find((r) => ["EXECUTING", "INTEGRATING"].includes(r.state))?.id ?? null;
+    return state.runs?.find((r) => ["EXECUTING", "INTEGRATING", "VERIFYING"].includes(r.state))?.id ?? null;
   } catch {
     return null;
   }
@@ -142,6 +143,8 @@ function makeController(
     if ("sessionId" in event && typeof event.sessionId === "string" && intakeSessions.has(event.sessionId)) return;
     if (event.type === "agent.log") {
       process.stdout.write(`  [${event.taskId ?? "run"}] ${event.text.split("\n")[0]!.slice(0, 120)}\n`);
+    } else if (event.type === "run.release_evidence") {
+      process.stdout.write(`  release ${event.releaseId} / ${event.phase}: ${event.verdict}${event.sha ? ` at ${event.sha}` : ""}${event.unmet.length ? ` — ${event.unmet.join("; ")}` : ""}${event.evidencePath ? ` · evidence: ${event.evidencePath}` : ""}\n`);
     } else if (event.type === "run.state_changed" || event.type === "task.state_changed") {
       const scope = "taskId" in event && event.taskId ? `task ${event.taskId}` : "run";
       process.stdout.write(`▶ ${scope}: ${event.from} → ${event.to}${event.reason ? ` (${event.reason})` : ""}\n`);
@@ -381,6 +384,12 @@ async function reportOutcome(
 const DEFAULT_RUN_CAP = 30;
 
 interface RunOpts {
+  prd?: string;
+  production?: boolean;
+  prodUrl?: string;
+  release?: string;
+  autoMerge?: boolean;
+  prodTestScope?: string;
   repo: string;
   runCap: string;
   check?: string[];
@@ -608,10 +617,22 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
     deterministicCheckTimeoutMinutes: file.deterministicCheckTimeoutMinutes,
     waitForChecks: file.waitForChecks,
     checkTimeoutMinutes: file.checkTimeoutMinutes,
-    prodUrl: file.prodUrl,
+    prodUrl: opts.prodUrl ?? file.prodUrl,
+    delivery: { ...file.delivery, ...(opts.production ? { mode: "production" } : {}),
+      ...(opts.autoMerge ? { merge: "auto" } : {}), ...(opts.release ? { releaseId: opts.release } : {}),
+      ...(opts.prodTestScope ? { productionTestScope: opts.prodTestScope } : {}),
+      prdSha256: assignment === undefined ? "" : sourceDigest(assignment) },
+    spec: file.spec,
+    live: file.live,
+    holdUntilProven: file.holdUntilProven,
+    holdUntilGreen: file.holdUntilGreen,
     deployTimeoutMinutes: file.deployTimeoutMinutes,
     externalTools: file.externalTools,
   });
+
+  const releaseProblems = deliveryConfigProblems(config);
+  if (releaseProblems.length) throw new Error(releaseProblems.join("; "));
+  if (config.delivery.mode === "production") banner.push(`delivery   production · ${config.delivery.releaseId} · ${config.prodUrl} · ${config.delivery.merge} merge`);
 
   // A role pointed at another vendor needs that vendor's key before anything
   // is spent, not at the moment that role is first dispatched. `demo` first
@@ -702,6 +723,12 @@ export function buildProgram(): Command {
     .command("run")
     .description("plan and build an assignment in the current repo")
     .argument("[assignment]", "what to build; omit to describe it in a conversation")
+    .option("--prd <path>", "read the complete product requirements document as the assignment")
+    .option("--production", "continue through merge, deployment and production acceptance; DONE requires release evidence")
+    .option("--prod-url <url>", "established production destination (required in production mode)")
+    .option("--release <id>", "stable release identifier; the complete PRD and contract persist across runs")
+    .option("--auto-merge", "authorize merging the validated release PR once GitHub checks and protections permit it")
+    .option("--prod-test-scope <scope>", "authorize test-data writes only within this isolated production test account or namespace; default read-only")
     .option("-r, --repo <path>", "target repo (default: the git repo containing the cwd)", process.cwd())
     .option("--run-cap <usd>", "run budget cap in USD", String(DEFAULT_RUN_CAP))
     .option("--check <cmd...>", "deterministic checks run before QA (default: auto-detected)")
@@ -718,6 +745,11 @@ export function buildProgram(): Command {
     .option("-m, --model <role=model>", "route one role to a model, e.g. worker=gpt-5.6-terra; repeatable", collect, [])
     .option("--account <name>", "spend a named Claude subscription from subscription.accounts (default: the account you are logged into)")
     .action(async (assignment: string | undefined, opts: RunOpts, cmd: Command) => {
+      if (opts.prd) {
+        if (assignment !== undefined) throw new Error("Use either --prd or a positional assignment, not both; put the full release scope in the PRD.");
+        assignment = readFileSync(path.resolve(expandHome(opts.prd)), "utf8");
+        if (!assignment.trim()) throw new Error("The PRD is empty.");
+      }
       if (await repoBlocked(resolveRepoRoot(opts.repo))) return;
       const { repo, config, dashboard: wantDashboard, dashboardPort, chat: wantChat, banner } = resolveRun(cmd, opts, assignment);
       const dash = makeDashboardFactory(wantDashboard, dashboardPort, repo);
@@ -965,6 +997,7 @@ export function buildProgram(): Command {
       // Setting prodUrl on a run that already finished is what extends it past the
       // pull request: the next resume follows the deploy and checks production.
       if (existing && file.prodUrl !== undefined && file.prodUrl !== existing.config.prodUrl) {
+        if (existing.config.delivery?.mode === "production") throw new Error("The production destination is frozen for this run; start a new run with the intended destination rather than redirecting its verification.");
         store.patchRunConfig(runId, { prodUrl: file.prodUrl });
         process.stdout.write(`Production URL updated from ${CONFIG_FILENAME}: ${file.prodUrl || "(none)"}\n`);
       }

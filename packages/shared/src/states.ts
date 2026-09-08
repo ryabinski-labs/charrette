@@ -100,11 +100,11 @@ export type GateState = z.infer<typeof GateState>;
 
 /** Legal run-state transitions; the orchestrator core is the only writer. */
 export const RUN_TRANSITIONS: Record<RunState, RunState[]> = {
-  CREATED: ["INTAKE", "PLANNING", "ABORTED"],
-  INTAKE: ["PLANNING", "FAILED", "PAUSED", "ABORTED"],
-  PLANNING: ["PLAN_REVIEW", "FAILED", "PAUSED", "ABORTED"],
-  PLAN_REVIEW: ["EXECUTING", "PLANNING", "ABORTED"],
-  EXECUTING: ["INTEGRATING", "PAUSED", "BUDGET_HOLD", "LIMIT_HOLD", "FAILED", "ABORTED"],
+  CREATED: ["INTAKE", "PLANNING", "BLOCKED", "ABORTED"],
+  INTAKE: ["PLANNING", "BLOCKED", "FAILED", "PAUSED", "ABORTED"],
+  PLANNING: ["PLAN_REVIEW", "BLOCKED", "FAILED", "PAUSED", "ABORTED"],
+  PLAN_REVIEW: ["EXECUTING", "PLANNING", "BLOCKED", "ABORTED"],
+  EXECUTING: ["INTEGRATING", "BLOCKED", "PAUSED", "BUDGET_HOLD", "LIMIT_HOLD", "FAILED", "ABORTED"],
   // INTEGRATING -> EXECUTING: the pit stop the validator's FAIL opens sits here,
   // between the verdict and the first pull request. An operator who reads that
   // verdict and asks for the gap to be fixed has to be able to send the run back
@@ -113,25 +113,25 @@ export const RUN_TRANSITIONS: Record<RunState, RunState[]> = {
   // A finished run is not a dead run: `resume` reopens it when tasks parked
   // (back to EXECUTING via the escalation gate) or merged work never got its
   // pull requests (back to INTEGRATING to retry them).
-  PR_REVIEW: ["EXECUTING", "INTEGRATING", "VERIFYING"],
+  PR_REVIEW: ["EXECUTING", "INTEGRATING", "VERIFYING", "BLOCKED", "PAUSED", "ABORTED"],
   // The same two doors as PR_REVIEW, and for the same reason: what blocked the
   // run is something the operator fixes — a scenario, a question, a parked
   // task — and `resume` is how the run is asked to look again. Never straight
   // to PR_REVIEW: the gates it failed are the gates it has to pass.
-  BLOCKED: ["EXECUTING", "INTEGRATING", "ABORTED"],
+  BLOCKED: ["PLANNING", "EXECUTING", "INTEGRATING", "VERIFYING", "ABORTED"],
   // A run stays in VERIFYING while the deploy is red or production disagrees:
   // both are states the operator has to act on, and neither is the harness's to
   // guess at. `resume` re-enters verification, so fixing the deploy and running
   // it again is what moves the run on — no new run, no lost history.
-  VERIFYING: ["DONE", "EXECUTING", "PAUSED", "FAILED", "ABORTED"],
+  VERIFYING: ["DONE", "BLOCKED", "EXECUTING", "PAUSED", "BUDGET_HOLD", "LIMIT_HOLD", "FAILED", "ABORTED"],
   DONE: [],
-  PAUSED: ["INTAKE", "PLANNING", "EXECUTING", "INTEGRATING", "ABORTED"],
-  BUDGET_HOLD: ["EXECUTING", "INTEGRATING", "ABORTED"],
+  PAUSED: ["INTAKE", "PLANNING", "EXECUTING", "INTEGRATING", "VERIFYING", "BLOCKED", "ABORTED"],
+  BUDGET_HOLD: ["EXECUTING", "INTEGRATING", "VERIFYING", "BLOCKED", "ABORTED"],
   // Same doors as BUDGET_HOLD, and for the same reason: what parked the run was
   // a ceiling, not a fault, so resuming puts it back exactly where it stopped.
   // The difference is what makes resuming worth anything — a raised cap there, a
   // different subscription (or a reset window) here.
-  LIMIT_HOLD: ["EXECUTING", "INTEGRATING", "ABORTED"],
+  LIMIT_HOLD: ["EXECUTING", "INTEGRATING", "VERIFYING", "BLOCKED", "ABORTED"],
   // FAILED -> PLANNING: a run that died before it produced a single task can be
   // planned again. Everything it has is still worth something — the intake
   // conversation the operator sat through, the brief it became — and the

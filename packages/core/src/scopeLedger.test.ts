@@ -45,7 +45,7 @@ describe("reconciling requirements rather than tasks", () => {
    * requirement whose scenario is red.
    */
   it("counts a requirement whose only task is still being built as shipping, not as lost", () => {
-    expect(statuses(scopeLedger(spec(), [task("a", "WORKING", ["SC-1"])]))).toMatchObject({ "REQ-1": "shipped" });
+    expect(statuses(scopeLedger(spec(), [task("a", "WORKING", ["SC-1"])]))).toMatchObject({ "REQ-1": "in-progress" });
   });
 
   it("calls it dropped when every task that claimed it was cancelled or parked", () => {
