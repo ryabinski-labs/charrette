@@ -184,6 +184,18 @@ suite("the specification feed lines", () => {
     expect(text).toBe("acceptance: 1 of 2 gating scenario(s) failing: SC-002");
   });
 
+  it("renders release evidence and production failures explicitly", () => {
+    const describeEv = extractDescribe();
+    const [, , passed] = describeEv({ type: "run.release_evidence", releaseId: "ga", phase: "production", verdict: "passed", sha: "abc", unmet: [], evidencePath: "release/evidence.json" });
+    expect(passed).toContain("release ga / production: passed at abc");
+    expect(passed).toContain("release/evidence.json");
+    expect(describeEv({ type: "run.release_evidence", releaseId: "ga", phase: "deploy", verdict: "blocked", sha: "", unmet: ["wrong revision"], evidencePath: "" })).toEqual(["bad", "release", expect.stringContaining("wrong revision")]);
+    expect(describeEv({ type: "run.deploy_status", state: "failing", sha: "abc", failing: ["deploy"] })[0]).toBe("bad");
+    expect(describeEv({ type: "run.deploy_status", state: "passing", sha: "abc", failing: [] })[0]).toBe("state");
+    expect(describeEv({ type: "run.prod_verdict", verdict: "FAIL", summary: "broken", findings: ["login"] })[0]).toBe("bad");
+    expect(describeEv({ type: "run.prod_verdict", verdict: "PASS", summary: "works", findings: [] })[0]).toBe("state");
+  });
+
   it("colours a green gate as an ordinary state line", () => {
     const describeEv = extractDescribe();
     const [kind, , text] = describeEv({

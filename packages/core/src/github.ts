@@ -30,6 +30,10 @@ export interface PrChecks {
    * (a path-filtered workflow), and only the same head cannot lose one.
    */
   sha?: string;
+  /** Only explicit successes; skipped/neutral/missing checks never enter this set. */
+  successful?: string[];
+  /** At least one GitHub check surface could not be read. Never release evidence. */
+  unavailable?: boolean;
 }
 
 export interface PrRef {
@@ -106,6 +110,17 @@ export class GitHubAdapter {
 
   get enabled(): boolean {
     return this.octokit !== null;
+  }
+
+  /** Called only under the run's explicit automatic-merge authority. SHA is a CAS guard. */
+  async mergeApprovedPR(prNumber: number, head: string, base: string, expectedSha: string): Promise<boolean> {
+    if (!this.octokit || !expectedSha) return false;
+    const args = { owner: this.owner, repo: this.repo, pull_number: prNumber };
+    const pr = await this.octokit.rest.pulls.get(args).then((r) => r.data).catch(() => null);
+    if (!pr || pr.state !== "open" || pr.draft || pr.head.ref !== head || pr.base.ref !== base || pr.head.sha !== expectedSha) return false;
+    if (pr.head.repo?.full_name !== `${this.owner}/${this.repo}`) return false;
+    return this.octokit.rest.pulls.merge({ ...args, sha: expectedSha, merge_method: "merge" })
+      .then((r) => r.data.merged).catch(() => false);
   }
 
   private marker(runId: string, id: string): string {
@@ -653,23 +668,26 @@ export class GitHubAdapter {
   /** The combined verdict of every check and status attached to one commit. */
   async checksForRef(ref: string): Promise<PrChecks | null> {
     if (!this.octokit) return null;
+    let unavailable = false;
     const runs = await this.octokit
       .paginate(this.octokit.rest.checks.listForRef, { owner: this.owner, repo: this.repo, ref, per_page: 100 })
-      .catch(() => [] as { name: string; status: string; conclusion: string | null }[]);
+      .catch(() => { unavailable = true; return [] as { name: string; status: string; conclusion: string | null }[]; });
     const combined = await this.octokit.rest.repos
       .getCombinedStatusForRef({ owner: this.owner, repo: this.repo, ref })
       .then((r) => r.data)
-      .catch(() => null);
+      .catch(() => { unavailable = true; return null; });
 
     // "cancelled" and "action_required" are failures for this purpose: neither
     // is a green branch, and reporting them as pending would wait forever.
     const BAD = new Set(["failure", "timed_out", "cancelled", "action_required", "startup_failure"]);
     const failing: string[] = [];
     const names: string[] = [];
+    const successful: string[] = [];
     let pending = 0;
     let total = 0;
     for (const c of runs) {
       names.push(c.name);
+      if (c.status === "completed" && c.conclusion === "success") successful.push(c.name);
       // Skipped and neutral checks are deliberate non-answers, not results.
       if (c.status === "completed" && (c.conclusion === "skipped" || c.conclusion === "neutral")) continue;
       total++;
@@ -678,11 +696,13 @@ export class GitHubAdapter {
     }
     for (const s of combined?.statuses ?? []) {
       names.push(s.context);
+      if (s.state === "success") successful.push(s.context);
       total++;
       if (s.state === "pending") pending++;
       else if (s.state === "failure" || s.state === "error") failing.push(s.context);
     }
-    if (!total) return { state: "none", failing: [], total: 0, names, sha: ref };
+    const evidence = { successful, ...(unavailable ? { unavailable: true } : {}) };
+    if (!total) return { state: "none", failing: [], total: 0, names, sha: ref, ...evidence };
     // A failure with other checks still pending is not yet the whole answer —
     // only report "failing" once nothing is left running. web-app run 428d77f8
     // reported "CI is red: Frontend" the moment that one job failed, while
@@ -695,8 +715,8 @@ export class GitHubAdapter {
     // finish first — exactly the false confidence `awaitChecks`'s "a timeout is
     // reported as pending, never as a pass" rule exists to prevent, just from
     // the other direction.
-    if (failing.length && !pending) return { state: "failing", failing, total, names, sha: ref };
-    return { state: pending ? "pending" : "passing", failing: [], total, names, sha: ref };
+    if (failing.length && !pending) return { state: "failing", failing, total, names, sha: ref, ...evidence };
+    return { state: pending ? "pending" : "passing", failing: [], total, names, sha: ref, ...evidence };
   }
 
   /**

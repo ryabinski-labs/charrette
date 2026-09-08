@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ReleaseVerification } from "./delivery.js";
 
 /**
  * The run's executable specification: what was promised, and the scenario that
@@ -59,8 +60,8 @@ export const SpecScenario = z.object({
   testRef: z.string().default(""),
   /**
    * Scaffolded but deliberately not runnable: it depends on an open question
-   * nobody has answered. Never counted against the run — an unanswerable test
-   * parked in CI teaches everyone to ignore a red bar.
+   * nobody has answered. Excluded from execution, but prevents a green release:
+   * an unanswered requirement is not successful evidence.
    */
   blocked: z.boolean().default(false),
 });
@@ -136,6 +137,7 @@ export const RunSpec = z.object({
   openQuestions: z.array(SpecOpenQuestion).default([]),
   commands: SpecCommands.default({}),
   criticalPath: CriticalPath.default({}),
+  release: ReleaseVerification.default({}),
   /** What the spec agent could not derive, in its own words. */
   notCovered: z.array(z.string()).default([]),
 });

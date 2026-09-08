@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { DeliveryConfig } from "./delivery.js";
 import { routingViolations } from "./providers.js";
 
 /**
@@ -753,6 +754,7 @@ export type LiveConfig = z.infer<typeof LiveConfig>;
 
 export const SpecConfig = z.object({
   enabled: z.boolean().default(true),
+  requireExecutionEvidence: z.boolean().default(true),
   /**
    * How many times a red acceptance gate may send the run back to work before
    * it escalates. Zero reports the failure and lets the run finish, which is
@@ -1229,6 +1231,7 @@ export const RunConfig = z.object({
    * Empty (the default) keeps the old behaviour — the run ends at PR_REVIEW.
    */
   prodUrl: z.string().default(""),
+  delivery: DeliveryConfig.default({}),
   /** How long to wait for the merge commit's deploy before giving up on it. */
   deployTimeoutMinutes: z.number().int().min(1).max(240).default(30),
   /**

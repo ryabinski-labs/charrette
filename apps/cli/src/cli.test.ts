@@ -148,7 +148,9 @@ const h = vi.hoisted(() => {
   };
 });
 
-vi.mock("@harness/core", () => ({
+vi.mock("@harness/core", async (importOriginal) => ({
+  sourceDigest: (await importOriginal<typeof import("@harness/core")>()).sourceDigest,
+  deliveryConfigProblems: (await importOriginal<typeof import("@harness/core")>()).deliveryConfigProblems,
   Store: h.StoreMock,
   Bus: h.BusMock,
   AgentPool: h.AgentPoolMock,
@@ -392,6 +394,45 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe("PRD production delivery flags", () => {
+  it("prints release phase, revision, blockers and evidence paths", async () => {
+    await cli("run", "build", "--no-dashboard");
+    busListener()({ event: { type: "run.release_evidence", runId: "run-1", releaseId: "ga", phase: "production", verdict: "passed", sha: "abc", unmet: [], evidencePath: "evidence.json" } });
+    busListener()({ event: { type: "run.release_evidence", runId: "run-1", releaseId: "ga", phase: "deploy", verdict: "blocked", sha: "", unmet: ["missing deployment"], evidencePath: "" } });
+    expect(printed()).toContain("release ga / production: passed at abc · evidence: evidence.json");
+    expect(printed()).toContain("release ga / deploy: blocked — missing deployment");
+  });
+  it("reads the full PRD and preserves explicit merge and test-scope authority", async () => {
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const { tmpdir } = await import("node:os");
+    const dir = fs.mkdtempSync(`${tmpdir()}/harness-cli-prd-`);
+    const prd = `${dir}/product.md`;
+    const content = "# GA release\n\nDurable storage, authenticated API, production deployment.\n";
+    fs.writeFileSync(prd, content);
+    try {
+      await cli("run", "--prd", prd, "--production", "--prod-url", "https://app.example", "--release", "ga-v1", "--auto-merge", "--prod-test-scope", "test tenant only", "--no-dashboard");
+      expect(h.controllerMethods.startRun).toHaveBeenCalledWith(content, expect.objectContaining({
+        prodUrl: "https://app.example", delivery: expect.objectContaining({ mode: "production", releaseId: "ga-v1", merge: "auto", productionTestScope: "test tenant only", prdSha256: expect.stringMatching(/^[a-f0-9]{64}$/) }),
+      }), undefined);
+      expect(printed()).toContain("delivery   production");
+      await expect(cli("run", "something else", "--prd", prd)).rejects.toThrow("either --prd");
+      fs.writeFileSync(prd, "  ");
+      await expect(cli("run", "--prd", prd)).rejects.toThrow("PRD is empty");
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("refuses automatic merge outside production mode and missing deployment targets", async () => {
+    await expect(cli("run", "build", "--auto-merge")).rejects.toThrow("requires production delivery mode");
+    await expect(cli("run", "build", "--production")).rejects.toThrow("prodUrl");
+    expect(h.controllerMethods.startRun).not.toHaveBeenCalled();
+  });
+
+  it("carries configured specification and live gates instead of silently dropping them", async () => {
+    h.loadFileConfigMock.mockReturnValue({ config: { delivery: { mode: "production" }, prodUrl: "https://app.example", spec: { requireExecutionEvidence: false } }, path: "/repo/harness.config.json" });
+    await expect(cli("run", "build", "--no-dashboard")).rejects.toThrow("execution-evidence");
+  });
 });
 
 describe("harness run — resolving what the run will actually do", () => {
@@ -1985,6 +2026,12 @@ describe("harness resume — settings the operator changed since the run started
     await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
 
     expect(printed()).toContain("Production URL updated from harness.config.json: (none)");
+  });
+
+  it("does not redirect verification of a frozen production run", async () => {
+    existing({ prodUrl: "https://app.example.com", delivery: { mode: "production" } });
+    h.loadFileConfigMock.mockReturnValue({ config: { prodUrl: "https://another.example" }, path: "/repo/harness.config.json" });
+    await expect(cli("resume", "run-1", "--repo", "/repo", "--no-dashboard")).rejects.toThrow("destination is frozen");
   });
 
   it("patches nothing for a run it has never seen", async () => {

@@ -1,10 +1,11 @@
 # Harness
 
-**Assignment in → reviewed pull requests out.**
+**PRD in → reviewed pull requests, or an evidence-verified production release.**
 
-Harness is a multi-agent development orchestrator built on the [Claude Agent SDK](https://docs.anthropic.com/en/api/agent-sdk). An intake agent reads your repo and interviews you until the assignment is unambiguous; a planner agent turns the agreed brief into a PRD and a task DAG; you approve the plan (Gate 1); worker agents implement tasks in isolated git worktrees with locally-discovered skills injected per task; adversarial QA agents verify against acceptance criteria (max 3 iterations); accepted branches merge continuously into a run branch and each component ships as a PR linked to its GitHub issue. You merge the PRs — the harness never does (Gate 2).
+Harness is a multi-agent development orchestrator built on the [Claude Agent SDK](https://docs.anthropic.com/en/api/agent-sdk). Intake and specification agents turn the full brief into executable requirements; a planner builds a task DAG; you approve the plan; workers implement tasks in isolated worktrees and adversarial QA checks them. Review mode stops at reviewed PRs. Explicit production mode follows the release through merge, named deployment jobs, deployed-revision verification and production acceptance. Merging remains manual unless you explicitly authorize `--auto-merge`; GitHub protections still apply.
 
 - **[docs/OPERATIONS.md](./docs/OPERATIONS.md)** — install, configure, run, observe, recover. Start here.
+- **[docs/PRODUCTION-DELIVERY.md](./docs/PRODUCTION-DELIVERY.md)** — full PRD → deployed release, authority, evidence and resume.
 - **[PRD.md](./PRD.md)** — the full product spec: architecture, threat model, performance budget, phasing.
 
 ## Status

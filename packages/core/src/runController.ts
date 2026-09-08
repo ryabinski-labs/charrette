@@ -35,6 +35,7 @@ import { skeletonShortfall } from "./skeleton.js";
 import { gatingRequirement, replanDrops, scopeLedger, scopeUnmet, type ScopeLedger } from "./scopeLedger.js";
 import { planRepeats, planRepeatsNote } from "./planRepeats.js";
 import { gapLedger, gapLedgerSignal, readableForGaps } from "./gapLedger.js";
+import { deliveryConfigProblems, deploymentProblems, deployedRevision, productionPlanInstructions, releaseSpecProblems, required, sourceDigest } from "./productionDelivery.js";
 import { changedFiles } from "./reportRun.js";
 import { answerBy, answerText, runIntake, type IntakeUi } from "./intake.js";
 import { AgentIntake } from "./intakeDecider.js";
@@ -450,9 +451,11 @@ const INTENT_NARROWED_TURNS = 60;
 const TWO_VERDICTS_TURNS = 6;
 /** The production validator's judgment of the deployed system against intent. */
 const ProdVerdict = z.object({
-  verdict: z.enum(["PASS", "FAIL"]),
+  verdict: z.enum(["PASS", "FAIL", "UNKNOWN"]),
   summary: z.string().default(""),
   findings: z.array(z.string()).default([]),
+  unchecked: z.array(z.string()).default([]),
+  observations: z.array(z.object({ scenarioId: z.string(), evidence: z.string() })).default([]),
 });
 /**
  * What to ask for per planner message when the SDK will not say what the model
@@ -957,6 +960,15 @@ export class RunController {
    * before the planner ever sees it.
    */
   async startRun(assignment: string, config: RunConfig, intake?: IntakeUi): Promise<string> {
+    const problems = deliveryConfigProblems(config);
+    if (config.delivery.mode === "production" && !this.github.enabled) problems.push("production delivery requires a configured GitHub repository and credentials");
+    if (problems.length) throw new Error(problems.join("; "));
+    if (config.delivery.mode === "production") {
+      config = { ...config, delivery: { ...config.delivery, prdSha256: sourceDigest(assignment) } };
+      const prior = this.store.releaseContract(config.delivery.releaseId);
+      if (prior && prior.sourceSha256 !== config.delivery.prdSha256) throw new Error(`release ${config.delivery.releaseId} has a different PRD; use a new --release ID to change the contract`);
+      assignment += productionPlanInstructions(config);
+    }
     const runId = randomUUID().slice(0, 8);
     this.store.createRun({
       id: runId,
@@ -1127,7 +1139,9 @@ export class RunController {
       readIssue: this.github.enabled ? this.github.readIssue.bind(this.github) : undefined,
       prior,
     });
-    const assignment = briefToAssignment(brief);
+    const assignment = run.config.delivery.mode === "production"
+      ? `${seed}\n\nIntake clarifications (the original PRD remains binding):\n${briefToAssignment(brief)}`
+      : briefToAssignment(brief);
     const dir = path.join(this.repoPath, ".harness", runId);
     mkdirSync(dir, { recursive: true });
     writeFileSync(path.join(dir, "BRIEF.md"), `${assignment}\n`);
@@ -1687,6 +1701,21 @@ export class RunController {
     }
     if (!run || (run.state !== "PR_REVIEW" && run.state !== "BLOCKED")) return;
     const tasks = this.store.listTasks(runId);
+    if (run.config.delivery.mode === "production") {
+      const phase = this.store.releaseEvidence(runId)?.phase;
+      if (run.state === "BLOCKED" && !tasks.length) {
+        this.store.transitionRun(runId, "PLANNING", "retrying the release contract before planning");
+        return;
+      }
+      if (phase && ["merge", "deploy", "production"].includes(phase)) {
+        if (run.state === "BLOCKED") this.store.transitionRun(runId, "VERIFYING", "resuming production delivery at the existing release PR");
+        return;
+      }
+      if (run.state === "BLOCKED" && phase === "skeleton" && !tasks.some((t) => t.state === "NEEDS_HUMAN") && tasks.some((t) => t.state === "PENDING" || t.state === "READY")) {
+        this.store.transitionRun(runId, "EXECUTING", "retrying the working skeleton before releasing remaining work");
+        return;
+      }
+    }
     const parked = tasks.filter((t) => t.state === "NEEDS_HUMAN");
     const revivable = this.revivableCancelled(runId, tasks);
     const prless = this.github.enabled && tasks.some((t) => t.state === "MERGED" && t.prNumber === null);
@@ -1829,6 +1858,10 @@ export class RunController {
     // at 97% of its weekly window would otherwise learn it from the first
     // session it paid for.
     await this.preflightSubscription(runId);
+    if (run.config.delivery.mode === "production" && !["DONE", "ABORTED", "VERIFYING", "PR_REVIEW", "PAUSED", "BUDGET_HOLD", "LIMIT_HOLD"].includes(run.state)) {
+      if (!(await this.ensureReleaseContract(runId, intake))) return;
+      run = this.store.getRun(runId)!;
+    }
     if (run.state === "CREATED") {
       this.store.transitionRun(runId, "PLANNING");
       run = this.store.getRun(runId)!;
@@ -1860,6 +1893,10 @@ export class RunController {
       }
       run = this.store.getRun(runId)!;
     } else if (run.state === "PAUSED") {
+      if (run.config.delivery.mode === "production" && ["merge", "deploy", "production"].includes(this.store.releaseEvidence(runId)?.phase ?? "")) {
+        this.store.transitionRun(runId, "VERIFYING", "resumed production verification");
+        return this.driveRun(runId, intake);
+      }
       // The only thing that parks a run rather than a task is an operator
       // choosing "stop, I want to think" at a pit stop. Resuming is them having
       // thought — the tasks and worktrees are exactly as they left them.
@@ -1880,7 +1917,7 @@ export class RunController {
       // The cap that parked it is still in force: execution re-opens the budget
       // gate on the first check, giving the operator another chance to raise it.
       this.closeAbandonedGates(runId, "budget", "resumed from budget hold");
-      this.store.transitionRun(runId, "EXECUTING", "resumed from budget hold");
+      this.store.transitionRun(runId, this.deliveryWasVerifying(runId) ? "VERIFYING" : "EXECUTING", "resumed from budget hold");
       run = this.store.getRun(runId)!;
     } else if (run.state === "LIMIT_HOLD") {
       // Resumed from a subscription hold. Whether anything changed is not this
@@ -1891,7 +1928,7 @@ export class RunController {
       // the gate opens again immediately, which is the honest outcome — nothing
       // was lost by trying.
       this.closeAbandonedGates(runId, "subscription", "resumed from subscription hold");
-      this.store.transitionRun(runId, "EXECUTING", "resumed from subscription hold");
+      this.store.transitionRun(runId, this.deliveryWasVerifying(runId) ? "VERIFYING" : "EXECUTING", "resumed from subscription hold");
       run = this.store.getRun(runId)!;
     }
     let planFeedback = "";
@@ -1975,6 +2012,7 @@ export class RunController {
     for (;;) {
       if (run.state === "EXECUTING") {
         const stopped = await this.execute(runId);
+        if (stopped === "blocked") return;
         if (stopped !== "complete") {
           this.store.transitionRun(
             runId,
@@ -2118,6 +2156,16 @@ export class RunController {
     // the run was still finishing — is verified now rather than next resume.
     if (run.state === "PR_REVIEW" || run.state === "VERIFYING") {
       if (!published) await this.republishUnmergeable(runId);
+      if (run.config.delivery.mode === "production") {
+        const complete = await this.deliverProduction(runId);
+        if (complete) {
+          this.store.transitionRun(runId, "DONE", "the agreed release is deployed and all required production checks passed");
+          await this.writeReport(runId);
+        } else if (this.store.getRun(runId)!.state === "EXECUTING") {
+          await this.driveRun(runId, intake);
+        }
+        return;
+      }
       const closed = await this.verify(runId);
       const now = this.store.getRun(runId)!;
       if (closed && now.state === "VERIFYING") {
@@ -2598,7 +2646,7 @@ export class RunController {
     /* v8 ignore stop */
     try {
       const { stdout, stderr } = await execFileP("sh", ["-c", command], { cwd: dir, maxBuffer: 16 * 1024 * 1024, timeout: timeoutMinutes * 60_000 });
-      return acceptanceVerdict(spec, { exitCode: 0, output: `${stdout}\n${stderr}` });
+      return acceptanceVerdict(spec, { exitCode: 0, output: `${stdout}\n${stderr}` }, this.store.getRun(runId)!.config.spec.requireExecutionEvidence);
     } catch (e) {
       return acceptanceVerdict(spec, suiteRunFrom(e as { code?: number; killed?: boolean }, timeoutMinutes));
     }
@@ -2634,7 +2682,7 @@ export class RunController {
     const spec = this.store.runSpec(runId)!;
 
     this.bus.publish({ type: "agent.log", runId, sessionId: "integrator", text: `acceptance: ${verdict.line}`, ts: Date.now() });
-    if (verdict.verdict === "no-opinion") {
+    if (verdict.verdict === "no-opinion" || (verdict.blocked.length > 0 && !verdict.failing.length)) {
       // Not work. The gate is asking the operator something — which question
       // is on the verdict, and the closing gate puts it to them.
       if (verdict.blocked.length) {
@@ -3291,7 +3339,208 @@ export class RunController {
       // both cases nothing here can claim the change reached production.
       if (deploy.state !== "passing") return false;
     }
+    if (!deploy) return false;
     return await this.validateProd(runId, run.config.prodUrl);
+  }
+
+  private releaseResult(runId: string, phase: import("@harness/shared").ReleaseEvidence["phase"], verdict: "passed" | "failed" | "blocked", unmet: string[] = [], sha = "", evidencePath = "", requirements: string[] = []): void {
+    const run = this.store.getRun(runId)!;
+    this.bus.publish({ type: "run.release_evidence", runId, releaseId: run.config.delivery.releaseId, phase, verdict,
+      sha, url: run.config.prodUrl, requirements, unmet, evidencePath, ts: Date.now() });
+  }
+
+  private deliveryWasVerifying(runId: string): boolean {
+    return this.store.getRun(runId)!.config.delivery.mode === "production" &&
+      ["merge", "deploy", "production"].includes(this.store.releaseEvidence(runId)?.phase ?? "");
+  }
+
+  private blockRelease(runId: string, phase: import("@harness/shared").ReleaseEvidence["phase"], unmet: string[], sha = ""): false {
+    this.releaseResult(runId, phase, "blocked", unmet, sha);
+    if (this.store.getRun(runId)!.state !== "BLOCKED") this.store.transitionRun(runId, "BLOCKED", unmet.join("; "));
+    return false;
+  }
+
+  private async ensureReleaseContract(runId: string, ui?: IntakeUi): Promise<boolean> {
+    const run = this.store.getRun(runId)!;
+    const configProblems = deliveryConfigProblems(run.config);
+    if (!this.github.enabled) configProblems.push("production delivery requires GitHub access");
+    if (configProblems.length) return this.blockRelease(runId, "contract", configProblems);
+    const prior = this.store.releaseContract(run.config.delivery.releaseId);
+    if (prior) {
+      if (prior.sourceSha256 !== run.config.delivery.prdSha256) return this.blockRelease(runId, "contract", ["the PRD differs from the frozen release contract"]);
+      if (!this.store.runSpec(runId)) this.bus.publish({ type: "run.spec_ready", runId, spec: prior.spec, ts: Date.now() });
+      if (JSON.stringify(this.store.runSpec(runId)) !== JSON.stringify(prior.spec)) return this.blockRelease(runId, "contract", ["the run specification differs from the frozen release contract"]);
+    } else {
+      if (!this.store.runSpec(runId) || releaseSpecProblems(this.store.runSpec(runId)).length) {
+        await this.specify(runId, run.assignment, ui ?? {
+          async ask() { throw new Error("No operator is attached; this specification question remains unanswered"); },
+          say: () => undefined,
+        });
+      }
+      const spec = this.store.runSpec(runId);
+      const problems = releaseSpecProblems(spec);
+      if (problems.length) return this.blockRelease(runId, "contract", problems);
+      this.store.bindRelease(run.config.delivery.releaseId, run.config.delivery.prdSha256, run.assignment, spec!, runId);
+    }
+    this.releaseResult(runId, "contract", "passed", [], "", "", this.store.runSpec(runId)!.requirements.filter(required).map((r) => r.id));
+    return true;
+  }
+
+  /** Task completion releases breadth only after the actual product slice works. */
+  private async checkReleaseSkeleton(runId: string): Promise<boolean> {
+    const tasks = this.store.listTasks(runId);
+    const spine = tasks.filter((t) => t.skeleton);
+    if (!spine.length) return this.blockRelease(runId, "skeleton", ["the plan has no walking skeleton"]);
+    if (spine.some((t) => !["MERGED", "NEEDS_HUMAN", "CANCELLED"].includes(t.state))) return true;
+    const stranded = spine.filter((t) => t.state !== "MERGED");
+    if (stranded.length) return this.blockRelease(runId, "skeleton", [`the working skeleton is unfinished: ${stranded.map((t) => t.id).join(", ")}`]);
+    const ids = spine.map((t) => t.id).sort();
+    const previous = this.store.releaseEvidence(runId, "skeleton");
+    if (previous?.verdict === "passed" && JSON.stringify(previous.requirements) === JSON.stringify(ids)) return true;
+    await this.exerciseLive(runId);
+    const live = this.store.liveVerdict(runId);
+    if (live?.verdict === "worked") {
+      this.releaseResult(runId, "skeleton", "passed", [], await this.integrationSha(runId), live.artifactsDir, ids);
+      return true;
+    }
+    const fixes = await this.queueLiveFixes(runId);
+    if (fixes.length) {
+      for (const id of fixes) this.store.updateTask(runId, id, { skeleton: true });
+      return true;
+    }
+    return this.blockRelease(runId, "skeleton", [live?.why || "the working skeleton has never been exercised"]);
+  }
+
+  private async integrationSha(runId: string): Promise<string> {
+    return (await git(this.repoPath, ["rev-parse", this.wt.integrationBranch(runId)])).trim();
+  }
+
+  /** A repair goes through workers, QA, a new PR and deployment; never a live patch. */
+  private async repairProduction(runId: string, phase: "deploy" | "production", unmet: string[], sha: string): Promise<false> {
+    const run = this.store.getRun(runId)!;
+    this.releaseResult(runId, phase, "failed", unmet, sha);
+    const rounds = this.store.listTasks(runId).filter((t) => /^production-fix-\d+$/.test(t.id)).length;
+    if (rounds >= run.config.delivery.fixRounds) return this.blockRelease(runId, phase, [...unmet, "production repair rounds exhausted; resume after resolving the blocker or start the next run for this release"], sha);
+    const task: PlannedTask = {
+      id: `production-fix-${rounds + 1}`, epicId: "production-repairs", title: `Repair ${phase} validation`,
+      spec: `The release failed ${phase} validation at ${run.config.prodUrl}, merged revision ${sha}.\n${unmet.join("\n")}\n` +
+        "Diagnose using the deployment job logs and the recorded release evidence. Repair repository code, packaging or CI and add a regression check. Do not modify production, drop tests, change thresholds, waive requirements or replace real integrations with mocks. Missing access is an external blocker, not a code fix. The frozen release contract will be run again against the next deployed revision.",
+      acceptanceCriteria: ["The reproduced release failure is fixed and covered by a regression check", "The original release contract and its assertions remain intact"],
+      dependsOn: [], touchedPaths: [], completionProbe: "", scenarioIds: [], skeleton: false, estimatedSize: "M",
+    };
+    this.store.insertTasks(runId, [{ id: task.epicId, title: "Production repairs" }], [pendingRow(task)]);
+    await this.fileIssues(runId);
+    this.store.transitionRun(runId, "EXECUTING", `repairing ${phase} validation before another deployment`);
+    return false;
+  }
+
+  private async deliverProduction(runId: string): Promise<boolean> {
+    await this.checkStops(runId);
+    const run = this.store.getRun(runId)!;
+    const spec = this.store.runSpec(runId);
+    const problems = [...deliveryConfigProblems(run.config), ...releaseSpecProblems(spec)];
+    const frozen = this.store.releaseContract(run.config.delivery.releaseId);
+    if (!frozen || frozen.sourceSha256 !== run.config.delivery.prdSha256 || JSON.stringify(frozen.spec) !== JSON.stringify(spec)) problems.push("the release contract is missing or has changed");
+    if (problems.length) return this.blockRelease(runId, "contract", problems);
+    const prNumber = this.rollupPr(runId);
+    if (prNumber === undefined) return this.blockRelease(runId, "merge", ["no release pull request exists"]);
+    if (run.state === "PR_REVIEW") this.store.transitionRun(runId, "VERIFYING", "following the release through merge and production verification");
+    const deadline = Date.now() + run.config.delivery.mergeTimeoutMinutes * 60_000;
+    let sha = await this.github.mergedSha(prNumber).catch(() => null);
+    if (!sha && run.config.delivery.merge === "auto") {
+      const proof = this.proofOf(runId);
+      if (!proof.proven) return this.blockRelease(runId, "merge", proof.unmet);
+      const head = await this.integrationSha(runId);
+      const checks = await this.github.prChecks(prNumber).catch(() => null);
+      if (!checks || checks.unavailable || checks.state !== "passing" || checks.sha !== head || checks.total === 0 || checks.successful?.length !== checks.total) return this.blockRelease(runId, "merge", ["automatic merge requires passing CI on the exact validated PR head"]);
+      const merged = await this.github.mergeApprovedPR(prNumber, this.wt.integrationBranch(runId), run.config.baseBranch, head);
+      if (!merged) return this.blockRelease(runId, "merge", ["GitHub refused the authorized merge; check branch protection, review requirements, and whether the PR head changed"]);
+      sha = await this.github.mergedSha(prNumber).catch(() => null);
+    }
+    if (!sha) this.releaseResult(runId, "merge", "blocked", [`waiting for the operator to merge #${prNumber}`]);
+    while (!sha && Date.now() < deadline) {
+      await this.checkStops(runId);
+      if (await this.github.prState(prNumber).catch(() => null) === "closed") return this.blockRelease(runId, "merge", [`#${prNumber} was closed without merging`]);
+      await new Promise((resolve) => setTimeout(resolve, Math.min(this.githubRetryMs, Math.max(1, deadline - Date.now()))));
+      sha = await this.github.mergedSha(prNumber).catch(() => null);
+    }
+    if (!sha) return this.blockRelease(runId, "merge", [`#${prNumber} has not merged; harness resume ${runId} continues delivery`]);
+    this.releaseResult(runId, "merge", "passed", [], sha);
+
+    // Required deployment jobs may appear after the ordinary build is already green.
+    this.releaseResult(runId, "deploy", "blocked", [`waiting for deployment checks: ${spec!.release.deploymentChecks.join(", ")}`], sha);
+    const deploy = await this.settleChecks(runId, async (ref) => {
+      await this.checkStops(runId);
+      const value = await this.github.checksForRef(ref);
+      if (!value) return { state: "pending" as const, failing: [], total: 0, sha: ref, successful: [] };
+      if (value.state !== "failing" && deploymentProblems(value, spec!.release.deploymentChecks, sha!).length) return { ...value, state: "pending" as const };
+      return value;
+    }, sha, run.config.deployTimeoutMinutes);
+    if (deploy) this.bus.publish({ type: "run.deploy_status", runId, sha, state: deploy.state, failing: deploy.failing, total: deploy.total, ts: Date.now() });
+    const deployProblems = deploymentProblems(deploy, spec!.release.deploymentChecks, sha);
+    if (deployProblems.length) {
+      if (deploy?.state === "failing") return this.repairProduction(runId, "deploy", [...deployProblems, ...deploy.failing], sha);
+      return this.blockRelease(runId, "deploy", deployProblems, sha);
+    }
+    const revision = await deployedRevision(run.config.prodUrl, run.config.delivery.revisionPath, sha);
+    if (!revision.ok) return this.blockRelease(runId, "deploy", [revision.why], sha);
+    this.releaseResult(runId, "deploy", "passed", [], sha);
+
+    const dir = path.join(this.repoPath, ".harness", runId, "release", sha);
+    mkdirSync(dir, { recursive: true });
+    let output = "";
+    let exitCode = 1;
+    let cwd: string | null = null;
+    try {
+      cwd = await this.wt.freshWorktree(runId, "__production__");
+      await git(cwd, ["fetch", "origin", sha]);
+      await git(cwd, ["checkout", "--detach", sha]);
+      await this.checkStops(runId);
+      const abort = new AbortController();
+      this.activeProductionChecks.set(runId, abort);
+      try {
+        const result = await execFileP("sh", ["-c", spec!.release.productionCommand], {
+          cwd, env: { ...process.env, HARNESS_PROD_URL: run.config.prodUrl, HARNESS_DEPLOY_SHA: sha, HARNESS_PROD_TEST_SCOPE: run.config.delivery.productionTestScope },
+          timeout: run.config.delivery.validationTimeoutMinutes * 60_000, maxBuffer: 16 * 1024 * 1024, signal: abort.signal,
+        });
+        output = `${result.stdout}\n${result.stderr}`;
+        exitCode = 0;
+      } catch (error) {
+        if (abort.signal.aborted) throw abort.signal.reason;
+        const result = suiteRunFrom(error as { code?: number; killed?: boolean }, run.config.delivery.validationTimeoutMinutes);
+        output = result.output;
+        exitCode = result.exitCode;
+      } finally {
+        this.activeProductionChecks.delete(runId);
+      }
+    } catch (error) {
+      if (stopsTheRun(error)) throw error;
+      return this.blockRelease(runId, "production", [`the merged release could not be checked out or validated: ${String(error).slice(0, 300)}`], sha);
+    } finally {
+      if (cwd) await reapUnder(cwd).catch(() => []);
+    }
+    const productionSpec = { ...spec!, scenarios: spec!.scenarios.filter((s) => spec!.release.productionScenarioIds.includes(s.id)) };
+    const verdict = acceptanceVerdict(productionSpec, { exitCode, output });
+    const proofPath = path.join(dir, "evidence.json");
+    writeFileSync(proofPath, JSON.stringify({ releaseId: run.config.delivery.releaseId, sourceSha256: run.config.delivery.prdSha256,
+      sha, url: run.config.prodUrl, environment: spec!.release.environment, command: spec!.release.productionCommand,
+      at: new Date().toISOString(), exitCode, verdict, output: output.slice(-16000) }, null, 2), { mode: 0o600 });
+    if (verdict.verdict !== "green") return this.repairProduction(runId, "production", [verdict.line, `Evidence: ${proofPath}`], sha);
+    const after = await deployedRevision(run.config.prodUrl, run.config.delivery.revisionPath, sha);
+    if (!after.ok) return this.blockRelease(runId, "production", ["the deployed revision changed or became unreadable during validation"], sha);
+    if (!(await this.validateProd(runId, run.config.prodUrl))) {
+      const finding = this.store.prodVerdict(runId);
+      const details = this.store.productionEvidence(runId);
+      if (finding?.findings.length && details?.unchecked?.length === 0) return this.repairProduction(runId, "production", finding.findings, sha);
+      return this.blockRelease(runId, "production", finding?.findings.length ? finding.findings : ["independent production validation did not pass"], sha);
+    }
+    const finalRevision = await deployedRevision(run.config.prodUrl, run.config.delivery.revisionPath, sha);
+    if (!finalRevision.ok) return this.blockRelease(runId, "production", [finalRevision.why], sha);
+    await this.checkStops(runId);
+    const manifest = JSON.parse(readFileSync(proofPath, "utf8"));
+    writeFileSync(proofPath, JSON.stringify({ ...manifest, independent: this.store.productionEvidence(runId), verifiedAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
+    this.releaseResult(runId, "production", "passed", [], sha, proofPath, spec!.requirements.filter(required).map((r) => r.id));
+    return true;
   }
 
   /**
@@ -3319,9 +3568,10 @@ export class RunController {
         runId,
         role: "prod",
         model: run.config.models.prod,
-        systemPrompt: prodValidatorSystemPrompt(toolbeltBlock(detectToolbelt(run.config.externalTools)), skillsBlock(skills)),
+        systemPrompt: prodValidatorSystemPrompt(toolbeltBlock(detectToolbelt(run.config.externalTools)), skillsBlock(skills), run.config.delivery.productionTestScope),
         skills: skills.map((s) => s.name),
-        prompt: prodValidatorPrompt(run.assignment, this.planPrd(runId), url, taskLines),
+        prompt: prodValidatorPrompt(run.assignment, this.planPrd(runId), url, taskLines) +
+          (run.config.delivery.mode === "production" ? `\nFrozen release specification (check every required capability, including deployment topology and operational criteria):\n${JSON.stringify(this.store.runSpec(runId))}` : ""),
         cwd: this.repoPath,
         // Production is read through the network, not through the checkout, and
         // an agent that can edit files here is one that can "fix" a live finding
@@ -3331,10 +3581,15 @@ export class RunController {
         budgetCheck: () => this.checkStops(runId),
       });
       const verdict = ProdVerdict.parse(extractJson(result.resultText));
-      this.bus.publish({ type: "run.prod_verdict", runId, url, verdict: verdict.verdict, findings: verdict.findings, summary: verdict.summary, ts: Date.now() });
-      return verdict.verdict === "PASS";
+      const expected = run.config.delivery.mode === "production" ? this.store.runSpec(runId)!.release.productionScenarioIds : [];
+      for (const id of expected) if (!verdict.observations.some((o) => o.scenarioId === id && o.evidence.trim())) verdict.unchecked.push(`${id}: independent production observation missing`);
+      const passed = verdict.verdict === "PASS" && !verdict.findings.length && !verdict.unchecked.length;
+      this.bus.publish({ type: "run.prod_verdict", runId, url, verdict: passed ? "PASS" : "FAIL", findings: [...verdict.findings, ...verdict.unchecked], summary: verdict.summary,
+        ...(run.config.delivery.mode === "production" ? { unchecked: verdict.verdict === "UNKNOWN" && !verdict.unchecked.length ? ["production reviewer could not reach a verdict"] : verdict.unchecked, observations: verdict.observations } : {}), ts: Date.now() });
+      return passed;
     } catch (e) {
       if (stopsTheRun(e)) throw e;
+      this.bus.publish({ type: "run.prod_verdict", runId, url, verdict: "FAIL", findings: ["production validation did not complete"], summary: String(e).slice(0, 300), ts: Date.now() });
       // An unverified deploy is reportable; a run that claims to have verified
       // one it never reached is not. Say which happened.
       this.bus.publish({
@@ -3397,7 +3652,7 @@ export class RunController {
   ): Promise<(PrChecks & { missing?: string[] }) | null> {
     let saidShort = false;
     const ask = async (): Promise<(PrChecks & { missing?: string[] }) | null> => {
-      const c = await read(ref).catch(() => null);
+      const c = await read(ref).catch((error) => { if (stopsTheRun(error)) throw error; return null; });
       if (!c || !expect) return c;
       if (c.sha !== expect.sha) {
         expect.seen.clear();
@@ -4259,6 +4514,8 @@ export class RunController {
             : "deploy still running"
       );
     }
+    const release = this.store.getRun(runId)?.config.delivery.mode === "production" ? this.store.releaseEvidence(runId) : null;
+    if (release) parts.push(`release ${release.phase}: ${release.verdict}${release.unmet.length ? ` — ${release.unmet.join("; ")}` : ""}`);
     const prod = this.store.prodVerdict(runId);
     if (prod) {
       parts.push(
@@ -4537,7 +4794,7 @@ export class RunController {
     const gate = this.store.getRun(runId)!.config.taskGate;
     const spent = this.store.taskCriteriaAmendments(runId, taskId);
     const by = decider || gate.decidedBy;
-    if (gate.decidedBy === "operator" || spent >= gate.criteriaAmendments || next.length < from.length) {
+    if (this.store.getRun(runId)!.config.delivery.mode === "production" || gate.decidedBy === "operator" || spent >= gate.criteriaAmendments || next.length < from.length) {
       this.bus.publish({
         type: "agent.log",
         runId,
@@ -5362,7 +5619,7 @@ export class RunController {
 
   // ---- execution ----
 
-  private async execute(runId: string): Promise<"complete" | "pitstop" | "operator"> {
+  private async execute(runId: string): Promise<"complete" | "pitstop" | "operator" | "blocked"> {
     const run = this.store.getRun(runId)!;
     await this.wt.ensureIntegrationBranch(runId);
     // The forge dir rides alongside the operator's dirs for task-level roles:
@@ -5446,6 +5703,9 @@ export class RunController {
       // between dispatches, which is exactly when an operator is most likely to
       // decide they are done for the day.
       if (this.pauseAsked.has(runId)) runStop = runStop ?? new RunPaused(runId);
+      if (!runStop && !inFlight.size && run.config.delivery.mode === "production") {
+        if (!(await this.checkReleaseSkeleton(runId))) return "blocked";
+      }
       const due = runStop ? null : this.pitStopReason(runId);
       if (due && !inFlight.size) {
         await this.issueSync;
@@ -5821,50 +6081,6 @@ export class RunController {
   }
 
   /**
-   * Write off every gating requirement nothing is building any more, against
-   * the answer that let the run go on.
-   *
-   * waf cancelled 177 tasks and carried none of their requirements anywhere:
-   * they stopped existing, and reappeared as sections of a 118 KB gaps file. A
-   * write-off is that same outcome with a person's answer attached — which is
-   * what the closing gate then reads, so the same run does not stop twice on
-   * something already decided (issue #120).
-   */
-  private recordWriteOffs(runId: string): void {
-    const scope = this.runScope(runId);
-    // Both buckets the gate holds on: a requirement every task of which was
-    // cancelled, and one no task ever claimed. The operator is shown both and
-    // answering "continue" accepts both — and if only the first were recorded,
-    // a run held on the second could never leave BLOCKED however many times it
-    // was answered, which is a trap rather than a gate.
-    const dropped = [...scope.dropped, ...scope.unclaimed].filter(gatingRequirement);
-    if (!dropped.length) return;
-    const decision = this.store.pitStopDecisions(runId).at(-1);
-    for (const r of dropped) {
-      this.bus.publish({
-        type: "run.scope_written_off",
-        runId,
-        requirementId: r.id,
-        requirement: r.text,
-        answer: decision?.feedback?.trim() || decision?.why?.trim() || "accepted at the closing pit stop without further comment",
-        // The field has carried a default since it existed, so an empty one is
-        // a row from before it did — read as the person who answered it then.
-        /* v8 ignore next */
-        decidedBy: decision?.decidedBy || "operator",
-        claimants: r.claimants.map((c) => ({ id: c.id, state: c.state, why: c.why })),
-        ts: Date.now(),
-      });
-    }
-    this.bus.publish({
-      type: "agent.log",
-      runId,
-      sessionId: "pitstop",
-      text: `${dropped.length} requirement(s) the brief named will not ship in this run, and that is now on the record as a decision: ${dropped.map((r) => r.id).join(", ")}`,
-      ts: Date.now(),
-    });
-  }
-
-  /**
    * The run's requirements, reconciled against what became of the tasks that
    * claimed them.
    *
@@ -5904,6 +6120,11 @@ export class RunController {
     const run = this.store.getRun(runId)!;
     const unmet: string[] = [];
     const acceptance = this.store.acceptanceVerdict(runId);
+    if (run.config.delivery.mode === "production") {
+      unmet.push(...releaseSpecProblems(this.store.runSpec(runId)));
+      if (!acceptance) unmet.push("the required acceptance suite has never run");
+      if (this.store.scopeWriteOffs(runId).length) unmet.push("the release has written-off requirements; a reduced scope needs its own release contract");
+    }
     if (acceptance && acceptance.verdict !== "green") {
       unmet.push(`the acceptance gate is ${acceptance.verdict === "red" ? "red" : "without an opinion"}: ${acceptance.line}`);
     }
@@ -5992,11 +6213,7 @@ export class RunController {
       });
     }
     const action = await this.pitStop(runId, { reason: `the run cannot prove itself: ${proof.unmet.join("; ")}`, epicIds: [] }, spent);
-    // "Continue" over a requirement nothing is building any more is the answer
-    // the epic asks for — accept it, or fund it — and the only thing that made
-    // it an omission rather than a decision was that nobody wrote it down.
-    // Now it is written down against the requirement, with whose answer it was.
-    if (action === "continue") this.recordWriteOffs(runId);
+    // Continuing execution never grants authority to drop a release promise.
     if (action === "stop") return "stop";
     // Redirect and replan both put work back in the queue; continuing from here
     // with tasks pending would open a pull request over an unfinished tree.
@@ -8283,6 +8500,7 @@ export class RunController {
    * definition no longer paused.
    */
   private readonly pauseAsked = new Set<string>();
+  private readonly activeProductionChecks = new Map<string, AbortController>();
 
   /** Runs this controller is holding; see `lockRun`. */
   private readonly locks = new Map<string, RunLock>();
@@ -8302,11 +8520,12 @@ export class RunController {
   pauseRun(runId: string): string {
     const run = this.store.getRun(runId);
     if (!run) return `no run ${runId}`;
-    if (!["EXECUTING", "INTEGRATING"].includes(run.state)) {
+    if (!["EXECUTING", "INTEGRATING", "VERIFYING", ...(run.config.delivery.mode === "production" ? ["PR_REVIEW"] : [])].includes(run.state)) {
       return `this run is ${run.state} — only a run that is still working can be paused`;
     }
     if (this.pauseAsked.has(runId)) return "already pausing — the agents stop at their next message";
     this.pauseAsked.add(runId);
+    this.activeProductionChecks.get(runId)?.abort(new RunPaused(runId));
     this.bus.publish({ type: "run.pause_requested", runId, ts: Date.now() });
     // The loop only re-reads its stop conditions when something wakes it, and a
     // run whose workers are all mid-turn is not waking on its own.
@@ -8366,7 +8585,7 @@ export class RunController {
     const gateId = randomUUID().slice(0, 8);
     // BUDGET_HOLD is only reachable while building; during intake or planning the
     // gate still opens, the run just has no held state to sit in.
-    const held = run.state === "EXECUTING" || run.state === "INTEGRATING" ? run.state : null;
+    const held = run.state === "EXECUTING" || run.state === "INTEGRATING" || run.state === "VERIFYING" ? run.state : null;
     if (held) this.store.transitionRun(runId, "BUDGET_HOLD", `run cap $${cap.toFixed(2)} reached at $${spent.toFixed(2)}`);
     const payload: BudgetGate = { spentUsd: spent, capUsd: cap };
     this.bus.publish({ type: "run.gate_opened", runId, gateId, kind: "budget", payload, ts: Date.now() });
@@ -8526,7 +8745,7 @@ export class RunController {
     // Only EXECUTING and INTEGRATING have a held state to sit in; earlier the
     // gate still opens and the run simply has nowhere to be parked, exactly as
     // the budget gate behaves during intake and planning.
-    const held = run.state === "EXECUTING" || run.state === "INTEGRATING" ? run.state : null;
+    const held = run.state === "EXECUTING" || run.state === "INTEGRATING" || run.state === "VERIFYING" ? run.state : null;
     if (held) this.store.transitionRun(runId, "LIMIT_HOLD", `${describeReading(reading)} — waiting on the operator`);
     const payload: SubscriptionGate = {
       window: reading.window,

@@ -211,9 +211,9 @@ describe("following a deploy the repo cannot report on", () => {
 
     const runId = await controller.startRun("build a thing", RunConfig.parse({ ...BASE, prodUrl: "https://app.example.com" }));
 
-    // No deploy signal at all is not a red deploy — it goes straight to asking
-    // production, which is the only thing left that can answer.
-    expect(store.prodVerdict(runId)).toMatchObject({ verdict: "PASS" });
+    // Unknown deployment evidence cannot establish that this change is live.
+    expect(store.prodVerdict(runId)).toBeNull();
+    expect(store.getRun(runId)!.state).toBe("VERIFYING");
   });
 
   it("counts production findings, and says unstated when there are none", async () => {

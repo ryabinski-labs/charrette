@@ -383,7 +383,7 @@ describe("checking the deployed system", () => {
 
     const runId = await controller.startRun("build a thing", PROD_CONFIG);
 
-    expect(store.prodVerdict(runId)).toBeNull();
+    expect(store.prodVerdict(runId)).toMatchObject({ verdict: "FAIL", findings: ["production validation did not complete"] });
     const logs = events.filter((e): e is HarnessEvent & { text: string } => e.type === "agent.log");
     expect(logs.some((e) => e.text.includes("production validation did not complete"))).toBe(true);
     // And the run stays open rather than calling itself done.

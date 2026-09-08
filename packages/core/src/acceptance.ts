@@ -11,12 +11,10 @@ import { gating, type RunSpec, type ScenarioPriority, type SpecScenario } from "
  * derived from the brief *before* the code existed cannot make that mistake;
  * it either goes green or it does not.
  *
- * So the exit code is the verdict, and everything else here is about saying
- * which promise broke. That distinction runs through the whole file: the suite
- * failing is a fact, and the list of failing scenario ids is a reading of test
- * output, which is a different and weaker kind of knowledge. Where the two
- * disagree the exit code wins, and the report says the ids could not be read
- * rather than pretending the list is complete.
+ * A failing process always fails the gate. A successful process must also
+ * report a positive result for every required scenario: an empty selection,
+ * skipped tests, or a silent no-op proves nothing. Parsed test output is still
+ * weaker than the oracle itself, which independent live validation checks.
  *
  * Pure, like `evidence` and `deployCapability`: the caller runs the command and
  * hands over the bytes.
@@ -46,7 +44,7 @@ export interface SuiteRun {
 export type AcceptanceCall = "green" | "red" | "no-opinion";
 
 export interface AcceptanceVerdict {
-  /** The answer. Derived from the exit code, never from the parsed ids. */
+  /** Green requires process success and evidence for every required scenario. */
   verdict: AcceptanceCall;
   /** Scenario ids the output named as failing, worst first. */
   failing: string[];
@@ -89,6 +87,21 @@ const FAILURE_MARKERS = [/^\s*(?:×|✕|✗|✘)\s/, /\bFAILED\b/, /\bFAIL\b/, /
 /** Lines that say a test passed, so an id on them is never read as a failure. */
 const PASS_MARKERS = [/^\s*(?:✓|√|✔)\s/, /^\s*ok\s+\d/, /\bPASSED\b/, /^\s*---\s*PASS:/];
 
+/** Require a positive result for each promised scenario, not just process success. */
+export function passedScenarios(output: string, known: Iterable<string>): string[] {
+  const ids = [...known];
+  const passed = new Set<string>();
+  for (const raw of output.split("\n")) {
+    const line = raw.replace(/\x1b\[[0-9;]*m/g, "");
+    if (!PASS_MARKERS.some((m) => m.test(line)) && !/^\s*test .+ \.\.\. ok\s*$/.test(line)) continue;
+    if (/\b(SKIP|SKIPPED|TODO|ignored)\b/i.test(line)) continue;
+    for (const id of ids) {
+      if (new RegExp(`(?<![A-Za-z0-9-])${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9-])`).test(line)) passed.add(id);
+    }
+  }
+  return [...passed];
+}
+
 /**
  * The scenario ids a test runner reported as failing.
  *
@@ -130,13 +143,12 @@ const bySeverity = (a: SpecScenario, b: SpecScenario): number => RANK[a.priority
 /**
  * Read one run of the scenario suite as a verdict on the run.
  *
- * Green is the exit code and nothing else. A suite that exits zero while
- * printing the word FAIL in a fixture has passed; a suite that exits one having
- * named no scenario has failed. Deriving the answer from the parsed ids instead
- * would make the gate as good as the parser, which is exactly the trade this
- * whole design exists to avoid.
+ * A nonzero exit always fails, including crashes that name no scenario. A zero
+ * exit also needs positive execution evidence for every required scenario and
+ * no blocked requirements. The explicit review-only legacy override relaxes
+ * parsing, never the process exit or blocked-scenario checks.
  */
-export function acceptanceVerdict(spec: RunSpec, run: SuiteRun): AcceptanceVerdict {
+export function acceptanceVerdict(spec: RunSpec, run: SuiteRun, requireExecutionEvidence = true): AcceptanceVerdict {
   const scenarios = gating(spec);
   const blocked = spec.scenarios
     .filter((s) => s.blocked && (s.priority === "P0" || s.priority === "P1"))
@@ -179,12 +191,22 @@ export function acceptanceVerdict(spec: RunSpec, run: SuiteRun): AcceptanceVerdi
   const sorted = [...failing].sort((a, b) => order.get(a)! - order.get(b)!);
 
   if (run.exitCode === 0) {
+    const passed = new Set(passedScenarios(run.output, scenarios.map((s) => s.id)));
+    const missing = requireExecutionEvidence ? scenarios.filter((s) => !passed.has(s.id) || failing.includes(s.id)).map((s) => s.id) : [];
+    if (blocked.length || missing.length) {
+      return {
+        verdict: "red", failing: missing, named: missing.length > 0, blocked,
+        line: [missing.length ? `${missing.length} required scenario(s) have no passing execution result: ${missing.join(", ")}` : "",
+          blocked.length ? `${blocked.length} required scenario(s) remain blocked: ${blocked.join(", ")}` : ""].filter(Boolean).join("; "),
+        output: run.output.slice(-OUTPUT_TAIL),
+      };
+    }
     return {
       verdict: "green",
       failing: [],
       named: true,
       blocked,
-      line: `${scenarios.length} gating scenario(s) green${blocked.length ? `, ${blocked.length} still blocked on an unanswered question` : ""}`,
+      line: `${scenarios.length} gating scenario(s) green`,
       output: "",
     };
   }

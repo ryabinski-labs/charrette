@@ -91,7 +91,7 @@ const specJson = (over: Record<string, unknown> = {}) =>
     requirements: [{ id: "REQ-001", text: "a card charge succeeds", priority: "P0", blockedBy: [] }],
     scenarios: [{ id: "SC-001", requirement: "REQ-001", title: "charges a card", level: "unit", priority: "P0", oracle: "the charge returns 200", testRef: "t.ts::SC-001", blocked: false }],
     openQuestions: [],
-    commands: { all: "exit 0", byId: 'echo "{{ids}}"' },
+    commands: { all: "printf '✓ SC-001\\n✓ SC-002\\n'", byId: 'echo "{{ids}}"' },
     notCovered: [],
     ...over,
   });
@@ -168,7 +168,7 @@ const transitions = (events: HarnessEvent[]) =>
 /** Everything a specified run needs answered, with `all` pointed at `allCommand`. */
 const specified = (allCommand: string, answers: Partial<Record<string, Answer>> = {}) => ({
   intake: BRIEF,
-  spec: specJson({ commands: { all: allCommand, byId: 'echo "{{ids}}"' } }),
+  spec: specJson({ commands: { all: allCommand ? `( ${allCommand} ) && printf '✓ SC-001\\n'` : "", byId: 'echo "{{ids}}"' } }),
   planner,
   worker,
   qa: () => QA_PASS,
@@ -941,7 +941,7 @@ describe("requirements nothing is building any more", () => {
    * asks for — accept it, or fund it — and what made it an omission was only
    * that nobody wrote it down. Now it is written against the requirement.
    */
-  it("records a write-off when the closing stop is answered, and does not stop twice for it", async () => {
+  it("does not convert a general continue into a requirement write-off", async () => {
     const dir = repo();
     const stops: PitStop[] = [];
     const { pool } = rolePool(
@@ -975,14 +975,12 @@ describe("requirements nothing is building any more", () => {
 
     const runId = store.listRuns()[0]!.id;
     expect(stops[0]!.reason).toContain("never claimed by any task: REQ-002");
-    expect(store.scopeWriteOffs(runId)).toEqual([{ requirementId: "REQ-002", answer: "receipts can wait for the next run", decidedBy: "operator" }]);
-    expect(logs(events)).toContainEqual(expect.stringContaining("1 requirement(s) the brief named will not ship in this run"));
-    // Written off, so the gate does not hold on it a second time: the run
-    // reports itself in review over a decision somebody made.
-    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    expect(store.scopeWriteOffs(runId)).toEqual([]);
+    expect(logs(events)).not.toContainEqual(expect.stringContaining("now on the record as a decision"));
+    expect(store.getRun(runId)!.state).toBe("BLOCKED");
   });
 
-  it("records the write-off even when the answer was silence", async () => {
+  it("never writes off a requirement on silence", async () => {
     const dir = repo();
     const { pool } = rolePool(
       specified("exit 0", {
@@ -1013,12 +1011,8 @@ describe("requirements nothing is building any more", () => {
     await controller.startRun("build a checkout", RunConfig.parse({ ...BASE, pitStop: { every: { usd: 1000 } } }), operator());
 
     const runId = store.listRuns()[0]!.id;
-    // Silence is still an answer, and it is recorded as the one it is rather
-    // than as an empty string nobody can read later.
-    expect(store.scopeWriteOffs(runId)).toEqual([
-      { requirementId: "REQ-002", answer: "accepted at the closing pit stop without further comment", decidedBy: "operator" },
-    ]);
-    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    expect(store.scopeWriteOffs(runId)).toEqual([]);
+    expect(store.getRun(runId)!.state).toBe("BLOCKED");
   });
 
   /**

@@ -496,7 +496,7 @@ describe("what CI says about a commit", () => {
     api.rest.checks.listForRef.mockResolvedValue({ data: [run("build", "completed", "success")] });
     api.rest.repos.getCombinedStatusForRef.mockResolvedValue({ data: { statuses: [{ state: "success", context: "ci/external" }] } });
 
-    await expect(adapter.checksForRef("sha")).resolves.toEqual({ state: "passing", failing: [], total: 2, names: ["build", "ci/external"], sha: "sha" });
+    await expect(adapter.checksForRef("sha")).resolves.toEqual({ state: "passing", failing: [], total: 2, names: ["build", "ci/external"], sha: "sha", successful: ["build", "ci/external"] });
   });
 
   it("names what failed, so the operator knows where to look", async () => {
@@ -514,6 +514,7 @@ describe("what CI says about a commit", () => {
       total: 3,
       names: ["build", "lint", "ci/deploy"],
       sha: "sha",
+      successful: ["build"],
     });
   });
 
@@ -529,7 +530,7 @@ describe("what CI says about a commit", () => {
       data: [run("frontend", "completed", "failure"), run("backend", "queued", null)],
     });
 
-    await expect(adapter.checksForRef("sha")).resolves.toEqual({ state: "pending", failing: [], total: 2, names: ["frontend", "backend"], sha: "sha" });
+    await expect(adapter.checksForRef("sha")).resolves.toEqual({ state: "pending", failing: [], total: 2, names: ["frontend", "backend"], sha: "sha", successful: [] });
   });
 
   it.each(["failure", "timed_out", "cancelled", "action_required", "startup_failure"])(
@@ -548,14 +549,14 @@ describe("what CI says about a commit", () => {
       data: [run("build", "completed", "success"), run("test", "in_progress", null)],
     });
 
-    await expect(adapter.checksForRef("sha")).resolves.toEqual({ state: "pending", failing: [], total: 2, names: ["build", "test"], sha: "sha" });
+    await expect(adapter.checksForRef("sha")).resolves.toEqual({ state: "pending", failing: [], total: 2, names: ["build", "test"], sha: "sha", successful: ["build"] });
   });
 
   it("is pending on an unfinished commit status too", async () => {
     const { adapter, api } = adapterWith();
     api.rest.repos.getCombinedStatusForRef.mockResolvedValue({ data: { statuses: [{ state: "pending", context: "ci" }] } });
 
-    await expect(adapter.checksForRef("sha")).resolves.toEqual({ state: "pending", failing: [], total: 1, names: ["ci"], sha: "sha" });
+    await expect(adapter.checksForRef("sha")).resolves.toEqual({ state: "pending", failing: [], total: 1, names: ["ci"], sha: "sha", successful: [] });
   });
 
   it("does not count a skipped or neutral check as a result", async () => {
@@ -567,20 +568,20 @@ describe("what CI says about a commit", () => {
     // Deliberate non-answers, so the commit has nothing attached to it at all —
     // but they are still checks the head carries, and a later answer without
     // them is a shorter answer, not a different verdict.
-    await expect(adapter.checksForRef("sha")).resolves.toEqual({ state: "none", failing: [], total: 0, names: ["changelog", "advisory"], sha: "sha" });
+    await expect(adapter.checksForRef("sha")).resolves.toEqual({ state: "none", failing: [], total: 0, names: ["changelog", "advisory"], sha: "sha", successful: [] });
   });
 
   it("counts a completed check with no conclusion at all as neither pass nor fail", async () => {
     const { adapter, api } = adapterWith();
     api.rest.checks.listForRef.mockResolvedValue({ data: [run("odd", "completed", null)] });
 
-    await expect(adapter.checksForRef("sha")).resolves.toEqual({ state: "passing", failing: [], total: 1, names: ["odd"], sha: "sha" });
+    await expect(adapter.checksForRef("sha")).resolves.toEqual({ state: "passing", failing: [], total: 1, names: ["odd"], sha: "sha", successful: [] });
   });
 
   it("reports none when the repo has no CI on either surface", async () => {
     const { adapter } = adapterWith();
 
-    await expect(adapter.checksForRef("sha")).resolves.toEqual({ state: "none", failing: [], total: 0, names: [], sha: "sha" });
+    await expect(adapter.checksForRef("sha")).resolves.toEqual({ state: "none", failing: [], total: 0, names: [], sha: "sha", successful: [] });
   });
 
   it("lists every check it saw, one entry per copy, so a caller can tell a whole answer from a shrunken one", async () => {
@@ -602,6 +603,7 @@ describe("what CI says about a commit", () => {
       total: 3,
       names: ["test", "test", "changelog", "ci/external"],
       sha: "sha",
+      successful: ["test", "test", "ci/external"],
     });
   });
 
@@ -610,7 +612,7 @@ describe("what CI says about a commit", () => {
     api.rest.checks.listForRef.mockRejectedValue(new Error("403"));
     api.rest.repos.getCombinedStatusForRef.mockRejectedValue(new Error("403"));
 
-    await expect(adapter.checksForRef("sha")).resolves.toEqual({ state: "none", failing: [], total: 0, names: [], sha: "sha" });
+    await expect(adapter.checksForRef("sha")).resolves.toEqual({ state: "none", failing: [], total: 0, names: [], sha: "sha", successful: [], unavailable: true });
   });
 
   it("asks about the pull request's head commit", async () => {

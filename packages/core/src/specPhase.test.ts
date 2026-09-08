@@ -82,7 +82,7 @@ const specJson = (over: Record<string, unknown> = {}) =>
     requirements: [{ id: "REQ-001", text: "a card charge succeeds", priority: "P0", blockedBy: [] }],
     scenarios: [{ id: "SC-001", requirement: "REQ-001", title: "charges a card", level: "unit", priority: "P0", oracle: "the charge returns 200", testRef: "t.ts::SC-001", blocked: false }],
     openQuestions: [],
-    commands: { all: "exit 0", byId: 'echo "{{ids}}"' },
+    commands: { all: "printf '✓ SC-001\\n'", byId: 'echo "{{ids}}"' },
     notCovered: [],
     ...over,
   }) +
@@ -711,7 +711,7 @@ describe("the acceptance gate", () => {
 
   it("lets a run through when the scenarios are green, and records that they were", async () => {
     const dir = repo();
-    const { pool } = rolePool(upTo("exit 0"));
+    const { pool } = rolePool(upTo("printf '✓ SC-001\\n'"));
     const { controller, store } = build({ repoPath: dir, pool });
 
     await controller.startRun("build a checkout", RunConfig.parse(BASE), operator());

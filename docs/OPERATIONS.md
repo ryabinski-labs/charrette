@@ -53,8 +53,10 @@ Three rules that shape everything:
 1. **Ambiguity is resolved with you before anything gets built.** The intake agent
    asks rather than guesses. Its questions carry options and a recommendation, and
    your answers become a brief the planner treats as settled.
-2. **The harness never merges a PR into your branches.** There is no code path that
-   can. Merging is your decision, always.
+2. **Merging requires your authority.** Review mode never merges. Production mode
+   waits for your merge unless you explicitly select `--auto-merge`, which binds
+   the merge to the tested PR head and respects GitHub branch protection. See
+   [Production delivery](PRODUCTION-DELIVERY.md) for the complete PRD-to-production flow.
 3. **A task becomes ready only when every dependency is `MERGED`**, not merely
    accepted — so a worker building on top of another task actually sees that code
    in its worktree.
@@ -231,9 +233,15 @@ the pull request opened: by default **one rollup PR for the whole run**, from
 the integration branch, listing every merged task (one `--no-ff` merge commit
 each) with the validator's verdict in the body, so a reviewer never sees a PR the
 harness has not finished judging. With `holdUntilProven: false` a FAIL verdict
-does not withhold the PR — the harness never merges, and human review is where
+does not withhold the PR in review mode — human review is where
 a gap it could not close belongs — but it is printed first, above it, and the PR
 is held as a draft.
+
+Production mode refuses disabled proof, execution-evidence, live, or CI gates. It
+continues past PR review and reaches `DONE` only with deployed-revision and
+production-scenario evidence. An exit-zero suite without positive results for all
+required scenarios is not green, and a general pit-stop “continue” never waives
+unfinished requirements.
 
 Why a rollup and not one PR per task: task branches are cut from the
 integration branch, so each carries every merge that landed before it — by the

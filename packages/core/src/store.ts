@@ -14,6 +14,10 @@ CREATE TABLE IF NOT EXISTS runs (
   createdAt INTEGER NOT NULL,
   updatedAt INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS release_contracts (
+  id TEXT PRIMARY KEY, sourceSha256 TEXT NOT NULL, source TEXT NOT NULL,
+  spec TEXT NOT NULL, runId TEXT NOT NULL, createdAt INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS epics (
   id TEXT NOT NULL, runId TEXT NOT NULL, title TEXT NOT NULL,
   githubIssueNumber INTEGER, ord INTEGER NOT NULL,
@@ -256,6 +260,28 @@ export class InvalidTransition extends Error {}
  * the event row and the materialized-state update in one transaction (PRD §11.1).
  */
 export class Store {
+  releaseContract(id: string): { sourceSha256: string; source: string; spec: RunSpec; runId: string } | null {
+    const row = this.db.prepare("SELECT sourceSha256, source, spec, runId FROM release_contracts WHERE id = ?").get(id) as
+      { sourceSha256: string; source: string; spec: string; runId: string } | undefined;
+    return row ? { ...row, spec: RunSpec.parse(JSON.parse(row.spec)) } : null;
+  }
+
+  /** Insert-only: another run cannot reinterpret a release already agreed. */
+  bindRelease(id: string, sourceSha256: string, source: string, spec: RunSpec, runId: string): void {
+    this.db.prepare("INSERT OR IGNORE INTO release_contracts (id, sourceSha256, source, spec, runId, createdAt) VALUES (?,?,?,?,?,?)")
+      .run(id, sourceSha256, source, JSON.stringify(spec), runId, Date.now());
+    const standing = this.releaseContract(id)!;
+    if (standing.sourceSha256 !== sourceSha256 || JSON.stringify(standing.spec) !== JSON.stringify(spec)) {
+      throw new Error(`release ${id} already has a different contract; use a new releaseId for a changed PRD`);
+    }
+  }
+
+  releaseEvidence(runId: string, phase?: string): import("@harness/shared").ReleaseEvidence | null {
+    const row = this.db.prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.release_evidence' AND (? IS NULL OR json_extract(payload, '$.phase') = ?) ORDER BY seq DESC LIMIT 1")
+      .get(runId, phase ?? null, phase ?? null) as { payload: string } | undefined;
+    return row ? JSON.parse(row.payload) : null;
+  }
+
   readonly db: DatabaseSync;
   private appendListeners = new Set<(e: { seq: number; event: HarnessEvent }) => void>();
 
@@ -907,6 +933,13 @@ export class Store {
   }
 
   /** What an agent found when it went and looked at production. */
+  productionEvidence(runId: string): Extract<HarnessEvent, { type: "run.prod_verdict" }> | null {
+    const row = this.db.prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.prod_verdict' ORDER BY seq DESC LIMIT 1")
+      .get(runId) as { payload: string } | undefined;
+    return row ? JSON.parse(row.payload) : null;
+  }
+
+  /** Compact, backward-compatible production judgment for reports. */
   prodVerdict(runId: string): { url: string; verdict: "PASS" | "FAIL"; findings: string[]; summary: string } | null {
     const row = this.db
       .prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.prod_verdict' ORDER BY seq DESC LIMIT 1")
@@ -1532,13 +1565,13 @@ export class Store {
   updateTask(
     runId: string,
     taskId: string,
-    patch: Partial<Pick<TaskRow, "branch" | "worktreePath" | "githubIssueNumber" | "prNumber" | "qaIterations" | "respawns" | "errorSummary" | "assignedSkills" | "unverified" | "emptyDeliveries" | "conflictFixes" | "abandonedJobs">>
+    patch: Partial<Pick<TaskRow, "branch" | "worktreePath" | "githubIssueNumber" | "prNumber" | "qaIterations" | "respawns" | "errorSummary" | "assignedSkills" | "unverified" | "emptyDeliveries" | "conflictFixes" | "abandonedJobs" | "skeleton">>
   ): void {
     const sets: string[] = [];
     const vals: (string | number | null)[] = [];
     for (const [k, v] of Object.entries(patch)) {
       sets.push(`${k} = ?`);
-      vals.push(k === "assignedSkills" || k === "unverified" ? JSON.stringify(v) : (v as string | number | null));
+      vals.push(k === "skeleton" ? (v ? 1 : 0) : k === "assignedSkills" || k === "unverified" ? JSON.stringify(v) : (v as string | number | null));
     }
     if (!sets.length) return;
     this.db.prepare(`UPDATE tasks SET ${sets.join(", ")} WHERE runId = ? AND id = ?`).run(...vals, runId, taskId);
