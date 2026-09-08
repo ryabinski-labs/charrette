@@ -562,6 +562,14 @@ describe("what the specification proves, on the finished page", () => {
     expect(scope.dropped).toEqual([{ id: "REQ-001", text: "charge a card", why: "gave-up CANCELLED (unreachable: dependencies parked)" }]);
   });
 
+  it("says only what it knows about a claimant that left no reason", () => {
+    const { store, bus } = run();
+    bus.publish({ type: "run.spec_ready", runId: "run-1", spec: SPEC, ts: 1 });
+    task(store, { id: "vanished", state: "CANCELLED", scenarioIds: ["SC-001"] });
+
+    expect(buildCompletionReport(sources(store)).scope!.dropped).toEqual([{ id: "REQ-001", text: "charge a card", why: "vanished CANCELLED" }]);
+  });
+
   it("has no scope section at all for a run that was never specified", () => {
     const { store } = run();
     expect(buildCompletionReport(sources(store)).scope).toBeNull();

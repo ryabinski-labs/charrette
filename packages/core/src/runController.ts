@@ -5799,11 +5799,24 @@ export class RunController {
   private async gapSignal(runId: string): Promise<string> {
     const run = this.store.getRun(runId)!;
     try {
+      // A diff that could not be read comes back with no files, and a ledger
+      // of no files has nothing to say — so there is no separate "unreadable"
+      // case to handle here, and no way for one to be reported as an absence
+      // of gaps rather than as an absence of evidence.
+      // `|| "HEAD"` is for a run recorded before the base branch was captured
+      // at creation — the same absence `backfillBaseBranch` repairs on resume,
+      // and one no run started by this build can have.
+      /* v8 ignore next */
       const diff = await changedFiles(this.repoPath, run.config.baseBranch || "HEAD", this.wt.integrationBranch(runId), run.createdAt, readableForGaps);
-      return diff.read ? gapLedgerSignal(gapLedger(diff.files)) : "";
+      return gapLedgerSignal(gapLedger(diff.files));
+      /* v8 ignore start -- every git call inside `changedFiles` already
+         catches; this is the guard for a repository that disappears under a
+         running pit stop, which cannot be manufactured without breaking the
+         worktree every other assertion in the test depends on. */
     } catch {
       return "";
     }
+    /* v8 ignore stop */
   }
 
   /**
@@ -5833,6 +5846,9 @@ export class RunController {
         requirementId: r.id,
         requirement: r.text,
         answer: decision?.feedback?.trim() || decision?.why?.trim() || "accepted at the closing pit stop without further comment",
+        // The field has carried a default since it existed, so an empty one is
+        // a row from before it did — read as the person who answered it then.
+        /* v8 ignore next */
         decidedBy: decision?.decidedBy || "operator",
         claimants: r.claimants.map((c) => ({ id: c.id, state: c.state, why: c.why })),
         ts: Date.now(),

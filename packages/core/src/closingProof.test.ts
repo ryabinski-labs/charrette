@@ -982,6 +982,109 @@ describe("requirements nothing is building any more", () => {
     expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
   });
 
+  it("records the write-off even when the answer was silence", async () => {
+    const dir = repo();
+    const { pool } = rolePool(
+      specified("exit 0", {
+        spec: specJson({
+          requirements: [
+            { id: "REQ-001", text: "a card charge succeeds", priority: "P0", blockedBy: [] },
+            { id: "REQ-002", text: "a receipt is emailed", priority: "P0", blockedBy: [] },
+          ],
+          scenarios: [
+            { id: "SC-001", requirement: "REQ-001", title: "charges a card", level: "unit", priority: "P0", oracle: "o", testRef: "", blocked: false },
+            { id: "SC-002", requirement: "REQ-002", title: "emails a receipt", level: "unit", priority: "P0", oracle: "o", testRef: "", blocked: false },
+          ],
+        }),
+        demo: () => DEMO_OK,
+        reviewer: () => REVIEW_OK,
+      })
+    );
+    const { controller, store } = build({
+      repoPath: dir,
+      pool,
+      gates: {
+        async resolvePitStop() {
+          return { action: "continue", feedback: "   " };
+        },
+      },
+    });
+
+    await controller.startRun("build a checkout", RunConfig.parse({ ...BASE, pitStop: { every: { usd: 1000 } } }), operator());
+
+    const runId = store.listRuns()[0]!.id;
+    // Silence is still an answer, and it is recorded as the one it is rather
+    // than as an empty string nobody can read later.
+    expect(store.scopeWriteOffs(runId)).toEqual([
+      { requirementId: "REQ-002", answer: "accepted at the closing pit stop without further comment", decidedBy: "operator" },
+    ]);
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+  });
+
+  /**
+   * Run 6fe4ba37 voided 39 tasks as one at a pit stop and nobody was shown what
+   * coverage went with them; the next run rebuilt much of it from scratch and
+   * paid a third task to consolidate its own duplicates.
+   */
+  it("says which requirements a re-plan stops covering, before it cancels anything", async () => {
+    const dir = repo();
+    let replanned = false;
+    const two = fence({
+      epics: [{ id: "epic-e", title: "E", summary: "s" }],
+      tasks: ["task-a", "task-b"].map((id, i) => ({
+        id,
+        epicId: "epic-e",
+        title: id,
+        spec: "s",
+        acceptanceCriteria: ["x"],
+        dependsOn: [],
+        touchedPaths: [],
+        completionProbe: "",
+        scenarioIds: [`SC-00${i + 1}`],
+        estimatedSize: "S" as const,
+      })),
+    });
+    const { pool } = rolePool({
+      intake: BRIEF,
+      spec: specJson({
+        requirements: [
+          { id: "REQ-001", text: "a card charge succeeds", priority: "P0", blockedBy: [] },
+          { id: "REQ-002", text: "a receipt is emailed", priority: "P0", blockedBy: [] },
+        ],
+        scenarios: [
+          { id: "SC-001", requirement: "REQ-001", title: "charges", level: "unit", priority: "P0", oracle: "o", testRef: "", blocked: false },
+          { id: "SC-002", requirement: "REQ-002", title: "emails", level: "unit", priority: "P0", oracle: "o", testRef: "", blocked: false },
+        ],
+      }),
+      // The re-plan keeps nothing that claimed the receipt.
+      // By call order, not by tools: the re-planning session carries tools too,
+      // so a fake keyed on them answers the re-plan with the PRD.
+      planner: (_s: AgentSpec, nth: number) => (nth === 1 ? DOCS : nth === 2 ? two : dag([{ id: "task-fix" }])),
+      worker,
+      qa: () => QA_PASS,
+      validator: () => INTENT_PASS,
+      demo: () => DEMO_OK,
+      reviewer: () => REVIEW_OK,
+    });
+    const { controller, events } = build({
+      repoPath: dir,
+      pool,
+      gates: {
+        async resolvePitStop() {
+          if (replanned) return { action: "continue", feedback: "" };
+          replanned = true;
+          return { action: "replan", feedback: "drop the receipt for now" };
+        },
+      },
+    });
+
+    await controller.startRun("build a checkout", RunConfig.parse({ ...BASE, maxParallelWorkers: 1, pitStop: { every: { tasks: 1 } } }), operator());
+
+    expect(logs(events)).toContainEqual(
+      expect.stringContaining("this re-plan drops every task that claimed 1 requirement(s) the brief named: REQ-002 (a receipt is emailed)")
+    );
+  }, 60_000);
+
   it("says nothing about scope for a run with no specification", async () => {
     const dir = repo();
     const { pool } = rolePool({
