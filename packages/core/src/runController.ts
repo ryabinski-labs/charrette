@@ -36,7 +36,7 @@ import { acquireRunLock, type RunLock } from "./runLock.js";
 import { composeDown, isolationBlock, isolationEnv, taskIsolation } from "./isolation.js";
 import { knownFlakySignatures, observeChecks, observeFlakySignatures } from "./memory.js";
 import { parseRunbook, withRunbook, type Runbook } from "./operatorRunbook.js";
-import { acceptanceVerdict, scenarioCommand, scenarioProbeCommand, suiteRunFrom, type AcceptanceVerdict } from "./acceptance.js";
+import { acceptanceVerdict, blockingQuestionsFor, scenarioCommand, scenarioProbeCommand, suiteRunFrom, type AcceptanceVerdict } from "./acceptance.js";
 import { standaloneReport } from "./completionReport.js";
 import { assembleReport, reportPath } from "./reportRun.js";
 import { ceilingNote, grantedTokens, requestTokens, sdkCeiling } from "./outputCeiling.js";
@@ -106,6 +106,8 @@ import {
   prodValidatorSystemPrompt,
   validatorPrompt,
   validatorSystemPrompt,
+  validatorTwoVerdictsPrompt,
+  validatorNarrowedPrompt,
   planIntentPrompt,
   planIntentSystemPrompt,
   workerResumePrompt,
@@ -138,7 +140,7 @@ import { renderProduction, scanProduction } from "./productionScan.js";
 import { detectToolbelt, toolbeltBlock } from "./toolbelt.js";
 import { extendForged, forgeDir, installForged, SkillForgeDecision, validateDraft } from "./skillForge.js";
 import { workerModelFor } from "./modelTier.js";
-import { Store, TaskRow, type RunRow } from "./store.js";
+import { Store, TaskRow, type RunRow, type StoredIntentVerdict } from "./store.js";
 
 const execFileP = promisify(execFile);
 
@@ -396,12 +398,34 @@ const ABANDONED_JOB_ATTEMPTS = 2;
  */
 const EVIDENCE_REASK_TURNS = 12;
 
-/** The validator's judgment of the merged whole against the operator's intent. */
+/**
+ * The validator's judgment of the merged whole against the operator's intent.
+ *
+ * Three answers. UNKNOWN is the one a validator under a turn budget needs and
+ * did not have: waf de2cb7aa's closing verdict was a PASS whose gaps read "Not
+ * independently verified given turn budget", and nothing downstream reads gaps
+ * on a PASS. `unchecked` is where that sentence belongs.
+ */
 const IntentVerdict = z.object({
-  verdict: z.enum(["PASS", "FAIL"]),
+  verdict: z.enum(["PASS", "FAIL", "UNKNOWN"]),
   summary: z.string().default(""),
   gaps: z.array(z.string()).default([]),
+  unchecked: z.array(z.string()).default([]),
 });
+type IntentVerdict = z.infer<typeof IntentVerdict>;
+/** What the closing gate found — see `closingProof`. */
+interface ClosingProof {
+  proven: boolean;
+  unmet: string[];
+  /** Whether the run is held on it (`holdUntilProven`) or only told. */
+  held: boolean;
+}
+/** Turns for the closing intent check. It is the cheapest agent in the run relative to what it decides. */
+const INTENT_TURNS = 90;
+/** Turns for the narrowed second pass after an UNKNOWN — a shorter list, read cold. */
+const INTENT_NARROWED_TURNS = 60;
+/** Turns to resolve a PASS that listed gaps into one verdict. The reading is already done. */
+const TWO_VERDICTS_TURNS = 6;
 /** The production validator's judgment of the deployed system against intent. */
 const ProdVerdict = z.object({
   verdict: z.enum(["PASS", "FAIL"]),
@@ -1614,12 +1638,19 @@ export class RunController {
       this.store.transitionRun(runId, "PLANNING", "the operator resumed a run whose planning phase failed");
       return;
     }
-    if (!run || run.state !== "PR_REVIEW") return;
+    if (!run || (run.state !== "PR_REVIEW" && run.state !== "BLOCKED")) return;
     const tasks = this.store.listTasks(runId);
     const parked = tasks.filter((t) => t.state === "NEEDS_HUMAN");
     const revivable = this.revivableCancelled(runId, tasks);
     const prless = this.github.enabled && tasks.some((t) => t.state === "MERGED" && t.prNumber === null);
-    if (!parked.length && !revivable.size && !prless) return; // nothing recoverable; drive() will not touch it
+    if (!parked.length && !revivable.size && !prless) {
+      // A blocked run with nothing to revive is resumed for one reason: the
+      // operator acted on what blocked it — answered the question, fixed the
+      // suite — and wants the gates asked again. Back to INTEGRATING, where
+      // the gates are. A finished run in review has nothing for drive() to do.
+      if (run.state === "BLOCKED") this.store.transitionRun(runId, "INTEGRATING", "reopened by the operator to re-check the closing gates");
+      return;
+    }
 
     // EXECUTING before the gates open, so the dashboard shows the run (and its
     // gate cards) as live while the operator is being asked.
@@ -1926,12 +1957,34 @@ export class RunController {
         // Task-level QA cannot answer that — it judged each task against its own
         // criteria, never the sum against the intent. Only after the verdict do the
         // pull requests open, so a reviewer arrives with the gap list in hand.
-        await this.validateIntent(runId);
-        // A FAIL names work, so queue it before the pit stop rather than after:
-        // the operator is then shown the gaps *and* what is already queued to
-        // close them, and "stop, none of that is worth it" stays sayable.
-        const fixes = await this.queueIntentFixes(runId);
-        const after = await this.closingPitStop(runId);
+        //
+        // Not bought over a tree the specification has already rejected: a red
+        // or opinionless acceptance gate with nothing left to queue is going to
+        // hold the run whatever the validator says, and the validator is the
+        // most expensive reader in the run.
+        const acceptance = this.store.acceptanceVerdict(runId);
+        const unproven = run.config.holdUntilProven && acceptance !== null && acceptance.verdict !== "green";
+        let fixes: string[] = [];
+        if (unproven) {
+          this.bus.publish({
+            type: "agent.log",
+            runId,
+            sessionId: "integrator",
+            text: `the acceptance gate is ${acceptance.verdict === "red" ? "red" : "without an opinion"} and nothing more can be queued for it; the intent check is not bought over a tree the specification rejects`,
+            ts: Date.now(),
+          });
+        } else {
+          await this.validateIntent(runId);
+          // A FAIL names work, so queue it before the pit stop rather than after:
+          // the operator is then shown the gaps *and* what is already queued to
+          // close them, and "stop, none of that is worth it" stays sayable.
+          fixes = await this.queueIntentFixes(runId);
+        }
+        // What the run can prove about itself, read once and shown to the pit
+        // stop and the gate alike, so the operator is asked about the same
+        // list the run is then held on.
+        const proof = this.closingProof(runId);
+        const after = await this.closingPitStop(runId, proof);
         if (after === "stop") {
           this.store.transitionRun(runId, "PAUSED", "the run was stopped at a pit stop");
           return;
@@ -1944,6 +1997,19 @@ export class RunController {
           );
           run = this.store.getRun(runId)!;
           continue;
+        }
+        // The gate. A run that cannot prove itself does not open pull requests
+        // and does not report itself in review; it says what is unmet and asks
+        // for help. Both runs in issue #115 walked through here with a red
+        // acceptance suite and reported "in review" within the hour.
+        if (!proof.proven && run.config.holdUntilProven) {
+          // The sentence `openPrs` would have written, for the case it will now
+          // never see: an operator reading the feed of a run whose foundation
+          // parked is owed the same "no diff to publish, N parked" line whether
+          // the run then held or reported in review.
+          if (!this.store.listTasks(runId).some((t) => t.state === "MERGED")) this.sayNothingToPublish(runId);
+          this.store.transitionRun(runId, "BLOCKED", proof.unmet.join("; "));
+          return;
         }
         await this.openPrs(runId);
         published = true;
@@ -2097,7 +2163,15 @@ export class RunController {
         maxTurns: 12,
         budgetCheck: () => this.checkStops(runId),
       });
-      const verdict = IntentVerdict.parse(extractJson(result.resultText));
+      const parsed = IntentVerdict.parse(extractJson(result.resultText));
+      // The plan check reads a task list, not a tree, and is never short of
+      // turns; it is not offered UNKNOWN. One that answers it anyway has said
+      // the plan cannot be shown to cover the assignment, which is a FAIL with
+      // its unchecked items as the gaps.
+      const verdict: { verdict: "PASS" | "FAIL"; summary: string; gaps: string[] } =
+        parsed.verdict === "UNKNOWN"
+          ? { verdict: "FAIL", summary: parsed.summary, gaps: parsed.unchecked }
+          : { verdict: parsed.verdict, summary: parsed.summary, gaps: parsed.gaps };
       this.bus.publish({ type: "run.plan_intent_verdict", runId, verdict: verdict.verdict, gaps: verdict.gaps, summary: verdict.summary, ts: Date.now() });
       const gaps = verdict.verdict === "PASS" ? deniedGaps : [...deniedGaps, ...verdict.gaps];
       return { block: render(gaps), gaps };
@@ -2195,9 +2269,18 @@ export class RunController {
 
   /**
    * Run the validator over the integration worktree and record its verdict.
-   * A FAIL does not block the PRs — the harness never merges, so the human
-   * review the PRs exist for is exactly where the gap list belongs. What a
-   * FAIL must never be is silent.
+   *
+   * A FAIL is work (`queueIntentFixes`) and, with `holdUntilProven`, so is
+   * anything short of a clean PASS: the closing gate reads this verdict and a
+   * run does not report itself in review over a FAIL or an UNKNOWN. What no
+   * verdict must ever be is silent.
+   *
+   * Two repairs happen here rather than in the caller, because both are about
+   * the shape of the answer and not about what to do with it. A PASS that
+   * lists gaps is two verdicts, and the session is asked to pick one. An
+   * UNKNOWN names what the turn budget did not reach, and a second, narrowed
+   * pass is bought for exactly those items — the cheapest agent in the run
+   * relative to what it decides, spent twice at most.
    */
   private async validateIntent(runId: string): Promise<void> {
     const run = this.store.getRun(runId)!;
@@ -2213,19 +2296,41 @@ export class RunController {
         ? await git(wtPath, ["diff", "--stat", `${base}...HEAD`]).catch(() => "unavailable")
         : "unavailable";
       const taskLines = tasks.map((t) => `- ${t.title} (${t.id}): ${t.state}${t.errorSummary ? ` — ${t.errorSummary.slice(0, 120)}` : ""}`).join("\n");
-      const result = await this.pool.run({
+      // The specification is the other half of "in scope": requirements written
+      // from the brief before any code existed. Handed over so that a scope the
+      // repository wrote for itself afterwards has something older to lose to.
+      const requirements = (this.store.runSpec(runId)?.requirements ?? []).map((r) => ({ id: r.id, text: r.text, priority: r.priority }));
+      const common = {
         runId,
-        role: "validator",
+        role: "validator" as const,
         model: run.config.models.qa,
         systemPrompt: validatorSystemPrompt(toolbeltBlock(detectToolbelt(run.config.externalTools))),
-        prompt: validatorPrompt(run.assignment, this.planPrd(runId), taskLines, diffStat.slice(0, 3000), run.config.deterministicChecks),
         cwd: wtPath,
         disallowedTools: ["WebSearch"],
-        maxTurns: 60,
         budgetCheck: () => this.checkStops(runId),
+      };
+      const first = await this.pool.run({
+        ...common,
+        prompt: validatorPrompt(run.assignment, this.planPrd(runId), taskLines, diffStat.slice(0, 3000), run.config.deterministicChecks, requirements),
+        maxTurns: INTENT_TURNS,
       });
-      const verdict = IntentVerdict.parse(extractJson(result.resultText));
-      this.bus.publish({ type: "run.intent_verdict", runId, verdict: verdict.verdict, gaps: verdict.gaps, summary: verdict.summary, ts: Date.now() });
+      let verdict = await this.oneVerdict(runId, common, first);
+      this.publishIntent(runId, verdict);
+      // Abstaining costs the run one more pass, about only what was missed.
+      // Published before the second pass so that a second pass that dies leaves
+      // the honest answer on the record rather than nothing.
+      if (verdict.verdict === "UNKNOWN" && verdict.unchecked.length) {
+        this.bus.publish({
+          type: "agent.log",
+          runId,
+          sessionId: "validator",
+          text: `the intent check could not reach ${verdict.unchecked.length} item(s) inside its turn budget; asking once more about only those`,
+          ts: Date.now(),
+        });
+        const second = await this.pool.run({ ...common, prompt: validatorNarrowedPrompt(verdict.unchecked, verdict.summary), maxTurns: INTENT_NARROWED_TURNS });
+        verdict = await this.oneVerdict(runId, common, second);
+        this.publishIntent(runId, verdict);
+      }
     } catch (e) {
       if (stopsTheRun(e)) throw e;
       // An unvalidated run is reportable; an unfinished one is not. Say so and move on.
@@ -2238,6 +2343,43 @@ export class RunController {
       // went on quoting the fifth pass's verdict at a tree three merges newer.
       this.bus.publish({ type: "run.intent_unknown", runId, why: String(e).slice(0, 300), ts: Date.now() });
     }
+  }
+
+  private publishIntent(runId: string, verdict: IntentVerdict): void {
+    this.bus.publish({ type: "run.intent_verdict", runId, verdict: verdict.verdict, gaps: verdict.gaps, unchecked: verdict.unchecked, summary: verdict.summary, ts: Date.now() });
+  }
+
+  /**
+   * One verdict out of a validator session, whatever shape it answered in.
+   *
+   * A PASS carrying gaps is the case: two verdicts in one object, and until now
+   * the harness kept the wrong one — the PASS opened the pull requests and the
+   * gaps went where nothing reads them. The session is resumed and asked to
+   * choose. If it will not, or cannot be resumed, the cautious reading wins:
+   * UNKNOWN, with the gaps as what was not settled. That is the only reading
+   * that cannot be the wrong one.
+   */
+  private async oneVerdict(runId: string, common: Omit<AgentSpec, "prompt" | "maxTurns">, result: AgentResult): Promise<IntentVerdict> {
+    const verdict = IntentVerdict.parse(extractJson(result.resultText));
+    if (verdict.verdict !== "PASS" || !verdict.gaps.length) return verdict;
+    this.bus.publish({
+      type: "agent.log",
+      runId,
+      sessionId: result.sessionId,
+      text: `the intent check answered PASS and listed ${verdict.gaps.length} gap(s) — two verdicts; asking it to choose one`,
+      ts: Date.now(),
+    });
+    if (result.sdkSessionId) {
+      try {
+        const again = await this.pool.run({ ...common, prompt: validatorTwoVerdictsPrompt(verdict.gaps), resume: result.sdkSessionId, maxTurns: TWO_VERDICTS_TURNS });
+        const chosen = IntentVerdict.parse(extractJson(again.resultText));
+        if (chosen.verdict !== "PASS" || !chosen.gaps.length) return chosen;
+      } catch (e) {
+        if (stopsTheRun(e)) throw e;
+        // Fall through: the first answer is all there is, and it is read below.
+      }
+    }
+    return { verdict: "UNKNOWN", summary: verdict.summary, gaps: [], unchecked: verdict.gaps };
   }
 
   /**
@@ -2356,7 +2498,8 @@ export class RunController {
     this.bus.publish({
       type: "run.acceptance_verdict",
       runId,
-      passed: verdict.passed,
+      verdict: verdict.verdict,
+      passed: verdict.verdict === "green",
       failing: verdict.failing,
       named: verdict.named,
       blocked: verdict.blocked,
@@ -2398,24 +2541,72 @@ export class RunController {
    * cannot conflict. The caller sends the run back to EXECUTING and the next
    * pass through INTEGRATING re-merges and asks again.
    *
+   * A red suite that named no scenario used to return nothing here, and the
+   * caller read nothing as a green suite: both runs in issue #115 closed
+   * through exactly that hole. There is still one honest piece of work in that
+   * case — make the suite runnable and readable — and it is queued as such,
+   * with the raw output attached, rather than left as a log line.
+   *
    * Returns the queued task ids — empty when the gate passed, when there is no
-   * specification, when the rounds are spent, or when the suite went red
-   * without naming a scenario, which is a thing to tell a person rather than a
-   * thing to hand a worker.
+   * specification, when the rounds are spent, or when the gate has no opinion
+   * (nothing gating declared, or everything gating blocked on an unanswered
+   * question), which is a question for the operator rather than work for an
+   * agent. In every one of those cases the caller reads the verdict itself
+   * before it opens a pull request; an empty list here is not a pass.
    */
   private async queueScenarioFixes(runId: string): Promise<string[]> {
     const run = this.store.getRun(runId)!;
     const verdict = await this.checkAcceptance(runId);
-    if (!verdict || verdict.passed) return [];
+    if (!verdict || verdict.verdict === "green") return [];
     const spec = this.store.runSpec(runId)!;
 
     this.bus.publish({ type: "agent.log", runId, sessionId: "integrator", text: `acceptance: ${verdict.line}`, ts: Date.now() });
-    if (!run.config.spec.gateRounds || !verdict.failing.length) return [];
+    if (verdict.verdict === "no-opinion") {
+      // Not work. The gate is asking the operator something — which question
+      // is on the verdict, and the closing gate puts it to them.
+      if (verdict.blocked.length) {
+        this.bus.publish({
+          type: "agent.log",
+          runId,
+          sessionId: "integrator",
+          text: `the acceptance gate cannot run: ${blockingQuestionsFor(spec, verdict.blocked).join("; ")}`,
+          ts: Date.now(),
+        });
+      }
+      return [];
+    }
+    if (!run.config.spec.gateRounds) return [];
 
     const tasks = this.store.listTasks(runId);
     const rounds = new Set(tasks.map((t) => /^spec-fix-(\d+)-/.exec(t.id)?.[1]).filter(Boolean));
     if (rounds.size >= run.config.spec.gateRounds) return [];
     const round = rounds.size + 1;
+
+    if (!verdict.failing.length) {
+      const suite: PlannedTask = {
+        id: `spec-fix-${round}-suite`,
+        epicId: SPEC_FIX_EPIC.id,
+        title: "Make the acceptance suite runnable and readable",
+        spec:
+          `The run's acceptance suite is red and its output named no scenario. The harness cannot tell which promise broke, so nothing else can be queued until it can.\n\n` +
+          `The verdict: ${verdict.line}\n` +
+          `The command the harness ran, from the repository root: \`${spec.commands.all.trim() || "(none — the specification named no command)"}\`\n\n` +
+          `What it printed (tail):\n\`\`\`\n${verdict.output || "(no output)"}\n\`\`\`\n\n` +
+          `Make that command run to completion and print a result per scenario, with the scenario id (e.g. \`${gating(spec)[0]!.id}\`) verbatim in each test's name, in the shape the repository's own runner uses. Fix what stops the suite from running — a missing dependency, a compile error, a fixture the repository no longer has, a wrong command in \`${spec.artifactPath || "the specification"}\` — not the assertions: a scenario edited to fit the implementation proves nothing, and that is the one failure this phase exists to prevent. If a scenario then fails for a real reason, leave it failing; the harness queues that separately, by name.`,
+        acceptanceCriteria: [
+          "The acceptance suite command runs to completion and its output names every scenario it ran, by id",
+          "No scenario assertion was weakened or removed to achieve that",
+        ],
+        dependsOn: [],
+        touchedPaths: [],
+        completionProbe: "",
+        scenarioIds: [],
+        estimatedSize: "M",
+      };
+      this.store.insertTasks(runId, [SPEC_FIX_EPIC], [pendingRow(suite)]);
+      await this.fileIssues(runId);
+      return [suite.id];
+    }
 
     // The same bound the intent gaps and the CI checks use, for the same
     // reason: enough for a real failure list, few enough that a broken suite
@@ -2898,6 +3089,18 @@ export class RunController {
     return gate;
   }
 
+  /** Why this run has no pull request: nothing merged, and here is what happened instead. */
+  private sayNothingToPublish(runId: string): void {
+    const outcome = this.outcome(runId);
+    this.bus.publish({
+      type: "agent.log",
+      runId,
+      sessionId: "integrator",
+      text: `no pull request opened: no task reached MERGED, so the run has no diff to publish — ${outcome.parked.length} task${outcome.parked.length === 1 ? "" : "s"} parked, ${outcome.cancelled} never started`,
+      ts: Date.now(),
+    });
+  }
+
   /**
    * Open the pull requests for everything merged — after validation, so no PR
    * exists before the run has been judged against the operator's intent. Each
@@ -2912,15 +3115,8 @@ export class RunController {
     // `openRunPr` on `!merged.length`, the per-task loop by never entering — and
     // an integrator that says nothing here is indistinguishable from one whose
     // push to GitHub failed. Say which it was.
-    const outcome = this.outcome(runId);
-    if (!outcome.merged) {
-      this.bus.publish({
-        type: "agent.log",
-        runId,
-        sessionId: "integrator",
-        text: `no pull request opened: no task reached MERGED, so the run has no diff to publish — ${outcome.parked.length} task${outcome.parked.length === 1 ? "" : "s"} parked, ${outcome.cancelled} never started`,
-        ts: Date.now(),
-      });
+    if (!this.outcome(runId).merged) {
+      this.sayNothingToPublish(runId);
       return;
     }
     if (run.config.prMode === "single") {
@@ -3602,9 +3798,13 @@ export class RunController {
       ...(intent && !intentStale
         ? [
             "",
-            intent.verdict === "PASS" ? "Intent check: **PASS**." : `Intent check: **FAIL** — ${intent.gaps.length || "unstated"} gap${intent.gaps.length === 1 ? "" : "s"}:`,
-            ...intent.gaps.slice(0, MAX_LISTED).map((g) => `- ${g.slice(0, 500)}`),
-            ...andMore(intent.gaps.length, MAX_LISTED),
+            intent.verdict === "PASS"
+              ? "Intent check: **PASS**."
+              : intent.verdict === "UNKNOWN"
+                ? `Intent check: **UNKNOWN** — the validator ran out of turns; ${intent.unchecked.length} item(s) unchecked:`
+                : `Intent check: **FAIL** — ${intent.gaps.length || "unstated"} gap${intent.gaps.length === 1 ? "" : "s"}:`,
+            ...(intent.verdict === "UNKNOWN" ? intent.unchecked : intent.gaps).slice(0, MAX_LISTED).map((g) => `- ${g.slice(0, 500)}`),
+            ...andMore((intent.verdict === "UNKNOWN" ? intent.unchecked : intent.gaps).length, MAX_LISTED),
             ...(intent.verdict === "FAIL"
               ? [
                   "",
@@ -3614,7 +3814,14 @@ export class RunController {
                   "production and this description. Close the gaps and the run flips this ready, or",
                   "mark it ready yourself if you have decided to ship it incomplete on purpose.",
                 ]
-              : []),
+              : intent.verdict === "UNKNOWN"
+                ? [
+                    "",
+                    "**This PR is held as a draft because of that.** Nothing has judged the items above,",
+                    "and a verdict that abstained is not a pass. Resume the run to buy another check, or",
+                    "mark it ready yourself if you have read the tree and are satisfied.",
+                  ]
+                : []),
           ]
         : []),
       ...(unsettled.length
@@ -3680,7 +3887,7 @@ export class RunController {
      * operator who means to ship an incomplete run still can. What they cannot
      * do any more is ship it by not reading.
      */
-    const intentFailed = intent?.verdict === "FAIL";
+    const intentFailed = intent?.verdict === "FAIL" || intent?.verdict === "UNKNOWN";
     /**
      * The same hold, for the gap the intent check cannot see.
      *
@@ -3784,7 +3991,9 @@ export class RunController {
     merged: number;
     cancelled: number;
     total: number;
-    intent: { verdict: "PASS" | "FAIL"; gaps: string[]; summary: string } | null;
+    intent: StoredIntentVerdict | null;
+    /** What the acceptance gate last said, or null for a run with no specification. */
+    acceptance: { verdict: "green" | "red" | "no-opinion"; line: string } | null;
     ci: { prNumber: number; state: "passing" | "failing" | "pending" | "none"; failing: string[]; total: number } | null;
     mergeable: { state: "mergeable" | "conflicting" | "behind" | "unknown"; baseBranch: string; conflicts: string[] } | null;
     deploy: { sha: string; state: "passing" | "failing" | "pending" | "none"; failing: string[]; total: number } | null;
@@ -3888,7 +4097,20 @@ export class RunController {
     if (this.store.intentCheckStale(runId)) {
       parts.push("the intent check did not complete — nothing has judged the merged tree");
     } else if (intent) {
-      parts.push(intent.verdict === "PASS" ? "intent check passed" : `intent check found ${intent.gaps.length || "unstated"} gap${intent.gaps.length === 1 ? "" : "s"}`);
+      parts.push(
+        intent.verdict === "PASS"
+          ? "intent check passed"
+          : intent.verdict === "UNKNOWN"
+            ? `intent check could not finish (${intent.unchecked.length} unchecked)`
+            : `intent check found ${intent.gaps.length || "unstated"} gap${intent.gaps.length === 1 ? "" : "s"}`
+      );
+    }
+    // What the run's own specification said. Green is one word because it is
+    // the expected case; the other two answers get the sentence, because both
+    // used to be spelled as a pass and read past.
+    const acceptance = this.store.acceptanceVerdict(runId);
+    if (acceptance) {
+      parts.push(acceptance.verdict === "green" ? "acceptance green" : acceptance.verdict === "red" ? `acceptance RED (${acceptance.line})` : `acceptance has no opinion (${acceptance.line})`);
     }
     // Whether any of it reached anyone. This is the end of the cycle, so it goes
     // last: the operator reads left to right and this is the part that decides
@@ -3918,6 +4140,7 @@ export class RunController {
       cancelled,
       total: tasks.length,
       intent,
+      acceptance: acceptance ? { verdict: acceptance.verdict, line: acceptance.line } : null,
       ci,
       mergeable: mergeable ? { state: mergeable.state, baseBranch: mergeable.baseBranch, conflicts: mergeable.conflicts } : null,
       deploy,
@@ -5413,22 +5636,66 @@ export class RunController {
   }
 
   /**
-   * The pit stop between the intent verdict and the first pull request.
+   * What the run can prove about itself at the end of INTEGRATING, and what it
+   * cannot.
    *
-   * It fires on a FAIL whatever the configured interval says (PITSTOP.md S6).
+   * Read in one place and handed to both the closing pit stop and the closing
+   * gate, so the operator is asked about the same list the run is then held
+   * on. Every entry in `unmet` was, in the runs this exists for, a clause in a
+   * sentence that declared the run finished: waf de2cb7aa's closing line read
+   * "1 pull request open for review; 17 never started; CI green; intent check
+   * passed" over a red acceptance suite, and ledger-app a8df0107's read "no
+   * pull requests opened; intent check found 2 gaps". Published every time it
+   * is read, so the reason a run stopped is one query away.
+   */
+  private closingProof(runId: string): ClosingProof {
+    const run = this.store.getRun(runId)!;
+    const unmet: string[] = [];
+    const acceptance = this.store.acceptanceVerdict(runId);
+    if (acceptance && acceptance.verdict !== "green") {
+      unmet.push(`the acceptance gate is ${acceptance.verdict === "red" ? "red" : "without an opinion"}: ${acceptance.line}`);
+    }
+    const merged = this.store.listTasks(runId).some((t) => t.state === "MERGED");
+    if (!merged) {
+      unmet.push("nothing merged, so there is nothing to review");
+    } else if (unmet.length && run.config.holdUntilProven) {
+      // The intent check was not bought over a tree the specification rejects
+      // (see the drive loop), so its absence is a decision, not an unmet
+      // proof. Listing it here would tell the operator to fix two things when
+      // fixing the suite is the one that unlocks the other.
+    } else {
+      const intent = this.store.intentVerdict(runId);
+      if (!intent || this.store.intentCheckStale(runId)) unmet.push("the intent check did not complete — nothing has judged the merged tree");
+      else if (intent.verdict === "FAIL") unmet.push(`the intent check found ${intent.gaps.length || "unstated"} gap${intent.gaps.length === 1 ? "" : "s"}`);
+      else if (intent.verdict === "UNKNOWN") unmet.push(`the intent check could not finish: ${intent.unchecked.length} item${intent.unchecked.length === 1 ? "" : "s"} unchecked`);
+    }
+    const proof = { proven: unmet.length === 0, unmet, held: run.config.holdUntilProven };
+    this.bus.publish({ type: "run.closing_proof", runId, ...proof, ts: Date.now() });
+    return proof;
+  }
+
+  /**
+   * The pit stop between the closing gate and the first pull request.
+   *
+   * It fires whenever the run cannot prove itself, whatever the configured
+   * interval says (PITSTOP.md S6) — a failed intent check, as it always did,
+   * and now a red or opinionless acceptance suite, a check that never finished,
+   * and a run with nothing merged.
    * Run ec40b527's validator was right about a broken endpoint seam and right
    * that it had not looked for more of the same; both facts were printed once,
    * at the end, to a terminal that had scrolled, and were rediscovered by a
    * human hours later. A verdict the operator has to be lucky to read is not a
    * verdict that was delivered.
    */
-  private async closingPitStop(runId: string): Promise<"proceed" | "stop" | "back-to-work"> {
+  private async closingPitStop(runId: string, proof: ClosingProof): Promise<"proceed" | "stop" | "back-to-work"> {
     const run = this.store.getRun(runId)!;
     if (!this.gates.resolvePitStop || run.config.pitStop.every === "never") return "proceed";
-    const verdict = this.store.intentVerdict(runId);
-    if (verdict?.verdict !== "FAIL") return "proceed";
+    if (proof.proven) return "proceed";
     // Only for a verdict nobody has been shown: a resumed run re-entering
-    // integration must not re-open the same pit stop it already answered.
+    // integration must not re-open the same pit stop it already answered. The
+    // verdicts are what the operator is shown — the intent check's and the
+    // acceptance gate's — so "shown" is "a pit stop opened after the newest of
+    // them", not after the newest `run.closing_proof`, which every pass writes.
     //
     // Summoned stops are excluded, and that exclusion is the whole reason this
     // reads `lastUnsummonedPitStopSeq` rather than the event type. An operator
@@ -5436,14 +5703,14 @@ export class RunController {
     // answer, not the verdict — and letting that suppress the closing stop would
     // break the one guarantee this pit stop exists to keep (PITSTOP.md S6:
     // "runs whose closing report is the first sight of a FAIL verdict → 0").
-    if (this.store.lastUnsummonedPitStopSeq(runId) > this.store.lastEventSeq(runId, "run.intent_verdict")) return "proceed";
+    const shown = Math.max(this.store.lastEventSeq(runId, "run.intent_verdict"), this.store.lastEventSeq(runId, "run.acceptance_verdict"));
+    if (this.store.lastUnsummonedPitStopSeq(runId) > shown) return "proceed";
     // This is the pit stop that repeats: "back to work" returns the run to the
-    // same verdict on a tree it has already judged, and one verdict per pass
-    // means the count of them is the count of goes it has had. A person
-    // answering this loop ends it by losing patience; nothing else does, so
-    // past the bound the decision goes to a person whether or not `decidedBy`
-    // names one.
-    const rounds = this.store.eventCount(runId, "run.intent_verdict");
+    // same gate on a tree it has already judged, and one proof per pass means
+    // the count of them is the count of goes it has had. A person answering
+    // this loop ends it by losing patience; nothing else does, so past the
+    // bound the decision goes to a person whether or not `decidedBy` names one.
+    const rounds = this.store.eventCount(runId, "run.closing_proof");
     const spent = rounds > run.config.pitStop.backToWorkRounds;
     if (spent) {
       this.bus.publish({
@@ -5451,12 +5718,12 @@ export class RunController {
         runId,
         sessionId: "pitstop",
         text:
-          `the intent check has come back FAIL ${rounds} times and the run has been sent back to work ${rounds - 1} of them — ` +
+          `the closing gate has held this run ${rounds} times and the run has been sent back to work ${rounds - 1} of them — ` +
           `past ${run.config.pitStop.backToWorkRounds}, so this one is yours to answer`,
         ts: Date.now(),
       });
     }
-    const action = await this.pitStop(runId, { reason: "the intent check came back FAIL", epicIds: [] }, spent);
+    const action = await this.pitStop(runId, { reason: `the run cannot prove itself: ${proof.unmet.join("; ")}`, epicIds: [] }, spent);
     if (action === "stop") return "stop";
     // Redirect and replan both put work back in the queue; continuing from here
     // with tasks pending would open a pull request over an unfinished tree.

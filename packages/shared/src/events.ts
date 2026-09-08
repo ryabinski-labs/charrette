@@ -177,6 +177,14 @@ export const HarnessEvent = z.discriminatedUnion("type", [
   z.object({
     ...base,
     type: z.literal("run.acceptance_verdict"),
+    /**
+     * Green, red, or no opinion. A spec with no gating scenario, or whose every
+     * gating scenario is blocked on an unanswered question, proves nothing —
+     * and for a while that was spelled `passed: true`, which is how both runs
+     * in issue #115 walked through this gate. `passed` stays on the event for
+     * readers that predate the third answer; it is true only for green.
+     */
+    verdict: z.enum(["green", "red", "no-opinion"]).optional(),
     passed: z.boolean(),
     failing: z.array(z.string()).default([]),
     /** False when the suite went red and its output named no scenario. */
@@ -184,7 +192,30 @@ export const HarnessEvent = z.discriminatedUnion("type", [
     blocked: z.array(z.string()).default([]),
     line: z.string().default(""),
   }),
-  z.object({ ...base, type: z.literal("run.intent_verdict"), verdict: z.enum(["PASS", "FAIL"]), gaps: z.array(z.string()).default([]), summary: z.string().default("") }),
+  /**
+   * PASS, FAIL, or UNKNOWN. The third answer is for what the turn budget did
+   * not reach: a validator with no way to abstain resolves "I ran out of turns"
+   * as a PASS with the unchecked items listed underneath, where nothing reads
+   * them — waf de2cb7aa closed on exactly that verdict. `unchecked` is what an
+   * UNKNOWN could not settle, in the validator's words.
+   */
+  z.object({
+    ...base,
+    type: z.literal("run.intent_verdict"),
+    verdict: z.enum(["PASS", "FAIL", "UNKNOWN"]),
+    gaps: z.array(z.string()).default([]),
+    unchecked: z.array(z.string()).default([]),
+    summary: z.string().default(""),
+  }),
+  /**
+   * What the closing gate decided, every time it decides. `unmet` is the list
+   * of things the run could not prove — an acceptance suite that is red, an
+   * intent check that failed or never finished, a run with nothing to review —
+   * and it is empty exactly when the run may report itself in review. On the
+   * log rather than derived, so the reason a run is BLOCKED is one query away
+   * from anyone watching it.
+   */
+  z.object({ ...base, type: z.literal("run.closing_proof"), proven: z.boolean(), unmet: z.array(z.string()).default([]), held: z.boolean().default(true) }),
   /**
    * The intent check ran and produced no verdict — the third answer the run
    * had no way to record.

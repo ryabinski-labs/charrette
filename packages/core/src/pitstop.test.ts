@@ -219,6 +219,16 @@ describe("the report the operator reads", () => {
     expect(md).toContain("- the pack endpoint is singular on one side");
   });
 
+  it("prints an abstaining intent verdict as what was not checked, never as a pass", () => {
+    const md = renderPitStop({ ...STOP, intent: { verdict: "UNKNOWN", gaps: [], unchecked: ["whether the poller is scheduled"], summary: "" } });
+
+    expect(md).toContain("**UNKNOWN** — the validator ran out of turns before it could judge the tree; not checked:");
+    expect(md).toContain("- whether the poller is scheduled");
+    expect(md).not.toContain("PASS");
+    // A stop recorded before `unchecked` existed still renders.
+    expect(renderPitStop({ ...STOP, intent: { verdict: "UNKNOWN", gaps: [], summary: "" } })).toContain("**UNKNOWN**");
+  });
+
   it("prints a passing intent verdict with its summary", () => {
     const md = renderPitStop({ ...STOP, intent: { verdict: "PASS", gaps: [], summary: "everything asked for is there" } });
 

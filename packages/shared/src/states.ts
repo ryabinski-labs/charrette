@@ -8,6 +8,16 @@ export const RunState = z.enum([
   "EXECUTING",
   "INTEGRATING",
   "PR_REVIEW",
+  // The run reached the end of INTEGRATING and could not prove itself: the
+  // acceptance suite is red or has no opinion, the intent check failed or could
+  // not finish, or nothing merged so there is no pull request to review. Its
+  // own state rather than PR_REVIEW with a sad reason string, because the two
+  // are different requests of the operator. PR_REVIEW asks them to review;
+  // this asks them for help, and it must read that way on the dashboard, in
+  // `harness status` and in the notification. waf de2cb7aa and ledger-app
+  // a8df0107 both reported themselves in review over a red acceptance suite
+  // (issue #115); this is the state they should have landed in.
+  "BLOCKED",
   // The human merged the pull request. Everything past here is about the world
   // rather than the repo: did the merge deploy, and does the deployed thing do
   // what was asked? A run that stops at PR_REVIEW has shipped nothing.
@@ -93,11 +103,16 @@ export const RUN_TRANSITIONS: Record<RunState, RunState[]> = {
   // between the verdict and the first pull request. An operator who reads that
   // verdict and asks for the gap to be fixed has to be able to send the run back
   // to work — the alternative is closing it and starting another.
-  INTEGRATING: ["PR_REVIEW", "EXECUTING", "PAUSED", "BUDGET_HOLD", "LIMIT_HOLD", "FAILED", "ABORTED"],
+  INTEGRATING: ["PR_REVIEW", "BLOCKED", "EXECUTING", "PAUSED", "BUDGET_HOLD", "LIMIT_HOLD", "FAILED", "ABORTED"],
   // A finished run is not a dead run: `resume` reopens it when tasks parked
   // (back to EXECUTING via the escalation gate) or merged work never got its
   // pull requests (back to INTEGRATING to retry them).
   PR_REVIEW: ["EXECUTING", "INTEGRATING", "VERIFYING"],
+  // The same two doors as PR_REVIEW, and for the same reason: what blocked the
+  // run is something the operator fixes — a scenario, a question, a parked
+  // task — and `resume` is how the run is asked to look again. Never straight
+  // to PR_REVIEW: the gates it failed are the gates it has to pass.
+  BLOCKED: ["EXECUTING", "INTEGRATING", "ABORTED"],
   // A run stays in VERIFYING while the deploy is red or production disagrees:
   // both are states the operator has to act on, and neither is the harness's to
   // guess at. `resume` re-enters verification, so fixing the deploy and running

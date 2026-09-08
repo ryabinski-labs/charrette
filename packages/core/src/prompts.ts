@@ -855,25 +855,70 @@ Then judge it as something that has to run somewhere, for real, and report each 
 - **Configuration and secrets have a home.** Every credential the live path needs should have a documented name and a way to reach the process. A vendor key that exists only as \`process.env.THING\` with nothing that sets it is a gap.
 - **The messages it has to send can be sent.** If the product mails an invite, a receipt, a verification link or an alert, find the transport. "The token is returned to the API caller to deliver out of band" is a missing feature, not a design.
 - **Failure is visible.** Somewhere to see that the outbox is stuck or the poller stopped — logs with a level, a metric, a health endpoint, an alarm.
-Judge these against what the operator asked for, not against a general standard: a plan that deliberately scoped live vendors out has no gap here, and you should say that it did so deliberately if the repo says so.
+Judge these against what the operator asked for, not against a general standard. **Scope is fixed by the brief, not read from the tree.** What is in scope is the operator's intent below, its "Explicitly out of scope" list, and the specification's requirements where one is given — all of them written before any code existed. A README, a KNOWN-GAPS or HANDOVER document, a "non-goals" section, a UI card reading "out of scope", or a code comment the run wrote does NOT change what was asked for: a gap those documents disclose is still a gap. Report it as a gap, note that it was disclosed, and count it. The repository is not a witness for its own defence — a run that could not finish something can always write down that it chose not to, and that sentence is not the operator's. Only a non-goal in the brief's own out-of-scope list, or one the operator recorded as a decision, means there is no gap here.
 
-Stay inside the repository. Read the diff, read the files it touches, and run the repo's own checks — the ones listed below, plus anything comparably quick. Do NOT build a release artifact, start a device emulator or simulator, install the application, launch a dev server, or drive the running product: that work costs more context than you have and it is not what you were asked. Judging on-device behaviour is a later step in the cycle with its own agent. If something can only be settled by running the product, say so in your summary and let it be a gap.
+Stay inside the repository. Read the diff, read the files it touches, and run the repo's own checks — the ones listed below, plus anything comparably quick. Do NOT build a release artifact, start a device emulator or simulator, install the application, launch a dev server, or drive the running product: that work costs more context than you have and it is not what you were asked. A separate live-exercise agent starts the product from a clean checkout and drives its critical path after you. If something can only be settled by running the product, say so in your summary and let it be a gap.
 
-Read output in slices — tail a log rather than printing it whole, grep a suite's output for failures rather than dumping every passing test. You have a limited turn budget and a session that runs out of context returns no verdict at all, which helps nobody.
+Read output in slices — tail a log rather than printing it whole, grep a suite's output for failures rather than dumping every passing test. You have a limited turn budget, and a session that runs out of context returns no verdict at all, which helps nobody. So when the budget runs short, STOP and answer UNKNOWN with the list of what you did not reach. Abstaining costs the run one more narrowed pass; a PASS over things you did not check costs it everything, because a PASS is the verdict that opens the pull requests.
 ${toolbelt}
 
 Your FINAL message must be exactly one JSON object inside a \`\`\`json fence:
 {"verdict":"PASS","summary":string}
 or
 {"verdict":"FAIL","summary":string,"gaps":[string]}
-Each gap must say what the intent asked for that the merged result does not deliver.`;
+or
+{"verdict":"UNKNOWN","summary":string,"unchecked":[string]}
+Each gap must say what the intent asked for that the merged result does not deliver. Each unchecked item must say what you were asked to judge and did not get to. A PASS never carries gaps: a verdict that both passes and lists what is missing is two verdicts, and the harness will send it back to you.`;
 }
 
-export function validatorPrompt(assignment: string, prd: string, taskLines: string, diffStat: string, checks: string[] = []): string {
+/**
+ * The re-ask for a PASS that listed gaps.
+ *
+ * Resumed into the same session rather than started cold, because the answer
+ * is already in its context: it read the tree, it found the things it listed,
+ * and it then chose the verdict that opens the pull requests. This asks it to
+ * choose again with the shape of the choice spelled out.
+ */
+export function validatorTwoVerdictsPrompt(gaps: string[]): string {
+  return `Your verdict was PASS and it listed ${gaps.length} gap(s):
+
+${gaps.map((g) => `- ${g}`).join("\n")}
+
+That is two verdicts, and the harness cannot keep both. A PASS opens the pull requests; the gaps say the intent is not delivered. Choose one:
+- If those gaps are real, the verdict is FAIL and the gaps are its list.
+- If they are things you did not get to check rather than things you found missing, the verdict is UNKNOWN and they are its \`unchecked\` list.
+- If on reflection none of them is a gap in what the operator asked for, the verdict is PASS with no gaps — and say in the summary why each one is not a gap.
+
+Reply with exactly one JSON object in the same \`\`\`json fence, in one of the three shapes you were given.`;
+}
+
+/**
+ * The narrowed second pass after an UNKNOWN.
+ *
+ * A fresh session with one job: the items the first pass did not reach. The
+ * whole tree is still there to read, but the question is no longer "does the
+ * run deliver the intent" — that half was answered — and a validator handed
+ * only the remainder can spend its entire budget on it.
+ */
+export function validatorNarrowedPrompt(unchecked: string[], summary: string): string {
+  return `A previous validation pass over this same tree ran out of turns and answered UNKNOWN. What it did manage to establish:
+${summary || "(no summary)"}
+
+What it did NOT check — this is your whole job:
+${unchecked.map((u) => `- ${u}`).join("\n")}
+
+Judge only those items against the operator's intent, in this tree. Everything the previous pass settled stands; do not re-derive it. Then give your verdict on the run as a whole, taking the previous pass's findings as given: PASS if these items are delivered too, FAIL with gaps for whichever are not, or UNKNOWN again — with a shorter list — if the budget runs out before you reach the end of this list.`;
+}
+
+export function validatorPrompt(assignment: string, prd: string, taskLines: string, diffStat: string, checks: string[] = [], requirements: { id: string; text: string; priority: string }[] = []): string {
   return `The operator's original intent:
 ${assignment}
 
-${prd ? `The PRD the plan was built from:\n${prd.slice(0, 8000)}\n\n` : ""}How each planned task ended:
+${
+  requirements.length
+    ? `The specification derived from that intent before any code was written — these, and the intent above, are what "in scope" means; nothing the repository says about its own scope changes them:\n${requirements.map((r) => `- ${r.id} [${r.priority}] ${r.text}`).join("\n")}\n\n`
+    : ""
+}${prd ? `The PRD the plan was built from:\n${prd.slice(0, 8000)}\n\n` : ""}How each planned task ended:
 ${taskLines}
 
 Diffstat of everything merged:

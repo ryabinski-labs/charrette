@@ -565,7 +565,7 @@ describe("the acceptance gate", () => {
     await controller.startRun("build a checkout", RunConfig.parse(BASE), operator());
 
     const runId = store.listRuns()[0]!.id;
-    expect(store.acceptanceVerdict(runId)).toMatchObject({ passed: true, failing: [] });
+    expect(store.acceptanceVerdict(runId)).toMatchObject({ verdict: "green", failing: [] });
     expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
   });
 
@@ -589,7 +589,7 @@ describe("the acceptance gate", () => {
 
     const runId = store.listRuns()[0]!.id;
     const verdict = store.acceptanceVerdict(runId)!;
-    expect(verdict.passed).toBe(false);
+    expect(verdict.verdict).toBe("red");
     // The suite said nothing about which scenario, so nothing is claimed.
     expect(verdict.named).toBe(false);
     expect(events.some((e) => e.type === "agent.log" && e.text.startsWith("acceptance:"))).toBe(true);
@@ -672,9 +672,13 @@ describe("the acceptance gate", () => {
     await controller.startRun("build a checkout", RunConfig.parse({ ...BASE, spec: { gateRounds: 1 } }), operator());
 
     const runId = store.listRuns()[0]!.id;
-    // One round of fixes, then the run reports rather than looping forever.
+    // One round of fixes, then the run stops rather than looping forever — and
+    // stops in BLOCKED, not in review: a red suite with the rounds spent is the
+    // run asking for help, which is what waf de2cb7aa should have done instead
+    // of reporting "in review" over 27 unproven scenarios (issue #117).
     expect(store.listTasks(runId).filter((t) => t.id.startsWith("spec-fix-2-"))).toEqual([]);
-    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    expect(store.getRun(runId)!.state).toBe("BLOCKED");
+    expect(store.lastRunStateChange(runId)!.reason).toContain("the acceptance gate is red");
   });
 
   it("reports without queuing anything when the operator set no rounds", async () => {
@@ -686,7 +690,7 @@ describe("the acceptance gate", () => {
 
     const runId = store.listRuns()[0]!.id;
     expect(store.listTasks(runId).some((t) => t.id.startsWith("spec-fix-"))).toBe(false);
-    expect(store.acceptanceVerdict(runId)!.passed).toBe(false);
+    expect(store.acceptanceVerdict(runId)!.verdict).toBe("red");
   });
 
   /**
@@ -702,7 +706,7 @@ describe("the acceptance gate", () => {
     await controller.startRun("build a checkout", RunConfig.parse({ ...BASE, spec: { gateRounds: 0 } }), operator());
 
     const verdict = store.acceptanceVerdict(store.listRuns()[0]!.id)!;
-    expect(verdict.passed).toBe(false);
+    expect(verdict.verdict).toBe("red");
     expect(verdict.line).toContain("named no command");
   });
 

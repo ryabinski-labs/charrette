@@ -155,6 +155,10 @@ const logs = (events: HarnessEvent[]) => events.filter((e): e is HarnessEvent & 
 // the stage it is aimed at. The forge's own stage has the same rethrow test
 // in skillForgeRun.test.ts.
 const BASE = { deterministicChecks: [] as string[], waitForChecks: false, skillForge: { enabled: false } };
+// The pull-request body cases open a PR over a FAIL or an unanswered intent
+// check, which the closing gate no longer allows — so those run with the hold
+// off. What the hold does is closingProof.test.ts's subject.
+const UNHELD = { ...BASE, holdUntilProven: false };
 
 describe("a budget stop reaching each stage that must let it through", () => {
   /**
@@ -379,7 +383,7 @@ describe("the pull request's title and body", () => {
 
     // The gap is a fixture for the singular wording, not work to do: without
     // this the harness queues a task to close it and the counts stop being one.
-    await controller.startRun("add rate limiting to the API\nand nothing else", RunConfig.parse({ ...BASE, intentFixRounds: 0 }));
+    await controller.startRun("add rate limiting to the API\nand nothing else", RunConfig.parse({ ...UNHELD, intentFixRounds: 0 }));
 
     expect(created[0]!.title).toContain("add rate limiting to the API");
     // One task, one gap: both singular.
@@ -415,7 +419,7 @@ describe("the pull request's title and body", () => {
     });
     const { controller } = build({ repoPath: dir, pool, github: adapter });
 
-    await controller.startRun("roll the edge fleet", RunConfig.parse({ ...BASE, intentFixRounds: 0 }));
+    await controller.startRun("roll the edge fleet", RunConfig.parse({ ...UNHELD, intentFixRounds: 0 }));
 
     expect(created[0]!.draft).toBe(true);
     expect(flippedReady).toBe(false);
@@ -455,7 +459,7 @@ describe("the pull request's title and body", () => {
     });
     const { controller } = build({ repoPath: dir, pool, github: adapter });
 
-    await controller.startRun("move session revocation to its own table", RunConfig.parse({ ...BASE, intentFixRounds: 0 }));
+    await controller.startRun("move session revocation to its own table", RunConfig.parse({ ...UNHELD, intentFixRounds: 0 }));
 
     // The intent check PASSED. The hold comes from the unverified list alone —
     // if it did not, this run would ship exactly the way dns-project's did.
@@ -479,7 +483,7 @@ describe("the pull request's title and body", () => {
     });
     const { controller, events } = build({ repoPath: dir, pool, github: adapter });
 
-    await controller.startRun("move session revocation to its own table", RunConfig.parse({ ...BASE, intentFixRounds: 0 }));
+    await controller.startRun("move session revocation to its own table", RunConfig.parse({ ...UNHELD, intentFixRounds: 0 }));
 
     expect(created[0]!.body).toMatch(/Passed but \*\*not verified\*\* — 2 criteria/);
     expect(created[0]!.body).toContain("the manifest was never applied");
@@ -510,7 +514,7 @@ describe("the pull request's title and body", () => {
     });
     const { controller, store } = build({ repoPath: dir, pool, github: adapter });
 
-    const runId = await controller.startRun("move session revocation to its own table", RunConfig.parse({ ...BASE, intentFixRounds: 0 }));
+    const runId = await controller.startRun("move session revocation to its own table", RunConfig.parse({ ...UNHELD, intentFixRounds: 0 }));
 
     expect(store.intentCheckStale(runId)).toBe(true);
     expect(controller.outcome(runId).line).toContain("the intent check did not complete");
@@ -551,7 +555,7 @@ describe("the pull request's title and body", () => {
     });
     const { controller, store } = build({ repoPath: dir, pool, github: adapter });
 
-    const runId = await controller.startRun("wire up the disbursement worker", RunConfig.parse({ ...BASE, intentFixRounds: 1 }));
+    const runId = await controller.startRun("wire up the disbursement worker", RunConfig.parse({ ...UNHELD, intentFixRounds: 1 }));
 
     // Both passes happened: a verdict is on record, and so is a later failure.
     expect(endOfRun).toBeGreaterThan(1);
@@ -597,7 +601,7 @@ describe("the pull request's title and body", () => {
     });
     const { controller } = build({ repoPath: dir, pool, github: adapter });
 
-    await controller.startRun("move session revocation to its own table", RunConfig.parse({ ...BASE, intentFixRounds: 0 }));
+    await controller.startRun("move session revocation to its own table", RunConfig.parse({ ...UNHELD, intentFixRounds: 0 }));
 
     const body = created[0]!.body;
     // The count is still reported in full — what is bounded is how many lines
@@ -626,7 +630,7 @@ describe("the pull request's title and body", () => {
     });
     const { controller } = build({ repoPath: dir, pool, github: adapter });
 
-    await controller.startRun("roll the edge fleet", RunConfig.parse({ ...BASE, intentFixRounds: 0 }));
+    await controller.startRun("roll the edge fleet", RunConfig.parse({ ...UNHELD, intentFixRounds: 0 }));
 
     expect(flippedReady).toBe(true);
   });
@@ -645,7 +649,7 @@ describe("the pull request's title and body", () => {
     });
     const { controller } = build({ repoPath: dir, pool, github: adapter });
 
-    await controller.startRun("build a thing", RunConfig.parse(BASE));
+    await controller.startRun("build a thing", RunConfig.parse(UNHELD));
 
     expect(created[0]!.title.length).toBeLessThanOrEqual(80);
     expect(created[0]!.title.endsWith("…")).toBe(true);
@@ -666,7 +670,7 @@ describe("the pull request's title and body", () => {
     });
     const { controller, store } = build({ repoPath: dir, pool, github: adapter });
 
-    const runId = await controller.startRun("build a thing", RunConfig.parse(BASE));
+    const runId = await controller.startRun("build a thing", RunConfig.parse(UNHELD));
 
     expect(created[0]!.body).toMatch(/unstated gaps/);
     expect(controller.outcome(runId).line).toContain("intent check found unstated gaps");

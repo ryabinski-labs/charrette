@@ -188,7 +188,8 @@ async function build(github: GitHubAdapter, agents: AgentPool, repo: string, ove
   // a conflicting or behind pull request is greenHold.test.ts's subject.
   const runId = await controller.startRun(
     "do a thing",
-    RunConfig.parse({ deterministicChecks: [], checkTimeoutMinutes: 1, deployTimeoutMinutes: 1, holdUntilGreen: false, ...(over.baseBranch ? { baseBranch: over.baseBranch } : {}) })
+    // `holdUntilProven` is off too: nothing here answers the validator, and what the closing gate does with that is closingProof.test.ts's subject.
+    RunConfig.parse({ deterministicChecks: [], checkTimeoutMinutes: 1, deployTimeoutMinutes: 1, holdUntilGreen: false, holdUntilProven: false, ...(over.baseBranch ? { baseBranch: over.baseBranch } : {}) })
   );
   return { store, bus, runId, logs, controller };
 }

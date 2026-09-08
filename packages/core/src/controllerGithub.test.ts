@@ -334,7 +334,9 @@ describe("an operator answering in the issue thread", () => {
     });
     const { controller, store } = build({ repoPath: dir, pool, github: gh.adapter });
 
-    const runId = await controller.startRun("build a thing", RunConfig.parse({ deterministicChecks: [], waitForChecks: false }));
+    // Hold off: with it on, an unanswered check holds the run in BLOCKED and no
+    // pull request opens at all.
+    const runId = await controller.startRun("build a thing", RunConfig.parse({ deterministicChecks: [], waitForChecks: false, holdUntilProven: false }));
 
     expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
   });
@@ -393,7 +395,9 @@ describe("pull requests per task", () => {
     });
     const { controller } = build({ repoPath: dir, pool, github: gh.adapter });
 
-    await controller.startRun("build a thing", RunConfig.parse({ deterministicChecks: [], waitForChecks: false }));
+    // Hold off: with it on, an unanswered check holds the run in BLOCKED and
+    // no pull request opens at all.
+    await controller.startRun("build a thing", RunConfig.parse({ deterministicChecks: [], waitForChecks: false, holdUntilProven: false }));
 
     expect(gh.prsCreated).toBe(1);
   });

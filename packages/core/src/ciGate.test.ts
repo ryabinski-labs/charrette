@@ -997,7 +997,8 @@ describe("a branch that went red after the run stood down", () => {
     const repo = repoWithOrigin();
     const { adapter, setChecks } = fakeGitHub([{ state: "failing", failing: ["test"], total: 3 }]);
     const { store, runId, controller } = await build(adapter, pool({ qaFails: true }), repo);
-    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    // Nothing merged: the closing gate holds it rather than calling it in review.
+    expect(store.getRun(runId)!.state).toBe("BLOCKED");
     expect(store.ciStatus(runId)).toBeNull();
 
     setChecks([{ state: "failing", failing: ["test"], total: 3 }]);

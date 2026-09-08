@@ -262,7 +262,9 @@ describe("a run configured for production with no pull request", () => {
 
     const runId = await controller.startRun(
       "build a thing",
-      RunConfig.parse({ ...BASE, prodUrl: "https://app.example.com", workerRespawnCap: 1 })
+      // Hold off, so the run reaches review with nothing merged — the shape
+      // this guard exists for. With the hold on it stops in BLOCKED first.
+      RunConfig.parse({ ...BASE, prodUrl: "https://app.example.com", workerRespawnCap: 1, holdUntilProven: false })
     );
 
     // Nothing merged, so no rollup pull request, so nothing deployed to ask about.

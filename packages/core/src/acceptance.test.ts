@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { z } from "zod";
 import { RunSpec, blockingQuestions, gating, type SpecScenario } from "@harness/shared";
-import { acceptanceVerdict, failingScenarios, scenarioCommand, scenarioProbeCommand, specCoverage, suiteRunFrom } from "./acceptance.js";
+import { acceptanceVerdict, blockingQuestionsFor, failingScenarios, scenarioCommand, scenarioProbeCommand, specCoverage, suiteRunFrom } from "./acceptance.js";
 
 const scenario = (over: Partial<SpecScenario> & { id: string }): SpecScenario =>
   ({ requirement: "REQ-001", title: "", level: "unit", priority: "P0", oracle: "", testRef: "", blocked: false, ...over }) as SpecScenario;
@@ -119,11 +119,11 @@ describe("the verdict", () => {
    */
   it("takes the answer from the exit code, never from the ids it could read", () => {
     const green = acceptanceVerdict(spec(), { exitCode: 0, output: "FAILED is a word in this fixture" });
-    expect(green.passed).toBe(true);
+    expect(green.verdict).toBe("green");
     expect(green.failing).toEqual([]);
 
     const red = acceptanceVerdict(spec(), { exitCode: 1, output: "everything looks fine" });
-    expect(red.passed).toBe(false);
+    expect(red.verdict).toBe("red");
   });
 
   /**
@@ -132,7 +132,7 @@ describe("the verdict", () => {
    */
   it("says the output named no scenario rather than implying the rest passed", () => {
     const v = acceptanceVerdict(spec(), { exitCode: 1, output: "SyntaxError: unexpected token" });
-    expect(v.passed).toBe(false);
+    expect(v.verdict).toBe("red");
     expect(v.named).toBe(false);
     expect(v.failing).toEqual([]);
     expect(v.line).toContain("named no scenario");
@@ -188,7 +188,7 @@ describe("the verdict", () => {
 
   it("counts a suite that could not be run as unproven, never as passing", () => {
     const v = acceptanceVerdict(spec(), { exitCode: 0, output: "", error: "no test framework detected" });
-    expect(v.passed).toBe(false);
+    expect(v.verdict).toBe("red");
     expect(v.named).toBe(false);
     expect(v.line).toContain("could not be run (no test framework detected)");
     expect(v.line).toContain("unproven, not passing");
@@ -197,7 +197,7 @@ describe("the verdict", () => {
   it("reports a green run, and says what is still blocked alongside it", () => {
     const s = spec({ scenarios: [scenario({ id: "SC-001" }), scenario({ id: "SC-002", blocked: true })] });
     const v = acceptanceVerdict(s, { exitCode: 0, output: "  ✓ SC-001" });
-    expect(v.passed).toBe(true);
+    expect(v.verdict).toBe("green");
     expect(v.blocked).toEqual(["SC-002"]);
     expect(v.line).toBe("1 gating scenario(s) green, 1 still blocked on an unanswered question");
   });
@@ -208,8 +208,44 @@ describe("the verdict", () => {
    */
   it("does not claim a specification with no gating scenario proved anything", () => {
     const v = acceptanceVerdict(spec({ scenarios: [scenario({ id: "SC-001", priority: "P2" })] }), { exitCode: 0, output: "" });
-    expect(v.passed).toBe(true);
+    expect(v.verdict).toBe("no-opinion");
     expect(v.line).toContain("declares no gating scenario, so nothing here was proven either way");
+  });
+
+  it("carries the tail of a red suite's output, and nothing of a green one's", () => {
+    const red = acceptanceVerdict(spec(), { exitCode: 1, output: "x".repeat(5000) + "TAIL" });
+    expect(red.output.endsWith("TAIL")).toBe(true);
+    expect(red.output.length).toBe(4000);
+    expect(acceptanceVerdict(spec(), { exitCode: 0, output: "all fine" }).output).toBe("");
+    expect(acceptanceVerdict(spec(), { exitCode: 1, output: "boom", error: "no runner" }).output).toBe("boom");
+  });
+
+  /**
+   * A blocked scenario carries no question of its own — its requirement does —
+   * and the operator has to be asked the question, not shown the id.
+   */
+  it("names the open question behind each blocked scenario, and says when there is none", () => {
+    const s = spec({
+      requirements: [
+        { id: "REQ-001", text: "take payment", priority: "P0", blockedBy: ["OQ-1"] },
+        { id: "REQ-002", text: "orphan", priority: "P0", blockedBy: [] },
+        { id: "REQ-003", text: "twice", priority: "P0", blockedBy: ["OQ-1", "OQ-missing"] },
+      ],
+      openQuestions: [{ id: "OQ-1", question: "Real Stripe account, or sandbox?", detail: "", blocks: ["REQ-001"] }],
+      scenarios: [
+        scenario({ id: "SC-001", requirement: "REQ-001", blocked: true }),
+        scenario({ id: "SC-002", requirement: "REQ-002", blocked: true }),
+        scenario({ id: "SC-003", requirement: "REQ-003", blocked: true }),
+        scenario({ id: "SC-004", requirement: "REQ-nope", blocked: true }),
+      ],
+    });
+    expect(blockingQuestionsFor(s, ["SC-001", "SC-002", "SC-003", "SC-004", "SC-001", "SC-999"])).toEqual([
+      "SC-001 waits on: Real Stripe account, or sandbox?",
+      "SC-002 is blocked and names no question",
+      "SC-003 waits on: Real Stripe account, or sandbox? / OQ-missing",
+      "SC-004 is blocked and names no question",
+      "SC-999 is blocked and names no question",
+    ]);
   });
 
   it("says so when every gating scenario is blocked", () => {

@@ -215,12 +215,13 @@ flowchart LR
 
 ### 11.2 Run Lifecycle State Machine
 
-Run states: `CREATED → PLANNING → PLAN_REVIEW (Gate 1) → EXECUTING → INTEGRATING → PR_REVIEW (Gate 2, terminal-for-harness)`; cross-cutting: `PAUSED`, `BUDGET_HOLD`, `FAILED`, `ABORTED`.
+Run states: `CREATED → PLANNING → PLAN_REVIEW (Gate 1) → EXECUTING → INTEGRATING → PR_REVIEW (Gate 2, terminal-for-harness)`, or `INTEGRATING → BLOCKED` when the run cannot prove itself; cross-cutting: `PAUSED`, `BUDGET_HOLD`, `FAILED`, `ABORTED`.
 
 - `CREATED → PLANNING`: user submits assignment; planner agent drafts PRD + DAG.
 - `PLANNING → PLAN_REVIEW`: PRD committed to repo branch, issues *drafted* (not yet filed). **Gate 1**: user approves/edits/rejects in dashboard. Approve → issues filed on GitHub → `EXECUTING`. Reject-with-feedback → back to `PLANNING`.
 - `EXECUTING`: scheduler dispatches ready tasks; per-task sub-machine below. Integration is **continuous** — the integrator merges each `ACCEPTED` branch into the run branch and opens its PR as it lands (see Integrator, §11.1) — so `INTEGRATING` as a run state means "all tasks terminal, final merges/PRs draining", not a separate phase where integration first begins.
 - `INTEGRATING → PR_REVIEW`: last PRs opened, and — with `holdUntilGreen` (the default) — only once the repo's own CI is green on the rollup PR and GitHub reports it mergeable (no conflicts, not behind its base). A red check is fix work (`ciFixRounds`), a moved base is a reconcile, and when the run has spent what it may spend on its own it holds at a pit stop or pauses with the reason on the record; `harness resume` is the grant. **Gate 2**: humans review/merge on GitHub; the harness never merges. The run is complete from the harness's perspective; a background poller updates PR merge status for the board.
+- `INTEGRATING → BLOCKED`: the task list emptied and the run could not prove the product — the acceptance suite is red or has no opinion, the intent check returned FAIL or UNKNOWN or never finished, or nothing merged so there is no pull request to review. With `holdUntilProven` (the default) no pull request opens and the run does not enter `PR_REVIEW`; the unmet list goes on the transition, the closing line, the notification and a `run.closing_proof` event. A run ends when the product is proven, not when the scheduler runs dry (issue #115). `harness resume` re-enters the gates from `BLOCKED`.
 - Any state → `PAUSED` (user) or `BUDGET_HOLD` (cap hit): in-flight agent turns finish (SDK interrupt after a 60s grace), no new dispatch. Resume returns to the prior state.
 - `FAILED` only when the run cannot proceed without restructuring (e.g., planner cannot produce a valid DAG after retries); individual task failure does *not* fail the run — it parks the task in `NEEDS_HUMAN` and continues independent branches of the DAG.
 
