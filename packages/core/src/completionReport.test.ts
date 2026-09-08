@@ -50,7 +50,48 @@ const report = (over: Partial<CompletionReport> = {}): CompletionReport => ({
   // And null here means nothing started the product, which the page says in
   // those words — see the "Exercised" cases.
   live: null,
+  // Null for a run with no specification, which promised nothing in the
+  // vocabulary the Scope section is written in.
+  scope: null,
   ...over,
+});
+
+describe("what became of what you asked for", () => {
+  const scope = (over: Partial<NonNullable<CompletionReport["scope"]>> = {}) => ({ shipped: 2, writtenOff: [], dropped: [], unclaimed: [], ...over });
+
+  it("says nothing at all for a run that was never specified", () => {
+    expect(renderCompletionReport(report())).not.toContain("What became of what you asked for");
+  });
+
+  it("counts the four states, and prints your own words for what you wrote off", () => {
+    const html = renderCompletionReport(
+      report({
+        scope: scope({
+          writtenOff: [{ id: "REQ-2", text: "email a receipt", answer: "next run" }],
+          dropped: [{ id: "REQ-3", text: "refunds", why: "task-c CANCELLED (unreachable: dependencies parked)" }],
+          unclaimed: [{ id: "REQ-4", text: "a nicer button" }],
+        }),
+      })
+    );
+    expect(html).toContain("Requirements, not tasks");
+    expect(html).toContain("REQ-2 — email a receipt — your answer: next run");
+    expect(html).toContain("Dropped without a decision:");
+    expect(html).toContain("task-c CANCELLED (unreachable: dependencies parked)");
+    expect(html).toContain("REQ-4 — a nicer button");
+  });
+
+  it("prints the counts without the lists when there is nothing to list", () => {
+    const html = renderCompletionReport(report({ scope: scope() }));
+    expect(html).toContain("What became of what you asked for");
+    expect(html).not.toContain("Written off:");
+    expect(html).not.toContain("Dropped without a decision:");
+    expect(html).not.toContain("Never claimed by any task:");
+  });
+
+  it("omits the provenance of a dropped requirement no task ever touched", () => {
+    const html = renderCompletionReport(report({ scope: scope({ dropped: [{ id: "REQ-9", text: "a thing", why: "" }] }) }));
+    expect(html).toContain("REQ-9 — a thing");
+  });
 });
 
 describe("what happened when someone used it", () => {

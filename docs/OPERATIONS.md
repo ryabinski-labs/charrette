@@ -158,6 +158,30 @@ before any code existed — a `KNOWN-GAPS.md`, a "non-goals" section or an
 "out of scope" card the run wrote for itself does not change what was asked for;
 a gap those documents disclose is still a gap, reported as disclosed.
 
+Alongside those, the run reconciles **requirements** rather than tasks. A
+cancelled task's requirement used to go nowhere — waf cancelled 177 tasks
+against 377 merged and carried none of their requirements anywhere; they
+stopped existing and came back as sections in a 118 KB gaps file. Now each
+requirement the brief named ends in one of four states: **shipped** (a task that
+claimed it merged), **written off** (it will not ship and you said so),
+**dropped** (every task that claimed it was cancelled or parked and nobody was
+asked), or **unclaimed** (no task ever took it on). The closing gate holds a run
+whose P0/P1 requirements are in the last two states, and names them. Answering
+"continue" at the closing pit stop *is* the write-off: the answer is recorded
+against each requirement as a `run.scope_written_off` event, so the run does not
+stop twice for one decision and the completion report can print what you said.
+A re-plan says which requirements it stops covering before it cancels anything.
+
+Every pit stop also measures **what the run has written about what it did not
+build**: the size of documents whose subject is gaps (`KNOWN-GAPS`, `HANDOVER`,
+`limitations`, `future-work` and the like) and the lines anywhere in the diff
+that record something as deliberately undone. Past roughly 16 KB of the first or
+40 of the second you are asked one question, while there is budget to answer it
+with: buy the work, or accept the gaps. It is a signal and never a gate — some
+of those documents are exactly what a good handover looks like, and only you can
+tell the difference. waf's was 118.6 KB across 27 sections and nobody was asked
+until the run was over.
+
 Before any of that, the plan is sequenced around the same path. The planner is
 told the critical path and marks the tasks that make it run end to end, however
 crudely, as the **walking skeleton**; dispatch then holds every other task behind

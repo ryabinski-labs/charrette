@@ -534,6 +534,48 @@ describe("what the specification proves, on the finished page", () => {
   });
 
   /**
+   * The other half of the same question: proof asks whether a promise is
+   * checked, scope asks whether anyone ever delivered it. A run can ship a
+   * requirement whose scenario is red, and the operator needs both readings.
+   */
+  it("sorts every requirement into what became of it, and carries the write-off answer through", () => {
+    const { store, bus } = run();
+    bus.publish({ type: "run.spec_ready", runId: "run-1", spec: SPEC, ts: 1 });
+    task(store, { id: "shipped-it", state: "MERGED", scenarioIds: ["SC-001"] });
+    task(store, { id: "gave-up", state: "CANCELLED", scenarioIds: ["SC-002"], errorSummary: "unreachable: dependencies parked" });
+    bus.publish({ type: "run.scope_written_off", runId: "run-1", requirementId: "REQ-002", requirement: "refund a charge", answer: "next run", decidedBy: "operator", claimants: [], ts: 2 });
+
+    const scope = buildCompletionReport(sources(store)).scope!;
+    expect(scope.shipped).toBe(1);
+    expect(scope.writtenOff).toEqual([{ id: "REQ-002", text: "refund a charge", answer: "next run" }]);
+    expect(scope.dropped).toEqual([]);
+    // REQ-003 is a nice-to-have nobody claimed: reported, never a hold.
+    expect(scope.unclaimed).toEqual([{ id: "REQ-003", text: "export a report" }]);
+  });
+
+  it("names what a dropped requirement was last seen doing", () => {
+    const { store, bus } = run();
+    bus.publish({ type: "run.spec_ready", runId: "run-1", spec: SPEC, ts: 1 });
+    task(store, { id: "gave-up", state: "CANCELLED", scenarioIds: ["SC-001"], errorSummary: "unreachable: dependencies parked" });
+
+    const scope = buildCompletionReport(sources(store)).scope!;
+    expect(scope.dropped).toEqual([{ id: "REQ-001", text: "charge a card", why: "gave-up CANCELLED (unreachable: dependencies parked)" }]);
+  });
+
+  it("says only what it knows about a claimant that left no reason", () => {
+    const { store, bus } = run();
+    bus.publish({ type: "run.spec_ready", runId: "run-1", spec: SPEC, ts: 1 });
+    task(store, { id: "vanished", state: "CANCELLED", scenarioIds: ["SC-001"] });
+
+    expect(buildCompletionReport(sources(store)).scope!.dropped).toEqual([{ id: "REQ-001", text: "charge a card", why: "vanished CANCELLED" }]);
+  });
+
+  it("has no scope section at all for a run that was never specified", () => {
+    const { store } = run();
+    expect(buildCompletionReport(sources(store)).scope).toBeNull();
+  });
+
+  /**
    * "Nothing is proven because nothing was ever checked" and "nothing is proven
    * because every check failed" are opposite facts, and a row of zeroes reads
    * as the second.

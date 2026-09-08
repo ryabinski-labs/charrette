@@ -32,6 +32,9 @@ import { git, pushRunBranch, repoFileList, WorktreeManager } from "./git.js";
 import { GitHubAdapter, type PrChecks, type PrRef } from "./github.js";
 import { unsatisfiableCriteria } from "./infraGuard.js";
 import { skeletonShortfall } from "./skeleton.js";
+import { gatingRequirement, replanDrops, scopeLedger, scopeUnmet, type ScopeLedger } from "./scopeLedger.js";
+import { gapLedger, gapLedgerSignal, readableForGaps } from "./gapLedger.js";
+import { changedFiles } from "./reportRun.js";
 import { answerBy, answerText, runIntake, type IntakeUi } from "./intake.js";
 import { AgentIntake } from "./intakeDecider.js";
 import { acquireRunLock, type RunLock } from "./runLock.js";
@@ -2053,17 +2056,22 @@ export class RunController {
           run = this.store.getRun(runId)!;
           continue;
         }
+        // Read again, because the stop can settle something the list named: an
+        // operator who answered "continue" over a requirement nothing was
+        // building has written it off, and holding the run on it after that
+        // would be stopping twice for one decision.
+        const settled = proof.proven ? proof : this.proofOf(runId);
         // The gate. A run that cannot prove itself does not open pull requests
         // and does not report itself in review; it says what is unmet and asks
         // for help. Both runs in issue #115 walked through here with a red
         // acceptance suite and reported "in review" within the hour.
-        if (!proof.proven && run.config.holdUntilProven) {
+        if (!settled.proven && run.config.holdUntilProven) {
           // The sentence `openPrs` would have written, for the case it will now
           // never see: an operator reading the feed of a run whose foundation
           // parked is owed the same "no diff to publish, N parked" line whether
           // the run then held or reported in review.
           if (!this.store.listTasks(runId).some((t) => t.state === "MERGED")) this.sayNothingToPublish(runId);
-          this.store.transitionRun(runId, "BLOCKED", proof.unmet.join("; "));
+          this.store.transitionRun(runId, "BLOCKED", settled.unmet.join("; "));
           return;
         }
         await this.openPrs(runId);
@@ -5623,6 +5631,11 @@ export class RunController {
     // invisible is one the operator cannot decide they do not want.
     const afterUsd = this.store.spentUsd(runId);
 
+    // What this run has written about what it did not build. Read here rather
+    // than at the end because the only decision available — buy the work, or
+    // accept the gaps — needs budget left to be a decision at all (issue #119).
+    const gaps = await this.gapSignal(runId);
+    if (gaps) this.bus.publish({ type: "agent.log", runId, sessionId: `pitstop-${number}`, text: `gap ledger: ${gaps}`, ts: Date.now() });
     const stop: PitStop = {
       runId,
       number,
@@ -5777,7 +5790,116 @@ export class RunController {
    * pull requests opened; intent check found 2 gaps". Published every time it
    * is read, so the reason a run stopped is one query away.
    */
+  /**
+   * How much of what this run has written is a record of what it did not build.
+   *
+   * Empty for the ordinary amount, and empty when the diff cannot be read —
+   * a signal nobody can evidence is one nobody should be asked about.
+   */
+  private async gapSignal(runId: string): Promise<string> {
+    const run = this.store.getRun(runId)!;
+    try {
+      // A diff that could not be read comes back with no files, and a ledger
+      // of no files has nothing to say — so there is no separate "unreadable"
+      // case to handle here, and no way for one to be reported as an absence
+      // of gaps rather than as an absence of evidence.
+      // `|| "HEAD"` is for a run recorded before the base branch was captured
+      // at creation — the same absence `backfillBaseBranch` repairs on resume,
+      // and one no run started by this build can have.
+      /* v8 ignore next */
+      const diff = await changedFiles(this.repoPath, run.config.baseBranch || "HEAD", this.wt.integrationBranch(runId), run.createdAt, readableForGaps);
+      return gapLedgerSignal(gapLedger(diff.files));
+      /* v8 ignore start -- every git call inside `changedFiles` already
+         catches; this is the guard for a repository that disappears under a
+         running pit stop, which cannot be manufactured without breaking the
+         worktree every other assertion in the test depends on. */
+    } catch {
+      return "";
+    }
+    /* v8 ignore stop */
+  }
+
+  /**
+   * Write off every gating requirement nothing is building any more, against
+   * the answer that let the run go on.
+   *
+   * waf cancelled 177 tasks and carried none of their requirements anywhere:
+   * they stopped existing, and reappeared as sections of a 118 KB gaps file. A
+   * write-off is that same outcome with a person's answer attached — which is
+   * what the closing gate then reads, so the same run does not stop twice on
+   * something already decided (issue #120).
+   */
+  private recordWriteOffs(runId: string): void {
+    const scope = this.runScope(runId);
+    // Both buckets the gate holds on: a requirement every task of which was
+    // cancelled, and one no task ever claimed. The operator is shown both and
+    // answering "continue" accepts both — and if only the first were recorded,
+    // a run held on the second could never leave BLOCKED however many times it
+    // was answered, which is a trap rather than a gate.
+    const dropped = [...scope.dropped, ...scope.unclaimed].filter(gatingRequirement);
+    if (!dropped.length) return;
+    const decision = this.store.pitStopDecisions(runId).at(-1);
+    for (const r of dropped) {
+      this.bus.publish({
+        type: "run.scope_written_off",
+        runId,
+        requirementId: r.id,
+        requirement: r.text,
+        answer: decision?.feedback?.trim() || decision?.why?.trim() || "accepted at the closing pit stop without further comment",
+        // The field has carried a default since it existed, so an empty one is
+        // a row from before it did — read as the person who answered it then.
+        /* v8 ignore next */
+        decidedBy: decision?.decidedBy || "operator",
+        claimants: r.claimants.map((c) => ({ id: c.id, state: c.state, why: c.why })),
+        ts: Date.now(),
+      });
+    }
+    this.bus.publish({
+      type: "agent.log",
+      runId,
+      sessionId: "pitstop",
+      text: `${dropped.length} requirement(s) the brief named will not ship in this run, and that is now on the record as a decision: ${dropped.map((r) => r.id).join(", ")}`,
+      ts: Date.now(),
+    });
+  }
+
+  /**
+   * The run's requirements, reconciled against what became of the tasks that
+   * claimed them.
+   *
+   * An empty ledger for a run with no specification rather than a special case:
+   * it promised nothing in this vocabulary, so the gate has nothing to hold it
+   * to — the same reading the acceptance gate takes of the same absence.
+   */
+  private runScope(runId: string): ScopeLedger {
+    const spec = this.store.runSpec(runId);
+    if (!spec) return { entries: [], shipped: 0, writtenOff: 0, dropped: [], unclaimed: [] };
+    const tasks = this.store.listTasks(runId).map((t) => ({
+      id: t.id,
+      title: t.title,
+      state: t.state,
+      scenarioIds: t.scenarioIds,
+      why: t.errorSummary || this.store.taskStateReason(runId, t.id),
+    }));
+    return scopeLedger(spec, tasks, this.store.scopeWriteOffs(runId));
+  }
+
   private closingProof(runId: string): ClosingProof {
+    const proof = this.proofOf(runId);
+    this.bus.publish({ type: "run.closing_proof", runId, ...proof, ts: Date.now() });
+    return proof;
+  }
+
+  /**
+   * The same reading, taken again without writing it down.
+   *
+   * Used after the closing pit stop, whose answer can settle something the
+   * proof shown to the operator listed — a requirement written off is the case
+   * today. Publishing a second time would double the count `closingPitStop`
+   * reads to decide whose turn it is to answer, and the record the operator
+   * was shown is the one worth keeping.
+   */
+  private proofOf(runId: string): ClosingProof {
     const run = this.store.getRun(runId)!;
     const unmet: string[] = [];
     const acceptance = this.store.acceptanceVerdict(runId);
@@ -5801,6 +5923,12 @@ export class RunController {
       // product rather than read it. A run may be green on every reading gate
       // and still never have run — which is what both products in issue #115
       // were.
+      //
+      // Before it, what the brief asked for against what the run did with it:
+      // every other line of this proof is about work that happened, and this is
+      // about promises nothing is building any more that nobody decided about
+      // (issue #120).
+      unmet.push(...scopeUnmet(this.runScope(runId)));
       const live = this.store.liveVerdict(runId);
       // Only for a run that has a specification: the gate is derived from one,
       // and `exerciseLive` declines to judge a run that never had one.
@@ -5810,9 +5938,7 @@ export class RunController {
         else if (live.verdict === "broken") unmet.push(`the critical path is broken: ${live.why}`);
       }
     }
-    const proof = { proven: unmet.length === 0, unmet, held: run.config.holdUntilProven };
-    this.bus.publish({ type: "run.closing_proof", runId, ...proof, ts: Date.now() });
-    return proof;
+    return { proven: unmet.length === 0, unmet, held: run.config.holdUntilProven };
   }
 
   /**
@@ -5865,6 +5991,11 @@ export class RunController {
       });
     }
     const action = await this.pitStop(runId, { reason: `the run cannot prove itself: ${proof.unmet.join("; ")}`, epicIds: [] }, spent);
+    // "Continue" over a requirement nothing is building any more is the answer
+    // the epic asks for — accept it, or fund it — and the only thing that made
+    // it an omission rather than a decision was that nobody wrote it down.
+    // Now it is written down against the requirement, with whose answer it was.
+    if (action === "continue") this.recordWriteOffs(runId);
     if (action === "stop") return "stop";
     // Redirect and replan both put work back in the queue; continuing from here
     // with tasks pending would open a pull request over an unfinished tree.
@@ -6654,6 +6785,29 @@ export class RunController {
       if (scope.length) throw new Error(`the re-planned tasks reach outside this run's repository: ${scope.join("; ")}`);
       const replaced = new Set(breakdown.tasks.map((t) => t.id));
       const dropped = pending.filter((t) => !replaced.has(t.id));
+      // What this re-plan stops building, in the operator's vocabulary rather
+      // than in task ids. Run 6fe4ba37 voided 39 tasks as one and nobody was
+      // shown what coverage went with them; the next run rebuilt much of it
+      // from scratch and paid a third task to consolidate its own duplicates
+      // (issue #120). Said before the cancellations, so the sentence describes
+      // the plan that is being replaced rather than its wreckage.
+      const spec = this.store.runSpec(runId);
+      const lost = spec
+        ? replanDrops(
+            spec,
+            tasks.map((t) => ({ id: t.id, title: t.title, state: t.state, scenarioIds: t.scenarioIds, why: "" })),
+            [...keep, ...breakdown.tasks]
+          )
+        : [];
+      if (lost.length) {
+        this.bus.publish({
+          type: "agent.log",
+          runId,
+          sessionId: "pitstop",
+          text: `this re-plan drops every task that claimed ${lost.length} requirement(s) the brief named: ${lost.join(" | ")}`,
+          ts: Date.now(),
+        });
+      }
       for (const t of dropped) {
         this.store.transitionTask(runId, t.id, "CANCELLED", "replaced when you re-planned at a pit stop");
         this.queueIssueSync(runId, t.id);

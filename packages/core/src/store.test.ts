@@ -499,6 +499,24 @@ describe("what the intent check left behind", () => {
     expect(store.planIntentVerdict("run1")).toEqual({ verdict: "FAIL", gaps: [] });
   });
 
+  /**
+   * A requirement written off twice was reconsidered, not written off twice:
+   * the newest answer is the one that stands.
+   */
+  it("reads back the newest answer per requirement, and fills in what a partial row does not carry", () => {
+    const store = makeStore();
+    makeRun(store);
+    const bus = new Bus(store);
+    expect(store.scopeWriteOffs("run1")).toEqual([]);
+    bus.publish({ type: "run.scope_written_off", runId: "run1", requirementId: "REQ-1", requirement: "pay", answer: "next run", decidedBy: "operator", claimants: [], ts: 1 });
+    bus.publish({ type: "run.scope_written_off", runId: "run1", requirementId: "REQ-1", requirement: "pay", answer: "actually, build it", decidedBy: "product-manager", claimants: [], ts: 2 });
+    store.db.prepare("INSERT INTO events (runId, type, payload, ts) VALUES (?,?,?,?)").run("run1", "run.scope_written_off", JSON.stringify({ requirementId: "REQ-2" }), 3);
+    expect(store.scopeWriteOffs("run1")).toEqual([
+      { requirementId: "REQ-1", answer: "actually, build it", decidedBy: "product-manager" },
+      { requirementId: "REQ-2", answer: "", decidedBy: "operator" },
+    ]);
+  });
+
   it("reads the live verdict back whole, and fills in what a partial row does not carry", () => {
     const store = makeStore();
     makeRun(store);

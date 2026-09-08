@@ -886,6 +886,26 @@ export class Store {
     return this.lastEventSeq(runId, "git.merged") > this.lastEventSeq(runId, "run.live_verdict");
   }
 
+  /**
+   * Requirements this run will not deliver, and the answers that made each a
+   * decision rather than an omission.
+   *
+   * Keyed by requirement id, newest answer per requirement: an operator who
+   * answers the same closing stop twice has changed their mind, not written the
+   * requirement off twice.
+   */
+  scopeWriteOffs(runId: string): { requirementId: string; answer: string; decidedBy: string }[] {
+    const rows = this.db
+      .prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.scope_written_off' ORDER BY seq")
+      .all(runId) as { payload: string }[];
+    const byId = new Map<string, { requirementId: string; answer: string; decidedBy: string }>();
+    for (const r of rows) {
+      const p = JSON.parse(r.payload) as { requirementId: string; answer?: string; decidedBy?: string };
+      byId.set(p.requirementId, { requirementId: p.requirementId, answer: p.answer ?? "", decidedBy: p.decidedBy ?? "operator" });
+    }
+    return [...byId.values()];
+  }
+
   /** What an agent found when it went and looked at production. */
   prodVerdict(runId: string): { url: string; verdict: "PASS" | "FAIL"; findings: string[]; summary: string } | null {
     const row = this.db
