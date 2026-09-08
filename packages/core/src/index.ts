@@ -3,6 +3,7 @@ export * from "./acceptance.js";
 export * from "./skeleton.js";
 export * from "./scopeLedger.js";
 export * from "./gapLedger.js";
+export * from "./planRepeats.js";
 export * from "./reportRun.js";
 export * from "./completionReport.js";
 export * from "./deliveryLedger.js";
