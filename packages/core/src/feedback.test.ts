@@ -298,8 +298,10 @@ describe("feedback that outlives the process", () => {
     expect(polls).toEqual([52, 52]); // polled per iteration, cheaply
     expect(workerPrompts[0]).toContain("isSafeWebhookUrl");
     expect(workerPrompts[0]).toContain("cigan commented on issue #52");
-    // Read twice, said once: the second dispatch must not repeat it.
-    expect(workerPrompts[1]).not.toContain("isSafeWebhookUrl");
+    // Polling must not queue it twice, but a cold worker has no transcript:
+    // it still needs the already-delivered instruction in its recovery brief.
+    expect(store.db.prepare("SELECT COUNT(*) AS n FROM feedback WHERE source = 'issue'").get()).toEqual({ n: 1 });
+    expect(workerPrompts[1]!.match(/isSafeWebhookUrl/g)).toHaveLength(1);
   });
 });
 

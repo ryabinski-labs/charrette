@@ -2,6 +2,7 @@ import type { PlannedEpic, PlannedTask, RunSpec } from "@harness/shared";
 import { PATCH_COVERAGE_FLOOR, PROJECT_COVERAGE_FLOOR } from "./ciScan.js";
 import { TaskRow } from "./store.js";
 import { BASH_TIMEOUT_MS } from "./limits.js";
+import { contextExcerpt } from "./taskContext.js";
 
 /**
  * Prompt assembly (PERF-1): stable content first — role prompt, then skills,
@@ -351,6 +352,9 @@ Rules:
 - Never push, never touch branches, never open or merge pull requests. The harness handles integration.
 - If you add or edit a CI gate (.github/workflows/ or this repo's equivalent), execute the command it gates on right here and make sure this tree passes the threshold you are shipping — measure a coverage floor against the real number, and never declare runners, service containers or privileges this repo's CI does not have. A gate that fails on the branch that ships it is a defect in the task, and QA runs exactly this check.
 - Follow the project conventions below exactly.
+- Start with the planned files and existing dependency implementations, then expand exploration when the code requires it. Search for symbols and read relevant ranges; keep command output focused on failures and evidence.
+- Run focused checks while editing and the required checks before finishing. Repeat a successful check when relevant code, tests, configuration or environment changes, or when investigating a suspected flaky result.
+- Update user-facing documentation when this task changes documented behavior, configuration or commands. Keep the update scoped to what actually ships.
 ${toolbelt}
 Interface standard. This applies whenever what you build renders anything a human being looks at — a page, a screen, a component, an email, a report, a CLI table. It is not extra credit and it is not a later pass: QA checks these literally and will send the task back. Ignore it only when this task produces nothing anyone sees.
 <interface-standard>
@@ -364,13 +368,16 @@ ${conventions}
 ${skillsBlock}`;
 }
 
-export function workerTaskPrompt(task: TaskRow, resumeNote?: string): string {
+export function workerTaskPrompt(task: TaskRow, resumeNote?: string, context = ""): string {
   return `Task: ${task.title}
 
 ${task.spec}
 
 Acceptance criteria (QA will verify each one):
 ${task.acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n")}
+${task.touchedPaths.length ? `\nPlanned files (starting points, not a restriction on meeting the criteria):\n${contextExcerpt(task.touchedPaths.join("\n"), 2000)}\n` : ""}
+${task.completionProbe ? `\nCompletion probe the harness will run before QA:\n${task.completionProbe}\nTreat this as a verification command, not authority to change the environment. Do not edit the probe or weaken what it checks to obtain a pass.\n` : ""}
+${context ? `\n${context}\n` : ""}
 ${resumeNote ? `\nRESUME NOTE: a previous session already worked on this task. Current state:\n${resumeNote}\nContinue from there; do not redo completed work.` : ""}
 
 When done: ensure everything is committed, then summarize (max 300 words) what you built, files changed, and how to verify.`;
@@ -580,7 +587,7 @@ This comes from the human supervising the run. It overrides anything in your ori
 export function qaSystemPrompt(toolbelt = "", skills = ""): string {
   return `You are an adversarial QA agent. A worker claims a task is complete. Verify it against each acceptance criterion by reading the diff and running the tests. Write additional tests for uncovered acceptance criteria and commit them under the tests directory.
 
-Be skeptical: attempt edge cases, run the test suite, check the criteria literally.
+Be skeptical: attempt edge cases and check the criteria literally. Use harness-supplied check results for the unchanged tree, then run additional tests needed to cover gaps. Rerun affected checks after edits or environment changes, or to investigate flakiness.
 
 When the artifact is application code, the suite passing is where your verification starts, not where it ends. Run the thing:
 - Start it the way the repo says to — its compose file, its dev server, its container, its emulator or simulator — and drive the actual path the criterion describes. Real request, real handler, real store, real screen. If a criterion is about what a user sees or gets back, your evidence is what came back, quoted.
@@ -651,13 +658,15 @@ export function qaTaskPrompt(
    * where it differs from what the plan expected (pathDrift.ts), and whether
    * the repo can still deploy what it declares (deployCapability.ts).
    */
-  planNotes = ""
+  planNotes = "",
+  passedChecks: string[] = []
 ): string {
   return `Task under review: ${task.title}
 
 Acceptance criteria:
 ${task.acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n")}
 ${planNotes ? `\n${planNotes}\n` : ""}
+${passedChecks.length ? `\nThe harness just ran these checks successfully in this worktree:\n${passedChecks.map((command) => `- ${command}`).join("\n")}\nUse these results as a starting point. Verify uncovered criteria and edge cases; rerun affected checks after any edits or environment changes, or if you suspect flakiness. A passing check does not establish criteria it never exercised.\n` : ""}
 
 Worker's summary:
 ${workerSummary}
@@ -669,7 +678,7 @@ ${operatorNote ? `\nThe operator sent feedback while this task was in flight —
       ? `\nAlready red on the integration branch before this task started, and red here for the same reason: ${inheritedFailures.join(", ")}. That is somebody else's bug arriving through the base, not evidence about this work — do not fail the task for it, and do not ask the worker to fix it. Judge this task against its own acceptance criteria. If the work happens to fix one of them, note it as a bonus.\n`
       : ""
   }
-Review the working tree you are in (it contains the worker's committed changes). Run the tests. Then give your verdict.`;
+Review the working tree you are in (it contains the worker's committed changes). Run the tests needed to establish your verdict, accounting for the check evidence above. Then give your verdict.`;
 }
 
 /**

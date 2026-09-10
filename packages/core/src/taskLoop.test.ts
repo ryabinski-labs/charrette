@@ -183,6 +183,179 @@ const logs = (events: HarnessEvent[]) =>
 
 const workerPrompts = (specs: AgentSpec[]) => specs.filter((s) => s.role === "worker").map((s) => s.prompt);
 
+describe("focused worker briefings", () => {
+  it.each(["rejection", "crash"])("preserves previously delivered human guidance after a %s starts a cold worker", async (failure) => {
+    const dir = repo();
+    const { pool, specs } = rolePool({
+      worker: (spec, nth) => {
+        commitInWorktree(spec.cwd, "thing.txt", `attempt ${nth}\n`);
+        if (nth === 1 && failure === "crash") return new Error("connection closed");
+        return { resultText: "Implementation notes without the operator's constraint", sdkSessionId: "synthetic" };
+      },
+      qa: (_spec, nth) => failure === "rejection" && nth === 1 ? QA_FAIL : QA_PASS,
+    });
+    const { controller, runId } = executing({ repoPath: dir, pool, config: { models: { worker: "gpt-5.6-terra" }, workerRespawnCap: 3 } });
+    controller.sendFeedback(runId, "task-a", "Keep the existing adapter; do not add another provider");
+    await controller.resume(runId);
+    const workers = specs.filter((spec) => spec.role === "worker");
+    expect(workers).toHaveLength(2);
+    for (const worker of workers) expect(worker.prompt).toContain("Keep the existing adapter; do not add another provider");
+  });
+
+  it("does not offer successful check results for reuse after a probe changes the checked files", async () => {
+    const dir = repo();
+    const { pool, specs } = rolePool({
+      worker: (spec) => {
+        commitInWorktree(spec.cwd, "thing.txt", "working\n");
+        return "Implemented";
+      },
+      qa: QA_PASS,
+    });
+    const { controller, runId } = executing({
+      repoPath: dir, pool,
+      config: { deterministicChecks: ["! grep -q broken thing.txt"] },
+      tasks: [{ id: "task-a", completionProbe: "node -e \"require('node:fs').writeFileSync('thing.txt', 'broken')\"" }],
+    });
+    await controller.resume(runId);
+    expect(specs.find((spec) => spec.role === "qa")!.prompt).not.toContain("checks successfully in this worktree");
+  });
+
+  it.each(["gpt-5.6-terra", "gemini-3.6-flash"])("keeps the full assignment when %s retries without a resumable transcript", async (model) => {
+    const dir = repo();
+    const { pool, specs } = rolePool({
+      worker: (spec, nth) => {
+        commitInWorktree(spec.cwd, "thing.txt", `attempt ${nth}\n`);
+        return { resultText: "Implemented the adapter in thing.txt", sdkSessionId: `synthetic-${nth}` };
+      },
+      qa: (_spec, nth) => nth === 1 ? QA_FAIL : QA_PASS,
+    });
+    const { controller, store, runId } = executing({ repoPath: dir, pool, config: { models: { worker: model } }, tasks: [{ id: "task-a", spec: "Use the existing adapter", touchedPaths: ["thing.txt"] }] });
+    await controller.resume(runId);
+    const workers = specs.filter((spec) => spec.role === "worker");
+    expect(workers).toHaveLength(2);
+    expect(workers[1]!.resume).toBeUndefined();
+    expect(workers[1]!.prompt).toContain("Use the existing adapter");
+    expect(workers[1]!.prompt).toContain("it works");
+    expect(workers[1]!.prompt).toContain("wire it to the store");
+    expect(workers[1]!.prompt).toContain("Implemented the adapter in thing.txt");
+    expect(workers[0]!.prompt).toContain("Planned files");
+    expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
+  });
+
+  it("keeps an Anthropic retry short when its conversation can be resumed", async () => {
+    const dir = repo();
+    const { pool, specs } = rolePool({
+      worker: (spec, nth) => {
+        commitInWorktree(spec.cwd, "thing.txt", `attempt ${nth}\n`);
+        return { resultText: "Completed first attempt", sdkSessionId: "sdk-worker" };
+      },
+      qa: (_spec, nth) => nth === 1 ? QA_FAIL : QA_PASS,
+    });
+    const { controller, runId } = executing({ repoPath: dir, pool });
+    await controller.resume(runId);
+    const retry = specs.filter((spec) => spec.role === "worker")[1]!;
+    expect(retry.resume).toBe("sdk-worker");
+    expect(retry.prompt).toContain("wire it to the store");
+    expect(retry.prompt).not.toMatch(/Acceptance criteria|Previous worker's summary/);
+  });
+
+  it("recovers the worker's checkpoint after a crash and passes green check evidence to QA", async () => {
+    const dir = repo();
+    const { pool, specs } = rolePool({
+      worker: (spec, nth) => {
+        if (nth === 1) {
+          commitInWorktree(spec.cwd, "adapter.txt", "already built\n");
+          built.store.db.prepare("INSERT INTO sessions (id,runId,taskId,role,model,state,startedAt) VALUES ('interrupted',?,'task-a','worker','claude-sonnet-5','crashed',0)").run(spec.runId);
+          built.store.appendEvent({ type: "agent.checkpoint", runId: spec.runId, taskId: "task-a", sessionId: "interrupted", turn: 20, digest: "adapter.txt is committed; next add its test", questions: [], ts: 0 });
+          return new Error("connection closed");
+        }
+        commitInWorktree(spec.cwd, "adapter-test.txt", "tested\n");
+        return "Added the missing test";
+      },
+      qa: QA_PASS,
+    });
+    const built = executing({ repoPath: dir, pool, config: { deterministicChecks: ["true"], workerRespawnCap: 3 } });
+    await built.controller.resume(built.runId);
+    const retry = specs.filter((spec) => spec.role === "worker")[1]!;
+    expect(retry.resume).toBeUndefined();
+    expect(retry.prompt).toContain("adapter.txt is committed; next add its test");
+    expect(retry.prompt).toContain("connection closed");
+    const qa = specs.find((spec) => spec.role === "qa")!;
+    expect(qa.prompt).toContain("checks successfully in this worktree:\n- true");
+    expect(qa.prompt).toContain("rerun affected checks after any edits");
+    expect(built.store.getTask(built.runId, "task-a")!.state).toBe("MERGED");
+  });
+
+  it("starts with the full brief when escalation changes the worker's provider", async () => {
+    const dir = repo();
+    const { pool, specs } = rolePool({
+      worker: (spec, nth) => {
+        commitInWorktree(spec.cwd, "thing.txt", `attempt ${nth}\n`);
+        return { resultText: `Attempt ${nth} completed`, sdkSessionId: "sdk-worker" };
+      },
+      qa: (_spec, nth) => nth < 3 ? QA_FAIL : QA_PASS,
+    });
+    const { controller, runId } = executing({ repoPath: dir, pool, config: { models: { workerHeavy: "gpt-5.6-terra" } } });
+    await controller.resume(runId);
+    const workers = specs.filter((spec) => spec.role === "worker");
+    expect(workers).toHaveLength(3);
+    expect(workers[1]!.resume).toBe("sdk-worker");
+    expect(workers[2]!.model).toBe("gpt-5.6-terra");
+    expect(workers[2]!.resume).toBeUndefined();
+    expect(workers[2]!.prompt).toContain("Acceptance criteria");
+    expect(workers[2]!.prompt).toContain("Attempt 2 completed");
+  });
+
+  it.each([false, true])("keeps the last completed summary unless the interrupted retry checkpoints newer work (%s)", async (newCheckpoint) => {
+    const dir = repo();
+    const { pool, specs } = rolePool({
+      worker: (spec, nth) => {
+        if (nth === 1 || (nth === 2 && newCheckpoint)) {
+          const sessionId = `worker-${nth}`;
+          built.store.db.prepare("INSERT INTO sessions (id,runId,taskId,role,model,state,startedAt) VALUES (?,?,'task-a','worker','claude-sonnet-5','done',0)").run(sessionId, spec.runId);
+          built.store.appendEvent({ type: "agent.checkpoint", runId: spec.runId, taskId: "task-a", sessionId, turn: 20, digest: nth === 1 ? "old incomplete plan" : "new partial retry progress", questions: [], ts: 0 });
+        }
+        if (nth === 2) return new Error("connection closed before a result");
+        commitInWorktree(spec.cwd, "thing.txt", `attempt ${nth}\n`);
+        return { resultText: "latest completed implementation", sdkSessionId: "sdk-worker" };
+      },
+      qa: (_spec, nth) => nth === 1 ? QA_FAIL : QA_PASS,
+    });
+    const built = executing({ repoPath: dir, pool, config: { workerRespawnCap: 3 } });
+    await built.controller.resume(built.runId);
+    const workers = specs.filter((spec) => spec.role === "worker");
+    expect(workers).toHaveLength(3);
+    expect(workers[2]!.resume).toBeUndefined();
+    expect(workers[2]!.prompt).not.toContain("old incomplete plan");
+    expect(workers[2]!.prompt).toContain(newCheckpoint ? "new partial retry progress" : "latest completed implementation");
+    expect(workers[2]!.prompt).not.toContain(newCheckpoint ? "latest completed implementation" : "new partial retry progress");
+  });
+
+  it("refreshes a pool-internal cold retry with live feedback and its latest checkpoint", async () => {
+    const dir = repo();
+    let restarted = "";
+    const { pool } = rolePool({
+      worker: (spec) => {
+        built.store.db.prepare("INSERT INTO sessions (id,runId,taskId,role,model,state,startedAt) VALUES ('active',?,'task-a','worker','gpt-5.6-terra','running',0)").run(spec.runId);
+        built.store.appendEvent({ type: "agent.checkpoint", runId: spec.runId, taskId: "task-a", sessionId: "active", turn: 20, digest: "adapter implemented, test pending", questions: [], ts: 0 });
+        built.controller.sendFeedback(spec.runId, "task-a", "Keep the public adapter interface");
+        restarted = spec.restartPrompt!();
+        commitInWorktree(spec.cwd, "thing.txt", "implemented\n");
+        return "done";
+      },
+      qa: QA_PASS,
+    });
+    // Delivered live: nothing reaches the pending feedback queue.
+    Object.assign(pool, { inject: () => true });
+    const built = executing({ repoPath: dir, pool, config: { models: { worker: "gpt-5.6-terra" } } });
+    await built.controller.resume(built.runId);
+    expect(restarted).toContain("Acceptance criteria");
+    expect(restarted).toContain("adapter implemented, test pending");
+    expect(restarted).toContain("Keep the public adapter interface");
+    expect(built.store.drainFeedback(built.runId, "task-a")).toBe("");
+  });
+});
+
 /**
  * Run da8325bd, Goal 8: a task scoped to remove an unenforced claim from the
  * product's pricing surfaces removed it from one page and left it on twenty
@@ -977,6 +1150,10 @@ describe("checks that stay red", () => {
 
     expect(logs(events).some((t) => /test -f never-exists\.txt also fails on harness\/run1\/main — not charged to this task/.test(t))).toBe(true);
     expect(workerPrompts(specs)[1]).toMatch(/do NOT try to fix them[\s\S]*never-exists\.txt/);
+    const qa = specs.find((spec) => spec.role === "qa")!;
+    const greenChecks = qa.prompt.split("checks successfully in this worktree:\n")[1]!.split("Use these results")[0]!;
+    expect(greenChecks).toContain("grep -q broken mine.txt");
+    expect(greenChecks).not.toContain("never-exists.txt");
   });
 });
 

@@ -6,6 +6,7 @@ Harness is a multi-agent development orchestrator built on the [Claude Agent SDK
 
 - **[docs/OPERATIONS.md](./docs/OPERATIONS.md)** — install, configure, run, observe, recover. Start here.
 - **[docs/PRODUCTION-DELIVERY.md](./docs/PRODUCTION-DELIVERY.md)** — full PRD → deployed release, authority, evidence and resume.
+- **[docs/CLAUDEFLOW-LEARNINGS.md](./docs/CLAUDEFLOW-LEARNINGS.md)** — Claude Flow comparison and adopted practices for focused context, recovery and efficient verification.
 - **[PRD.md](./PRD.md)** — the full product spec: architecture, threat model, performance budget, phasing.
 
 ## Status

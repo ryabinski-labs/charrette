@@ -276,6 +276,25 @@ describe("moving a live session onto another subscription", () => {
     expect(sessionRows()[0]).toMatchObject({ state: "done" });
   });
 
+  it("rebuilds a warm worker's briefing and clears its old resume handle on a different login", async () => {
+    const said: string[] = [];
+    queryMock.mockImplementation((arg: { prompt: AsyncIterable<{ message: { content: string } }> }) => {
+      const nth = said.length;
+      return (async function* () {
+        for await (const m of arg.prompt) { said.push(m.message.content); break; }
+        yield nth === 0 ? rateLimit() : result();
+      })();
+    });
+    pool.configureSubscription(switchTo("work", { CLAUDE_CONFIG_DIR: "/home/me/.claude-work" }));
+    const restartPrompt = vi.fn(() => "Full task, acceptance criteria, latest checkpoint and operator guidance");
+
+    await pool.run(spec({ resume: "previous-login-session", prompt: "Fix the QA rejection", restartPrompt }));
+
+    expect(resumes()).toEqual(["previous-login-session", undefined]);
+    expect(said).toEqual(["Fix the QA rejection", restartPrompt.mock.results[0]!.value]);
+    expect(restartPrompt).toHaveBeenCalledTimes(1);
+  });
+
   it("does not throw away a session that has already answered", async () => {
     // The switch reaches every session dispatched after this one anyway, so
     // killing a finished one would discard work that is paid for and done.
