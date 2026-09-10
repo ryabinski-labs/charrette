@@ -1682,6 +1682,22 @@ harness status            # find the runId and where it stopped
 harness resume <runId>
 ```
 
+Fresh worker sessions receive the full task and criteria, the planned files and
+completion probe, and a bounded list of directly required tasks already merged.
+On recovery they also receive the latest saved worker checkpoint for that task,
+when available. A completed iteration's summary is reused during cold retries.
+These notes are orientation, not proof: workers must check the current worktree
+and follow the current criteria and operator feedback. Anthropic retries with a
+resumable conversation retain the short follow-up; OpenAI and Google retries
+receive the full brief because their current transports start a new conversation.
+Cold retries also retain previously delivered task feedback, issue comments and
+non-parked gate answers with their source attribution. Internal quota retries
+and account switches rebuild that brief if the transcript is unavailable. An
+interrupted attempt's new checkpoint supersedes the previous summary; a crash
+without a new checkpoint does not discard that summary.
+See [the Claude Flow comparison](CLAUDEFLOW-LEARNINGS.md) for the context limits
+and verification policy.
+
 ### 13.1 Stopping on purpose
 
 Ctrl-C is a crash the harness happens to survive: the agents that were mid-turn

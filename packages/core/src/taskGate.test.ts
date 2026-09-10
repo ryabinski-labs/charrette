@@ -637,7 +637,10 @@ describe("a completion probe that cannot pass", () => {
     // having an opinion — not the probe, again, for the second time.
     expect(logs(store, runId).some((t) => t.includes("completion probe passes as amended"))).toBe(true);
     expect(workerPrompts[1]).toContain("QA has its own opinion");
-    expect(workerPrompts[1]).not.toContain("completion probe");
+    // A cold briefing now includes the current probe and its decision history;
+    // it must not reinstate the obsolete command that caused the old gate.
+    expect(workerPrompts[1]).toContain("test -f feature.txt");
+    expect(workerPrompts[1]).not.toContain("test -f nope.txt");
     expect(asked).toHaveLength(1);
   });
 

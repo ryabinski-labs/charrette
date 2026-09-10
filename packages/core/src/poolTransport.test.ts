@@ -153,6 +153,27 @@ describe("running a session on OpenAI", () => {
     const row = store.db.prepare("SELECT * FROM sessions WHERE runId = 'run1'").get() as Record<string, unknown>;
     expect(row.state).toBe("interrupted");
   });
+
+  it("rebuilds cold quota retries from current context", async () => {
+    pool = new AgentPool(store, bus, async () => undefined);
+    let guidance = "initial guidance";
+    vi.stubGlobal("fetch", vi.fn(async (url: string, opts: RequestInit) => {
+      requests.push({ url: String(url), body: JSON.parse(String(opts.body)) as Record<string, unknown> });
+      if (requests.length === 1) {
+        guidance = "updated operator guidance";
+        return { ok: false, status: 429, statusText: "Too Many Requests", text: async () => "You've hit your usage limit. Try again in 1 minute." };
+      }
+      return { ok: true, status: 200, json: async () => said("done") };
+    }));
+    const restartPrompt = vi.fn(() => `Full task, acceptance criteria and ${guidance}`);
+
+    const result = await pool.run(spec({ restartPrompt }));
+
+    expect(result.outcome).toBe("done");
+    expect(requests).toHaveLength(2);
+    expect(JSON.stringify(requests[1]!.body)).toContain("Full task, acceptance criteria and updated operator guidance");
+    expect(restartPrompt).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("running a session on Google", () => {

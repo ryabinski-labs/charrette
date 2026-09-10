@@ -239,6 +239,29 @@ describe("a session that dies mid-thought because the account is out of quota", 
     expect(slept).toEqual([]);
   });
 
+  it("discards the caller's old resume handle and refreshes guidance after a thrown limit", async () => {
+    const said: string[] = [];
+    let guidance = "original guidance";
+    queryMock.mockImplementation((arg: { prompt: AsyncIterable<{ message: { content: string } }> }) => {
+      const nth = said.length;
+      return (async function* () {
+        for await (const m of arg.prompt) { said.push(m.message.content); break; }
+        if (nth === 0) {
+          guidance = "guidance delivered during the interrupted attempt";
+          throw new Error(`Claude Code process exited: ${LIMIT}`);
+        }
+        yield result();
+      })();
+    });
+    const restartPrompt = vi.fn(() => `Full assignment and ${guidance}`);
+
+    await pool.run(spec({ resume: "previous-session", prompt: "Fix QA feedback", restartPrompt }));
+
+    expect(promptsGiven()).toEqual(["previous-session", undefined]);
+    expect(said).toEqual(["Fix QA feedback", "Full assignment and guidance delivered during the interrupted attempt"]);
+    expect(restartPrompt).toHaveBeenCalledTimes(1);
+  });
+
   it("gives the crash back when the wait is longer than the run allows", async () => {
     build({ usageLimitWaitMinutes: 0 });
     queryMock.mockImplementation(() =>

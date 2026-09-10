@@ -163,6 +163,8 @@ export interface AgentSpec {
   tier?: string;
   systemPrompt: string;
   prompt: string;
+  /** Rebuild a self-contained briefing when an internal retry loses its transcript. */
+  restartPrompt?: () => string;
   cwd: string;
   /**
    * The built-in tools that *exist* for this agent. `allowedTools` only
@@ -663,7 +665,7 @@ export class AgentPool {
     for (let attempt = 0; ; attempt++) {
       let result: AgentResult;
       try {
-        result = await this.session(this.attemptSpec(spec, sessionId, resumeFrom, resumeWhy), sessionId, attempt);
+        result = await this.session(this.attemptSpec(spec, sessionId, resumeFrom, resumeWhy, attempt), sessionId, attempt);
       } catch (e) {
         // A limit can also arrive as a throw — the session dies without ever
         // producing a result. There is no handle to resume from that, so the
@@ -703,11 +705,13 @@ export class AgentPool {
    * The spec for one attempt. The first is the caller's, verbatim; a retry after
    * a limit re-attaches to the conversation the limit interrupted where the
    * transport keeps one — the OpenAI and Gemini loops are stateless, so those
-   * start the session over with the original prompt, as they do everywhere else.
+   * start with a fresh briefing. Callers that originally sent only a follow-up
+   * must supply restartPrompt so a lost transcript cannot erase the assignment.
    */
-  private attemptSpec(spec: AgentSpec, sessionId: string, resumeFrom: string | undefined, why: string): AgentSpec {
+  private attemptSpec(spec: AgentSpec, sessionId: string, resumeFrom: string | undefined, why: string, attempt: number): AgentSpec {
+    if (attempt === 0) return { ...spec, sessionId };
     const resumable = resumeFrom && providerFor(spec.model) === "anthropic";
-    if (!resumable) return { ...spec, sessionId };
+    if (!resumable) return { ...spec, sessionId, resume: undefined, prompt: spec.restartPrompt?.() ?? spec.prompt };
     return { ...spec, sessionId, resume: resumeFrom, prompt: why };
   }
 

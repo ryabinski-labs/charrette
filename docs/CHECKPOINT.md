@@ -1,5 +1,11 @@
 # Checkpoints
 
+Saved worker digests also support cold recovery: a fresh worker session can
+receive the latest nonempty checkpoint for its run and task. It is bounded to
+4,000 characters and labeled as prior observations to verify against the current
+worktree. Checkpoint questions and recommendations do not become operator
+instructions. See [the recovery implementation](../packages/core/src/taskContext.ts).
+
 The operator's own habit, mechanised.
 
 Working a long task by hand, the flow that works is: `/compact`, then

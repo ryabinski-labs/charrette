@@ -19,6 +19,7 @@ import {
   briefToAssignment,
   gating,
   hasCriticalPath,
+  providerFor,
   validatePlanDag,
 } from "@harness/shared";
 import { indexSkills, matchSkills, verifyHash, type IndexedSkill } from "@harness/skills-mcp";
@@ -42,6 +43,7 @@ import { AgentIntake } from "./intakeDecider.js";
 import { acquireRunLock, type RunLock } from "./runLock.js";
 import { composeDown, isolationBlock, isolationEnv, taskIsolation } from "./isolation.js";
 import { knownFlakySignatures, observeChecks, observeFlakySignatures } from "./memory.js";
+import { workerCheckpoint, workerContext } from "./taskContext.js";
 import { parseRunbook, withRunbook, type Runbook } from "./operatorRunbook.js";
 import { acceptanceVerdict, blockingQuestionsFor, scenarioCommand, scenarioProbeCommand, suiteRunFrom, type AcceptanceVerdict } from "./acceptance.js";
 import { standaloneReport } from "./completionReport.js";
@@ -7598,7 +7600,20 @@ export class RunController {
        * attempt's mistake.
        */
       let abandoned: string[] = [];
+      const previousSummary = workerSummary;
+      const checkpointBefore = workerCheckpoint(this.store, runId, taskId);
+      // Also used by the pool if quota/account recovery must start a new
+      // conversation without returning through this task loop.
+      const restartPrompt = () => {
+        const current = this.store.getTask(runId, taskId)!;
+        return workerTaskPrompt(current, qaFeedback, workerContext(this.store, runId, current,
+          workerCheckpoint(this.store, runId, taskId) !== checkpointBefore ? "" : previousSummary));
+      };
       try {
+        // Only Anthropic can reattach to a conversation. A synthetic session
+        // id from a stateless provider is not a transcript: sending just the
+        // rejection would lose the task and its acceptance criteria entirely.
+        const resumeSession = providerFor(workerModel) === "anthropic" ? workerSession : undefined;
         const worker = await this.pool.run({
           runId,
           taskId,
@@ -7614,8 +7629,11 @@ export class RunController {
           // The same list the prompt names, so a skill an agent is told to read
           // is one the Skill tool will actually run.
           skills: workerSkills.map((s) => s.name),
-          prompt: workerSession && qaFeedback ? workerResumePrompt(qaFeedback) : workerTaskPrompt(task, qaFeedback),
-          resume: workerSession,
+          prompt: resumeSession && qaFeedback
+            ? workerResumePrompt(qaFeedback)
+            : restartPrompt(),
+          resume: resumeSession,
+          restartPrompt,
           cwd: wt.path,
           disallowedTools: ["WebSearch"],
           maxTurns: workerTurns,
@@ -7625,7 +7643,7 @@ export class RunController {
           onLimitWait: creditLimitWait,
         });
         workerSummary = worker.resultText;
-        workerSession = worker.sdkSessionId ?? workerSession;
+        workerSession = providerFor(workerModel) === "anthropic" ? worker.sdkSessionId ?? workerSession : undefined;
         abandoned = worker.abandoned ?? [];
         if (worker.outcome === "error" && worker.errorDetail?.includes("error_max_turns")) {
           workerTurns = Math.min(400, Math.ceil(workerTurns * 1.5));
@@ -7649,6 +7667,9 @@ export class RunController {
       } catch (e) {
         if (stopsTheRun(e)) throw e;
         workerSession = undefined;
+        // Prefer a newer checkpoint, but an early crash with no checkpoint
+        // must not erase the last completed iteration's useful summary.
+        workerSummary = workerCheckpoint(this.store, runId, taskId) !== checkpointBefore ? "" : previousSummary;
         // A session that died is not evidence about the model the way a turn
         // ceiling is — transports drop, quotas close, machines run out of disk,
         // and none of that is Haiku's doing. It escalates anyway, because the
@@ -8088,7 +8109,11 @@ export class RunController {
               task.completionProbe ? `This task's completion probe passes: \`${task.completionProbe}\`. That settles the "everywhere" half of the job; it says nothing about whether the change is correct.` : "",
             ]
               .filter(Boolean)
-              .join("\n\n")
+              .join("\n\n"),
+            // A probe can mutate files, services or the environment. Without
+            // a complete fingerprint, its effects invalidate reuse of earlier
+            // check results even when the probe itself returned zero.
+            probeCommand ? [] : run.config.deterministicChecks.filter((command) => !checks.failures.some((failure) => failure.command === command))
           ),
           cwd: wt.path,
           disallowedTools: ["WebSearch"],
