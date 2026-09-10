@@ -45,6 +45,19 @@ All confirmed findings are fixed here. They are recorded in this PR instead of
 creating separate already-fixed GitHub issues. No unresolved defect was left
 as an untracked recommendation.
 
+After the tested branch was pushed, GitHub reported **19 existing open
+Dependabot alerts on the default branch: 9 high and 10 moderate**. These concern
+unchanged dependencies (`fast-uri`, `nanoid`, `fastify`, `hono`, `qs`,
+`vitest`/`@vitest/mocker`), not new dependencies in this change. They remain
+tracked in [the repository's dependency alerts](https://github.com/ryabinski-labs/harness/security/dependabot).
+This PR does **not** remediate those advisories or establish their exploitability.
+An independent follow-up review confirmed the vulnerable versions are unchanged
+and found no demonstrated advisory trigger introduced by this feature.
+In particular, the reported Vitest fix requires moving from the current 3.x
+test toolchain to 4.1.11 or later, a separate compatibility migration. The
+passing functional suite and scoped security review are not a clean bill of
+health for the repository's dependency supply chain.
+
 ## Scenario results
 
 | Scenario | Expected result and evidence | Result |
@@ -57,7 +70,7 @@ as an untracked recommendation.
 | QA-06: review evidence | No inherited failures presented as green; no reuse after completion probe; fresh successful checks supplied otherwise. | Passed |
 | QA-07: built CLI | Actual executable: read-only `status` creates no state directory; `init --run-cap 5` discovers and executes `npm run test`; `status`, `version`, root and init help succeed. | Passed |
 | QA-08: stdio MCP | Actual SDK client/server subprocess: `search_skills` finds `qa-agent`, `describe_skill` returns its instructions. Rechecked after build. | Passed |
-| QA-09: documentation | All 9 local links in added/changed content resolve; all 9 unique external source links return HTTP 200. Behavior and limits checked against implementation. | Passed |
+| QA-09: documentation | All 9 local links in added/changed content resolve; all 9 unique upstream source links return HTTP 200. Dependency alerts retrieved through the authenticated GitHub API. Behavior and limits checked against implementation. | Passed |
 | QA-10: complete regression | `pnpm build` passed; full `pnpm test:coverage --maxWorkers=6 --reporter=dot`: 3,561 tests in 156 files passed, 100% lines/statements/functions/branches, exit 0. | Passed |
 
 The focused QA rerun passed **21 tests in 5 files**; 105 unrelated cases were
