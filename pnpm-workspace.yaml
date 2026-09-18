@@ -21,3 +21,24 @@ overrides:
   fast-uri: "^3.1.6"
   vite: "^7.1.12"
   esbuild: "^0.25.0"
+
+  # Both reach us the same way: @modelcontextprotocol/sdk pulls express (and so
+  # qs) for its HTTP transport and @hono/node-server for its Hono one. We drive
+  # the SDK over stdio, so neither parser is on a path we call — but they are
+  # installed, they are what an advisory scan sees, and Dependabot cannot lift
+  # them on its own because nothing in this repo declares either package.
+  #
+  # qs 6.16.0 fixes GHSA-x5fp-wj9c-mxmx (array-limit bypass via bracket-key
+  # comma parsing) and GHSA-4mjr-xmp4-gh2g (DoS via attacker-controlled
+  # isBuffer). The SDK's own ranges already allow it (body-parser asks for
+  # ^6.15.2, express for ^6.14.0); only the lockfile held 6.15.3, and no
+  # `pnpm update` targets a package no manifest names.
+  #
+  # hono 4.13.5 fixes GHSA-gqvv-2mrq-wpjv (toSSG writing outside the output
+  # directory), GHSA-g6gw-c38x-mqfc (unbounded dot-notation nesting in
+  # parseBody) and GHSA-crvj-82cr-hjcx (query parser reading past the URL
+  # fragment). @hono/node-server peers on ^4, so a patch bump satisfies it.
+  #
+  # Both are patch-level and both go away once the SDK floats its own lockfile.
+  qs: "^6.16.0"
+  hono: "^4.13.5"
