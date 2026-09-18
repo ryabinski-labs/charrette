@@ -126,7 +126,7 @@ const h = vi.hoisted(() => {
     // The report's content is settled in postmortem.test.ts; what the CLI owes
     // is picking the right run and saying so when there is none.
     postmortemMock: vi.fn((_store: unknown, runId: string) => ({ runId })),
-    // Whether a harness process is holding the run. Its own behaviour is
+    // Whether a charrette process is holding the run. Its own behaviour is
     // settled in runLock.test.ts; what `status` owes is saying so.
     runLockHolderMock: vi.fn(() => null as { pid: number; startedAt: number } | null),
     renderPostmortemMock: vi.fn((p: { runId: string }) => `Run ${p.runId} [state] — assignment`),
@@ -143,14 +143,14 @@ const h = vi.hoisted(() => {
     assembleReportMock: vi.fn(async () => ({
       ledger: { headline: "Nothing from this run has shipped.", counts: { live: 0, dark: 3, unproven: 1, "not-delivered": 2 }, switches: [{ name: "A_KEY" }] },
     })),
-    reportPathMock: vi.fn((repo: string, runId: string) => `${repo}/.harness/reports/${runId}.html`),
+    reportPathMock: vi.fn((repo: string, runId: string) => `${repo}/.charrette/reports/${runId}.html`),
     standaloneReportMock: vi.fn(() => "<!doctype html><title>report</title>"),
   };
 });
 
-vi.mock("@harness/core", async (importOriginal) => ({
-  sourceDigest: (await importOriginal<typeof import("@harness/core")>()).sourceDigest,
-  deliveryConfigProblems: (await importOriginal<typeof import("@harness/core")>()).deliveryConfigProblems,
+vi.mock("@charrette/core", async (importOriginal) => ({
+  sourceDigest: (await importOriginal<typeof import("@charrette/core")>()).sourceDigest,
+  deliveryConfigProblems: (await importOriginal<typeof import("@charrette/core")>()).deliveryConfigProblems,
   Store: h.StoreMock,
   Bus: h.BusMock,
   AgentPool: h.AgentPoolMock,
@@ -173,12 +173,12 @@ vi.mock("@harness/core", async (importOriginal) => ({
   pinsInPlay: h.pinsInPlayMock,
   // Pinned, so the banner assertion is about the line existing rather than
   // about whatever commit this checkout happens to be on.
-  harnessBuild: () => "0.0.1@7453d60",
+  charretteBuild: () => "0.0.1@7453d60",
   // Handed straight through to the version check, which is tested against
   // real files in version.test.ts; here it only has to be the same reference.
   agentBinaryFiles: h.agentBinaryFilesMock,
   // The rule this stands in for is unit-tested against the real implementation
-  // in core; here it exists so a test can prove `harness run` actually refuses
+  // in core; here it exists so a test can prove `charrette run` actually refuses
   // when a routed provider has no key.
   missingKeys: h.missingKeysMock,
   // Resolving an account's credentials is unit-tested in core against real
@@ -198,7 +198,7 @@ vi.mock("@harness/core", async (importOriginal) => ({
   // question id — is unit-tested against the real class in core.
   BridgedIntake: h.BridgedIntakeMock,
 }));
-vi.mock("@harness/dashboard", () => ({ Dashboard: h.DashboardMock }));
+vi.mock("@charrette/dashboard", () => ({ Dashboard: h.DashboardMock }));
 vi.mock("./defaults.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./defaults.js")>();
   return {
@@ -228,7 +228,7 @@ const v = vi.hoisted(() => ({
     packages: [],
     agent: { ok: true, version: "2.1.257", path: "/sdk/claude" },
   })),
-  formatVersionMock: vi.fn(() => "harness    0.0.1@7453d60\n"),
+  formatVersionMock: vi.fn(() => "charrette    0.0.1@7453d60\n"),
 }));
 vi.mock("./version.js", () => ({ collectVersion: v.collectVersionMock, formatVersion: v.formatVersionMock }));
 vi.mock("node:fs", async (importOriginal) => {
@@ -243,7 +243,7 @@ vi.mock("./dashboardLink.js", () => ({
   recordedDashboard: h.recordedDashboardMock,
 }));
 
-import type { GateHandler } from "@harness/core";
+import type { GateHandler } from "@charrette/core";
 import { buildProgram, modelOverrides, parseRunConfig } from "./cli.js";
 
 let out: string[];
@@ -373,7 +373,7 @@ beforeEach(() => {
   // tests is one that has been run before, which is what every command that
   // reads a run assumes. The never-run repo is its own case, and the tests
   // that want it say so by making this false for the database too.
-  h.existsSyncMock.mockReset().mockImplementation((p: string) => String(p).endsWith("harness.db"));
+  h.existsSyncMock.mockReset().mockImplementation((p: string) => String(p).endsWith("charrette.db"));
   h.mkdirSyncMock.mockReset();
   h.writeFileSyncMock.mockReset();
   h.createInterfaceMock.mockReset();
@@ -407,7 +407,7 @@ describe("PRD production delivery flags", () => {
   it("reads the full PRD and preserves explicit merge and test-scope authority", async () => {
     const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
     const { tmpdir } = await import("node:os");
-    const dir = fs.mkdtempSync(`${tmpdir()}/harness-cli-prd-`);
+    const dir = fs.mkdtempSync(`${tmpdir()}/charrette-cli-prd-`);
     const prd = `${dir}/product.md`;
     const content = "# GA release\n\nDurable storage, authenticated API, production deployment.\n";
     fs.writeFileSync(prd, content);
@@ -430,18 +430,18 @@ describe("PRD production delivery flags", () => {
   });
 
   it("carries configured specification and live gates instead of silently dropping them", async () => {
-    h.loadFileConfigMock.mockReturnValue({ config: { delivery: { mode: "production" }, prodUrl: "https://app.example", spec: { requireExecutionEvidence: false } }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { delivery: { mode: "production" }, prodUrl: "https://app.example", spec: { requireExecutionEvidence: false } }, path: "/repo/charrette.config.json" });
     await expect(cli("run", "build", "--no-dashboard")).rejects.toThrow("execution-evidence");
   });
 });
 
-describe("harness run — resolving what the run will actually do", () => {
+describe("charrette run — resolving what the run will actually do", () => {
   it("auto-detects checks and reports where each setting came from", async () => {
     await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard");
 
     const banner = printed();
     expect(banner).toContain("repo       /repo");
-    // Which harness this is, before anything is spent — the same string every
+    // Which charrette this is, before anything is spent — the same string every
     // session it spawns is stamped with.
     expect(banner).toContain("build      0.0.1@7453d60");
     expect(banner).toContain("checks     npm test   (auto-detected from package.json)");
@@ -452,14 +452,14 @@ describe("harness run — resolving what the run will actually do", () => {
   });
 
   it("says checks taken from CI have not been run here yet, because an unproven one parks the run", async () => {
-    // `harness init` runs each candidate before writing it down. This path has
+    // `charrette init` runs each candidate before writing it down. This path has
     // no moment at which it could, and a banner that reads the same either way
     // implies a guarantee it did not make.
     h.detectChecksMock.mockReturnValue({ checks: ["cargo deny check"], source: "1 step(s) from 1 CI workflow(s)", skipped: [] });
 
     await cli("run", "build a thing", "--repo", "/repo");
 
-    expect(printed()).toContain("not yet run here; `harness init` proves them first");
+    expect(printed()).toContain("not yet run here; `charrette init` proves them first");
   });
 
   it("says nothing about models when every role is on its default", async () => {
@@ -475,7 +475,7 @@ describe("harness run — resolving what the run will actually do", () => {
   it("names each role the operator moved, and only those", async () => {
     h.loadFileConfigMock.mockReturnValue({
       config: { models: { worker: "gpt-5.6-terra", demo: "gemini-3.5-flash-lite" } },
-      path: "/repo/harness.config.json",
+      path: "/repo/charrette.config.json",
     });
     await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard");
 
@@ -499,7 +499,7 @@ describe("harness run — resolving what the run will actually do", () => {
   it("refuses a config that points a judging role off Anthropic", async () => {
     // Enforced by the config schema itself, so it cannot be reached by any
     // other entry point either.
-    h.loadFileConfigMock.mockReturnValue({ config: { models: { qa: "gpt-5.6-terra" } }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { models: { qa: "gpt-5.6-terra" } }, path: "/repo/charrette.config.json" });
     await expect(cli("run", "build a thing", "--repo", "/repo", "--no-dashboard")).rejects.toThrow(/pinned to Anthropic/);
   });
 
@@ -518,7 +518,7 @@ describe("harness run — resolving what the run will actually do", () => {
     // issue list, and the crash handler prints that plus a stack trace. The
     // routing rules are the ones an operator trips on purpose, while trying to
     // make a run cheaper, so the reason has to survive being skimmed.
-    h.loadFileConfigMock.mockReturnValue({ config: { models: { reviewer: "claude-haiku-4-5-20251001" } }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { models: { reviewer: "claude-haiku-4-5-20251001" } }, path: "/repo/charrette.config.json" });
     const err = await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard").then(
       () => null,
       (e: Error) => e
@@ -530,7 +530,7 @@ describe("harness run — resolving what the run will actually do", () => {
   });
 
   it("takes a routing change from the command line, over the config file", async () => {
-    h.loadFileConfigMock.mockReturnValue({ config: { models: { worker: "claude-sonnet-5" } }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { models: { worker: "claude-sonnet-5" } }, path: "/repo/charrette.config.json" });
     await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard", "--model", "worker=gpt-5.6-terra", "--model", "demo=gemini-3.5-flash-lite");
 
     const banner = printed();
@@ -550,15 +550,15 @@ describe("harness run — resolving what the run will actually do", () => {
     [{ minutes: 90 }, "every 90 minutes"],
     ["epic", "after every epic"],
   ])("reports the configured interval %j as %s", async (every, expected) => {
-    h.loadFileConfigMock.mockReturnValue({ config: { pitStop: { every } }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { pitStop: { every } }, path: "/repo/charrette.config.json" });
 
     await cli("run", "x", "--repo", "/repo", "--no-dashboard");
 
-    expect(printed()).toContain(`pit stops  ${expected}   (harness.config.json)`);
+    expect(printed()).toContain(`pit stops  ${expected}   (charrette.config.json)`);
   });
 
   it("says plainly what turning them off costs", async () => {
-    h.loadFileConfigMock.mockReturnValue({ config: { pitStop: { every: "never" } }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { pitStop: { every: "never" } }, path: "/repo/charrette.config.json" });
 
     await cli("run", "x", "--repo", "/repo", "--no-dashboard");
 
@@ -566,7 +566,7 @@ describe("harness run — resolving what the run will actually do", () => {
   });
 
   it("prefers --check over anything the repo suggests", async () => {
-    h.loadFileConfigMock.mockReturnValue({ config: { deterministicChecks: ["make ci"] }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { deterministicChecks: ["make ci"] }, path: "/repo/charrette.config.json" });
 
     await cli("run", "x", "--repo", "/repo", "--no-dashboard", "--check", "go test ./...", "go vet ./...");
 
@@ -575,12 +575,12 @@ describe("harness run — resolving what the run will actually do", () => {
   });
 
   it("takes the config file's checks when no flag overrides them", async () => {
-    h.loadFileConfigMock.mockReturnValue({ config: { deterministicChecks: ["make ci"] }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { deterministicChecks: ["make ci"] }, path: "/repo/charrette.config.json" });
 
     await cli("run", "x", "--repo", "/repo", "--no-dashboard");
 
-    expect(printed()).toContain("checks     make ci   (harness.config.json)");
-    expect(printed()).toContain("config     harness.config.json");
+    expect(printed()).toContain("checks     make ci   (charrette.config.json)");
+    expect(printed()).toContain("config     charrette.config.json");
   });
 
   it("warns that QA has no hard signal when checks are turned off", async () => {
@@ -601,7 +601,7 @@ describe("harness run — resolving what the run will actually do", () => {
     // The flag beats the file for the same reason `--model` does: it is what
     // you reach for when *this* run needs to be spending something else.
     const accounts = [{ name: "work", env: { CLAUDE_CONFIG_DIR: "/w" } }];
-    h.loadFileConfigMock.mockReturnValue({ config: { subscription: { accounts, active: "personal" } }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { subscription: { accounts, active: "personal" } }, path: "/repo/charrette.config.json" });
 
     await cli("run", "x", "--repo", "/repo", "--no-dashboard", "--account", "work");
 
@@ -617,7 +617,7 @@ describe("harness run — resolving what the run will actually do", () => {
   });
 
   it("spends the account it was configured with when the command line says nothing", async () => {
-    h.loadFileConfigMock.mockReturnValue({ config: { subscription: { active: "personal" } }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { subscription: { active: "personal" } }, path: "/repo/charrette.config.json" });
 
     await cli("run", "x", "--repo", "/repo", "--no-dashboard");
 
@@ -637,12 +637,12 @@ describe("harness run — resolving what the run will actually do", () => {
   it("takes the budget cap from the config file otherwise", async () => {
     h.loadFileConfigMock.mockReturnValue({
       config: { budget: { runCapUsd: 500 } },
-      path: "/repo/harness.config.json",
+      path: "/repo/charrette.config.json",
     });
 
     await cli("run", "x", "--repo", "/repo", "--no-dashboard");
 
-    expect(printed()).toContain("budget     $500   (harness.config.json)");
+    expect(printed()).toContain("budget     $500   (charrette.config.json)");
   });
 
   it.each([
@@ -657,11 +657,11 @@ describe("harness run — resolving what the run will actually do", () => {
 
   it("reports the skills directories and the tools the agents will be offered", async () => {
     h.detectToolbeltMock.mockReturnValue([{ name: "rtk" }, { name: "gh" }]);
-    h.loadFileConfigMock.mockReturnValue({ config: { skillsDirs: ["~/my-skills"] }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { skillsDirs: ["~/my-skills"] }, path: "/repo/charrette.config.json" });
 
     await cli("run", "x", "--repo", "/repo", "--no-dashboard");
 
-    expect(printed()).toMatch(/skills {5}\S*my-skills {3}\(harness\.config\.json\)/);
+    expect(printed()).toMatch(/skills {5}\S*my-skills {3}\(charrette\.config\.json\)/);
     expect(printed()).toContain("tools      rtk · gh   (offered to worker + QA agents)");
     // `~` must be expanded before it reaches a config the agents read.
     expect(printed()).not.toContain("~/my-skills");
@@ -677,7 +677,7 @@ describe("harness run — resolving what the run will actually do", () => {
    * will really use.
    */
   it("asks about the pinned skills with the directories and the pins the run will use", async () => {
-    h.loadFileConfigMock.mockReturnValue({ config: { roleSkills: { spec: ["prd-to-tdd"] } }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { roleSkills: { spec: ["prd-to-tdd"] } }, path: "/repo/charrette.config.json" });
     h.skillPinBannerMock.mockReturnValue(["           spec is pinned to prd-to-tdd, which is in none of those directories"]);
 
     await cli("run", "x", "--repo", "/repo", "--no-dashboard");
@@ -705,19 +705,19 @@ describe("harness run — resolving what the run will actually do", () => {
   });
 
   it("credits the config file when it asks for the mode that is also the default", async () => {
-    h.loadFileConfigMock.mockReturnValue({ config: { prMode: "single" }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { prMode: "single" }, path: "/repo/charrette.config.json" });
 
     await cli("run", "x", "--repo", "/repo", "--no-dashboard");
 
-    expect(printed()).toContain("prs        one rollup PR for the whole run   (harness.config.json)");
+    expect(printed()).toContain("prs        one rollup PR for the whole run   (charrette.config.json)");
   });
 
   it("reports per-task PR mode when the config asks for it", async () => {
-    h.loadFileConfigMock.mockReturnValue({ config: { prMode: "per-task" }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { prMode: "per-task" }, path: "/repo/charrette.config.json" });
 
     await cli("run", "x", "--repo", "/repo", "--no-dashboard");
 
-    expect(printed()).toContain("prs        one PR per task   (harness.config.json)");
+    expect(printed()).toContain("prs        one PR per task   (charrette.config.json)");
   });
 
   it("warns that other open runs in this repo are invisible to this one", async () => {
@@ -762,7 +762,7 @@ describe("a repository no run can be built in", () => {
     await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard");
 
     expect(printed()).toContain("no commits");
-    // Not one of these: no store opened, no .harness written, nothing spent.
+    // Not one of these: no store opened, no .charrette written, nothing spent.
     expect(h.RunControllerMock).not.toHaveBeenCalled();
     expect(h.controllerMethods.startRun).not.toHaveBeenCalled();
     expect(h.armCrashLogMock).not.toHaveBeenCalled();
@@ -776,7 +776,7 @@ describe("a repository no run can be built in", () => {
     expect(printed()).toContain('git add -A && git commit -m "initial commit"');
   });
 
-  it("fails the exit code, so a script wrapping the harness can tell", async () => {
+  it("fails the exit code, so a script wrapping the charrette can tell", async () => {
     h.repoUnusableMock.mockResolvedValue(WHY);
     await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard");
     expect(process.exitCode).toBe(1);
@@ -839,7 +839,7 @@ describe("what the repo already knows about its checks", () => {
     // The config file has just overridden the run's frozen checks; the memory
     // worth showing is about the commands that are going to run.
     h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "EXECUTING", assignment: "a" }]);
-    h.loadFileConfigMock.mockReturnValue({ config: { deterministicChecks: ["pnpm test"] }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { deterministicChecks: ["pnpm test"] }, path: "/repo/charrette.config.json" });
     h.storeMethods.getRun
       .mockReturnValueOnce({ id: "run-1", state: "EXECUTING", config: { deterministicChecks: ["npm test"] } })
       .mockReturnValue({ id: "run-1", state: "EXECUTING", config: { deterministicChecks: ["pnpm test"] } });
@@ -866,7 +866,7 @@ describe("what the repo already knows about its checks", () => {
   });
 });
 
-describe("harness run — the dashboard", () => {
+describe("charrette run — the dashboard", () => {
   it("serves the dashboard by default and prints the URL with its token", async () => {
     await cli("run", "x", "--repo", "/repo");
 
@@ -884,7 +884,7 @@ describe("harness run — the dashboard", () => {
   });
 
   it("takes the port from the config file when no flag pins it", async () => {
-    h.loadFileConfigMock.mockReturnValue({ config: { dashboardPort: 6001 }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { dashboardPort: 6001 }, path: "/repo/charrette.config.json" });
 
     await cli("run", "x", "--repo", "/repo");
 
@@ -917,7 +917,7 @@ describe("harness run — the dashboard", () => {
   });
 
   it("honours dashboard:false from the config file", async () => {
-    h.loadFileConfigMock.mockReturnValue({ config: { dashboard: false }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { dashboard: false }, path: "/repo/charrette.config.json" });
 
     await cli("run", "x", "--repo", "/repo");
 
@@ -925,7 +925,7 @@ describe("harness run — the dashboard", () => {
   });
 
   it("lets --dashboard override dashboard:false in the config file", async () => {
-    h.loadFileConfigMock.mockReturnValue({ config: { dashboard: false }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { dashboard: false }, path: "/repo/charrette.config.json" });
 
     await cli("run", "x", "--repo", "/repo", "--dashboard");
 
@@ -933,7 +933,7 @@ describe("harness run — the dashboard", () => {
   });
 });
 
-describe("harness run — intake", () => {
+describe("charrette run — intake", () => {
   it("plans straight from an assignment given on the command line", async () => {
     await cli("run", "build the thing", "--repo", "/repo", "--no-dashboard");
 
@@ -1006,7 +1006,7 @@ describe("harness run — intake", () => {
   });
 
   it("takes the decider from the config file when the flag is not given", async () => {
-    h.loadFileConfigMock.mockReturnValue({ config: { intake: { decidedBy: "critical-challenger" } }, path: "/repo/harness.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { intake: { decidedBy: "critical-challenger" } }, path: "/repo/charrette.json" });
 
     await cli("run", "build the thing", "--repo", "/repo", "--no-dashboard", "--chat");
 
@@ -1023,7 +1023,7 @@ describe("harness run — intake", () => {
   });
 
   it("lets the flag win over the file, as --model and --account do", async () => {
-    h.loadFileConfigMock.mockReturnValue({ config: { intake: { decidedBy: "critical-challenger" } }, path: "/repo/harness.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { intake: { decidedBy: "critical-challenger" } }, path: "/repo/charrette.json" });
 
     await cli("run", "build the thing", "--repo", "/repo", "--no-dashboard", "--chat", "--intake-decider", "product-manager");
 
@@ -1041,7 +1041,7 @@ describe("harness run — intake", () => {
 
   it("does not open a terminal transport when there is no terminal and a decider is named", async () => {
     // The unattended path this whole feature exists for: a cron, a CI job, a
-    // harness started by another harness. `TerminalChat` would block forever on
+    // charrette started by another charrette. `TerminalChat` would block forever on
     // the first question, and the run would look hung while it waited for
     // somebody who was never going to arrive.
     const tty = process.stdin.isTTY;
@@ -1085,7 +1085,7 @@ describe("harness run — intake", () => {
   });
 
   it("honours chat:false from the config file", async () => {
-    h.loadFileConfigMock.mockReturnValue({ config: { chat: false }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { chat: false }, path: "/repo/charrette.config.json" });
 
     await cli("run", "build it", "--repo", "/repo", "--no-dashboard");
 
@@ -1093,11 +1093,11 @@ describe("harness run — intake", () => {
   });
 
   it("honours chat:true from the config file", async () => {
-    h.loadFileConfigMock.mockReturnValue({ config: { chat: true }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { chat: true }, path: "/repo/charrette.config.json" });
 
     await cli("run", "build it", "--repo", "/repo", "--no-dashboard");
 
-    expect(printed()).toContain("intake     conversation before planning   (harness.config.json)");
+    expect(printed()).toContain("intake     conversation before planning   (charrette.config.json)");
   });
 
   it("notifies, closes the chat and stops the dashboard when the run throws", async () => {
@@ -1119,21 +1119,21 @@ describe("harness run — intake", () => {
 });
 
 describe("wiring the controller", () => {
-  it("creates the state directory, arms the crash log, and keeps .harness out of git", async () => {
+  it("creates the state directory, arms the crash log, and keeps .charrette out of git", async () => {
     h.ensureIgnoredMock.mockReturnValue(true);
 
     await cli("run", "x", "--repo", "/repo", "--no-dashboard");
 
-    expect(h.mkdirSyncMock).toHaveBeenCalledWith("/repo/.harness", { recursive: true });
-    expect(h.armCrashLogMock).toHaveBeenCalledWith("/repo/.harness");
-    expect(h.StoreMock).toHaveBeenCalledWith("/repo/.harness/harness.db");
-    expect(printed()).toContain("added .harness/ to .gitignore");
+    expect(h.mkdirSyncMock).toHaveBeenCalledWith("/repo/.charrette", { recursive: true });
+    expect(h.armCrashLogMock).toHaveBeenCalledWith("/repo/.charrette/charrette.log");
+    expect(h.StoreMock).toHaveBeenCalledWith("/repo/.charrette/charrette.db");
+    expect(printed()).toContain("added .charrette/ to .gitignore");
   });
 
   it("says nothing when .gitignore already covered it", async () => {
     await cli("run", "x", "--repo", "/repo", "--no-dashboard");
 
-    expect(printed()).not.toContain("added .harness/");
+    expect(printed()).not.toContain("added .charrette/");
   });
 
   it("keeps the GitHub token in this process and hands the adapter the slug", async () => {
@@ -1350,8 +1350,8 @@ describe("the terminal gates", () => {
       taskId: "settlement-hold-engine",
       title: "Settlement hold engine",
       why: "still not accepted after 45 minutes\nmore detail",
-      branch: "harness/run-1/settlement-hold-engine",
-      worktreePath: "/repo/.harness/worktrees/settlement-hold-engine",
+      branch: "charrette/run-1/settlement-hold-engine",
+      worktreePath: "/repo/.charrette/worktrees/settlement-hold-engine",
       recommendation: "merge the current tip and re-run the suite",
     });
 
@@ -1360,8 +1360,8 @@ describe("the terminal gates", () => {
     expect(shown).toContain("Settlement hold engine (settlement-hold-engine)");
     expect(shown).toContain("still not accepted after 45 minutes");
     expect(shown).not.toContain("more detail");
-    expect(shown).toContain("Its work so far is on harness/run-1/settlement-hold-engine");
-    expect(shown).toContain("Worktree: /repo/.harness/worktrees/settlement-hold-engine");
+    expect(shown).toContain("Its work so far is on charrette/run-1/settlement-hold-engine");
+    expect(shown).toContain("Worktree: /repo/.charrette/worktrees/settlement-hold-engine");
     expect(shown).toContain("Suggested answer: merge the current tip and re-run the suite");
     expect(question).toHaveBeenCalledWith("Your guidance [y = send the suggested answer / enter = park the task] ");
     // `y` accepts the suggestion rather than sending the letter y to the agent.
@@ -1426,7 +1426,7 @@ const STOP = {
   stopCostUsd: 1.5,
   projectedUsd: 40,
   intent: null,
-  artifactsDir: "/repo/.harness/run-1/pitstops/1",
+  artifactsDir: "/repo/.charrette/run-1/pitstops/1",
   markdown: "# Pit stop 1\n\n**It runs.** pnpm dev",
 };
 
@@ -1487,7 +1487,7 @@ describe("the pit stop gate in the terminal", () => {
   });
 });
 
-describe("harness resume", () => {
+describe("charrette resume", () => {
   it("picks the newest run with something left to do", async () => {
     h.storeMethods.listRuns.mockReturnValue([
       { id: "run-done", state: "DONE", assignment: "finished" },
@@ -1523,7 +1523,7 @@ describe("harness resume", () => {
    * The question a pin asks is about *this machine*, and a resume is exactly
    * when that answer can have changed: another laptop, a moved skills
    * directory, a collection cleaned out since the run was planned. The run
-   * banner is printed by `harness run` and never seen again, so without this
+   * banner is printed by `charrette run` and never seen again, so without this
    * the operator resuming gets no warning at all.
    */
   it("checks the resumed run's pins against this machine, from the frozen config", async () => {
@@ -1618,7 +1618,7 @@ describe("harness resume", () => {
 
   it("asks GitHub about a run in review before deciding whether it has work, and finds the red that the record did not carry", async () => {
     // Run de2cb7aa sat in PR_REVIEW with "CI green" on the record while #527
-    // was red on `test`, and `harness resume de2cb7aa` answered "already
+    // was red on `test`, and `charrette resume de2cb7aa` answered "already
     // finished" — from the record. Refreshing is what makes the record say
     // what the pull request says, and it has to happen before the decision.
     h.storeMethods.listRuns.mockReturnValue([{ id: "run-pr", state: "PR_REVIEW", assignment: "a" }]);
@@ -1724,14 +1724,14 @@ describe("harness resume", () => {
     await cli("resume", "--repo", "/repo", "--port", "5050");
     expect(h.dashboardArgs.at(-1)![2]).toEqual({ port: 5050 });
 
-    h.loadFileConfigMock.mockReturnValue({ config: { dashboardPort: 6060 }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { dashboardPort: 6060 }, path: "/repo/charrette.config.json" });
     await cli("resume", "--repo", "/repo");
     expect(h.dashboardArgs.at(-1)![2]).toEqual({ port: 6060 });
   });
 
   it("runs headless when the config file turns the dashboard off", async () => {
     h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "EXECUTING", assignment: "a" }]);
-    h.loadFileConfigMock.mockReturnValue({ config: { dashboard: false }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { dashboard: false }, path: "/repo/charrette.config.json" });
 
     await cli("resume", "--repo", "/repo");
 
@@ -1758,7 +1758,7 @@ describe("harness resume", () => {
   });
 });
 
-describe("harness resume — settings the operator changed since the run started", () => {
+describe("charrette resume — settings the operator changed since the run started", () => {
   const existing = (config: Record<string, unknown>) => {
     h.storeMethods.getRun.mockReturnValue({ id: "run-1", state: "EXECUTING", config });
     h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "EXECUTING", assignment: "a" }]);
@@ -1766,17 +1766,17 @@ describe("harness resume — settings the operator changed since the run started
 
   it("updates the checks a run was frozen with", async () => {
     existing({ deterministicChecks: ["cd web && npm test"] });
-    h.loadFileConfigMock.mockReturnValue({ config: { deterministicChecks: ["npm test"] }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { deterministicChecks: ["npm test"] }, path: "/repo/charrette.config.json" });
 
     await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
 
     expect(h.storeMethods.patchRunConfig).toHaveBeenCalledWith("run-1", { deterministicChecks: ["npm test"] });
-    expect(printed()).toContain("Checks updated from harness.config.json:\n  $ npm test");
+    expect(printed()).toContain("Checks updated from charrette.config.json:\n  $ npm test");
   });
 
   it("leaves the checks alone when the file says the same thing", async () => {
     existing({ deterministicChecks: ["npm test"] });
-    h.loadFileConfigMock.mockReturnValue({ config: { deterministicChecks: ["npm test"] }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { deterministicChecks: ["npm test"] }, path: "/repo/charrette.config.json" });
 
     await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
 
@@ -1788,7 +1788,7 @@ describe("harness resume — settings the operator changed since the run started
     // than the work is, and the tasks still queued are the only ones that can
     // still be made cheaper.
     existing({ models: { worker: "claude-sonnet-5", qa: "claude-sonnet-5" } });
-    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/charrette.config.json" });
 
     await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard", "--model", "worker=gpt-5.6-terra");
 
@@ -1800,7 +1800,7 @@ describe("harness resume — settings the operator changed since the run started
 
   it("takes the same change from the config file", async () => {
     existing({ models: { worker: "claude-sonnet-5" } });
-    h.loadFileConfigMock.mockReturnValue({ config: { models: { worker: "gpt-5.6-terra" } }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { models: { worker: "gpt-5.6-terra" } }, path: "/repo/charrette.config.json" });
 
     await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
 
@@ -1809,7 +1809,7 @@ describe("harness resume — settings the operator changed since the run started
 
   it("leaves the routing alone when nothing changed", async () => {
     existing({ models: { worker: "claude-sonnet-5" } });
-    h.loadFileConfigMock.mockReturnValue({ config: { models: { worker: "claude-sonnet-5" } }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { models: { worker: "claude-sonnet-5" } }, path: "/repo/charrette.config.json" });
 
     await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
 
@@ -1818,7 +1818,7 @@ describe("harness resume — settings the operator changed since the run started
 
   it("refuses a re-route to a provider with no key, before resuming", async () => {
     existing({ models: { worker: "claude-sonnet-5" } });
-    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/charrette.config.json" });
     h.missingKeysMock.mockReturnValue(["OPENAI_API_KEY is not set, but worker (gpt-5.6-terra) is routed to openai."]);
 
     await expect(cli("resume", "run-1", "--repo", "/repo", "--no-dashboard", "--model", "worker=gpt-5.6-terra")).rejects.toThrow(/OPENAI_API_KEY/);
@@ -1830,7 +1830,7 @@ describe("harness resume — settings the operator changed since the run started
     // the reason to re-route is almost always that the budget is going faster
     // than the work. `qa` is the one that must not get cheaper.
     existing({ models: { qa: "claude-sonnet-5" } });
-    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/charrette.config.json" });
 
     await expect(
       cli("resume", "run-1", "--repo", "/repo", "--no-dashboard", "--model", "qa=claude-haiku-4-5-20251001")
@@ -1854,29 +1854,29 @@ describe("harness resume — settings the operator changed since the run started
     // A flag that quietly did nothing would leave the operator watching an
     // expensive run they thought they had just made cheap.
     existing({ models: { worker: "claude-sonnet-5" } });
-    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/charrette.config.json" });
 
     await expect(cli("resume", "run-1", "--repo", "/repo", "--no-dashboard", "--model", "wroker=gpt-5.6-terra")).rejects.toThrow(/no role called "wroker"/);
   });
 
   it("updates the PR mode", async () => {
     existing({ prMode: "per-task" });
-    h.loadFileConfigMock.mockReturnValue({ config: { prMode: "single" }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { prMode: "single" }, path: "/repo/charrette.config.json" });
 
     await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
 
     expect(h.storeMethods.patchRunConfig).toHaveBeenCalledWith("run-1", { prMode: "single" });
-    expect(printed()).toContain("PR mode updated from harness.config.json: single");
+    expect(printed()).toContain("PR mode updated from charrette.config.json: single");
   });
 
   it("raises the parallel worker cap on a run that predates parallel dispatch", async () => {
     existing({ maxParallelWorkers: 1 });
-    h.loadFileConfigMock.mockReturnValue({ config: { maxParallelWorkers: 4 }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { maxParallelWorkers: 4 }, path: "/repo/charrette.config.json" });
 
     await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
 
     expect(h.storeMethods.patchRunConfig).toHaveBeenCalledWith("run-1", { maxParallelWorkers: 4 });
-    expect(printed()).toContain("Parallel workers updated from harness.config.json: 1 → 4");
+    expect(printed()).toContain("Parallel workers updated from charrette.config.json: 1 → 4");
   });
 
   it("raises the deterministic check timeout on a run whose suite is honestly slower", async () => {
@@ -1884,22 +1884,22 @@ describe("harness resume — settings the operator changed since the run started
     // was killed at 10 on every QA iteration. Raising the ceiling is the fix,
     // and a run already in progress is exactly where it has to land.
     existing({ deterministicCheckTimeoutMinutes: 10 });
-    h.loadFileConfigMock.mockReturnValue({ config: { deterministicCheckTimeoutMinutes: 45 }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { deterministicCheckTimeoutMinutes: 45 }, path: "/repo/charrette.config.json" });
 
     await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
 
     expect(h.storeMethods.patchRunConfig).toHaveBeenCalledWith("run-1", { deterministicCheckTimeoutMinutes: 45 });
-    expect(printed()).toContain("Check timeout updated from harness.config.json: 10 → 45 minute(s)");
+    expect(printed()).toContain("Check timeout updated from charrette.config.json: 10 → 45 minute(s)");
   });
 
   it("updates whether the run waits for CI", async () => {
     existing({ waitForChecks: true });
-    h.loadFileConfigMock.mockReturnValue({ config: { waitForChecks: false }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { waitForChecks: false }, path: "/repo/charrette.config.json" });
 
     await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
 
     expect(h.storeMethods.patchRunConfig).toHaveBeenCalledWith("run-1", { waitForChecks: false });
-    expect(printed()).toContain("Wait for CI updated from harness.config.json: false");
+    expect(printed()).toContain("Wait for CI updated from charrette.config.json: false");
   });
 
   it.each([
@@ -1907,30 +1907,30 @@ describe("harness resume — settings the operator changed since the run started
     ["workerMaxTurns", "Worker turn ceiling", 100, 300],
   ])("raises %s so the resumed tasks can reach it", async (key, label, before, after) => {
     existing({ [key]: before });
-    h.loadFileConfigMock.mockReturnValue({ config: { [key]: after }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { [key]: after }, path: "/repo/charrette.config.json" });
 
     await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
 
     expect(h.storeMethods.patchRunConfig).toHaveBeenCalledWith("run-1", { [key]: after });
-    expect(printed()).toContain(`${label} updated from harness.config.json: ${before} → ${after}`);
+    expect(printed()).toContain(`${label} updated from charrette.config.json: ${before} → ${after}`);
   });
 
   it.each(["skillRouting", "roleSkills"])("hands the remaining tasks the new %s", async (key) => {
     existing({ [key]: [] });
     const value = key === "skillRouting" ? [{ when: "ui", skills: ["frontend-design"] }] : { qa: ["visual-qa-agent"] };
-    h.loadFileConfigMock.mockReturnValue({ config: { [key]: value }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { [key]: value }, path: "/repo/charrette.config.json" });
 
     await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
 
     expect(h.storeMethods.patchRunConfig).toHaveBeenCalledWith("run-1", { [key]: value });
-    expect(printed()).toContain(`${key} updated from harness.config.json for the remaining tasks`);
+    expect(printed()).toContain(`${key} updated from charrette.config.json for the remaining tasks`);
   });
 
   it("leaves the routing tables alone when the file has not changed them", async () => {
     existing({ skillRouting: [{ when: "ui", skills: ["frontend-design"] }], roleSkills: {} });
     h.loadFileConfigMock.mockReturnValue({
       config: { skillRouting: [{ when: "ui", skills: ["frontend-design"] }] },
-      path: "/repo/harness.config.json",
+      path: "/repo/charrette.config.json",
     });
 
     await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
@@ -1943,7 +1943,7 @@ describe("harness resume — settings the operator changed since the run started
     // its weekly window is being resumed *because* the operator has another
     // subscription, and typing JSON is not what they want to be doing.
     existing({ subscription: { accounts: [{ name: "work", env: { CLAUDE_CONFIG_DIR: "/w" }, note: "" }], active: "", windows: ["seven_day"], pauseAtPercent: 95, preflight: true } });
-    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/charrette.config.json" });
 
     await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard", "--account", "work");
 
@@ -1956,7 +1956,7 @@ describe("harness resume — settings the operator changed since the run started
     // added after the run started is exactly the one it needs.
     const accounts = [{ name: "work", env: { CLAUDE_CONFIG_DIR: "/w" }, note: "" }];
     existing({ subscription: { accounts: [], active: "", windows: ["seven_day"], pauseAtPercent: 95, preflight: true } });
-    h.loadFileConfigMock.mockReturnValue({ config: { subscription: { accounts } }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { subscription: { accounts } }, path: "/repo/charrette.config.json" });
 
     await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard", "--account", "work");
 
@@ -1968,7 +1968,7 @@ describe("harness resume — settings the operator changed since the run started
     // starts, authenticates as the account it was told to leave, and says it
     // switched.
     existing({ subscription: { accounts: [], active: "", windows: ["seven_day"], pauseAtPercent: 95, preflight: true } });
-    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/charrette.config.json" });
     h.accountEnvMock.mockImplementation(() => {
       throw new Error('No subscription account named "work" — known accounts: none configured');
     });
@@ -1981,7 +1981,7 @@ describe("harness resume — settings the operator changed since the run started
     // `--account ""` is the way back: a run moved onto a work subscription for
     // an afternoon should not need a config edit to come home.
     existing({ subscription: { accounts: [{ name: "work", env: { CLAUDE_CONFIG_DIR: "/w" }, note: "" }], active: "work", windows: ["seven_day"], pauseAtPercent: 95, preflight: true } });
-    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/charrette.config.json" });
 
     await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard", "--account", "");
 
@@ -1990,7 +1990,7 @@ describe("harness resume — settings the operator changed since the run started
 
   it("says nothing about a subscription nobody changed", async () => {
     existing({ subscription: { accounts: [], active: "", windows: ["seven_day"], pauseAtPercent: 95, preflight: true } });
-    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/charrette.config.json" });
 
     await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
 
@@ -2002,7 +2002,7 @@ describe("harness resume — settings the operator changed since the run started
     // Its config JSON has no such key at all, and reading `.active` off it
     // would throw on the resume of every run older than this feature.
     existing({ deterministicChecks: [] });
-    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/charrette.config.json" });
 
     await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
 
@@ -2011,26 +2011,26 @@ describe("harness resume — settings the operator changed since the run started
 
   it("extends a finished-looking run past the pull request by setting a production URL", async () => {
     existing({ prodUrl: "" });
-    h.loadFileConfigMock.mockReturnValue({ config: { prodUrl: "https://app.example.com" }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { prodUrl: "https://app.example.com" }, path: "/repo/charrette.config.json" });
 
     await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
 
     expect(h.storeMethods.patchRunConfig).toHaveBeenCalledWith("run-1", { prodUrl: "https://app.example.com" });
-    expect(printed()).toContain("Production URL updated from harness.config.json: https://app.example.com");
+    expect(printed()).toContain("Production URL updated from charrette.config.json: https://app.example.com");
   });
 
   it("says (none) when the production URL is being cleared", async () => {
     existing({ prodUrl: "https://app.example.com" });
-    h.loadFileConfigMock.mockReturnValue({ config: { prodUrl: "" }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { prodUrl: "" }, path: "/repo/charrette.config.json" });
 
     await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
 
-    expect(printed()).toContain("Production URL updated from harness.config.json: (none)");
+    expect(printed()).toContain("Production URL updated from charrette.config.json: (none)");
   });
 
   it("does not redirect verification of a frozen production run", async () => {
     existing({ prodUrl: "https://app.example.com", delivery: { mode: "production" } });
-    h.loadFileConfigMock.mockReturnValue({ config: { prodUrl: "https://another.example" }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { prodUrl: "https://another.example" }, path: "/repo/charrette.config.json" });
     await expect(cli("resume", "run-1", "--repo", "/repo", "--no-dashboard")).rejects.toThrow("destination is frozen");
   });
 
@@ -2038,7 +2038,7 @@ describe("harness resume — settings the operator changed since the run started
     h.storeMethods.getRun.mockReturnValue(undefined);
     h.loadFileConfigMock.mockReturnValue({
       config: { deterministicChecks: ["npm test"], prMode: "single", maxParallelWorkers: 4, skillRouting: [] },
-      path: "/repo/harness.config.json",
+      path: "/repo/charrette.config.json",
     });
 
     await cli("resume", "run-x", "--repo", "/repo", "--no-dashboard");
@@ -2047,7 +2047,7 @@ describe("harness resume — settings the operator changed since the run started
   });
 });
 
-describe("harness criteria", () => {
+describe("charrette criteria", () => {
   // Run bc691359, `tier1-three-arm-capture`: the criteria asked for a bundle
   // that only `terraform apply` can produce, which `infraGuard` denies at the
   // Bash chokepoint. Five QA passes, four correct refusals and a rewritten
@@ -2108,7 +2108,7 @@ describe("harness criteria", () => {
   });
 });
 
-describe("harness probe", () => {
+describe("charrette probe", () => {
   const stuck = { id: "ui-login", state: "WORKING", completionProbe: "! rg -qi 'passkey' src" };
 
   beforeEach(() => {
@@ -2195,7 +2195,7 @@ describe("harness probe", () => {
   });
 });
 
-describe("harness regroup", () => {
+describe("charrette regroup", () => {
   it("rolls a run's per-task PRs into one and closes the superseded ones", async () => {
     h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "PR_REVIEW", assignment: "a" }]);
     h.storeMethods.listTasks.mockReturnValue([{ prNumber: 4 }]);
@@ -2247,16 +2247,16 @@ describe("harness regroup", () => {
 });
 
 /**
- * Diagnosing run 40da9337 took an hour of ad-hoc SQL against its harness.db.
+ * Diagnosing run 40da9337 took an hour of ad-hoc SQL against its charrette.db.
  * The answer — an intake question asked and never answered — was two lines of
  * it, and nothing in the product would have shown it.
  */
-describe("harness report", () => {
+describe("charrette report", () => {
   const aRun = (over: Record<string, unknown> = {}) => ({
     id: "run-1",
     state: "PR_REVIEW",
     assignment: "build it",
-    integrationBranch: "harness/run-1/main",
+    integrationBranch: "charrette/run-1/main",
     createdAt: 1_000,
     config: { baseBranch: "main" },
     ...over,
@@ -2271,8 +2271,8 @@ describe("harness report", () => {
     expect(printed()).toContain("Nothing from this run has shipped.");
     expect(printed()).toContain("live 0   dark 3   unproven 1   not delivered 2");
     expect(printed()).toContain("1 switch the run could not throw");
-    expect(printed()).toContain("/repo/.harness/reports/run-1.html");
-    expect(h.writeFileSyncMock).toHaveBeenCalledWith("/repo/.harness/reports/run-1.html", "<!doctype html><title>report</title>");
+    expect(printed()).toContain("/repo/.charrette/reports/run-1.html");
+    expect(h.writeFileSyncMock).toHaveBeenCalledWith("/repo/.charrette/reports/run-1.html", "<!doctype html><title>report</title>");
   });
 
   it("tells the assembler which repository this is and whether anyone merged it", async () => {
@@ -2371,7 +2371,7 @@ describe("harness report", () => {
   });
 });
 
-describe("harness postmortem", () => {
+describe("charrette postmortem", () => {
   it("explains the most recent run when given no id", async () => {
     h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "PR_REVIEW", assignment: "build it" }]);
     h.storeMethods.getRun.mockReturnValue({ id: "run-1", state: "PR_REVIEW", assignment: "build it", config: {} });
@@ -2408,7 +2408,7 @@ describe("harness postmortem", () => {
   it("fails when the run it was told to explain does not exist", async () => {
     // `probe` and `regroup` already exit 1 for a named target that is not
     // there. Reporting a typo as success is what lets the second half of
-    // `harness postmortem $ID && …` run against a run nobody looked at.
+    // `charrette postmortem $ID && …` run against a run nobody looked at.
     h.storeMethods.getRun.mockReturnValue(undefined);
     process.exitCode = undefined;
 
@@ -2444,10 +2444,10 @@ describe("harness postmortem", () => {
   });
 });
 
-describe("harness status", () => {
+describe("charrette status", () => {
   it("leaves a repository it was only asked to read exactly as it found it", async () => {
-    // `harness status` in a checkout that has never been run used to create
-    // `.harness/`, open an empty database in it and add a `.gitignore` entry —
+    // `charrette status` in a checkout that has never been run used to create
+    // `.charrette/`, open an empty database in it and add a `.gitignore` entry —
     // three writes to answer a question about whether anything had happened.
     h.existsSyncMock.mockReturnValue(false);
 
@@ -2485,26 +2485,26 @@ describe("harness status", () => {
 
   /**
    * EXECUTING says nothing about whether anything is working the run: bc691359
-   * sat in it for days with no harness alive, and spent an afternoon in it with
+   * sat in it for days with no charrette alive, and spent an afternoon in it with
    * two — which is how a task that had already committed its work got parked.
    */
-  it("names the harness process holding the run", async () => {
+  it("names the charrette process holding the run", async () => {
     h.runLockHolderMock.mockReturnValue({ pid: 47427, startedAt: Date.parse("2026-08-21T07:19:46Z") });
     h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "EXECUTING", assignment: "a" }]);
     h.storeMethods.listTasks.mockReturnValue([]);
 
     await cli("status", "--repo", "/repo");
 
-    expect(printed()).toContain("  driven by harness pid 47427 since 2026-08-21T07:19:46.000Z");
+    expect(printed()).toContain("  driven by charrette pid 47427 since 2026-08-21T07:19:46.000Z");
   });
 
-  it("says nothing about a driver when no harness holds the run", async () => {
+  it("says nothing about a driver when no charrette holds the run", async () => {
     h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "EXECUTING", assignment: "a" }]);
     h.storeMethods.listTasks.mockReturnValue([]);
 
     await cli("status", "--repo", "/repo");
 
-    expect(printed()).not.toContain("driven by harness pid");
+    expect(printed()).not.toContain("driven by charrette pid");
   });
 
   it("lists a rollup PR once, not once per task", async () => {
@@ -2591,7 +2591,7 @@ describe("harness status", () => {
 
     await cli("status", "--repo", "/repo");
 
-    expect(printed()).toContain("dashboard  none running — `harness dashboard` serves this repo's runs");
+    expect(printed()).toContain("dashboard  none running — `charrette dashboard` serves this repo's runs");
   });
 
   it("links the dashboard a run is serving right now", async () => {
@@ -2616,7 +2616,7 @@ describe("harness status", () => {
   });
 });
 
-describe("harness pause", () => {
+describe("charrette pause", () => {
   /**
    * The run lives in another process, so pausing is a request sent to its
    * dashboard. This is that dashboard: it answers `/api/state` with whatever the
@@ -2661,7 +2661,7 @@ describe("harness pause", () => {
     // JSON body parser answers that with a 400 before the route is reached.
     expect(calls.every((c) => c.type === undefined)).toBe(true);
     expect(printed()).toContain("pausing — the agents stop at their next message");
-    expect(printed()).toContain("harness resume run-1");
+    expect(printed()).toContain("charrette resume run-1");
     expect(printed()).toContain("It comes back on this same dashboard: http://127.0.0.1:4777/#tok");
   });
 
@@ -2708,7 +2708,7 @@ describe("harness pause", () => {
     await cli("pause", "--repo", "/repo");
 
     expect(printed()).toContain("pausing\n");
-    expect(printed()).toContain("harness resume run-1");
+    expect(printed()).toContain("charrette resume run-1");
   });
 
   it("reports the status code when a refusal says nothing", async () => {
@@ -2736,11 +2736,11 @@ describe("harness pause", () => {
     await cli("pause", "--repo", "/repo");
 
     expect(printed()).toContain("could not pause: this run is PAUSED");
-    expect(printed()).not.toContain("harness resume");
+    expect(printed()).not.toContain("charrette resume");
   });
 });
 
-describe("harness dashboard", () => {
+describe("charrette dashboard", () => {
   it("serves the repo's runs, finished ones included, until the operator stops it", async () => {
     // A run that ends leaves `listOpenRuns`, which is right for a dashboard
     // attached to a run and wrong for this one: the finished run is the whole
@@ -2779,14 +2779,14 @@ describe("harness dashboard", () => {
   });
 });
 
-describe("harness init", () => {
+describe("charrette init", () => {
   it("writes the settings this repo would run with", async () => {
     h.detectChecksMock.mockReturnValue({ checks: ["npm test", "npm run lint"], source: "package.json", skipped: [] });
 
     await cli("init", "--repo", "/repo");
 
     const [target, body] = h.writeFileSyncMock.mock.calls[0] as [string, string];
-    expect(target).toBe("/repo/harness.config.json");
+    expect(target).toBe("/repo/charrette.config.json");
     expect(JSON.parse(body)).toEqual({
       budget: { runCapUsd: 30 },
       deterministicChecks: ["npm test", "npm run lint"],
@@ -2794,19 +2794,19 @@ describe("harness init", () => {
       skillsDirs: expect.any(Array),
     });
     expect(body.endsWith("\n")).toBe(true);
-    expect(printed()).toContain("Wrote /repo/harness.config.json with 2 check(s).");
+    expect(printed()).toContain("Wrote /repo/charrette.config.json with 2 check(s).");
   });
 
   /**
    * `init` is run more than once — a repo's CI changes and this is the command
    * that catches the config up. Before this it wrote the default cap every
    * time, so a re-init silently undid whatever the operator or the budget gate
-   * had settled on. waf's cap had been raised to 2000 mid-run; a re-init put
+   * had settled on. rust-service's cap had been raised to 2000 mid-run; a re-init put
    * it back to 30, and the file still looked right afterwards.
    */
   it("keeps the cap already in the file rather than resetting it to the default", async () => {
     h.detectChecksMock.mockReturnValue({ checks: ["cargo test"], source: "package.json", skipped: [] });
-    h.loadFileConfigMock.mockReturnValue({ config: { budget: { runCapUsd: 2000 } }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { budget: { runCapUsd: 2000 } }, path: "/repo/charrette.config.json" });
 
     await cli("init", "--repo", "/repo", "--force");
 
@@ -2816,7 +2816,7 @@ describe("harness init", () => {
 
   it("takes a cap named on the command line over the one in the file", async () => {
     h.detectChecksMock.mockReturnValue({ checks: ["cargo test"], source: "package.json", skipped: [] });
-    h.loadFileConfigMock.mockReturnValue({ config: { budget: { runCapUsd: 2000 } }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { budget: { runCapUsd: 2000 } }, path: "/repo/charrette.config.json" });
 
     await cli("init", "--repo", "/repo", "--force", "--run-cap", "500");
 
@@ -2836,7 +2836,7 @@ describe("harness init", () => {
     // not be read first would be backwards.
     h.detectChecksMock.mockReturnValue({ checks: ["cargo test"], source: "package.json", skipped: [] });
     h.loadFileConfigMock.mockImplementation(() => {
-      throw new Error("/repo/harness.config.json is not valid JSON: Unexpected end of JSON input");
+      throw new Error("/repo/charrette.config.json is not valid JSON: Unexpected end of JSON input");
     });
 
     await cli("init", "--repo", "/repo", "--force");
@@ -2880,7 +2880,7 @@ describe("harness init", () => {
    * The ceiling the checks are proved under has to be the ceiling QA gives
    * them, and before this it was neither settable nor shared. `verifyChecks`
    * held its own hardcoded ten minutes, so a repository whose suite is honestly
-   * slower — waf's `cargo test --workspace` takes 21 — had its real test
+   * slower — rust-service's `cargo test --workspace` takes 21 — had its real test
    * command killed here and dropped from the config it was writing. That is
    * quieter than the failure it replaced and worse: the run then has no test
    * check at all, and nobody decided that.
@@ -2932,7 +2932,7 @@ describe("harness init", () => {
     // A loader that hands back no config at all is that case arriving by the
     // other route, and refusing to write because there was nothing to preserve
     // would be exactly backwards.
-    h.loadFileConfigMock.mockReturnValue({ config: undefined as unknown as Record<string, unknown>, path: "/repo/harness.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: undefined as unknown as Record<string, unknown>, path: "/repo/charrette.json" });
     h.detectChecksMock.mockReturnValue({ checks: ["npm test"], source: "package.json", skipped: [] });
 
     await cli("init", "--repo", "/repo");
@@ -2946,7 +2946,7 @@ describe("harness init", () => {
     // than once — a repo's CI changes and this is the command that catches the
     // config up — and before this every re-run put the ceiling back to the
     // default, with the file still looking right afterwards.
-    h.loadFileConfigMock.mockReturnValue({ config: { deterministicCheckTimeoutMinutes: 45 }, path: "/repo/harness.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { deterministicCheckTimeoutMinutes: 45 }, path: "/repo/charrette.json" });
     h.detectChecksMock.mockReturnValue({ checks: ["cargo test --workspace"], source: "1 step(s) from 1 CI workflow(s)", skipped: [] });
 
     await cli("init", "--repo", "/repo");
@@ -2962,7 +2962,7 @@ describe("harness init", () => {
     // never was. A zero — or anything else a hand-edit can leave behind —
     // reaches `execFileSync` as no timeout at all, which is an init that hangs
     // on the first slow check. The default is the honest fallback.
-    h.loadFileConfigMock.mockReturnValue({ config: { deterministicCheckTimeoutMinutes: 0 }, path: "/repo/harness.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { deterministicCheckTimeoutMinutes: 0 }, path: "/repo/charrette.json" });
     h.detectChecksMock.mockReturnValue({ checks: ["npm test"], source: "package.json", skipped: [] });
 
     await cli("init", "--repo", "/repo");
@@ -3090,7 +3090,7 @@ describe("harness init", () => {
     h.existsSyncMock.mockReturnValue(true);
 
     await expect(cli("init", "--repo", "/repo")).rejects.toThrow(
-      "/repo/harness.config.json already exists. Pass --force to overwrite."
+      "/repo/charrette.config.json already exists. Pass --force to overwrite."
     );
     expect(h.writeFileSyncMock).not.toHaveBeenCalled();
   });
@@ -3116,7 +3116,7 @@ describe("the closing report", () => {
     const shown = await reportFor({ line: "3 of 4 tasks merged" });
 
     expect(shown).toContain("Run run-1 finished — 3 of 4 tasks merged.");
-    expect(shown).toContain("Full picture: harness status --repo /repo");
+    expect(shown).toContain("Full picture: charrette status --repo /repo");
     expect(h.notifyDoneMock).toHaveBeenCalledWith("repo — run done", "run-1: 3 of 4 tasks merged.");
   });
 
@@ -3136,7 +3136,7 @@ describe("the closing report", () => {
         ],
         howStarted: "pnpm dev",
         why: "1 of 3 step(s) worked",
-        artifactsDir: "/r/.harness/run-1/live",
+        artifactsDir: "/r/.charrette/run-1/live",
         proof: [],
         couldNotReach: [],
       } as never,
@@ -3144,7 +3144,7 @@ describe("the closing report", () => {
 
     expect(shown).toContain("Live exercise: THE CRITICAL PATH IS BROKEN — 1 of 3 step(s) worked");
     expect(shown).toContain("BROKE  pay with a test card");
-    expect(shown).toContain("What it captured: /r/.harness/run-1/live");
+    expect(shown).toContain("What it captured: /r/.charrette/run-1/live");
   });
 
   it("says a working path worked, and one nothing drove was never exercised", async () => {
@@ -3205,7 +3205,7 @@ describe("the closing report", () => {
     expect(shown).toContain("CANNOT MERGE: this run's branch conflicts with main.");
     expect(shown).toContain("    - .gitignore");
     expect(shown).toContain("    - changelog.js");
-    expect(shown).toContain("Resolve it in the run's integration worktree, then `harness resume`.");
+    expect(shown).toContain("Resolve it in the run's integration worktree, then `charrette resume`.");
   });
 
   it("names the first ten conflicts and counts the rest", async () => {
@@ -3331,13 +3331,13 @@ describe("the closing report", () => {
     });
 
     expect(shown).toContain("    - broken");
-    expect(shown).toContain("harness resume");
+    expect(shown).toContain("charrette resume");
   });
 
   it("prints every pull request as a clickable URL", async () => {
     const shown = await reportFor({ prs: [{ number: 12, title: "Auth" }, { number: 13, title: "Packs" }] as never });
 
-    expect(shown).toContain("Open for review (the harness never merges — that part is yours):");
+    expect(shown).toContain("Open for review (the charrette never merges — that part is yours):");
     expect(shown).toContain("    https://github.com/acme/widgets/pull/12  Auth");
     expect(shown).toContain("    https://github.com/acme/widgets/pull/13  Packs");
   });
@@ -3353,7 +3353,7 @@ describe("the closing report", () => {
 
   it("takes the slug from the config file when there is no git remote", async () => {
     h.originSlugMock.mockResolvedValue(null);
-    h.loadFileConfigMock.mockReturnValue({ config: { githubRepo: "acme/from-config" }, path: "/repo/harness.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { githubRepo: "acme/from-config" }, path: "/repo/charrette.config.json" });
 
     const shown = await reportFor({ prs: [{ number: 12, title: "Auth" }] as never });
 
@@ -3367,7 +3367,7 @@ describe("the closing report", () => {
           taskId: "settlement",
           title: "Settlement hold engine",
           issue: 41,
-          branch: "harness/run-1/settlement",
+          branch: "charrette/run-1/settlement",
           why: "merge conflicts against a tip it   has never seen",
           blocking: ["reporting", "exports"],
         },
@@ -3378,7 +3378,7 @@ describe("the closing report", () => {
     expect(shown).toContain("    Settlement hold engine");
     expect(shown).toContain("      https://github.com/acme/widgets/issues/41");
     expect(shown).toContain("      why: merge conflicts against a tip it has never seen");
-    expect(shown).toContain("      its work is on harness/run-1/settlement");
+    expect(shown).toContain("      its work is on charrette/run-1/settlement");
     expect(shown).toContain("      2 other task(s) were waiting on it");
   });
 
@@ -3416,7 +3416,7 @@ describe("version", () => {
       code: "commander.version",
     });
 
-    // The same string `harnessBuild()` stamps on every agent session, so an
+    // The same string `charretteBuild()` stamps on every agent session, so an
     // operator holding a session record can match it against a binary.
     expect(printed()).toContain("0.0.1@7453d60");
   });
@@ -3432,11 +3432,11 @@ describe("version", () => {
   it("reports the build against the compiled output, read from this binary's own directory", async () => {
     await cli("version");
 
-    // Not the cwd: `harness version` is typed from inside the repo being
-    // worked on far more often than from the harness checkout, and the
-    // question is which harness is running.
+    // Not the cwd: `charrette version` is typed from inside the repo being
+    // worked on far more often than from the charrette checkout, and the
+    // question is which charrette is running.
     expect(v.collectVersionMock).toHaveBeenCalledWith("0.0.1@7453d60", expect.stringContaining("cli"), h.agentBinaryFilesMock);
-    expect(printed()).toBe("harness    0.0.1@7453d60\n");
+    expect(printed()).toBe("charrette    0.0.1@7453d60\n");
   });
 
   it("emits the same facts as JSON for a script that gates on the build", async () => {

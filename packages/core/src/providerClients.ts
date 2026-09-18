@@ -1,11 +1,11 @@
-import { modelId, providerFor, type Provider } from "@harness/shared";
+import { modelId, providerFor, type Provider } from "@charrette/shared";
 import type { LocalTool } from "./agentTools.js";
 
 /**
- * The two non-Anthropic APIs the harness can drive, behind one small interface.
+ * The two non-Anthropic APIs the charrette can drive, behind one small interface.
  *
  * Deliberately raw `fetch` rather than each vendor's SDK. Two reasons, in
- * order: the request the harness sends is the request a test can assert on, so
+ * order: the request the charrette sends is the request a test can assert on, so
  * "does the guard reach the shell before the model does" is provable without a
  * network or a mock framework; and a vendor SDK is another dependency in the
  * path that spawns agents, which is the path where a surprise costs money.
@@ -91,7 +91,7 @@ export function keyVarFor(provider: Provider): string {
  * Providers a routing table needs a key for and does not have, one sentence
  * each, naming the roles that would have failed.
  *
- * Checked at `harness run`, beside the routing policy, because the alternative
+ * Checked at `charrette run`, beside the routing policy, because the alternative
  * is finding out at the first dispatch of that role — which for `demo` is at
  * the first pit stop, after every worker in the epic has been paid for.
  */
@@ -116,7 +116,7 @@ const sleepMs: Sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
  * The vendor is briefly unable, rather than refusing.
  *
  * 429 is deliberately absent. A rate limit is not transient in seconds — it is
- * a quota window, and the harness already has a mechanism for one that is
+ * a quota window, and the charrette already has a mechanism for one that is
  * better than anything this loop could do: `usageLimitOf` recognises it and
  * `AgentPool.run` sleeps until it lifts, keeping the session, its ledger row
  * and its handle for operator feedback, and saying so on the bus. Retrying a
@@ -137,7 +137,7 @@ const TRANSIENT_BACKOFF_MS = [1_000, 4_000];
  * One request, retried while the vendor is merely unwell.
  *
  * The Anthropic transport never needed this: the Agent SDK retries a 5xx
- * internally, so every role in the harness had that resilience without anyone
+ * internally, so every role in the charrette had that resilience without anyone
  * writing it. Roles on this transport had none — which cost nothing while it
  * carried only what an operator had deliberately moved, and started costing on
  * the day `models.reviewer` was pinned to Google. A pit stop's reviewers all
@@ -356,5 +356,5 @@ export function clientFor(provider: Provider, env: NodeJS.ProcessEnv = process.e
   if (provider === "google") return googleClient(key, fetchImpl);
   // Anthropic runs on the SDK transport and never arrives here. Saying so out
   // loud beats returning something plausible if that ever stops being true.
-  throw new Error(`${provider} does not use the harness tool loop`);
+  throw new Error(`${provider} does not use the charrette tool loop`);
 }

@@ -88,7 +88,7 @@ const issue = (number: number, body: string | null, extra: Record<string, unknow
 describe("an adapter with nothing configured", () => {
   /**
    * Every method has to be a no-op rather than a throw: a run without a GitHub
-   * token is a supported way to use the harness, and it walks the same code
+   * token is a supported way to use the charrette, and it walks the same code
    * paths as one with a token.
    */
   it.each([
@@ -126,18 +126,18 @@ describe("filing a run's issues", () => {
   it("creates the issue, labels it with the run, and stamps it so a replay finds it", async () => {
     const { adapter, api } = adapterWith();
 
-    const ref = await adapter.ensureIssue("run1", "auth-task", "Auth", "Build the auth flow", ["harness"]);
+    const ref = await adapter.ensureIssue("run1", "auth-task", "Auth", "Build the auth flow", ["charrette"]);
 
     expect(ref).toEqual({ number: 7, url: "https://example.invalid/issues/7", fresh: true });
     const args = (api.rest.issues.create.mock.calls[0] as unknown[])[0] as { body: string; labels: string[] };
-    expect(args.body).toBe("Build the auth flow\n\n<!-- harness-run:run1/auth-task -->");
-    expect(args.labels).toEqual(["harness", "harness-run:run1"]);
+    expect(args.body).toBe("Build the auth flow\n\n<!-- charrette-run:run1/auth-task -->");
+    expect(args.labels).toEqual(["charrette", "charrette-run:run1"]);
   });
 
   it("returns the issue it already filed rather than filing a second one", async () => {
     const { adapter, api } = adapterWith();
     api.rest.issues.listForRepo.mockResolvedValue({
-      data: [issue(12, "whatever\n\n<!-- harness-run:run1/auth-task -->")],
+      data: [issue(12, "whatever\n\n<!-- charrette-run:run1/auth-task -->")],
     });
 
     const ref = await adapter.ensureIssue("run1", "auth-task", "Auth", "body", []);
@@ -196,7 +196,7 @@ describe("filing a run's issues", () => {
     const { adapter, api } = adapterWith();
     api.rest.issues.listForRepo.mockResolvedValue({
       data: [
-        issue(3, "<!-- harness-run:run1/a -->", { pull_request: { url: "x" } }),
+        issue(3, "<!-- charrette-run:run1/a -->", { pull_request: { url: "x" } }),
         issue(4, "an issue a human filed"),
         issue(5, null),
       ],
@@ -230,13 +230,13 @@ describe("reading what an operator wrote on an issue", () => {
   /**
    * By marker, not by author: the token is often the operator's own, so
    * dropping everything that account said would drop exactly the words the
-   * harness came for.
+   * charrette came for.
    */
-  it("skips what the harness wrote itself, even under the operator's account", async () => {
+  it("skips what the charrette wrote itself, even under the operator's account", async () => {
     const { adapter, api } = adapterWith();
     api.rest.issues.listComments.mockResolvedValue({
       data: [
-        { id: 1, user: { login: "operator" }, body: "merged\n\n<!-- harness-comment -->" },
+        { id: 1, user: { login: "operator" }, body: "merged\n\n<!-- charrette-comment -->" },
         { id: 2, user: { login: "operator" }, body: "actually, retry it" },
       ],
     });
@@ -275,7 +275,7 @@ describe("reading what an operator wrote on an issue", () => {
   it("says nothing twice about the same state", async () => {
     const { adapter, api } = adapterWith();
     api.rest.issues.listComments.mockResolvedValue({
-      data: [{ id: 1, body: "merged\n\n<!-- harness-comment -->\n<!-- harness-status:merged -->" }],
+      data: [{ id: 1, body: "merged\n\n<!-- charrette-comment -->\n<!-- charrette-status:merged -->" }],
     });
 
     await expect(adapter.commentOnIssue(9, "merged", "it merged")).resolves.toBe(false);
@@ -291,7 +291,7 @@ describe("reading what an operator wrote on an issue", () => {
 });
 
 /**
- * The read half of an issue the harness did *not* file. This is how a request
+ * The read half of an issue the charrette did *not* file. This is how a request
  * that is nothing but a link — "implement owner/repo#480" — becomes a brief
  * without the operator retyping the specification into a terminal.
  */
@@ -366,14 +366,14 @@ describe("reading an issue somebody else wrote", () => {
     await expect(adapter.readIssue(480)).resolves.toMatchObject({ comments: [] });
   });
 
-  it("fills in the gaps a sparse issue leaves and drops the harness's own comments", async () => {
+  it("fills in the gaps a sparse issue leaves and drops the charrette's own comments", async () => {
     const { adapter, api } = adapterWith();
     api.rest.issues.get.mockResolvedValue({
       data: { number: 5, html_url: "u", title: "t", state: "closed", user: null, labels: [], body: null },
     });
     api.rest.issues.listComments.mockResolvedValue({
       data: [
-        { user: { login: "operator" }, body: "merged\n\n<!-- harness-comment -->" },
+        { user: { login: "operator" }, body: "merged\n\n<!-- charrette-comment -->" },
         { user: null, body: "from a deleted account" },
         { user: { login: "x" }, body: null },
       ],
@@ -446,11 +446,11 @@ describe("how much of a long thread comes back", () => {
 
   /**
    * Skipped comments are still counted as read. Otherwise an issue whose thread
-   * is nothing but the harness's own status updates would report them as
+   * is nothing but the charrette's own status updates would report them as
    * unread, and send the agent looking for words that are not there.
    */
-  it("does not report the harness's own comments as left behind", async () => {
-    const { adapter } = withThread([[{ user: { login: "a" }, body: "merged\n\n<!-- harness-comment -->" }]], 1);
+  it("does not report the charrette's own comments as left behind", async () => {
+    const { adapter } = withThread([[{ user: { login: "a" }, body: "merged\n\n<!-- charrette-comment -->" }]], 1);
 
     const issue = await adapter.readIssue(1);
 
@@ -519,7 +519,7 @@ describe("what CI says about a commit", () => {
   });
 
   it("is pending, not failing, while a failure sits alongside checks that have not finished", async () => {
-    // web-app run 428d77f8: Frontend failed on this repo's slow, serialized
+    // The shared runner run 428d77f8: Frontend failed on this repo's slow, serialized
     // self-hosted runner while Backend/E2E/Android hadn't started yet, and
     // `settleChecks` stopped watching the instant this returned "failing" —
     // reporting one red job to the operator when three more went on to fail
@@ -688,7 +688,7 @@ describe("closing a pull request", () => {
 
     expect(api.rest.issues.createComment.mock.calls[0]![0]).toMatchObject({
       issue_number: 5,
-      body: "superseded by the rollup\n\n<!-- harness-comment -->",
+      body: "superseded by the rollup\n\n<!-- charrette-comment -->",
     });
     expect(api.rest.pulls.update.mock.calls[0]![0]).toMatchObject({ pull_number: 5, state: "closed" });
   });
@@ -725,7 +725,7 @@ describe("opening a pull request", () => {
       fresh: true,
     });
     expect((api.rest.pulls.create.mock.calls[0]![0] as { body: string }).body).toBe(
-      "body\n\n<!-- harness-run:run1/pr-task1 -->"
+      "body\n\n<!-- charrette-run:run1/pr-task1 -->"
     );
   });
 
@@ -748,7 +748,7 @@ describe("telling the no-commits 422 apart", () => {
       isNoCommitsError(
         Object.assign(new Error("Validation Failed"), {
           status: 422,
-          response: { data: { errors: [{ message: "No commits between main and harness/run1/task" }] } },
+          response: { data: { errors: [{ message: "No commits between main and charrette/run1/task" }] } },
         })
       )
     ).toBe(true);
@@ -793,7 +793,7 @@ describe("asking whether a pull request merges", () => {
     api.rest.pulls.get.mockResolvedValue({ data: { mergeable: true, mergeable_state: "behind" } });
     await expect(adapter.prMergeable(42)).resolves.toEqual({ state: "behind", mergeStateStatus: "behind" });
 
-    // Every other state a true `mergeable` carries — a review this harness
+    // Every other state a true `mergeable` carries — a review this charrette
     // will never give, a non-required check — is mergeable for this purpose.
     api.rest.pulls.get.mockResolvedValue({ data: { mergeable: true, mergeable_state: "blocked" } });
     await expect(adapter.prMergeable(42)).resolves.toEqual({ state: "mergeable", mergeStateStatus: "blocked" });

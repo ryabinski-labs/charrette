@@ -30,13 +30,13 @@ importers:
 
   apps/cli:
     dependencies:
-      '@harness/core':
+      '@charrette/core':
         specifier: workspace:*
         version: link:../../packages/core
-      '@harness/dashboard':
+      '@charrette/dashboard':
         specifier: workspace:*
         version: link:../../packages/dashboard
-      '@harness/shared':
+      '@charrette/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       commander:
@@ -58,10 +58,10 @@ importers:
       '@anthropic-ai/claude-agent-sdk':
         specifier: ^0.3.257
         version: 0.3.257(@anthropic-ai/sdk@0.115.0(zod@3.25.76))(@modelcontextprotocol/sdk@1.30.0(supports-color@7.2.0)(zod@3.25.76))(zod@3.25.76)
-      '@harness/shared':
+      '@charrette/shared':
         specifier: workspace:*
         version: link:../shared
-      '@harness/skills-mcp':
+      '@charrette/skills-mcp':
         specifier: workspace:*
         version: link:../skills-mcp
       octokit:
@@ -80,10 +80,10 @@ importers:
 
   packages/dashboard:
     dependencies:
-      '@harness/core':
+      '@charrette/core':
         specifier: workspace:*
         version: link:../core
-      '@harness/shared':
+      '@charrette/shared':
         specifier: workspace:*
         version: link:../shared
       fastify:

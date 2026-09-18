@@ -42,7 +42,7 @@ describe("reading the ceiling the installed SDK will actually grant", () => {
 
   it("keeps both numbers, because they answer different questions", () => {
     // `standard` is what a message gets unasked; `upper` is what it gets when
-    // the harness asks. Reporting only one of them is how the planner ended up
+    // the charrette asks. Reporting only one of them is how the planner ended up
     // asking for half of what it could have had.
     expect(modelCeiling(ceilingTable(REGISTRY), "claude-opus-5")).toMatchObject({ known: true, standard: 64_000, upper: 128_000 });
   });
@@ -105,11 +105,11 @@ describe("a bundle it cannot read the registry out of", () => {
   });
 });
 
-describe("the SDK this harness is actually installed against", () => {
+describe("the SDK this charrette is actually installed against", () => {
   it("names the binary and manifest the platform package should have installed", () => {
     const { binary, manifest } = agentBinaryFiles();
 
-    // Both are read by `harness version`, which exists because a platform
+    // Both are read by `charrette version`, which exists because a platform
     // package that never downloaded is invisible until an agent is spawned:
     // pnpm records the optional dependency as installed, the symlink resolves,
     // and the 190MB payload is simply absent.
@@ -123,7 +123,7 @@ describe("the SDK this harness is actually installed against", () => {
 
   it("still has a registry in the shape this parses", async () => {
     // The test that earns the rest of the module. If an SDK upgrade moves the
-    // ceiling somewhere else, the harness goes quiet instead of lying — and this
+    // ceiling somewhere else, the charrette goes quiet instead of lying — and this
     // is what tells us it went quiet. It moved once already: 0.3.25x keeps the
     // table in the native binary rather than the entry bundle, which is why
     // this asks the installed-SDK reader rather than the bundle directly.
@@ -145,7 +145,7 @@ describe("the SDK this harness is actually installed against", () => {
     expect(requestTokens(reading, 64_000)).toBeGreaterThanOrEqual(64_000);
   });
 
-  it("knows the model the planner runs on, and grants more than the harness used to ask for", async () => {
+  it("knows the model the planner runs on, and grants more than the charrette used to ask for", async () => {
     // The regression this module exists for, in its fixed form: 0.1.77 had never
     // heard of `claude-opus-5` and silently handed it 32000, which truncated a
     // plan mid-JSON and — once the wrap-up message landed on the truncated turn
@@ -216,14 +216,14 @@ describe("what the operator is told about it", () => {
 describe("how much to ask each message for", () => {
   const table = ceilingTable(REGISTRY) as CeilingTable;
 
-  it("asks for everything the model allows, not the harness's own figure", () => {
+  it("asks for everything the model allows, not the charrette's own figure", () => {
     // The planner emits one indivisible artifact per message. Leaving 64000
     // tokens of the model's allowance unused is a plan split in half for nothing.
     expect(requestTokens(modelCeiling(table, "claude-opus-5"), 64_000)).toBe(128_000);
     expect(requestTokens(modelCeiling(table, "claude-opus-4"), 64_000)).toBe(32_000);
   });
 
-  it("falls back to the harness's figure for a model the SDK does not list", () => {
+  it("falls back to the charrette's figure for a model the SDK does not list", () => {
     // Asking for more than an unlisted model grants is harmless — it is clamped.
     // Asking for less than it grants is not.
     expect(requestTokens(modelCeiling(table, "claude-opus-9"), 64_000)).toBe(64_000);
@@ -231,7 +231,7 @@ describe("how much to ask each message for", () => {
   });
 
   it("plans around what was granted, and around the request when nothing was read", () => {
-    // An unreadable SDK leaves the harness exactly where it was before it could
+    // An unreadable SDK leaves the charrette exactly where it was before it could
     // read one: taking its own request at face value.
     expect(grantedTokens(modelCeiling(table, "claude-opus-4"), 64_000)).toBe(32_000);
     expect(grantedTokens(modelCeiling(table, "claude-opus-5"), 128_000)).toBe(128_000);
@@ -243,7 +243,7 @@ describe("how much to ask each message for", () => {
 describe("reading the registry out of the SDK's native binary", () => {
   /** A registry file on disk, with `filler` bytes of noise before and after it. */
   function registryFile(entries: string[], filler = 0): string {
-    const dir = mkdtempSync(path.join(tmpdir(), "harness-ceiling-"));
+    const dir = mkdtempSync(path.join(tmpdir(), "charrette-ceiling-"));
     const file = path.join(dir, "claude");
     writeFileSync(file, " ".repeat(filler) + `let MODELS=[${entries.join(",")}];` + " ".repeat(filler));
     return file;
@@ -276,7 +276,7 @@ describe("reading the registry out of the SDK's native binary", () => {
   });
 
   it("says nothing about a file that is not there", async () => {
-    await expect(ceilingTableFromFile(path.join(tmpdir(), "harness-no-such-binary"))).rejects.toThrow();
+    await expect(ceilingTableFromFile(path.join(tmpdir(), "charrette-no-such-binary"))).rejects.toThrow();
   });
 });
 
@@ -320,7 +320,7 @@ describe("where the installed SDK keeps its registry", () => {
 describe("what the SDK's binary is called", () => {
   it("is claude.exe on Windows and claude everywhere else", () => {
     // Only the running machine's platform package is ever installed, so this
-    // rule is about a machine the harness has not run on yet.
+    // rule is about a machine the charrette has not run on yet.
     expect(binaryName("win32")).toBe("claude.exe");
     expect(binaryName("darwin")).toBe("claude");
     expect(binaryName("linux")).toBe("claude");

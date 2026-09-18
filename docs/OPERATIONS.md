@@ -1,6 +1,6 @@
-# Operating the Harness
+# Operating the Charrette
 
-Everything you need to install, configure, run, observe, and recover the harness.
+Everything you need to install, configure, run, observe, and recover the charrette.
 For *why* it is built this way, read [PRD.md](../PRD.md); this document is the *how*.
 
 - [1. Mental model](#1-mental-model)
@@ -11,7 +11,7 @@ For *why* it is built this way, read [PRD.md](../PRD.md); this document is the *
 - [6. Your first run](#6-your-first-run)
 - [7. CLI reference](#7-cli-reference)
 - [8. Configuration reference](#8-configuration-reference)
-- [9. What the harness writes where](#9-what-the-harness-writes-where)
+- [9. What the charrette writes where](#9-what-the-charrette-writes-where)
 - [10. The dashboard](#10-the-dashboard)
 - [11. Skills](#11-skills)
 - [12. Budget control](#12-budget-control)
@@ -24,7 +24,7 @@ For *why* it is built this way, read [PRD.md](../PRD.md); this document is the *
 
 ## 1. Mental model
 
-You give the harness **a sentence** and a **target repository**. It runs this loop:
+You give the charrette **a sentence** and a **target repository**. It runs this loop:
 
 ```
 what you typed
@@ -38,9 +38,9 @@ what you typed
    ↓     deterministic checks   your test/lint commands — cheap, run before QA
    ↓     QA agent (Sonnet)      adversarial review against acceptance criteria
    ↓       ↳ FAIL → back to the worker with a must-fix list (max 3 iterations)
-   ↓       ↳ at the cap → GATE — the harness asks YOU, and your answer restarts
+   ↓       ↳ at the cap → GATE — the charrette asks YOU, and your answer restarts
    ↓                      the worker with fresh iterations (or parks the task)
-   ↓     merge into harness/<runId>/main      ← this is what unblocks dependents
+   ↓     merge into charrette/<runId>/main      ← this is what unblocks dependents
    ↓  validator agent (Sonnet)  judges the merged whole against your original
    ↓                            intent — the last step before any PR exists
    ↓       ↳ FAIL → one task per gap, queued and built, then judged again
@@ -62,12 +62,12 @@ Three rules that shape everything:
    in its worktree.
 
 The third rule has a consequence worth knowing before your first run: a task the
-harness cannot finish parks as `NEEDS_HUMAN`, and everything downstream of it can
+charrette cannot finish parks as `NEEDS_HUMAN`, and everything downstream of it can
 then never become ready. Those tasks are cancelled unattempted, and the run ends
 with fewer PRs than the plan had tasks — or with none at all. That is the design
-working, not a fault, but it means **`PR_REVIEW` is where the harness stops, not
+working, not a fault, but it means **`PR_REVIEW` is where the charrette stops, not
 proof that it succeeded.** Read what it produced, which the closing line and
-`harness status` both spell out.
+`charrette status` both spell out.
 
 Since issue #115 there is a second way for a run to stop, and it reads
 differently on purpose. A run whose task list has emptied but which **cannot
@@ -77,7 +77,7 @@ an agent drove it**, or nothing merged at all — does not
 enter `PR_REVIEW`. It enters **`BLOCKED`**, opens no pull request, and puts the
 unmet list in the transition reason, the closing line, the dashboard notification
 and a `run.closing_proof` event. `PR_REVIEW` asks you to review; `BLOCKED` asks
-you for help. Fix what it names and `harness resume` re-enters the gates.
+you for help. Fix what it names and `charrette resume` re-enters the gates.
 `holdUntilProven: false` restores the older shape, where every one of those was a
 clause in the closing line and the run reported in review anyway.
 
@@ -103,7 +103,7 @@ When it does come to you, it arrives as it always did — in the terminal, or as
 an amber panel (and a desktop notification) on the dashboard — with the
 advisor's draft prefilled. Leaving it blank, or clicking *Park it*, parks the
 task. Set `{"taskGate":{"decidedBy":"operator"}}` to be asked every time, which
-is what the harness used to do.
+is what the charrette used to do.
 
 One escalation is not like the others. A task's **completion probe** is checked
 before QA and the worker is forbidden to edit it, so when the probe itself is
@@ -120,8 +120,8 @@ You have the same power, unbounded, and you do not need to stop the run to use
 it:
 
 ```bash
-harness probe ui-login "rg -q useShortcuts src/AppShell.vue" --why "the old one grepped a generated file"
-harness probe ui-login --clear      # withdraw it; QA alone judges the task
+charrette probe ui-login "rg -q useShortcuts src/AppShell.vue" --why "the old one grepped a generated file"
+charrette probe ui-login --clear      # withdraw it; QA alone judges the task
 ```
 
 The task loop re-reads its task every iteration, so this lands on a run in
@@ -135,7 +135,7 @@ your original assignment — did the sum of the merged tasks deliver what you
 asked for, not merely pass their own acceptance criteria? Its verdict (and each
 gap it finds) goes into the closing report and the run's events.
 
-**A FAIL does not just get reported — the harness goes and closes it.** Each gap
+**A FAIL does not just get reported — the charrette goes and closes it.** Each gap
 becomes a task in its own `intent-gaps` epic, chained one after another (the
 gaps are usually the same omission seen from several angles, so they land in the
 same files and racing them would only produce merge conflicts), and the run goes
@@ -144,16 +144,16 @@ tree again. This happens **once** by default: `{"intentFixRounds": 0}` restores
 the old behaviour of reporting the verdict and stopping there, and up to 3 is
 allowed. The gaps are stated against a tree that already exists, which is what
 makes them the cheapest work in the run — and leaving them for the human meant
-the harness declined to make exactly the fixes it was best placed to make. If a
+the charrette declined to make exactly the fixes it was best placed to make. If a
 round of fixing does not satisfy the validator, the second verdict is reported
 and — with `holdUntilProven` (the default) — the run stops in `BLOCKED` rather
 than opening a pull request over it.
 
 The validator has three answers, not two. **UNKNOWN** is for what its turn budget
-did not reach: it names the items it never checked in `unchecked`, the harness
+did not reach: it names the items it never checked in `unchecked`, the charrette
 buys one more, narrower pass over exactly those items, and if that pass abstains
 too the run holds on it — an abstention is not a pass. A PASS that lists gaps is
-two verdicts; the harness sends the session back to choose one, and if it will
+two verdicts; the charrette sends the session back to choose one, and if it will
 not, keeps the cautious reading (UNKNOWN, with the gaps as what was not settled).
 Scope, for the validator, is the brief and the specification derived from it
 before any code existed — a `KNOWN-GAPS.md`, a "non-goals" section or an
@@ -161,7 +161,7 @@ before any code existed — a `KNOWN-GAPS.md`, a "non-goals" section or an
 a gap those documents disclose is still a gap, reported as disclosed.
 
 Alongside those, the run reconciles **requirements** rather than tasks. A
-cancelled task's requirement used to go nowhere — waf cancelled 177 tasks
+cancelled task's requirement used to go nowhere — rust-service cancelled 177 tasks
 against 377 merged and carried none of their requirements anywhere; they
 stopped existing and came back as sections in a 118 KB gaps file. Now each
 requirement the brief named ends in one of four states: **shipped** (a task that
@@ -176,7 +176,7 @@ A re-plan says which requirements it stops covering before it cancels anything,
 and which of the tasks it proposes look like work this run has already merged.
 The second is a comparison of titles and touched paths, not a verdict: a repeat
 is sometimes what you asked for, so nothing is cancelled and the pit stop is
-simply told. waf merged `seclang ast types` twice under two ids, built each of
+simply told. rust-service merged `seclang ast types` twice under two ids, built each of
 its three body parsers twice, and then paid a further task to consolidate its
 own duplicates.
 
@@ -187,7 +187,7 @@ that record something as deliberately undone. Past roughly 16 KB of the first or
 40 of the second you are asked one question, while there is budget to answer it
 with: buy the work, or accept the gaps. It is a signal and never a gate — some
 of those documents are exactly what a good handover looks like, and only you can
-tell the difference. waf's was 118.6 KB across 27 sections and nobody was asked
+tell the difference. rust-service's was 118.6 KB across 27 sections and nobody was asked
 until the run was over.
 
 Before any of that, the plan is sequenced around the same path. The planner is
@@ -204,7 +204,7 @@ names no spine at all when the specification names a path, and that more than
 documentation, dashboards or marketing rather than the product's own path. A
 task in the skeleton is never counted as scaffolding whatever it is named, so a
 run whose product *is* a CI tool is plannable. Neither finding blocks the plan —
-both are in front of you before a worker is paid, which is where waf's split
+both are in front of you before a worker is paid, which is where rust-service's split
 (13 crates, a UI, a marketing site, a fuzz workspace and 56,491 lines of docs
 before anything ran) would have been the whole conversation.
 
@@ -218,7 +218,7 @@ shortest sequence a real user performs that makes the product worth having, name
 by the spec agent at intake, from the brief, before any code existed. It stops at
 the first step that does not work and reports what it saw.
 
-Everything before this reads code. Across waf and ledger-app — five runs, $4,763,
+Everything before this reads code. Across rust-service and ledger-app — five runs, $4,763,
 510 merged tasks, a month of wall clock — nothing ever started the product and
 used it, and both shipped "done" without ever having run. A broken step becomes a
 fix task carrying the observation verbatim (`live.fixRounds`, one round by
@@ -226,13 +226,13 @@ default); a path that stays broken, or a product that never starts, holds the ru
 in `BLOCKED`. `live.enabled: false` switches the whole gate off, and a
 specification that named no critical path is reported as never exercised rather
 than as a pass. The transcript, screenshots and captures are kept under
-`.harness/<runId>/live/`.
+`.charrette/<runId>/live/`.
 
 Fourth, only after all of that — and only when the run can prove itself — is
 the pull request opened: by default **one rollup PR for the whole run**, from
 the integration branch, listing every merged task (one `--no-ff` merge commit
 each) with the validator's verdict in the body, so a reviewer never sees a PR the
-harness has not finished judging. With `holdUntilProven: false` a FAIL verdict
+charrette has not finished judging. With `holdUntilProven: false` a FAIL verdict
 does not withhold the PR in review mode — human review is where
 a gap it could not close belongs — but it is printed first, above it, and the PR
 is held as a draft.
@@ -246,8 +246,8 @@ unfinished requirements.
 Why a rollup and not one PR per task: task branches are cut from the
 integration branch, so each carries every merge that landed before it — by the
 last task, its "own" PR is nearly the whole run's diff again. Set
-`"prMode": "per-task"` in `harness.config.json` if you want the old behaviour
-anyway; `harness regroup` converts an already-published per-task run.
+`"prMode": "per-task"` in `charrette.config.json` if you want the old behaviour
+anyway; `charrette regroup` converts an already-published per-task run.
 
 State lives in an event-sourced SQLite database. Every run is resumable; completed
 tasks never re-execute and are never re-paid for.
@@ -273,24 +273,24 @@ That is expected and harmless.
 ## 3. Install
 
 ```bash
-git clone git@github.com:ryabinski-labs/harness.git
-cd harness
+git clone git@github.com:ryabinski-labs/charrette.git
+cd charrette
 pnpm install
 pnpm build          # compiles all packages to dist/
 pnpm test           # 58 unit tests, no API calls, no network
 ```
 
-### Put `harness` on your PATH
+### Put `charrette` on your PATH
 
 The build emits an executable `apps/cli/dist/main.js`. Symlink it into a
 directory already on your PATH:
 
 ```bash
-pnpm link-cli       # ln -s apps/cli/dist/main.js ~/.local/bin/harness
-harness --help
+pnpm link-cli       # ln -s apps/cli/dist/main.js ~/.local/bin/charrette
+charrette --help
 ```
 
-If `harness: command not found`, `~/.local/bin` is not on your PATH. Add it:
+If `charrette: command not found`, `~/.local/bin` is not on your PATH. Add it:
 
 ```bash
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && exec zsh
@@ -301,14 +301,14 @@ stay in place, because the symlink resolves back into this repo's
 `node_modules`:
 
 ```bash
-ln -sf "$PWD/apps/cli/dist/main.js" /usr/local/bin/harness
+ln -sf "$PWD/apps/cli/dist/main.js" /usr/local/bin/charrette
 ```
 
 `pnpm link --global` also works, but only after `pnpm setup` has configured a
 global bin directory; the symlink above needs no setup.
 
 Rebuilding (`pnpm build`) updates the linked command in place — no re-linking.
-Every example below uses `harness`; if you skipped linking, substitute
+Every example below uses `charrette`; if you skipped linking, substitute
 `node apps/cli/dist/main.js`.
 
 ---
@@ -317,7 +317,7 @@ Every example below uses `harness`; if you skipped linking, substitute
 
 ### Anthropic (required)
 
-The harness never handles Anthropic credentials itself — there is no API-key
+The charrette never handles Anthropic credentials itself — there is no API-key
 code path anywhere in it. It calls the Claude Agent SDK's `query()`, and the SDK
 resolves credentials from the environment exactly as the Claude Code CLI does.
 Pick one:
@@ -359,7 +359,7 @@ two windows, and both are on by default:
   asks — because a run that walks into the weekly wall on a Tuesday is parked
   until Friday. See [§12.1](#121-subscription-limits).
 
-Either way `harness resume <runId>` continues from where the run stopped, and
+Either way `charrette resume <runId>` continues from where the run stopped, and
 nothing already finished is re-executed or re-paid.
 
 ### GitHub (recommended)
@@ -367,12 +367,12 @@ nothing already finished is re-executed or re-paid.
 Credentials are resolved in this order, and the run banner tells you which one
 won:
 
-1. `GITHUB_TOKEN` + `HARNESS_GITHUB_REPO` from the environment.
+1. `GITHUB_TOKEN` + `CHARRETTE_GITHUB_REPO` from the environment.
 2. **The `gh` CLI**, if it is authenticated (`gh auth status`). The token comes
    from `gh auth token` and the `owner/repo` slug from `gh repo view`, run in the
    target repo. Nothing to export — if you already use `gh`, GitHub mode is on.
 
-With neither, the harness runs **local-only**: it still plans, builds, QAs, and
+With neither, the charrette runs **local-only**: it still plans, builds, QAs, and
 merges into the local integration branch, but files no issues and opens no PRs.
 The banner says `github  off — …` when that happens, with the reason.
 
@@ -381,7 +381,7 @@ scoped to the single target repository with these repository permissions:
 
 | Permission | Access | Used for |
 |---|---|---|
-| Contents | Read and write | pushing `harness/<runId>/*` branches |
+| Contents | Read and write | pushing `charrette/<runId>/*` branches |
 | Issues | Read and write | one issue per task |
 | Pull requests | Read and write | one PR per accepted task |
 | Metadata | Read | implied |
@@ -390,7 +390,7 @@ Then:
 
 ```bash
 export GITHUB_TOKEN=github_pat_...
-export HARNESS_GITHUB_REPO=owner/repo      # must match the target repo's origin
+export CHARRETTE_GITHUB_REPO=owner/repo      # must match the target repo's origin
 ```
 
 > However it is obtained, the token lives in the CLI process only. It is never
@@ -407,24 +407,24 @@ Checklist:
 
 1. **It is a git repository** with at least one commit.
 2. **The working tree is clean.** The integration branch is cut from `HEAD`.
-3. **`origin` points at `HARNESS_GITHUB_REPO`** if you are using GitHub mode.
+3. **`origin` points at `CHARRETTE_GITHUB_REPO`** if you are using GitHub mode.
 4. **It has working check commands.** These run inside each worktree before any
-   QA tokens are spent. The harness auto-detects them (see below); override with
+   QA tokens are spent. The charrette auto-detects them (see below); override with
    `--check "pnpm test" --check "pnpm lint"`. Cheap and specific beats broad.
-5. **Branch protection on the default branch** is a good idea. The harness only
-   ever pushes `harness/<runId>/*`, but protection makes that guarantee enforced
+5. **Branch protection on the default branch** is a good idea. The charrette only
+   ever pushes `charrette/<runId>/*`, but protection makes that guarantee enforced
    by GitHub rather than by trust.
 6. Add these to the target repo's `.gitignore`:
 
    ```gitignore
-   .harness/
+   .charrette/
    ```
 
-   `harness.config.json` ([§8](#8-configuration-reference)) is meant to be
+   `charrette.config.json` ([§8](#8-configuration-reference)) is meant to be
    **committed** — it is per-repo defaults your whole team shares.
 
 Sibling directory note: worktrees are created **next to** the repo, in
-`<repo>-wt/`. If your repo is `~/code/my-app`, the harness creates
+`<repo>-wt/`. If your repo is `~/code/my-app`, the charrette creates
 `~/code/my-app-wt/`. Make sure that path is writable and not inside a synced
 folder that fights with git.
 
@@ -437,11 +437,11 @@ measure your *QA first-pass rate* and *cost per merged PR*, not to ship a featur
 
 ```bash
 cd ~/code/my-app
-harness run
+charrette run
 ```
 
 That is the whole command — no assignment on the command line, no flags. The
-harness resolves the target repo, the checks, the budget, and the dashboard for
+charrette resolves the target repo, the checks, the budget, and the dashboard for
 you, and prints exactly what it resolved before spending anything:
 
 ```
@@ -457,18 +457,18 @@ you, and prints exactly what it resolved before spending anything:
 Read that banner before answering anything. If `checks` says `none`, QA has no
 hard signal and you should add one with `--check`.
 
-`build` is the harness itself: its version and the commit it was built from,
+`build` is the charrette itself: its version and the commit it was built from,
 with a trailing `+` when the checkout had uncommitted changes. Every session
 this run spawns is stamped with that same string, so a postmortem months later
 can say which fixes the run actually had. It is fixed at process start —
 **building a fix while a run is executing does not reach that run**, because
 Node loaded its build when the process started and cannot reload it. To give an
-in-flight run a fix, stop it, build, and `harness resume`.
+in-flight run a fix, stop it, build, and `charrette resume`.
 
 Then it asks what to build, and keeps asking until the assignment is unambiguous:
 
 ```
-What should the harness build?
+What should the charrette build?
   A sentence is enough — the intake agent will ask about the rest.
   Finish with a blank line.
 
@@ -494,13 +494,13 @@ then does the planner start.
 Skip the conversation entirely by putting the assignment on the command line:
 
 ```bash
-harness run "Add a /healthz endpoint that returns build SHA and uptime, with a unit test"
+charrette run "Add a /healthz endpoint that returns build SHA and uptime, with a unit test"
 ```
 
 For a first run, tighten the budget:
 
 ```bash
-harness run "Add a /healthz endpoint…" --run-cap 10 --task-cap 4
+charrette run "Add a /healthz endpoint…" --run-cap 10 --task-cap 4
 ```
 
 What you will see:
@@ -515,10 +515,10 @@ What you will see:
    is printed and `y` approves; **any other text is sent back to the planner as
    rejection feedback** and it replans.
 5. Tasks execute serially, streaming agent logs, tool calls, and cost.
-6. Each accepted task merges into `harness/<runId>/main` and gets a PR.
+6. Each accepted task merges into `charrette/<runId>/main` and gets a PR.
 7. The run ends in `PR_REVIEW` and prints what it actually produced — every pull
    request as a URL, plus anything parked or cancelled. `PR_REVIEW` means *the
-   harness is finished and could prove it*: the acceptance suite is green, the
+   charrette is finished and could prove it*: the acceptance suite is green, the
    intent check passed, and there is a pull request. A run that ran out of tasks
    without proving itself — a red suite, a FAIL or UNKNOWN verdict, nothing
    merged because the early tasks all parked — ends in `BLOCKED` instead, with
@@ -529,8 +529,8 @@ Local-only first run (no GitHub, no dashboard, no conversation) is a good smoke
 test:
 
 ```bash
-harness run "Add a CONTRIBUTING.md" --run-cap 3 --no-dashboard --no-chat
-git log --oneline harness/<runId>/main
+charrette run "Add a CONTRIBUTING.md" --run-cap 3 --no-dashboard --no-chat
+git log --oneline charrette/<runId>/main
 ```
 
 ---
@@ -541,10 +541,10 @@ Every command defaults `--repo` to **the git repository containing your current
 directory**, found by walking up for `.git` — so subdirectories work too. Outside
 a repository you get an actionable error rather than a confusing one.
 
-### `harness run [assignment]`
+### `charrette run [assignment]`
 
-The assignment is optional. Omit it and the harness asks you in a conversation;
-pass it and the harness takes it as final.
+The assignment is optional. Omit it and the charrette asks you in a conversation;
+pass it and the charrette takes it as final.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -573,8 +573,8 @@ You can always answer in free text instead of picking an option; that answer win
 over any recommendation. When the agent is satisfied it shows you a draft brief
 and only proceeds once you approve it.
 
-The brief is written to `.harness/<runId>/BRIEF.md` and becomes the run's
-assignment — so `harness status`, the dashboard, and the planner all see the
+The brief is written to `.charrette/<runId>/BRIEF.md` and becomes the run's
+assignment — so `charrette status`, the dashboard, and the planner all see the
 agreed version, not the sentence you started with. Interrupting mid-conversation
 loses it: a resume plans from the assignment on record instead of re-interviewing.
 
@@ -583,7 +583,7 @@ cheap phase (one Opus session, read-only tools), but it is not free.
 
 #### How checks are detected
 
-When you pass no `--check`, the harness reads the target repo and infers
+When you pass no `--check`, the charrette reads the target repo and infers
 conventional, non-destructive commands:
 
 | Repo contains | Detected checks |
@@ -594,24 +594,24 @@ conventional, non-destructive commands:
 | none of the above | nothing — the banner says so |
 
 Only those. Anything project-specific (integration suites, Python, Make targets)
-needs an explicit `--check` or a `harness.config.json`. Detection never runs
+needs an explicit `--check` or a `charrette.config.json`. Detection never runs
 `build` for Node projects — it is slow and usually redundant with `typecheck`.
 
-### `harness init`
+### `charrette init`
 
 ```bash
-harness init            # writes harness.config.json with the resolved defaults
-harness init --force    # overwrite an existing one
+charrette init            # writes charrette.config.json with the resolved defaults
+charrette init --force    # overwrite an existing one
 ```
 
 Materializes the defaults into a committable config file so the whole team gets
 them. Refuses to clobber an existing file without `--force`.
 
-### `harness resume [runId]`
+### `charrette resume [runId]`
 
 ```bash
-harness resume            # the newest run with something left to do
-harness resume 3f9a2c11   # a specific one
+charrette resume            # the newest run with something left to do
+charrette resume 3f9a2c11   # a specific one
 ```
 
 Prunes stale worktrees, reloads state from SQLite, and drives the run forward from
@@ -634,7 +634,7 @@ pull requests never opened get them retried, and a run from before base-branch
 capture has its base branch repaired from the repo's current branch first. A
 reopened run re-runs the intent validator only if something new merged since the
 last verdict. Fix the environment before you resume — start the service the
-checks need, correct the checks in `harness.config.json` — or your answer buys
+checks need, correct the checks in `charrette.config.json` — or your answer buys
 iterations that fail the same way.
 
 A run interrupted **mid-conversation** gets the conversation back. The intake
@@ -660,25 +660,25 @@ A run that was **paused** on purpose resumes onto the dashboard it was serving �
 same port, same token, so the tab you left open still works. See
 [§13.1](#131-stopping-on-purpose).
 
-### `harness pause [runId]`
+### `charrette pause [runId]`
 
 ```bash
-harness pause             # the run this repo is running
-harness pause 3f9a2c11    # a specific one
+charrette pause             # the run this repo is running
+charrette pause 3f9a2c11    # a specific one
 ```
 
 Stops the run at every agent's next message and leaves it `PAUSED`. The run lives
 in another process — the one holding the worktrees and the sessions — so this is
 a request sent to its dashboard, and a repo with no dashboard running has no
-reachable run to pause. What it prints is the `harness resume` line that brings it
+reachable run to pause. What it prints is the `charrette resume` line that brings it
 back, and the URL it will come back on. Full semantics in
 [§13.1](#131-stopping-on-purpose).
 
-### `harness postmortem [runId]`
+### `charrette postmortem [runId]`
 
 ```bash
-harness postmortem            # the most recent run
-harness postmortem 40da9337   # a specific one
+charrette postmortem            # the most recent run
+charrette postmortem 40da9337   # a specific one
 ```
 
 Answers the question `status` does not: **why is this what I got?** Local queries
@@ -690,7 +690,7 @@ outcome:
 - **the end-of-run verdict**, and how many of its gaps became tasks
 - **tasks whose acceptance criteria never require anything to leave the process** — a task is finished when its criteria are met, so one of these was free to ship a stub
 - **spend grouped by how the session ended**, and the hours the run spent waiting on you
-- **which harness build each session ran under** — one line when the run used one build, and a table when it did not, because a run whose sessions carry two builds did not run one harness
+- **which charrette build each session ran under** — one line when the run used one build, and a table when it did not, because a run whose sessions carry two builds did not run one charrette
 
 Run against 40da9337 it prints, first line of the report:
 
@@ -703,11 +703,11 @@ Run against 40da9337 it prints, first line of the report:
 That one line is the whole explanation for a $773.55 run that shipped six of
 seven integrations as stubs. Working it out by hand took an hour of SQL.
 
-### `harness regroup [runId]`
+### `charrette regroup [runId]`
 
 ```bash
-harness regroup           # the newest run with pull requests
-harness regroup 3f9a2c11  # a specific one
+charrette regroup           # the newest run with pull requests
+charrette regroup 3f9a2c11  # a specific one
 ```
 
 Replaces a run's per-task pull requests with the single rollup PR. The rollup
@@ -717,12 +717,12 @@ are left exactly as they are, and GitHub shrinks the rollup's diff to whatever
 the base branch is still missing. Also flips the run's `prMode` to `single`, so
 later resumes publish the same way. No agents, no tokens.
 
-### `harness probe <taskId> [command]`
+### `charrette probe <taskId> [command]`
 
 ```bash
-harness probe ui-login "rg -q useShortcuts src/AppShell.vue"   # hold it to this instead
-harness probe ui-login --clear --why "it belonged to another task"
-harness probe ui-login                                          # print the current one
+charrette probe ui-login "rg -q useShortcuts src/AppShell.vue"   # hold it to this instead
+charrette probe ui-login --clear --why "it belonged to another task"
+charrette probe ui-login                                          # print the current one
 ```
 
 Rewrites the completion probe a task is stuck on — the definition of done the
@@ -739,11 +739,11 @@ neither a command nor `--clear` — withdrawing a task's definition of done shou
 never be a thing you did by leaving an argument off. Read-only as far as agents
 go: no tokens.
 
-### `harness status`
+### `charrette status`
 
 ```bash
-harness status
-harness status --all      # finished runs too
+charrette status
+charrette status --all      # finished runs too
 ```
 
 Prints each run with its state, spend, per-task states, QA iteration counts, and
@@ -763,16 +763,16 @@ than omitting the line and leaving you to conclude the list failed to print.
 Settings are layered, highest priority first:
 
 1. **CLI flag** — `--run-cap 50`
-2. **`harness.config.json`** at the target repo root
+2. **`charrette.config.json`** at the target repo root
 3. **Auto-detection** — checks only ([§7](#7-cli-reference))
 4. **Built-in default**
 
 Whatever wins is printed in the run banner with its source, so a bare
-`harness run` is never silently doing something you didn't intend.
+`charrette run` is never silently doing something you didn't intend.
 
-### `harness.config.json`
+### `charrette.config.json`
 
-Written by `harness init`, committed alongside the code it configures. Every key
+Written by `charrette init`, committed alongside the code it configures. Every key
 is optional; unknown keys are a **hard error** rather than a silent no-op, so a
 typo surfaces immediately.
 
@@ -801,11 +801,11 @@ Run configuration is a zod-validated `RunConfig`
 | `maxParallelWorkers` | `3` | — | ✅ | concurrent *agents*, not tasks — one waiting at a gate is using neither the machine nor the API and does not hold a slot. Tasks whose planned `touchedPaths` overlap something in flight wait rather than race it into a merge conflict. |
 | `qaIterationCap` | `3` | — | ✅ | worker↔QA round trips before a task is parked as `NEEDS_HUMAN` |
 | `heavyTierAfterRejections` | `2` | — | ✅ | how many of those round trips a task may be sent back before its next worker runs on `models.workerHeavy`, whatever tier it started on. Counted on the same `qaIterations` as the cap above, so a gate answer resets it too. |
-| `holdUntilGreen` | `true` | — | ✅ | the run never reports itself in review while its pull request is red, unchecked (no CI at all), unread (GitHub unreachable), conflicting or behind its base. Fix rounds spent, it holds at a pit stop where `pitStop.decidedBy` (or you) can grant another `ciFixRounds` or stop it; with pit stops off it pauses with the reason on the record, and `harness resume` is the grant. `false` restores the old shape: the failure goes into the outcome line and the run reports in review anyway. |
+| `holdUntilGreen` | `true` | — | ✅ | the run never reports itself in review while its pull request is red, unchecked (no CI at all), unread (GitHub unreachable), conflicting or behind its base. Fix rounds spent, it holds at a pit stop where `pitStop.decidedBy` (or you) can grant another `ciFixRounds` or stop it; with pit stops off it pauses with the reason on the record, and `charrette resume` is the grant. `false` restores the old shape: the failure goes into the outcome line and the run reports in review anyway. |
 | `live.enabled` | `true` | — | ✅ | an agent starts the finished product from a clean checkout and drives the critical path before the run may report itself in review. Off restores the older shape, where nothing in the run ever used the product — which is how both products in issue #115 shipped "done" without ever having run. |
 | `live.maxTurns` | `140` | — | ✅ | the live-exercise agent's turn ceiling. It has to find how a repository it has never seen starts, install it, start it, and drive a path end to end. |
 | `live.fixRounds` | `1` | — | ✅ | rounds of fix tasks a broken critical path may queue on its own before it holds. Each queues one task per broken step, carrying what the agent observed. `0` reports the verdict and holds without queueing. |
-| `holdUntilProven` | `true` | — | ✅ | the run never reports itself in review before it has proved itself: the acceptance suite green (not red, and not "no opinion" because nothing gating was declared or everything gating is blocked on an unanswered question), the intent check PASS with no gaps (not FAIL, not UNKNOWN, not a check that never finished), the critical path driven and working (see `live.enabled`), and something merged so there is a pull request to review. Anything short of that, once the fix rounds are spent, holds at the closing pit stop and then parks the run in `BLOCKED` with the unmet list on the record; `harness resume` re-enters the gates. `false` restores the shape both runs in issue #115 closed with: every one of those is a clause in the outcome line, and the run reports in review over it. |
+| `holdUntilProven` | `true` | — | ✅ | the run never reports itself in review before it has proved itself: the acceptance suite green (not red, and not "no opinion" because nothing gating was declared or everything gating is blocked on an unanswered question), the intent check PASS with no gaps (not FAIL, not UNKNOWN, not a check that never finished), the critical path driven and working (see `live.enabled`), and something merged so there is a pull request to review. Anything short of that, once the fix rounds are spent, holds at the closing pit stop and then parks the run in `BLOCKED` with the unmet list on the record; `charrette resume` re-enters the gates. `false` restores the shape both runs in issue #115 closed with: every one of those is a clause in the outcome line, and the run reports in review over it. |
 | `ciFixRounds` | `2` | — | ✅ | rounds of fix tasks a red CI may queue on its own before it asks. Each round re-runs the failed jobs once first (flakes), then queues one task per failing check with that job's log. `0` never fixes CI itself. |
 | `workerRespawnCap` | `3` | — | ✅ | crashed-session restarts before parking; the replacement gets a "read your own git log and continue" note |
 | `workerMaxTurns` | `120` | — | ✅ | turns before the SDK cuts a worker off. A session that hits it is the most expensive kind of failure — it dies having done the most work — so hitting it raises the ceiling **for the whole run**, not just that task: the repository is the same size for all of them. |
@@ -829,13 +829,13 @@ Run configuration is a zod-validated `RunConfig`
 | `models.spec` | `claude-fable-5-1` | — | ✅ | writes the specification every downstream check is judged against, once per run, from a brief nobody has built against yet — the hardest reading task in the run |
 | `pitStop.every` | `"epic"` | — | ✅ | when the run stops to show you what it built: `"epic"`, `"never"`, `{"tasks":5}`, `{"usd":100}`, `{"minutes":90}` — see [PITSTOP.md](./PITSTOP.md) |
 | `pitStop.reviewers` | `product-manager`, `critical-challenger`, `qa-agent`, `ui-ux-cx-engineer` | — | ✅ | one short session per lens, by skill name; max 4, `[]` for none. This is the pit stop's price. |
-| `pitStop.reviewFirstPass` | `2` | — | ✅ | how many lenses read the demo before the harness decides whether the rest are worth buying. The remaining ones are bought only when the first pass suggests there is something to find — any lens not `on-track`, any disagreement, a lens that did not finish, or an INCONCLUSIVE demo. `0` runs them all every time. Which lenses were skipped, and why, is printed with the report. |
+| `pitStop.reviewFirstPass` | `2` | — | ✅ | how many lenses read the demo before the charrette decides whether the rest are worth buying. The remaining ones are bought only when the first pass suggests there is something to find — any lens not `on-track`, any disagreement, a lens that did not finish, or an INCONCLUSIVE demo. `0` runs them all every time. Which lenses were skipped, and why, is printed with the report. |
 | `pitStop.demoMaxTurns` | `80` | — | ✅ | the demo agent has to start a product it has never seen; too low and its report says only "I could not start it" |
 | `pitStop.decidedBy` | `"product-manager"` | — | ✅ | who decides what the run does next, by skill name — or `"operator"` to be asked, which is what this used to be. The named skill reads the same report you would, plus what earlier pit stops in the run already decided, and answers the same four ways (continue / redirect / re-plan / stop). One that fails, or answers with something that is not one of the four, falls back to asking you. |
 | `pitStop.backToWorkRounds` | `2` | — | ✅ | how many times the **closing** pit stop — the one a FAIL from the intent check opens — may send the run back to work before the next one comes to you whatever `decidedBy` says. It is the only pit stop that repeats over the same tree, and a loop a human ends by losing patience needs another way to end. |
 | `taskGate.decidedBy` | `"product-manager"` | — | ✅ | who answers a task that has **escalated** — one QA keeps rejecting, or one stuck on a probe it may not edit — by skill name, or `"operator"` to be asked yourself, which is what this used to be. Not `budget.decidedBy`, four rows down, which answers a task that has run out of *money*; a task can hit either without hitting the other. The advisor investigates exactly as before; naming a skill means it answers as that skill and the answer goes straight to the worker. It hands the question back to you when only a person can settle it (something to start or provide outside the repo, an unmade product decision, a plan that is wrong rather than an attempt that is) or when its session returned nothing usable. |
 | `taskGate.autoAnswerRounds` | `2` | — | ✅ | how many times a skill may answer the **same** task's escalation before the next one comes to you whatever `decidedBy` says. Each answer resets that task's iteration and respawn counters, so this is the bound on an agent answering its own escalation in a circle. `0` asks every time. |
-| `taskGate.probeAmendments` | `1` | — | ✅ | how many times the decider may rewrite the **completion probe** it is escalating about, rather than answering around a probe no answer can satisfy. Recorded as `task.probe_amended`. `0` makes probes unamendable by any agent; your own `harness probe` is never bounded. |
+| `taskGate.probeAmendments` | `1` | — | ✅ | how many times the decider may rewrite the **completion probe** it is escalating about, rather than answering around a probe no answer can satisfy. Recorded as `task.probe_amended`. `0` makes probes unamendable by any agent; your own `charrette probe` is never bounded. |
 | `budget.runCapUsd` | `30` | `--run-cap` | ✅ | one cap for the whole run, checked **before every agent turn**; the plan gate prices the plan against it before you approve. Raise it any time — reactively from the `BUDGET_HOLD` gate, or proactively from the dashboard header (click the `$` figure) or the CLI's live `budget run <usd>` stdin command — without waiting for it to be reached. |
 | `budget.decidedBy` | `"product-manager"` | — | ✅ | who answers the cap once it is reached, by skill name — or `"operator"` to be asked, which is what this used to be. The skill is shown what is still in flight, what is queued behind it and what is still unbuilt before it names a figure. It may also decline, which parks the run exactly as your own `s` did. |
 | `budget.ceilingUsd` | *(unset)* | — | ✅ | how far a skill may raise the cap. Unset means the gate is always yours — the run cap is the agreement, and an agent that can raise its own ceiling has none. `{"budget":{"runCapUsd":100,"ceilingUsd":600}}` reads as "go to 600 without me if the work is worth it". A figure above the ceiling is held at it. |
@@ -843,28 +843,28 @@ Run configuration is a zod-validated `RunConfig`
 | `subscription.pauseAtPercent` | `95` | — | ✅ | how much of the account's **plan** may be spent before the run stops and asks ([§12.1](#121-subscription-limits)). Not the run's dollar cap: this is quota the account burns across every machine you use, and it is what a subscription run actually runs out of. `100` restores the old behaviour of noticing only at the wall. |
 | `subscription.windows` | `["seven_day"]` | — | ✅ | which limit windows that applies to, matched as name prefixes — `seven_day` covers the plan-wide weekly window and the per-model ones beside it. Add `"five_hour"` to be asked about the short window too; by default it is slept through instead (`usageLimitWaitMinutes`), because it reopens on its own. |
 | `subscription.accounts` | `[]` | — | ✅ | the Claude subscriptions a run may be pointed at: `{"name":"work","env":{"CLAUDE_CONFIG_DIR":"…"}}` or `{"name":"personal","env":{"CLAUDE_CODE_OAUTH_TOKEN":"$TOKEN_VAR"}}`. A `$VAR` value is read from your shell when a session is spawned, never from this file. |
-| `subscription.active` | `""` | `--account` | ✅ | which of them the run is spending; empty is the account you are logged into. **Not frozen at creation** — `harness resume --account <name>` changes it, which is the point. |
+| `subscription.active` | `""` | `--account` | ✅ | which of them the run is spending; empty is the account you are logged into. **Not frozen at creation** — `charrette resume --account <name>` changes it, which is the point. |
 | `subscription.preflight` | `true` | — | ✅ | read the account's utilization once before the run spends anything, instead of waiting for a live session to report it. Costs no model tokens; returns nothing (and changes nothing) for accounts whose plan does not meter. |
 | `planGate.decidedBy` | `"product-manager"` | — | ✅ | who weighs the plan-intent check's gaps before you approve past them, by skill name — or `"operator"` to be shown the list and asked, which is what this used to be. It has two actions and **approve is not one of them**: it either sends the plan back to the planner on its own authority, or accepts the gaps in writing, with its reasoning printed underneath the gap list you then approve or reject. Runs only when the check FAILs; a decider that fails leaves you the gate you always had. |
 | `planGate.replanRounds` | `1` | — | ✅ | how many times the adjudicator may send a plan back over the intent check's gaps before the gate is yours however it answers. Each round is a planner session and another check, and a gap the planner cannot close twice is a question about the assignment rather than about the plan. `0` turns the veto off and leaves its reasoning as a note on the gate. |
 | `intentFixRounds` | `1` | — | ✅ | how many times a FAIL from the intent validator may queue work to close its own gaps; `0` reports the verdict and stops there |
 | `skillsDirs` | `~/.claude/skills`, `~/skills` | — | ✅ | |
 | `deterministicChecks` | auto-detected | `--check`, `--no-checks` | ✅ | shell strings, run via `sh -c` in the worktree |
-| `githubRepo` | `gh repo view` in the target repo | — | ✅ | `HARNESS_GITHUB_REPO` takes precedence when set |
+| `githubRepo` | `gh repo view` in the target repo | — | ✅ | `CHARRETTE_GITHUB_REPO` takes precedence when set |
 | `prMode` | `single` | — | ✅ | `single` = one rollup PR for the whole run; `per-task` = one PR per task (they overlap — task branches stack on the integration branch) |
 | `externalTools` | everything detected on PATH | — | ✅ | allowlist of CLIs named to worker/QA agents (`gh`, `aws`, `podman`, `docker`, `adb`, `emulator`, `xcrun`, `maestro`); `[]` advertises none |
 | *(not in RunConfig)* `dashboard` | `true` | `--dashboard`, `--no-dashboard` | ✅ | CLI-only concern |
 | *(not in RunConfig)* `dashboardPort` | first free port from `4777` | `--port` | ✅ | pin it per repo when you want a stable bookmark |
 | *(not in RunConfig)* `chat` | on when no assignment is given | `--chat`, `--no-chat` | ✅ | set `false` to make a repo always plan directly |
 
-For anything beyond this — a custom gate handler, embedding the harness in
+For anything beyond this — a custom gate handler, embedding the charrette in
 another program — drive the controller directly:
 
 ```ts
-import { AgentPool, Bus, GitHubAdapter, RunController, Store } from "@harness/core";
-import { RunConfig } from "@harness/shared";
+import { AgentPool, Bus, GitHubAdapter, RunController, Store } from "@charrette/core";
+import { RunConfig } from "@charrette/shared";
 
-const store = new Store(".harness/harness.db");
+const store = new Store(".charrette/charrette.db");
 const bus = new Bus(store);
 const controller = new RunController(
   store, bus, new AgentPool(store, bus),
@@ -880,7 +880,7 @@ await controller.startRun("assignment", RunConfig.parse({
 ```
 
 Auto-approving Gate 1 like that removes the only cheap check on a bad plan. Use it
-for CI of the harness itself, not for real work.
+for CI of the charrette itself, not for real work.
 
 ### Using other providers
 
@@ -908,13 +908,13 @@ You do not have to decide at the start. `--model` works on `run` and on
 `resume`, and on `resume` it re-routes the roles for **the rest of the run**:
 
 ```bash
-harness resume --model worker=gpt-5.6-terra --model demo=gemini-3.5-flash-lite
+charrette resume --model worker=gpt-5.6-terra --model demo=gemini-3.5-flash-lite
 ```
 
 This is the knob for the run that is spending faster than it is building. The
 tasks still queued are the only ones that can still be made cheaper, so a
 routing table frozen at run start is frozen at the least useful moment. Editing
-`models` in `harness.config.json` and resuming does the same thing; the flag wins
+`models` in `charrette.config.json` and resuming does the same thing; the flag wins
 over the file, because nobody wants to edit JSON to stop a run from spending.
 
 Only the roles you name change — the rest keep what the run already had. A
@@ -963,7 +963,7 @@ refuse to resume, they would be unreadable: no ledger, no postmortem, no
 dashboard row. Resuming one reviews on Gemini from that point on.
 
 **What is different off Anthropic.** Those sessions do not run inside the Claude
-Agent SDK; the harness runs the tool loop itself and gives the agent Bash, Read,
+Agent SDK; the charrette runs the tool loop itself and gives the agent Bash, Read,
 Write, Edit, Glob and Grep. This is no longer only a thing that happens when you
 ask for it: pinning `reviewer` to Google put the default routing on this
 transport at every pit stop. Everything the run is accounted for by is unchanged
@@ -997,50 +997,50 @@ under-charging would let a cap silently stop binding.
 | `OPENAI_API_KEY` | only if a role is routed to OpenAI | see [Using other providers](#using-other-providers) |
 | `GEMINI_API_KEY` | **always** | `reviewer` is pinned to Google; `GOOGLE_API_KEY` also accepted |
 | `GITHUB_TOKEN` | no | enables issues + PRs; falls back to `gh auth token` |
-| `HARNESS_GITHUB_REPO` | no | `owner/repo`; falls back to `gh repo view` |
+| `CHARRETTE_GITHUB_REPO` | no | `owner/repo`; falls back to `gh repo view` |
 
 Any of these may be written to a `.env` file instead of exported. It is read
-from **the directory you run `harness` from**, which is deliberately not the
+from **the directory you run `charrette` from**, which is deliberately not the
 repository given by `--repo`: that repository is the thing being built, a task
 spec can write to it, and reading credentials out of it would let one run choose
 which keys the next one uses. A variable already exported wins over the file, so
-`GEMINI_API_KEY=… harness run` stays a working one-off override, and a missing
+`GEMINI_API_KEY=… charrette run` stays a working one-off override, and a missing
 or unparseable `.env` is not an error — the key check a moment later names the
 variable and the role that needed it.
 
-The harness also *sets* variables in every task agent's environment. They are not
+The charrette also *sets* variables in every task agent's environment. They are not
 yours to configure — they are how a task is told what part of the machine it owns:
 
 | Variable | Meaning |
 |---|---|
-| `COMPOSE_PROJECT_NAME` | `harness-<taskId>-<runhash>`, so `docker compose` / `podman compose` acts only on that task's own stack |
-| `HARNESS_PORT_BASE` / `HARNESS_PORT_END` | the 16 host ports the task may bind; derived from the run and task ids, in 20000–28191 (never the ephemeral range) |
+| `COMPOSE_PROJECT_NAME` | `charrette-<taskId>-<runhash>`, so `docker compose` / `podman compose` acts only on that task's own stack |
+| `CHARRETTE_PORT_BASE` / `CHARRETTE_PORT_END` | the 16 host ports the task may bind; derived from the run and task ids, in 20000–28191 (never the ephemeral range) |
 
 See **Worktrees are not machine isolation** under §14 for what this does and does
 not protect against.
 
 ---
 
-## 9. What the harness writes where
+## 9. What the charrette writes where
 
 Inside the **target repo**:
 
 | Path | Contents |
 |---|---|
-| `.harness/harness.db` | event log + materialized run/task/usage state (SQLite, WAL) |
-| `.harness/<runId>/BRIEF.md` | the brief the intake conversation produced — what the planner was actually given |
-| `.harness/<runId>/planner-attempt-docs-N.txt` | raw output of planning phase A (PRD + conventions), kept verbatim for post-mortem |
-| `.harness/<runId>/planner-attempt-dag-N.txt` | raw output of planning phase B (the task DAG), same |
-| `.harness/<runId>/PRD.md` | the PRD the planner produced — the thing you approve |
-| `.harness/<runId>/CONVENTIONS.md` | conventions injected into every worker's system prompt |
-| `.harness/<runId>/plan.json` | full plan incl. task DAG; SHA-256 of this is the approved `planHash` |
+| `.charrette/charrette.db` | event log + materialized run/task/usage state (SQLite, WAL) |
+| `.charrette/<runId>/BRIEF.md` | the brief the intake conversation produced — what the planner was actually given |
+| `.charrette/<runId>/planner-attempt-docs-N.txt` | raw output of planning phase A (PRD + conventions), kept verbatim for post-mortem |
+| `.charrette/<runId>/planner-attempt-dag-N.txt` | raw output of planning phase B (the task DAG), same |
+| `.charrette/<runId>/PRD.md` | the PRD the planner produced — the thing you approve |
+| `.charrette/<runId>/CONVENTIONS.md` | conventions injected into every worker's system prompt |
+| `.charrette/<runId>/plan.json` | full plan incl. task DAG; SHA-256 of this is the approved `planHash` |
 
 Git objects in the **target repo**:
 
 | Ref | Meaning |
 |---|---|
-| `harness/<runId>/main` | integration branch, cut from `HEAD` at run start; every accepted task merges here |
-| `harness/<runId>/<taskId>` | one branch per task, cut from the integration branch *at dispatch time* |
+| `charrette/<runId>/main` | integration branch, cut from `HEAD` at run start; every accepted task merges here |
+| `charrette/<runId>/<taskId>` | one branch per task, cut from the integration branch *at dispatch time* |
 
 Both are pushed to `origin` when GitHub is configured; nothing else ever is
 (SEC-5). Each component PR is opened **from** its task branch **into the branch
@@ -1062,10 +1062,10 @@ Cleanup after a finished run:
 git -C ~/code/my-app worktree list                       # inspect
 git -C ~/code/my-app worktree remove --force <path>      # per worktree
 git -C ~/code/my-app worktree prune
-git -C ~/code/my-app branch -D $(git -C ~/code/my-app branch --list "harness/<runId>/*" | tr -d ' ')
+git -C ~/code/my-app branch -D $(git -C ~/code/my-app branch --list "charrette/<runId>/*" | tr -d ' ')
 ```
 
-Do not delete `.harness/harness.db` while a run is resumable — it is the only
+Do not delete `.charrette/charrette.db` while a run is resumable — it is the only
 record of what has been paid for and completed.
 
 ---
@@ -1073,7 +1073,7 @@ record of what has been paid for and completed.
 ## 10. The dashboard
 
 On by default; `--no-dashboard` runs headless. It binds **127.0.0.1 only**, on
-the first free port from `4777` upward — one harness per repo means several
+the first free port from `4777` upward — one charrette per repo means several
 dashboards at once, so a busy port moves to the next one rather than killing the
 run. The banner prints the port that was actually taken. `--port <n>` (or
 `dashboardPort` in the config) pins it; a pinned port that is busy is an error,
@@ -1096,11 +1096,11 @@ The layout is built around one question — *what is happening right now, and do
 need to step in?* — so the activity feed owns most of the window and everything
 else sits in a fixed sidebar.
 
-- **Title** — the repository folder the agents are working in, e.g. `harness
-  billing-app`, and the same name in the browser tab (`billing-app · Harness`).
-  One harness per repo means several dashboards on adjacent ports at once, and
+- **Title** — the repository folder the agents are working in, e.g. `charrette
+  billing-app`, and the same name in the browser tab (`billing-app · Charrette`).
+  One charrette per repo means several dashboards on adjacent ports at once, and
   the folder is the only part of a run you can say out loud. The run id stays in
-  the state pill beside it because that is the handle `harness resume` takes.
+  the state pill beside it because that is the handle `charrette resume` takes.
 - **Activity** — the event stream, capped at 2000 lines. Every line is attributed
   to the agent that caused it and says what actually happened: `worker  read
   src/server.ts`, `planner  grep onRequest|preHandler in src`, `qa  $ pnpm test`,
@@ -1124,7 +1124,7 @@ else sits in a fixed sidebar.
   carries its state, dependencies, QA iteration count, injected skills, and
   linked issue/PR numbers. Before the plan exists the panel
   explains which phase you are in rather than sitting empty. Issue and PR numbers
-  link straight to GitHub: the slug comes from `HARNESS_GITHUB_REPO`, then the
+  link straight to GitHub: the slug comes from `CHARRETTE_GITHUB_REPO`, then the
   run's `githubRepo`, and failing both from the repo's `origin` remote — so a run
   started before the slug was recorded still links its issues instead of printing
   a dead `issue #28`. Only `github.com` remotes are linked; a GitHub Enterprise
@@ -1150,10 +1150,10 @@ else sits in a fixed sidebar.
   It also holds **Models**, the run's model-per-role table, editable for the rest
   of the run: click a value, pick another model, and every agent started from
   then on uses it — a session already running keeps the model it was spawned on,
-  because the harness re-routes by spawning fresh rather than switching under a
+  because the charrette re-routes by spawning fresh rather than switching under a
   conversation whose prompt cache is what makes it affordable. This is the knob
   to reach for when spend is climbing faster than the work, and it does not need
-  a `harness resume` to apply. The four judging roles (`intake`, `qa`,
+  a `charrette resume` to apply. The four judging roles (`intake`, `qa`,
   `reviewer`, `prod`) are shown as text with no control at all: they decide
   whether work is correct or shippable, and the server refuses to move them below
   the judging floor whatever a stale tab asks for.
@@ -1166,7 +1166,7 @@ else sits in a fixed sidebar.
   own after six seconds or on Escape — the button next to it grants notification
   permission, and missing that one must not be able to stop a run. Once the
   request lands the page says so until the run actually settles, then tells you
-  the `harness resume` line that brings both the run and this page back. Full
+  the `charrette resume` line that brings both the run and this page back. Full
   semantics in [§13.1](#131-stopping-on-purpose).
 - **Gate 1** — when the plan needs approval it takes over the full width above
   everything else, because it is blocking the run.
@@ -1187,7 +1187,7 @@ else sits in a fixed sidebar.
 
 ### Being told when it is over
 
-A run takes tens of minutes. You are meant to walk away from it, so the harness
+A run takes tens of minutes. You are meant to walk away from it, so the charrette
 tells you when it stops needing to be left alone. Two channels, because neither
 one alone is reliable:
 
@@ -1225,7 +1225,7 @@ repository contents are untrusted input. `packages/dashboard/preview.mjs` serves
 it against a seeded fake run for UI work without spending tokens:
 
 ```bash
-pnpm --filter @harness/dashboard build && node packages/dashboard/preview.mjs
+pnpm --filter @charrette/dashboard build && node packages/dashboard/preview.mjs
 GATE=1 node packages/dashboard/preview.mjs   # …with the plan gate open
 ```
 
@@ -1235,7 +1235,7 @@ Sharing the URL shares the token. Treat it as a password for the run.
 
 ## 11. Skills
 
-Skills are `SKILL.md` playbooks — the same format Claude Code uses. The harness
+Skills are `SKILL.md` playbooks — the same format Claude Code uses. The charrette
 indexes `~/.claude/skills` and `~/skills` by default, matches them lexically
 against each task's title and spec, and injects the top matches into the worker's
 system prompt.
@@ -1269,7 +1269,7 @@ plus two narrow rules that must stay near the top of the list:
 
 | Rule | Skill |
 |---|---|
-| DNS, dns-project, CNAME/TXT records, cert-manager, DNS-01, ACME, Route 53 | `dns-project-iac-engineer` |
+| DNS, nameservers, CNAME/TXT records, cert-manager, DNS-01, ACME, Route 53 | `dns-iac-engineer` |
 | greenfield, scaffolding, technology-stack choice, DynamoDB, magic-link, WebAuthn, serverless | `fullstack-app` |
 
 **A role carries at most four skills.** Rules are applied in list order and the
@@ -1314,12 +1314,12 @@ That default pin is the one to watch. The spec phase runs between intake and
 planning so that the run is judged against a standard rather than an
 improvisation, and a run that loses `prd-to-tdd` looks identical from the
 outside: there is still a specification, still a scenario list, still an
-acceptance verdict. The check runs again on every `harness resume`, because the
+acceptance verdict. The check runs again on every `charrette resume`, because the
 answer is about *this machine* — a run resumed on another laptop, or after you
 moved your skills directory, has a different one, and the frozen config cannot
 know that.
 
-Setting `skillsDirs` in `harness.config.json` **replaces** the defaults rather
+Setting `skillsDirs` in `charrette.config.json` **replaces** the defaults rather
 than adding to them, so a config that points at a project-local skills directory
 must list `~/.claude/skills` too if you still want it.
 
@@ -1366,7 +1366,7 @@ Two obligations exist because a green run shipped a broken build:
   that deliberately scoped live vendors out has no gap here — but silence is not
   a scope decision.
 
-**The plan is checked against the assignment before it is built.** The harness
+**The plan is checked against the assignment before it is built.** The charrette
 has always asked "does the sum of this do what was asked?" — but at the end, of
 the merged result, when the answer costs a whole run. It now asks the same
 question of the plan, for about a dollar, and puts the answer in the plan
@@ -1438,7 +1438,7 @@ node packages/skills-mcp/dist/server.js [dir ...]
 Register it with Claude Code:
 
 ```bash
-claude mcp add harness-skills -- node ~/Documents/projects/harness/packages/skills-mcp/dist/server.js
+claude mcp add charrette-skills -- node ~/Documents/projects/charrette/packages/skills-mcp/dist/server.js
 ```
 
 ---
@@ -1456,7 +1456,7 @@ cache reads at 0.1×, cache writes at 1.25× — and appended to a ledger in SQL
 - **Unknown model IDs are priced at the most expensive tier.** The estimate is
   never below reality.
 
-`harness status` prints spend per run at any time; the dashboard meter shows it
+`charrette status` prints spend per run at any time; the dashboard meter shows it
 live against the cap.
 
 ### What the run is likely to cost, before you approve it
@@ -1473,7 +1473,7 @@ Raising it now costs nothing and interrupts you less.
 
 The rate comes from what previous runs **in this repository** merged and what
 they cost, weighted by the planner's own S/M/L sizing. Per repository because
-that is the variable that actually moves the number: the same harness costs
+that is the variable that actually moves the number: the same charrette costs
 around $2 a task on a small greenfield project and around $21 on a large
 brownfield service, and no single figure spans that. With no finished run to
 learn from, the estimate is that whole spread, and says so.
@@ -1508,7 +1508,7 @@ it's reached) and proactively (any time before then).
   answers it too, so the paused agent carries on immediately rather than waiting
   on a second confirmation.
 - The same thing from a live terminal: type `budget run <usd>` into the process
-  running `harness run`/`resume` at any time — it doesn't fight the plan/task/
+  running `charrette run`/`resume` at any time — it doesn't fight the plan/task/
   pit-stop/budget gate prompts for stdin.
 - **Enter / "Raise cap & continue"** in the terminal prompt (or the dashboard's
   live-edit control) writes the new cap to the run's config in SQLite, so a later
@@ -1517,7 +1517,7 @@ it's reached) and proactively (any time before then).
 - **A cap at or below what is already spent is refused**, in the terminal and over
   the API. It would trip again on the very next check.
 - **"s" / "Stop & park the run"** — the run moves to `BUDGET_HOLD` and the process
-  exits with `run parked. Raise the cap and pick it up with: harness resume <id>`.
+  exits with `run parked. Raise the cap and pick it up with: charrette resume <id>`.
   Nothing is lost: committed worker output stays on its branch.
 - Resuming from `BUDGET_HOLD` under the *same* cap simply re-opens the gate, so
   you get asked again rather than failing.
@@ -1548,7 +1548,7 @@ you as it always did. `{"budget":{"decidedBy":"operator"}}` restores asking ever
 time. For a genuinely unattended run, set `ceilingUsd` to the number you are
 actually willing to spend and let `runCapUsd` be the one the run works against.
 
-One caveat on "paused, not cancelled": the harness stops reading from the agent's
+One caveat on "paused, not cancelled": the charrette stops reading from the agent's
 stream while it waits for you, but it cannot promise the SDK session survives an
 arbitrarily long wait. Answer within a few minutes and the agent continues; leave
 it overnight and the session may die, in which case the worker is respawned
@@ -1574,7 +1574,7 @@ has a second ceiling that the cap cannot see: a weekly window, metered by the
 account across every machine and every session you use, which a run can walk
 into while sitting well under its cap.
 
-The harness watches that window and stops before it is gone:
+The charrette watches that window and stops before it is gone:
 
 ```
 ===== SUBSCRIPTION =====
@@ -1585,7 +1585,7 @@ Other subscriptions configured: work
 What now?
   <name>   continue on that subscription (work)
   c        carry on spending this one and take the limit when it comes
-  enter    park the run; `harness resume` picks it up where it stopped
+  enter    park the run; `charrette resume` picks it up where it stopped
 ```
 
 The same choice appears on the dashboard as an amber panel with one button per
@@ -1601,7 +1601,7 @@ integration branch. Add `"five_hour"` to `subscription.windows` if you want to b
 asked about the short one too — sensible for a run you are watching, poor for one
 you left going overnight.
 
-**Where the numbers come from.** The account's own metering, not the harness's
+**Where the numbers come from.** The account's own metering, not the charrette's
 ledger: the same figures `/usage` shows you. Live sessions report them as they
 go, and one check runs before the run spends anything, so a run started at 97% is
 stopped before it pays for a planner. That pre-run check costs no model tokens
@@ -1609,7 +1609,7 @@ and is skipped for accounts whose plan does not meter (API key, Bedrock, Vertex)
 
 #### Handing a run a different subscription
 
-Name the subscriptions in `harness.config.json`. The credentials do not belong in
+Name the subscriptions in `charrette.config.json`. The credentials do not belong in
 that file — it is committable — so write them as `$VAR` and they are read from
 your shell when a session is spawned:
 
@@ -1625,7 +1625,7 @@ your shell when a session is spawned:
 }
 ```
 
-Two ways to point a session at another account, both of which the harness simply
+Two ways to point a session at another account, both of which the charrette simply
 puts in the session's environment:
 
 - **A long-lived token** from `claude setup-token` run while logged into that
@@ -1633,7 +1633,7 @@ puts in the session's environment:
   switch resumes the same conversation.
 - **A second config directory** that account is logged into (`CLAUDE_CONFIG_DIR`).
   A different login cannot see the first one's transcripts, so an interrupted
-  session starts its task again rather than resuming — the harness says so in the
+  session starts its task again rather than resuming — the charrette says so in the
   log when it happens.
 
 An `ANTHROPIC_API_KEY` in the same place is legal and means "stop spending a
@@ -1642,9 +1642,9 @@ plan, start spending money".
 Then:
 
 ```bash
-harness run "…" --account work          # start on it
-harness resume <runId> --account work   # move a parked run onto it
-harness resume <runId> --account ""     # hand it back to the login you are sitting at
+charrette run "…" --account work          # start on it
+charrette resume <runId> --account work   # move a parked run onto it
+charrette resume <runId> --account ""     # hand it back to the login you are sitting at
 ```
 
 Unlike the repo path, the account is deliberately **not** frozen at run creation:
@@ -1652,18 +1652,18 @@ a subscription is a thing a run can run out of. Accounts are re-read from the
 file on every resume too, so a subscription you set up *after* the run parked is
 one the run can use.
 
-If a named account's `$VAR` is not exported, the harness refuses rather than
+If a named account's `$VAR` is not exported, the charrette refuses rather than
 spawning a session with a blank credential — an unresolved token would fall back
 to the login you were trying to get away from, and the run would carry on
 spending the exhausted account while the log said it had switched.
 
 #### What it costs you when nobody answers
 
-A harness with no gate handler at all (embedded, headless with no terminal) logs
+A charrette with no gate handler at all (embedded, headless with no terminal) logs
 the alert and keeps going: parking a run nobody can un-park turns a warning into
 an outage. Declining at the gate parks the run in `LIMIT_HOLD`, which is its own
 state rather than `BUDGET_HOLD` — the two are un-parked by completely different
-things, and `harness status` should be able to tell you which one you are looking
+things, and `charrette status` should be able to tell you which one you are looking
 at.
 
 `{"subscription":{"pauseAtPercent":100}}` restores the old behaviour of noticing
@@ -1678,8 +1678,8 @@ so *anything* — Ctrl-C, crash, laptop sleep, budget abort — leaves a consist
 resumable run.
 
 ```bash
-harness status            # find the runId and where it stopped
-harness resume <runId>
+charrette status            # find the runId and where it stopped
+charrette resume <runId>
 ```
 
 Fresh worker sessions receive the full task and criteria, the planned files and
@@ -1700,14 +1700,14 @@ and verification policy.
 
 ### 13.1 Stopping on purpose
 
-Ctrl-C is a crash the harness happens to survive: the agents that were mid-turn
+Ctrl-C is a crash the charrette happens to survive: the agents that were mid-turn
 lose that turn, and the process dies before it can say what state it left behind.
 A planned stop — you are closing the laptop, or the machine is needed for
 something else — has its own control.
 
 ```bash
-harness pause             # stop the run this repo is running
-harness pause <runId>     # or name one
+charrette pause             # stop the run this repo is running
+charrette pause <runId>     # or name one
 ```
 
 or the **Pause** button in the dashboard header, which takes two clicks because
@@ -1720,7 +1720,7 @@ What happens:
   back: each session books what it spent and closes, and every commit its worker
   had already made stays in that task's worktree.
 - The scheduler stops dispatching, so no new task starts.
-- The run parks in `PAUSED`, and `harness resume <runId>` picks it up. A task
+- The run parks in `PAUSED`, and `charrette resume <runId>` picks it up. A task
   that was mid-flight is requeued with its worktree intact, so the next session
   starts by reading what the last one had already committed.
 - The dashboard **comes back at the same URL**, port and token both — the tab
@@ -1744,10 +1744,10 @@ one already in `PR_REVIEW` — is refused with the state it is actually in.
 | Tasks `CANCELLED`, reason `unreachable` | their dependencies parked, so they can never become ready | expected fallout; fix the blocking task and start a new run |
 | Run `FAILED` at planning | planner produced invalid JSON/DAG 3× | the assignment is probably ambiguous — rewrite it more concretely |
 | Run `FAILED` at planning, reason `cut off mid-JSON` | the plan was longer than one message allows, 3× | the assignment covers too much — split it, or name a narrower scope |
-| Run in `PAUSED`, reason `the operator paused the run` | you stopped it with `harness pause` or the dashboard's Pause button | `harness resume <runId>`, on the same dashboard URL |
-| Run in `BUDGET_HOLD` | a cap was reached and you declined to raise it | `harness resume <runId>` re-opens the gate; raise it there |
+| Run in `PAUSED`, reason `the operator paused the run` | you stopped it with `charrette pause` or the dashboard's Pause button | `charrette resume <runId>`, on the same dashboard URL |
+| Run in `BUDGET_HOLD` | a cap was reached and you declined to raise it | `charrette resume <runId>` re-opens the gate; raise it there |
 | `BudgetExceeded` | cap reached and declined | raise the cap, `resume` |
-| Run in `LIMIT_HOLD` | the account's plan is nearly spent and you declined to carry on ([§12.1](#121-subscription-limits)) | `harness resume <runId> --account <name>` to continue on another subscription, or resume after the window resets |
+| Run in `LIMIT_HOLD` | the account's plan is nearly spent and you declined to carry on ([§12.1](#121-subscription-limits)) | `charrette resume <runId> --account <name>` to continue on another subscription, or resume after the window resets |
 | `paused on subscription usage` naming a variable | the account you switched to reads its token from a `$VAR` that is not exported | export it (`claude setup-token` on that account) and `resume --account` again |
 
 Rejecting at Gate 1 is not a failure: your feedback text goes straight back into
@@ -1758,7 +1758,7 @@ approving a plan you do not believe in.
 
 ## 14. Operating safely
 
-Read this before pointing the harness at anything you care about.
+Read this before pointing the charrette at anything you care about.
 
 **Worker agents run with `bypassPermissions`.** They edit files and run shell
 commands inside their worktree without asking. OS-level sandboxing (macOS
@@ -1789,7 +1789,7 @@ mitigations are in place, and neither is a sandbox:
   this, every worktree shipped the same compose file and therefore the same
   default project name, and one agent restarting "its" database restarted the
   one every other in-flight task was testing against.
-- Every task is given a block of 16 host ports (`HARNESS_PORT_BASE`…`HARNESS_PORT_END`)
+- Every task is given a block of 16 host ports (`CHARRETTE_PORT_BASE`…`CHARRETTE_PORT_END`)
   and told in its prompt that the rest of the machine belongs to somebody else.
 
 An agent can still ignore both and bind port 8000 anyway. If you are running
@@ -1798,9 +1798,9 @@ its host ports from the environment rather than hardcoding them — a hardcoded
 shared port is the one failure mode this cannot fix, and it shows up as tests
 failing in one task because of what another task did.
 
-**Agents leave processes behind, and the harness kills them.** A session that
+**Agents leave processes behind, and the charrette kills them.** A session that
 ends — cleanly, at its turn cap, or killed — leaves whatever it backgrounded
-still running. The harness sweeps its own worktree at the end of every session,
+still running. The charrette sweeps its own worktree at the end of every session,
 and sweeps the whole run's worktree tree at start and resume. The sweep kills only
 processes whose working directory is inside the run's worktrees *and* which have
 no controlling terminal, so **a shell you opened yourself in a worktree is left
@@ -1818,19 +1818,19 @@ point for QA (real containers, a booted emulator) and the risk for anything
 holding live credentials. Two consequences worth internalising:
 
 - An agent that can run `aws` can, in principle, touch real infrastructure. Set
-  `"externalTools"` in `harness.config.json` to an allowlist — e.g.
+  `"externalTools"` in `charrette.config.json` to an allowlist — e.g.
   `["gh", "podman"]` — for repos that should never see your cloud credentials,
   or `[]` to advertise nothing.
 - An agent that can run `gh auth token` can read your GitHub token. Secret
-  isolation covers the harness's own plumbing, not what a shell command can
+  isolation covers the charrette's own plumbing, not what a shell command can
   fetch for itself. This was true before the toolbelt existed.
 
 What *is* enforced today:
 
 | Control | Guarantee |
 |---|---|
-| Push allowlist | only `harness/<runId>/*` refs are ever pushed |
-| No merge path | the harness cannot merge a PR; the code does not exist |
+| Push allowlist | only `charrette/<runId>/*` refs are ever pushed |
+| No merge path | the charrette cannot merge a PR; the code does not exist |
 | Secret isolation | tokens live in the CLI process; never in prompts or agent context |
 | Setting isolation | `settingSources: []` — your Claude Code config never reaches workers |
 | Skill provenance | SHA-256 verified at injection; tampered skills are dropped |
@@ -1863,7 +1863,7 @@ continues.
 
 Two classes of failure never reach you, and the run's log says so when they are
 filtered: one that is **also red on the integration branch** is somebody else's
-bug arriving through the base (`… also fails on harness/<runId>/main — not
+bug arriving through the base (`… also fails on charrette/<runId>/main — not
 charged to this task`), and one that **passes when the same command is run a
 second time** was never about the tree at all (`… failed once and passed on a
 re-run — not charged to this task`). The second is what a shared local database,
@@ -1878,7 +1878,7 @@ plan approval, a budget cap, or a task at its iteration cap. A gate never times
 out; unanswered, it waits indefinitely. In a terminal run the same question is
 sitting on stdin.
 
-**`harness: command not found`**
+**`charrette: command not found`**
 The symlink target directory is not on your PATH. See [§3](#3-install) — with the
 default `pnpm link-cli` location, add `export PATH="$HOME/.local/bin:$PATH"` to
 your shell profile.
@@ -1891,11 +1891,11 @@ Planning runs in two phases, and the message says which one failed.
 
 *Phase A* surveys the repository and writes the PRD and the conventions document
 as plain markdown between `<prd>` and `<conventions>` tags. Two attempts; raw
-output in `.harness/<runId>/planner-attempt-docs-N.txt`.
+output in `.charrette/<runId>/planner-attempt-docs-N.txt`.
 
 *Phase B* turns that prose into the epic/task DAG as JSON, with no tools at all —
 the survey already happened and its output is quoted back. Three attempts; raw
-output in `.harness/<runId>/planner-attempt-dag-N.txt`. The message names which of
+output in `.charrette/<runId>/planner-attempt-dag-N.txt`. The message names which of
 the three failure modes happened: the JSON could not be read, it did not match the
 required shape, or it was not a valid DAG.
 
@@ -1928,7 +1928,7 @@ If a phase still truncates on all its attempts, the assignment is too broad: nam
 a narrower scope, or split it across runs. "Review everything and fix all the
 issues" is the shape that does this.
 
-**`No commits between harness/<runId>/main and harness/<runId>/<taskId>`**
+**`No commits between charrette/<runId>/main and charrette/<runId>/<taskId>`**
 Fixed — but if you see it, you are on a build from before component PRs were
 based on the run's start branch. The integrator merges each accepted task into the
 integration branch *and then* opens its PR, so a PR based on the integration
@@ -1944,16 +1944,16 @@ not already have"* and the run carries on.
 That is intended. The merge is the work; the PR is how you see it. A GitHub
 outage, an expired token or a rejected push no longer unwinds an accepted, merged
 task — the failure is logged as *"merged locally, but the pull request could not
-be opened"* and the run continues. The commits are on `harness/<runId>/<taskId>`
-and in `harness/<runId>/main`; open the PR by hand, or re-run once the cause is
+be opened"* and the run continues. The commits are on `charrette/<runId>/<taskId>`
+and in `charrette/<runId>/main`; open the PR by hand, or re-run once the cause is
 fixed and the idempotency check will find the branch rather than duplicating it.
 
 **`issue #28` on a task card is plain text, not a link**
 The dashboard could not work out which repository the number belongs to. It tries
-`HARNESS_GITHUB_REPO`, then the run's stored `githubRepo`, then the `origin`
+`CHARRETTE_GITHUB_REPO`, then the run's stored `githubRepo`, then the `origin`
 remote — so this now means the repo has no `origin`, or `origin` is not on
 `github.com` (a GitHub Enterprise remote is deliberately not linked, because a
-link to the wrong host is worse than no link). Set `HARNESS_GITHUB_REPO=owner/repo`
+link to the wrong host is worse than no link). Set `CHARRETTE_GITHUB_REPO=owner/repo`
 to force it. Note the issue itself is fine either way; only the link is missing.
 
 **The run ended in `BLOCKED`**
@@ -1972,7 +1972,7 @@ exactly what is unmet, in this vocabulary:
   `intentFixRounds` are spent. Resume buys another check.
 - *the critical path is broken* — an agent started the product from a clean
   checkout and a step of the critical path did not work. The closing line names
-  the step and what it saw; `.harness/<runId>/live/` has the captures. Fix it and
+  the step and what it saw; `.charrette/<runId>/live/` has the captures. Fix it and
   resume, or set `live.fixRounds` higher to let the run try again itself.
 - *the product was never exercised* — it never started, the live agent crashed,
   or the specification named no critical path to drive. The first two are worth
@@ -1981,37 +1981,37 @@ exactly what is unmet, in this vocabulary:
   and never ran, which a resume fixes.
 - *nothing merged, so there is nothing to review* — see the next entry; the
   usual cause is a foundation task parking.
-A run in `BLOCKED` opened no pull request on purpose. `harness resume` re-enters
+A run in `BLOCKED` opened no pull request on purpose. `charrette resume` re-enters
 the gates; `holdUntilProven: false` in the config turns the hold off.
 
 **The run ended in `PR_REVIEW` but there are no pull requests**
 On builds with `holdUntilProven` (the default) this no longer happens: a run
 with nothing merged ends in `BLOCKED`. Where it is off, `PR_REVIEW` means the
-harness has stopped, not that it succeeded. If the closing line reads `no pull
+charrette has stopped, not that it succeeded. If the closing line reads `no pull
 requests opened`, nothing was pushed and there is nothing on GitHub to look for.
 The usual cause is a foundation task parking: everything that depends on it,
 directly or through another task, becomes unreachable and is cancelled without
 being attempted. The closing line names each parked task, why it stopped, its
 issue, the branch its work is on, and how many tasks were queued behind it;
-`harness status` prints the same after the fact. Two earlier builds printed
+`charrette status` prints the same after the fact. Two earlier builds printed
 `PRs opened; human review on GitHub` unconditionally here — that message was
 wrong, not a sign that the PRs went missing.
 
-**`harness resume` says there is nothing to resume**
+**`charrette resume` says there is nothing to resume**
 The run is already in a terminal state (`PR_REVIEW` with nothing recoverable,
 `ABORTED`, or `FAILED` with work already in flight) and no state machine will
 move it again. Resume is for a run interrupted mid-flight. A parked task's work
-is committed on its own `harness/<runId>/<taskId>` branch — take it forward by
+is committed on its own `charrette/<runId>/<taskId>` branch — take it forward by
 hand, or start a fresh run now that you know what stalled.
 
 A run that failed *in planning* is the exception: it built nothing to talk over
-and still holds the intake conversation you sat through, so `harness resume`
+and still holds the intake conversation you sat through, so `charrette resume`
 plans it again under the same run id rather than making you answer everything a
 second time.
 
 **The run went quiet: "the account is out of quota — waiting …"**
 Your Claude plan's usage window closed. Every session in flight dies at the same
-moment with the same sentence, and the only remedy is time, so the harness sleeps
+moment with the same sentence, and the only remedy is time, so the charrette sleeps
 until the reset the message quoted and then continues each session from where it
 stopped — the same conversation, the same bill, and no attempt, respawn or QA
 iteration spent on it. Nothing is required of you; leave it running. A session
@@ -2042,23 +2042,23 @@ running, which a bare SSH session does not have.
 Give it more to work with: a two-sentence seed with the constraint you care about
 beats a three-word one. To skip the conversation for a run, pass the assignment on
 the command line; to skip it for a repo, set `"chat": false` in
-`harness.config.json`. The brief it produced is in `.harness/<runId>/BRIEF.md` —
+`charrette.config.json`. The brief it produced is in `.charrette/<runId>/BRIEF.md` —
 worth reading if the plan came out wrong, since that file is what the planner saw.
 
 **The conversation was interrupted**
-The brief lives only in the agent's session, so `harness resume` cannot continue
+The brief lives only in the agent's session, so `charrette resume` cannot continue
 it — the run moves to planning using the assignment on record (your original
 seed). If the conversation mattered, abandon the run and start a new one.
 
-**`harness.config.json is invalid: Unrecognized key(s)`**
+**`charrette.config.json is invalid: Unrecognized key(s)`**
 A typo, or a key that belongs one level deeper (`runCapUsd` lives under
 `budget`). The schema is strict on purpose — see [§8](#8-configuration-reference)
-for the exact shape, or regenerate with `harness init --force`.
+for the exact shape, or regenerate with `charrette init --force`.
 
 **The banner says `checks none`**
 Auto-detection found no conventional test/lint scripts, so QA has no hard signal
 and will rely entirely on the agent reading the diff. Add `--check "<cmd>"` or a
-`deterministicChecks` entry in `harness.config.json`.
+`deterministicChecks` entry in `charrette.config.json`.
 
 **`ExperimentalWarning: SQLite is an experimental feature`**
 Expected on Node 22/23. Silence with `NODE_OPTIONS=--no-warnings`.
@@ -2081,7 +2081,7 @@ You opened the URL without the `#token` fragment. Copy the full line the CLI
 printed. The token changes every process — an old bookmark will not work.
 
 **Nothing appears in the dashboard event log**
-Check the run ID is open (`harness status`). The stream only tails events for
+Check the run ID is open (`charrette status`). The stream only tails events for
 runs returned by `/api/state`.
 
 **No issues or PRs appear**
@@ -2089,7 +2089,7 @@ Check the `github` line in the run banner first — it names the credential sour
 or says `off` with the reason. Either `gh` is not authenticated and no
 `GITHUB_TOKEN` is set, the repo has no GitHub remote, or the token lacks
 Issues/PR write. `gh auth login` is usually the whole fix. The run itself
-degrades to local-only rather than failing, so also check `harness status` for
+degrades to local-only rather than failing, so also check `charrette status` for
 merged tasks with no PR number.
 
 **PR creation fails with "base branch not found"**
@@ -2121,7 +2121,7 @@ pnpm typecheck      # no-emit typecheck
 | `packages/core` | store (event-sourced SQLite), bus, budget/pricing, git + worktrees, agent pool, prompts, intake conversation, QA checks, run controller, GitHub adapter |
 | `packages/skills-mcp` | `SKILL.md` indexer, lexical matcher, provenance hashing, stdio MCP server |
 | `packages/dashboard` | Fastify backend + single-file SPA, plus `preview.mjs` for UI work against a seeded run |
-| `apps/cli` | `harness run / resume / status / init`, terminal intake chat (`chat.ts`), repo-root resolution, check detection, and config-file layering (`defaults.ts`) |
+| `apps/cli` | `charrette run / resume / status / init`, terminal intake chat (`chat.ts`), repo-root resolution, check detection, and config-file layering (`defaults.ts`) |
 
 Conventions worth keeping:
 

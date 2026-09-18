@@ -1,4 +1,4 @@
-import type { RunState } from "@harness/shared";
+import type { RunState } from "@charrette/shared";
 import type { Activation, DeliveryLedger, LedgerEntry, Reach } from "./deliveryLedger.js";
 import type { DarkSwitch } from "./darkSwitches.js";
 import type { SpecCoverage } from "./acceptance.js";
@@ -6,7 +6,7 @@ import type { SpecCoverage } from "./acceptance.js";
 /**
  * The run, as one page a person reads when it is over.
  *
- * Everything else the harness prints is written for someone already inside the
+ * Everything else the charrette prints is written for someone already inside the
  * run — `status` assumes you know what a task is, the event feed assumes you
  * were watching. This is written for the person who asked for the thing and
  * walked away, and it answers their two questions in order: what did I get, and
@@ -288,7 +288,7 @@ export function renderCompletionReport(report: CompletionReport): string {
   const withRunbooks = dark.filter((e) => e.runbook && e.runbook.steps.length);
 
   const activation = ledger.switches.length
-    ? `<p>These are the switches the run declared and could not throw. No agent in this harness is given production credentials or allowed to run <code>apply</code>, so this list is not a set of mistakes — it is the permanent seam between what a run can build and what only you can turn on.</p>
+    ? `<p>These are the switches the run declared and could not throw. No agent in this charrette is given production credentials or allowed to run <code>apply</code>, so this list is not a set of mistakes — it is the permanent seam between what a run can build and what only you can turn on.</p>
        <div class="switches">${ledger.switches.map(switchCard).join("")}</div>`
     : `<p class="empty">Nothing in the merged diff declares a credential, a stack, a record or a migration that this run could not have thrown itself. That is a real answer and a rare one — most runs leave at least a key behind.</p>`;
 
@@ -678,7 +678,7 @@ ${
   <ul>
     <li>Nothing in this report was written by the agents that did the work. Every state above is derived from what the run recorded — merges, deploy checks, the production verdict — and from a scan of the merged diff.</li>
     <li>A feature is never reported as more live than the run's reach allows. A run that stopped at <strong>Merged</strong> has no live features regardless of how green its tests were, because nothing carried them anywhere.</li>
-    <li>The harness cannot throw the switches in the <strong>Dark</strong> section by design: no agent it runs is given production credentials, and <code>apply</code> is denied to all of them. That seam is permanent, and this page is what it produces.</li>
+    <li>The charrette cannot throw the switches in the <strong>Dark</strong> section by design: no agent it runs is given production credentials, and <code>apply</code> is denied to all of them. That seam is permanent, and this page is what it produces.</li>
   </ul>
 </div>
 

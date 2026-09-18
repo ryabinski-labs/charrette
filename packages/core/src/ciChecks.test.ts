@@ -82,7 +82,7 @@ describe("reading a repository's own pipeline as a list of commands", () => {
   it("joins a command wrapped across lines with backslashes, rather than counting the wraps", () => {
     // Run bc691359's clippy and coverage steps are both this shape. Read as
     // separate lines they are refused, and the two checks with the most to say
-    // about that repository are the two the harness never runs.
+    // about that repository are the two the charrette never runs.
     expect(
       commands(`${PR}  lint:
     steps:
@@ -547,7 +547,7 @@ describe("a step that depends on one this scanner would not take", () => {
     // exist: `npm ci` is not a liftable verb, so it is dropped — and treating
     // the drop as a poisoned prerequisite refused every check behind it. A repo
     // whose CI is checkout / setup-node / install / lint / test came out of
-    // `harness init` with no deterministic checks at all.
+    // `charrette init` with no deterministic checks at all.
     //
     // It is also the one drop that provably needs no poisoning:
     // `seedWorktreeDeps` installs node_modules into every task worktree before

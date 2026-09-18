@@ -1,4 +1,4 @@
-import type { IntakeQuestion } from "@harness/shared";
+import type { IntakeQuestion } from "@charrette/shared";
 import { Bus } from "./bus.js";
 import type { IntakeAnswer, IntakeUi } from "./intake.js";
 import { AgentPool } from "./pool.js";

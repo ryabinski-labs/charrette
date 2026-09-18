@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { RunConfig } from "@harness/shared";
-import type { HarnessEvent } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
+import type { CharretteEvent } from "@charrette/shared";
 
 const { queryMock, reapUnderMock } = vi.hoisted(() => ({ queryMock: vi.fn(), reapUnderMock: vi.fn() }));
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({ query: queryMock }));
@@ -8,7 +8,7 @@ vi.mock("./reaper.js", () => ({ reapUnder: reapUnderMock, toolingMarkers: () => 
 
 import { Bus } from "./bus.js";
 import { Store } from "./store.js";
-import { harnessBuild } from "./build.js";
+import { charretteBuild } from "./build.js";
 import { AgentPool, PromptStream, type AgentSpec } from "./pool.js";
 
 /**
@@ -59,7 +59,7 @@ function scriptedSdk(messages: Message[]): void {
 let store: Store;
 let bus: Bus;
 let pool: AgentPool;
-let events: HarnessEvent[];
+let events: CharretteEvent[];
 
 const SPEC: AgentSpec = {
   runId: "run1",
@@ -93,7 +93,7 @@ beforeEach(() => {
     state: "CREATED",
     prdPath: null,
     planHash: null,
-    integrationBranch: "harness/run1/main",
+    integrationBranch: "charrette/run1/main",
     config: RunConfig.parse({}),
   });
   bus = new Bus(store);
@@ -106,7 +106,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-const typed = <T extends HarnessEvent["type"]>(type: T) => events.filter((e) => e.type === type);
+const typed = <T extends CharretteEvent["type"]>(type: T) => events.filter((e) => e.type === type);
 
 describe("running an agent session", () => {
   it("returns the result, books the bill, and closes the session row", async () => {
@@ -133,9 +133,9 @@ describe("running an agent session", () => {
     expect(row.outputTokens).toBe(50);
     expect(row.cacheReadTokens).toBe(10);
     expect(row.cacheWriteTokens).toBe(5);
-    // Which harness spawned it. A run outlives the process that started it, so
+    // Which charrette spawned it. A run outlives the process that started it, so
     // this is the only record of which fixes this session could have had.
-    expect(row.build).toBe(harnessBuild());
+    expect(row.build).toBe(charretteBuild());
     expect(row.build).not.toBe("");
   });
 
@@ -307,11 +307,11 @@ describe("what the session is configured with", () => {
     expect((optionsGiven().env as Record<string, string>).CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe("64000");
   });
 
-  it("layers the caller's environment over the inherited one, under the harness's own", async () => {
-    await pool.run(spec({ env: { COMPOSE_PROJECT_NAME: "harness-task1", BASH_DEFAULT_TIMEOUT_MS: "1000" } }));
+  it("layers the caller's environment over the inherited one, under the charrette's own", async () => {
+    await pool.run(spec({ env: { COMPOSE_PROJECT_NAME: "charrette-task1", BASH_DEFAULT_TIMEOUT_MS: "1000" } }));
 
     const env = optionsGiven().env as Record<string, string>;
-    expect(env.COMPOSE_PROJECT_NAME).toBe("harness-task1");
+    expect(env.COMPOSE_PROJECT_NAME).toBe("charrette-task1");
     expect(env.PATH).toBe(process.env.PATH);
     // A spec must not be able to hand an agent back the two-minute timeout.
     expect(env.BASH_DEFAULT_TIMEOUT_MS).toBe(String(30 * 60 * 1000));
@@ -488,7 +488,7 @@ describe("the wrap-up message", () => {
     await pool.run(spec({ maxTurns: 5 }));
 
     expect(seen[0]).toBe("build the thing");
-    expect(seen[1]).toMatch(/\[HARNESS\] You are near this session's turn limit/);
+    expect(seen[1]).toMatch(/\[CHARRETTE\] You are near this session's turn limit/);
     expect(typed("agent.log").at(-1)).toMatchObject({ text: "approaching the turn limit (4/5) — asked for a final answer now" });
   });
 
@@ -546,7 +546,7 @@ describe("a turn cut off at the output ceiling", () => {
     await pool.run(spec({ maxTurns: 4 }));
 
     expect(sent).toEqual(["build the thing"]);
-    expect(typed("agent.log").map((e) => (e as { text: string }).text).join("\n")).not.toContain("[HARNESS]");
+    expect(typed("agent.log").map((e) => (e as { text: string }).text).join("\n")).not.toContain("[CHARRETTE]");
   });
 
   it("still sends the wrap-up when the turn ended normally", async () => {
@@ -564,7 +564,7 @@ describe("a turn cut off at the output ceiling", () => {
 
     await pool.run(spec({ maxTurns: 4 }));
 
-    expect(sent[1]).toMatch(/\[HARNESS\] You are near this session's turn limit/);
+    expect(sent[1]).toMatch(/\[CHARRETTE\] You are near this session's turn limit/);
   });
 
   it("reports the truncation, so a caller can tell it from a badly written answer", async () => {
@@ -739,7 +739,7 @@ describe("sweeping the worktree when a session ends", () => {
     // log clips each command at 60 characters, which is why the operator's copy
     // of this line stopped at `node /Users/dev/.npm/`.)
     expect(typed("agent.log").at(-1)).toMatchObject({
-      text: "killed 1 process left running in this worktree: 50269 /opt/homebrew/bin/node /Users/dev/.npm/_npx/15c6/node_modu (SIGTERM)",
+      text: "killed 1 process left running in this worktree: 50269 /opt/homebrew/bin/node /Users/dev/.npm/_npx/15c6/node_module (SIGTERM)",
     });
     expect(res.abandoned).toEqual([]);
   });
@@ -779,7 +779,7 @@ describe("sweeping the worktree when a session ends", () => {
 
     const res = await pool.run(spec());
 
-    // The repo itself is the operator's working directory, not the harness's.
+    // The repo itself is the operator's working directory, not the charrette's.
     expect(reapUnderMock).not.toHaveBeenCalled();
     expect(res.abandoned).toEqual([]);
   });
@@ -953,14 +953,14 @@ describe("checkpoints", () => {
 
     await pool.run(spec({ maxTurns: 100 }));
 
-    const pushed = seen.filter((s) => s.includes("[HARNESS] Checkpoint"));
+    const pushed = seen.filter((s) => s.includes("[CHARRETTE] Checkpoint"));
     expect(pushed).toHaveLength(2);
     expect(pushed[0]).toContain("turn 5");
     expect(pushed[1]).toContain("turn 10");
     expect(typed("agent.log").some((e) => (e as { text: string }).text === "checkpoint at turn 5/100 — asked for a state digest and any open questions")).toBe(true);
   });
 
-  it("reaches an SDK session and a harness-run one alike", async () => {
+  it("reaches an SDK session and a charrette-run one alike", async () => {
     // The push sits above the transport split on purpose: the Anthropic
     // transport is the one that cannot fold, and it is still the one where most
     // agent-hours are spent, so it must still get the questions.
@@ -970,7 +970,7 @@ describe("checkpoints", () => {
 
     await pool.run(spec({ model: "claude-opus-5", maxTurns: 100 }));
 
-    expect(seen.some((s) => s.includes("[HARNESS] Checkpoint"))).toBe(true);
+    expect(seen.some((s) => s.includes("[CHARRETTE] Checkpoint"))).toBe(true);
   });
 
   it("never fires on a session too short to reach one", async () => {
@@ -979,7 +979,7 @@ describe("checkpoints", () => {
 
     await pool.run(spec({ maxTurns: 4 }));
 
-    expect(seen.some((s) => s.includes("[HARNESS] Checkpoint"))).toBe(false);
+    expect(seen.some((s) => s.includes("[CHARRETTE] Checkpoint"))).toBe(false);
   });
 
   it("is off when the run configured it off", async () => {
@@ -989,7 +989,7 @@ describe("checkpoints", () => {
 
     await pool.run(spec({ maxTurns: 100 }));
 
-    expect(seen.some((s) => s.includes("[HARNESS] Checkpoint"))).toBe(false);
+    expect(seen.some((s) => s.includes("[CHARRETTE] Checkpoint"))).toBe(false);
   });
 
   it("keeps its own default when a run frozen before checkpoints existed has no cadence", async () => {
@@ -1001,7 +1001,7 @@ describe("checkpoints", () => {
 
     await pool.run(spec({ maxTurns: 100 }));
 
-    expect(seen.some((s) => s.includes("[HARNESS] Checkpoint"))).toBe(true);
+    expect(seen.some((s) => s.includes("[CHARRETTE] Checkpoint"))).toBe(true);
   });
 
   it("changes only what the run actually set", async () => {
@@ -1012,7 +1012,7 @@ describe("checkpoints", () => {
     await pool.run(spec({ maxTurns: 100 }));
 
     // `every` was left alone, so the default cadence still fires.
-    expect(seen.filter((s) => s.includes("[HARNESS] Checkpoint"))).toHaveLength(1);
+    expect(seen.filter((s) => s.includes("[CHARRETTE] Checkpoint"))).toHaveLength(1);
   });
 
   it("keeps the task's answer when the agent finished on a checkpoint turn", async () => {
@@ -1022,7 +1022,7 @@ describe("checkpoints", () => {
     // and verdicts must still be the answer, not the digest.
     const seen: string[] = [];
     pool.configureCheckpoints({ every: 4 });
-    const digest = ["<harness-checkpoint>", "STATE: rewrote the retry helper", "</harness-checkpoint>"].join("\n");
+    const digest = ["<charrette-checkpoint>", "STATE: rewrote the retry helper", "</charrette-checkpoint>"].join("\n");
     queryMock.mockImplementation((args: { prompt: AsyncGenerator<{ message: { content: string } }> }) => (async function* () {
       void (async () => {
         for await (const m of args.prompt) seen.push(m.message.content);
@@ -1036,7 +1036,7 @@ describe("checkpoints", () => {
 
     const res = await pool.run(spec({ maxTurns: 100 }));
 
-    expect(seen.some((s) => s.includes("[HARNESS] Checkpoint"))).toBe(true);
+    expect(seen.some((s) => s.includes("[CHARRETTE] Checkpoint"))).toBe(true);
     expect(res.resultText).toBe("DONE: opened PR #12");
   });
 
@@ -1047,7 +1047,7 @@ describe("checkpoints", () => {
 
     await pool.run(spec({ maxTurns: 100, checkpointEvery: 0 }));
 
-    expect(seen.some((s) => s.includes("[HARNESS] Checkpoint"))).toBe(false);
+    expect(seen.some((s) => s.includes("[CHARRETTE] Checkpoint"))).toBe(false);
   });
 
   it("publishes the digest and the questions the agent came back with", async () => {
@@ -1057,12 +1057,12 @@ describe("checkpoints", () => {
       6,
       seen,
       [
-        "<harness-checkpoint>",
+        "<charrette-checkpoint>",
         "STATE: the retry helper already exists in src/util/retry.ts",
         "QUESTION: reuse it or add one?",
         "OPTIONS: reuse | add",
         "RECOMMENDED: reuse",
-        "</harness-checkpoint>",
+        "</charrette-checkpoint>",
       ].join("\n")
     );
 
@@ -1080,13 +1080,13 @@ describe("checkpoints", () => {
   it("puts the questions in the run log, where a terminal can see them", async () => {
     // The dashboard reads `agent.checkpoint`; the CLI reads `agent.log` and
     // prints its first line only. An operator watching a terminal must get the
-    // question itself, not the "<harness-checkpoint>" line that opens the block.
+    // question itself, not the "<charrette-checkpoint>" line that opens the block.
     const seen: string[] = [];
     pool.configureCheckpoints({ every: 5 });
     session(
       6,
       seen,
-      ["<harness-checkpoint>", "STATE: found it", "QUESTION: reuse it or add one?", "OPTIONS: reuse | add", "RECOMMENDED: reuse", "</harness-checkpoint>"].join("\n")
+      ["<charrette-checkpoint>", "STATE: found it", "QUESTION: reuse it or add one?", "OPTIONS: reuse | add", "RECOMMENDED: reuse", "</charrette-checkpoint>"].join("\n")
     );
 
     await pool.run(spec({ maxTurns: 100 }));
@@ -1118,7 +1118,7 @@ describe("checkpoints", () => {
 
     await pool.run(spec({ maxTurns: 25 }));
 
-    expect(seen.some((s) => s.includes("[HARNESS] Checkpoint"))).toBe(false);
+    expect(seen.some((s) => s.includes("[CHARRETTE] Checkpoint"))).toBe(false);
     expect(seen.some((s) => s.includes("near this session's turn limit"))).toBe(true);
   });
 });

@@ -47,20 +47,20 @@ describe("notifyDone", () => {
   it("sends a macOS notification through osascript", () => {
     onPlatform("darwin");
 
-    notifyDone("harness — run done", "abc123: 3 PRs opened.");
+    notifyDone("charrette — run done", "abc123: 3 PRs opened.");
 
     const [cmd, args] = execFileMock.mock.calls[0] as [string, string[]];
     expect(cmd).toBe("osascript");
     expect(args[0]).toBe("-e");
-    expect(args[1]).toBe('display notification "abc123: 3 PRs opened." with title "harness — run done"');
+    expect(args[1]).toBe('display notification "abc123: 3 PRs opened." with title "charrette — run done"');
   });
 
   it("sends a Linux notification through notify-send", () => {
     onPlatform("linux");
 
-    notifyDone("harness", "run done");
+    notifyDone("charrette", "run done");
 
-    expect(execFileMock.mock.calls[0]).toEqual(["notify-send", ["harness", "run done"], expect.any(Function)]);
+    expect(execFileMock.mock.calls[0]).toEqual(["notify-send", ["charrette", "run done"], expect.any(Function)]);
   });
 
   it("collapses newlines and caps the body, so a stack trace cannot become the notification", () => {

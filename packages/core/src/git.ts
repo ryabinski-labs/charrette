@@ -8,11 +8,11 @@ const execFileP = promisify(execFile);
 /**
  * Add `entry` to the target repo's `.gitignore` unless git already ignores it.
  *
- * The harness writes its state into the repo it is working on, and that state is
- * not source: `.harness/harness.db` is the run ledger, holding every prompt,
+ * The charrette writes its state into the repo it is working on, and that state is
+ * not source: `.charrette/charrette.db` is the run ledger, holding every prompt,
  * every tool result and every file an agent read. A stray `git add -A` in the
  * target repo would commit the whole transcript — megabytes that rewrite on
- * every event. So the harness cleans up after itself rather than leaving the
+ * every event. So the charrette cleans up after itself rather than leaving the
  * operator to notice.
  *
  * Deliberately synchronous: this runs once at startup, before the run exists,
@@ -61,13 +61,13 @@ export async function git(cwd: string, args: string[], opts: { serialize?: boole
  * Push one of the run's own branches, and explain a rejection instead of
  * relaying git's.
  *
- * The harness only ever pushes `harness/<runId>/*` (SEC-5), and it treats those
+ * The charrette only ever pushes `charrette/<runId>/*` (SEC-5), and it treats those
  * as append-only, so a plain push is expected to fast-forward and nothing is
  * ever forced. That held until a human opened a pull request *into* a run's
  * integration branch and merged it: origin moved ahead of the local branch, and
  * every subsequent push was rejected as non-fast-forward. Run 3ae58e02 reported
  * `merged locally, but the pull request could not be opened: Command failed:
- * git push origin harness/3ae58e02/main` — 60 merged tasks, and nothing in that
+ * git push origin charrette/3ae58e02/main` — 60 merged tasks, and nothing in that
  * sentence says the remote has commits the operator wants to keep.
  *
  * A force push is not the answer and is not offered here: the commits on the
@@ -91,10 +91,10 @@ export async function pushRunBranch(repoPath: string, branch: string): Promise<v
     const ahead = await git(repoPath, ["rev-list", "--count", `FETCH_HEAD..${branch}`]).catch(() => "?");
     throw new Error(
       `${branch} has diverged from origin: ${behind} commit(s) on origin are not in the local branch, and ${ahead} local commit(s) are not on origin.\n\n` +
-        `Something merged into this branch on GitHub — a pull request opened against it, most likely. Those commits are not the harness's to discard, and it never force-pushes, so publishing has to wait for the two to be reconciled:\n\n` +
+        `Something merged into this branch on GitHub — a pull request opened against it, most likely. Those commits are not the charrette's to discard, and it never force-pushes, so publishing has to wait for the two to be reconciled:\n\n` +
         `  git fetch origin ${branch}\n` +
         `  git merge origin/${branch}      # in the run's integration worktree\n\n` +
-        `then \`harness resume\` opens the pull request.`
+        `then \`charrette resume\` opens the pull request.`
     );
   }
 }
@@ -102,7 +102,7 @@ export async function pushRunBranch(repoPath: string, branch: string): Promise<v
 /**
  * Whether this repository can host a run at all — asked before anything is spent.
  *
- * Every task the harness dispatches runs in a `git worktree`, and a worktree
+ * Every task the charrette dispatches runs in a `git worktree`, and a worktree
  * needs a commit to branch from. A repository with no commits — `git init` and
  * nothing since — fails at `git worktree add` with `fatal: invalid reference:
  * main`, and it fails once per task, after intake and planning have already been
@@ -115,7 +115,7 @@ export async function pushRunBranch(repoPath: string, branch: string): Promise<v
 export async function repoUnusable(repoPath: string): Promise<string | null> {
   const inside = await git(repoPath, ["rev-parse", "--is-inside-work-tree"]).catch(() => "");
   if (inside !== "true") {
-    return `${repoPath} is not a git repository.\n\nThe harness builds every task on a branch in its own worktree, so it needs one. Run \`git init\`, commit what is already there, and start the run again.`;
+    return `${repoPath} is not a git repository.\n\nThe charrette builds every task on a branch in its own worktree, so it needs one. Run \`git init\`, commit what is already there, and start the run again.`;
   }
   const head = await git(repoPath, ["rev-parse", "--verify", "HEAD"]).catch(() => "");
   if (!head) {
@@ -219,11 +219,11 @@ export class WorktreeManager {
   }
 
   branchName(runId: string, taskId: string): string {
-    return `harness/${runId}/${taskId}`;
+    return `charrette/${runId}/${taskId}`;
   }
 
   integrationBranch(runId: string): string {
-    return `harness/${runId}/main`;
+    return `charrette/${runId}/main`;
   }
 
   async ensureIntegrationBranch(runId: string, baseRef = "HEAD"): Promise<string> {
@@ -283,7 +283,7 @@ export class WorktreeManager {
   /**
    * What a task's branch actually carries over the base it will merge into.
    *
-   * Nothing else in the harness ever asks. `git merge --no-ff` on a branch with
+   * Nothing else in the charrette ever asks. `git merge --no-ff` on a branch with
    * no commits prints `Already up to date.` and exits 0, so `mergeTaskBranch`
    * reports success, `integrate` books MERGED, and `mergedShas` records the
    * integration branch's own pre-existing commit as the task's delivery — which
@@ -311,7 +311,7 @@ export class WorktreeManager {
    *
    * Ancestry alone does not separate them: a branch that has just been created
    * is an ancestor of the integration branch too. What separates them is *how*
-   * the tip got there. This harness only ever moves the integration branch by
+   * the tip got there. This charrette only ever moves the integration branch by
    * `merge --no-ff` of a task branch, so its first-parent chain is exactly the
    * list of commits it has ever pointed at — a branch that delivered nothing
    * still sits on one of them, and a branch that was merged in hangs off a
@@ -473,7 +473,7 @@ export class WorktreeManager {
    * A run branches once, at the start, and merges every accepted task into that
    * branch. `main` does not stop moving while it works — and on a run of any
    * length the two diverge, so the rollup opened at the end is one GitHub
-   * refuses to merge. Nothing in the harness ever looked: run 5743ce85 spent
+   * refuses to merge. Nothing in the charrette ever looked: run 5743ce85 spent
    * $373, merged 64 tasks, opened #834 CONFLICTING, and reported it to the
    * operator as "1 pull request open for review".
    *

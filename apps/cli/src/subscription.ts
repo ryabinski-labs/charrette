@@ -1,5 +1,5 @@
 import { createInterface } from "node:readline/promises";
-import type { SubscriptionChoice, SubscriptionGate } from "@harness/core";
+import type { SubscriptionChoice, SubscriptionGate } from "@charrette/core";
 import { notifyDone } from "./notify.js";
 
 /** Ask on stdin. Split out so the prompt can be tested without a terminal. */
@@ -47,7 +47,7 @@ export async function promptForAccount(
         `What now?\n` +
           (gate.alternatives.length ? `  <name>   continue on that subscription (${gate.alternatives.join(", ")})\n` : "") +
           `  c        carry on spending this one and take the limit when it comes\n` +
-          `  enter    park the run; \`harness resume\` picks it up where it stopped\n> `
+          `  enter    park the run; \`charrette resume\` picks it up where it stopped\n> `
       )
     ).trim();
     if (answer === "") return { action: "park" };

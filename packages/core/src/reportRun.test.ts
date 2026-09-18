@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { RunConfig, RunSpec } from "@harness/shared";
+import { RunConfig, RunSpec } from "@charrette/shared";
 import { afterEach, describe, expect, it } from "vitest";
 import { Bus } from "./bus.js";
 import { git } from "./git.js";
@@ -13,7 +13,7 @@ afterEach(() => {
   for (const dir of temps.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 const scratch = (): string => {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-report-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-report-"));
   temps.push(dir);
   return dir;
 };
@@ -28,7 +28,7 @@ function run(over: Partial<{ state: string; assignment: string }> = {}) {
     state: "CREATED",
     prdPath: null,
     planHash: null,
-    integrationBranch: "harness/run-1/main",
+    integrationBranch: "charrette/run-1/main",
     config: RunConfig.parse({ prodUrl: "https://x.test" }),
   });
   return { store, bus };
@@ -108,7 +108,7 @@ describe("the four facts the ledger turns on", () => {
 
 describe("whether a person merged it", () => {
   /**
-   * The one thing the harness never does for itself. VERIFYING is only entered
+   * The one thing the charrette never does for itself. VERIFYING is only entered
    * off a merged SHA, and a deploy status is only ever recorded for a commit on
    * the base branch — so either is proof, and PR_REVIEW alone is not.
    */
@@ -247,12 +247,12 @@ describe("reading what the run changed", () => {
 
   it("reads the diff against the base while the pull request is still open", async () => {
     const dir = await repo();
-    await git(dir, ["checkout", "-qb", "harness/run-1/main"]);
+    await git(dir, ["checkout", "-qb", "charrette/run-1/main"]);
     writeFileSync(path.join(dir, "app.ts"), "process.env.MY_API_KEY\n");
     await git(dir, ["add", "-A"]);
     await commit(dir, "work", AFTER);
 
-    const diff = await changedFiles(dir, "main", "harness/run-1/main", STARTED);
+    const diff = await changedFiles(dir, "main", "charrette/run-1/main", STARTED);
     expect(diff.read).toBe(true);
     expect(diff.files).toEqual([{ path: "app.ts", text: "process.env.MY_API_KEY" }]);
     expect(diff.basis).toContain("between `main` and the run's branch");
@@ -265,15 +265,15 @@ describe("reading what the run changed", () => {
    */
   it("still reads the diff after the pull request has been merged", async () => {
     const dir = await repo();
-    await git(dir, ["checkout", "-qb", "harness/run-1/main"]);
+    await git(dir, ["checkout", "-qb", "charrette/run-1/main"]);
     writeFileSync(path.join(dir, "app.ts"), "process.env.MY_API_KEY\n");
     await git(dir, ["add", "-A"]);
     await commit(dir, "work", AFTER);
     await git(dir, ["checkout", "-q", "main"]);
-    await git(dir, ["merge", "-q", "--ff-only", "harness/run-1/main"]);
+    await git(dir, ["merge", "-q", "--ff-only", "charrette/run-1/main"]);
 
-    expect((await git(dir, ["diff", "--name-only", "main...harness/run-1/main"])).trim()).toBe("");
-    const diff = await changedFiles(dir, "main", "harness/run-1/main", STARTED);
+    expect((await git(dir, ["diff", "--name-only", "main...charrette/run-1/main"])).trim()).toBe("");
+    const diff = await changedFiles(dir, "main", "charrette/run-1/main", STARTED);
     expect(diff.read).toBe(true);
     expect(diff.files.map((f) => f.path)).toEqual(["app.ts"]);
     expect(diff.basis).toContain("the last commit that predates it");
@@ -286,7 +286,7 @@ describe("reading what the run changed", () => {
    */
   it("says it could not read the diff rather than reporting nothing changed", async () => {
     const dir = await repo();
-    const diff = await changedFiles(dir, "main", "harness/gone/main", STARTED);
+    const diff = await changedFiles(dir, "main", "charrette/gone/main", STARTED);
     expect(diff.read).toBe(false);
     expect(diff.files).toEqual([]);
     expect(diff.basis).toContain("no longer exists in this checkout");
@@ -301,13 +301,13 @@ describe("reading what the run changed", () => {
 
   it("leaves out a file the run deleted, because a gone file declares nothing", async () => {
     const dir = await repo();
-    await git(dir, ["checkout", "-qb", "harness/run-1/main"]);
+    await git(dir, ["checkout", "-qb", "charrette/run-1/main"]);
     await git(dir, ["rm", "-q", "README.md"]);
     writeFileSync(path.join(dir, "app.ts"), "ok\n");
     await git(dir, ["add", "-A"]);
     await commit(dir, "work", AFTER);
 
-    const diff = await changedFiles(dir, "main", "harness/run-1/main", STARTED);
+    const diff = await changedFiles(dir, "main", "charrette/run-1/main", STARTED);
     expect(diff.files.map((f) => f.path)).toEqual(["app.ts"]);
   });
 });
@@ -448,7 +448,7 @@ describe("assembling a report from a run id and a checkout", () => {
     for (const k of KEYS) process.env[k] = "2026-08-01T00:00:00Z";
     await git(dir, ["commit", "-qm", "base"]);
     for (const k of KEYS) delete process.env[k];
-    await git(dir, ["checkout", "-qb", "harness/run-1/main"]);
+    await git(dir, ["checkout", "-qb", "charrette/run-1/main"]);
     writeFileSync(path.join(dir, ".env.example"), "STRIPE_SECRET_KEY=\n");
     await git(dir, ["add", "-A"]);
     await git(dir, ["commit", "-qm", "work"]);
@@ -498,7 +498,7 @@ describe("assembling a report from a run id and a checkout", () => {
     const dir = await repo();
     const { store } = run();
     await git(dir, ["checkout", "-q", "main"]);
-    await git(dir, ["branch", "-qD", "harness/run-1/main"]);
+    await git(dir, ["branch", "-qD", "charrette/run-1/main"]);
 
     const report = await assembleReport({ store, repoPath: dir, runId: "run-1", merged: false, origin: "cli", now: 1 });
     expect(report.couldNotCheck[0]).toContain("not for want of switches");
@@ -510,7 +510,7 @@ describe("assembling a report from a run id and a checkout", () => {
   });
 
   it("puts a run's report where both the controller and the CLI look for it", () => {
-    expect(reportPath("/repo", "run-1")).toBe(path.join("/repo", ".harness", "reports", "run-1.html"));
+    expect(reportPath("/repo", "run-1")).toBe(path.join("/repo", ".charrette", "reports", "run-1.html"));
   });
 });
 

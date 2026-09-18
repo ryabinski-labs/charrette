@@ -3,7 +3,7 @@
  * deploys ahead of infrastructure nothing in the repo will have applied yet —
  * read off the diff, at the task gate, while a worker can still fix it.
  *
- * Run 1e7d3df3 took dns-project's console down. The work was a cookie/jti session
+ * Run 1e7d3df3 took the DNS service's console down. The work was a cookie/jti session
  * cutover: `control-plane/internal/api/auth.go` began checking every
  * authenticated request's `jti` against a revocation store, and
  * `infra/aws/dynamodb/main.tf` gained the table that store reads —
@@ -33,10 +33,10 @@
  * that caused it. What was missing was anyone asking whether the document had
  * a chance to be obeyed. A handover that says "apply the table first" is a
  * true sentence about an ordering that the merge button had already decided,
- * and no check in the repo or the harness compared those two facts.
+ * and no check in the repo or the charrette compared those two facts.
  *
  * So they get compared here, on the diff, before the task is done. The
- * question has one right answer and needs two files the harness already has in
+ * question has one right answer and needs two files the charrette already has in
  * front of it: does a workflow deploy this change on the merge, and is there a
  * resource in this change that no such workflow applies? When both hold, the
  * deploy is ordered ahead of its own prerequisite and the only thing standing
@@ -107,7 +107,7 @@ const APPLY_COMMAND = /\b(?:terraform|tofu)\b[^\n]*\bapply\b/;
  * Without this the rule asks "does a workflow run on the merge?", and the
  * answer in every repo is yes — `ci.yml` runs on push to main with no paths
  * filter, so it matches every file changed. Measured over forty commits each
- * of dns-project, billing-app and waf, that reading fired on twenty of the twenty
+ * of dns-service, billing-app and rust-service, that reading fired on twenty of the twenty
  * commits that touched any `.tf` file and stayed silent on none of them. A
  * check that never clears is one people learn to click past, which costs the
  * gate the one time it is right.
@@ -123,7 +123,7 @@ const APPLY_COMMAND = /\b(?:terraform|tofu)\b[^\n]*\bapply\b/;
  *
  * Every command question below is asked of this and not of the raw file. A
  * comment is prose about the workflow, not a step in it, and reading the two
- * alike goes wrong in both directions: dns-project's `ci.yml` says
+ * alike goes wrong in both directions: dns-service's `ci.yml` says
  * `# unit-tested with doctl+dig faked.` and was read as a deploy, while a note
  * reading `we run terraform apply by hand` would have satisfied the
  * merge-applies-it test and switched the whole gate off — silently, on exactly
@@ -173,7 +173,7 @@ const DEPLOY_COMMAND = new RegExp(
  *
  * The reason this is read at all: a workflow can trigger on push to main and
  * still keep its apply behind `if: github.event_name == 'workflow_dispatch'`,
- * which is exactly what dns-project's `deploy-edge.yml` does — and what makes
+ * which is exactly what the DNS service's `deploy-edge.yml` does — and what makes
  * "this workflow runs on the merge and contains an apply" the wrong question.
  * Deciding which job an `if:` guards would mean resolving the whole workflow
  * graph; deciding whether the file gates anything on a hand-launch is one
@@ -197,7 +197,7 @@ const INCIDENTAL = /(?:^|\/)(?:README|CHANGELOG|LICENSE)|\.(?:md|txt|coveragerc|
  * Every Terraform resource declared in this file.
  *
  * The whole file rather than only its added lines, for the same reason
- * `namedIamResources` reads the whole template: the harness has the changed
+ * `namedIamResources` reads the whole template: the charrette has the changed
  * file list and the file, not a per-hunk diff, and a resource that was added
  * three commits ago and is still unapplied is the same hazard as one added
  * now. The cost of the wider read is a question asked about a file someone
@@ -338,7 +338,7 @@ export function pathMatches(glob: string, file: string): boolean {
  * Silent unless all of it is true: the change declares a Terraform resource,
  * no workflow that runs on the merge applies Terraform, and a workflow that
  * runs on the merge ships some other file in the same change. Each of those
- * alone is ordinary. A repo whose deployment the harness cannot see is a repo
+ * alone is ordinary. A repo whose deployment the charrette cannot see is a repo
  * this says nothing about, for the reason `deployCapability` gives — a gate
  * that cries on ordinary work is one nobody reads by the third task.
  *
@@ -380,7 +380,7 @@ export function scanDeployOrder(changed: SourceFile[], workflows: SourceFile[]):
     // Report the file that makes the ordering obvious. Every one of these ships
     // on the merge, so any of them proves the finding — but a reader shown
     // `deploy-edge.yml deploys README.md` reads a true finding as a false one
-    // and stops there. Running against dns-project's history this picked a
+    // and stops there. Running against dns-service's history this picked a
     // `.coveragerc`, a README and a `_test.go` on three of five real findings.
     const pick = shipped.find((s) => !INCIDENTAL.test(s.file)) ?? shipped[0];
     if (pick) findings.push({ deployer: workflow.path, deploys: pick.file, via: pick.via, resources });
@@ -418,7 +418,7 @@ export function renderDeployOrder(findings: OrderFinding[]): string {
     "way to write a revocation or authorization check, turns it into the second: every",
     "authenticated request errors until a human applies the configuration.",
     "",
-    "This is exactly how run 1e7d3df3 took dns-project's console down. That run wrote the",
+    "This is exactly how run 1e7d3df3 took the DNS service's console down. That run wrote the",
     "ordering out in full, confirmed against the live account that the table was",
     "missing, and handed a human an ordered runbook — and none of it mattered, because",
     "nothing in the runbook could run before the merge that had already shipped the",

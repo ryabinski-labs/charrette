@@ -12,7 +12,7 @@
  * The store is `node:sqlite` deliberately — no native build step, no
  * better-sqlite3 — and Node says so on stderr before every command, addressed
  * to an operator who did not choose the storage engine and cannot act on it.
- * Two lines above every `harness status` teach people to skim past stderr,
+ * Two lines above every `charrette status` teach people to skim past stderr,
  * which is where the messages that do matter go.
  *
  * It has to be a process flag rather than a `warning` listener installed here:
@@ -29,7 +29,7 @@
  * it could be imported: line one installed signal handlers on the importing
  * process and the last line parsed the importing process's argv. So the whole
  * CLI — every flag, every banner line, every gate prompt — went untested, and
- * the only way to find out whether `harness resume` still worked was to run it.
+ * the only way to find out whether `charrette resume` still worked was to run it.
  */
 import { buildProgram } from "./cli.js";
 import { installCrashLog, recordFatal, recordRefusal } from "./crashlog.js";
@@ -37,7 +37,7 @@ import { loadDotEnv } from "./env.js";
 
 installCrashLog();
 
-// Before the command tree runs, because `harness run` checks the vendor keys
+// Before the command tree runs, because `charrette run` checks the vendor keys
 // while it is resolving the config — see `missingKeys` in cli.ts — and a key
 // loaded after that check is a key that was not there when it mattered.
 loadDotEnv();
@@ -45,7 +45,7 @@ loadDotEnv();
 buildProgram()
   .parseAsync()
   .catch((e: unknown) => {
-    // A run already held by another harness process is a refusal, not a crash;
+    // A run already held by another charrette process is a refusal, not a crash;
     // see `recordRefusal`. Same exit code — nothing the operator asked for
     // happened — but the message says what it is.
     if (e instanceof Error && e.name === "RunLocked") recordRefusal(e);

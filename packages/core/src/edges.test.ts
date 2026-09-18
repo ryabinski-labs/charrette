@@ -10,7 +10,7 @@ import { detectToolbelt } from "./toolbelt.js";
 /**
  * The arms of these functions that only a strange input reaches — an id made
  * entirely of punctuation, a check that fails without writing to stderr, a
- * merge that came out clean. Each is a real state the harness reaches; none is
+ * merge that came out clean. Each is a real state the charrette reaches; none is
  * the state a test naturally constructs.
  */
 
@@ -32,7 +32,7 @@ describe("naming a task's compose project", () => {
 });
 
 describe("running the repo's own checks", () => {
-  const dir = () => mkdtempSync(path.join(tmpdir(), "harness-checks-"));
+  const dir = () => mkdtempSync(path.join(tmpdir(), "charrette-checks-"));
 
   it("reports the output of a check that failed", async () => {
     const result = await runDeterministicChecks(dir(), ["echo 'to stdout'; echo 'to stderr' >&2; exit 1"]);
@@ -70,7 +70,7 @@ describe("running the repo's own checks", () => {
 
 describe("asking a worker to resolve its own conflicts", () => {
   it("names the conflicted files when there is something to resolve by hand", () => {
-    const prompt = conflictPrompt("harness/run1/main", ["src/app.ts", "src/routes.ts"], false);
+    const prompt = conflictPrompt("charrette/run1/main", ["src/app.ts", "src/routes.ts"], false);
 
     expect(prompt).toContain("left conflicted on purpose");
     expect(prompt).toContain("src/app.ts");
@@ -83,7 +83,7 @@ describe("asking a worker to resolve its own conflicts", () => {
    * the combination rather than told there is nothing to do.
    */
   it("asks for a check of the combination when the merge came out clean", () => {
-    const prompt = conflictPrompt("harness/run1/main", [], true);
+    const prompt = conflictPrompt("charrette/run1/main", [], true);
 
     expect(prompt).toContain("nothing to resolve by hand");
     expect(prompt).toContain("not the same as correct");
@@ -93,7 +93,7 @@ describe("asking a worker to resolve its own conflicts", () => {
 
 describe("what the agents are offered on PATH", () => {
   it("offers everything it finds when the operator named nothing", () => {
-    const bin = mkdtempSync(path.join(tmpdir(), "harness-bin-"));
+    const bin = mkdtempSync(path.join(tmpdir(), "charrette-bin-"));
     writeFileSync(path.join(bin, "gh"), "#!/bin/sh\n", { mode: 0o755 });
 
     const found = detectToolbelt(undefined, { PATH: bin });
@@ -102,7 +102,7 @@ describe("what the agents are offered on PATH", () => {
   });
 
   it("offers only what the operator named", () => {
-    const bin = mkdtempSync(path.join(tmpdir(), "harness-bin-"));
+    const bin = mkdtempSync(path.join(tmpdir(), "charrette-bin-"));
     for (const name of ["gh", "aws"]) writeFileSync(path.join(bin, name), "#!/bin/sh\n", { mode: 0o755 });
 
     expect(detectToolbelt(["aws"], { PATH: bin }).map((t) => t.name)).toEqual(["aws"]);

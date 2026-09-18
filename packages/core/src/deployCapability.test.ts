@@ -3,7 +3,7 @@ import { deployCapabilities, namedIamResources, renderDeployCapability, scanDepl
 
 /**
  * The template and the workflow that actually failed, trimmed to the shape
- * that matters. api-service-new-api's CD run 31940430551 refused the changeset
+ * that matters. api-service's CD run a CD run refused the changeset
  * with `Requires capabilities : [CAPABILITY_NAMED_IAM]` after the merge, on
  * main, having passed `sam validate --lint`, `sam build`, a 100%-coverage
  * suite and a green pull request on the way there.
@@ -18,7 +18,7 @@ Resources:
   DeliveryLogRunnerPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
-      ManagedPolicyName: api-service-delivery-log-runner-write
+      ManagedPolicyName: delivery-log-runner-write
       PolicyDocument:
         Version: "2012-10-17"
 `;
@@ -59,7 +59,7 @@ describe("IAM resources a template names itself", () => {
     const template = `Resources:
   Runner:
     Properties:
-      RoleName: api-service-runner
+      RoleName: ci-runner
     Type: AWS::IAM::Role
 `;
     expect(namedIamResources(template)).toEqual([{ logicalId: "Runner", type: "AWS::IAM::Role", via: "RoleName" }]);

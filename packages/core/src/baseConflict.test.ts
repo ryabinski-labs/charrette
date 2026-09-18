@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { RunConfig } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
 import { describe, expect, it } from "vitest";
 import { Bus } from "./bus.js";
 import type { GitHubAdapter } from "./github.js";
@@ -13,7 +13,7 @@ import { Store } from "./store.js";
 /**
  * The run's own branch against the branch it must merge into.
  *
- * Every other merge in the harness is between two things the run owns. This one
+ * Every other merge in the charrette is between two things the run owns. This one
  * is against `main`, which keeps moving while the run works and is written by
  * people who do not know the run exists. Nothing used to look: run 5743ce85
  * spent $373.36, merged 64 tasks, opened a CONFLICTING pull request and told the
@@ -36,13 +36,13 @@ const gitIn = (cwd: string, ...args: string[]) => execFileSync("git", args, { cw
 const gitOut = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 
 function repoWithOrigin(): { repo: string; origin: string } {
-  const origin = mkdtempSync(path.join(tmpdir(), "harness-base-origin-"));
+  const origin = mkdtempSync(path.join(tmpdir(), "charrette-base-origin-"));
   gitIn(origin, "init", "--bare", "-b", "release");
-  const repo = mkdtempSync(path.join(tmpdir(), "harness-base-"));
+  const repo = mkdtempSync(path.join(tmpdir(), "charrette-base-"));
   writeFileSync(path.join(repo, "README.md"), "# fixture\n");
   gitIn(repo, "init", "-b", "release");
-  gitIn(repo, "config", "user.email", "harness@example.com");
-  gitIn(repo, "config", "user.name", "harness");
+  gitIn(repo, "config", "user.email", "charrette@example.com");
+  gitIn(repo, "config", "user.name", "charrette");
   gitIn(repo, "add", "-A");
   gitIn(repo, "commit", "-m", "init");
   gitIn(repo, "remote", "add", "origin", origin);
@@ -56,7 +56,7 @@ function repoWithOrigin(): { repo: string; origin: string } {
  * commit this run's checkout has never seen and did not fetch.
  */
 function moveBase(origin: string, files: { file: string; body: string }[]): void {
-  const clone = mkdtempSync(path.join(tmpdir(), "harness-base-other-"));
+  const clone = mkdtempSync(path.join(tmpdir(), "charrette-base-other-"));
   gitIn(clone, "clone", origin, ".");
   gitIn(clone, "config", "user.email", "someone@example.com");
   gitIn(clone, "config", "user.name", "someone else");
@@ -268,7 +268,7 @@ describe("the base branch moved and conflicts", () => {
   });
 
   it("abandons a merge nobody could resolve, leaving the branch exactly where it was", async () => {
-    // The failure that matters: the harness must never publish a half-finished
+    // The failure that matters: the charrette must never publish a half-finished
     // merge, and must never quietly drop the base's commits to make one work.
     const { repo, origin } = repoWithOrigin();
     const { adapter, prs } = fakeGitHub();
@@ -372,8 +372,8 @@ describe("resuming a run that already published an unmergeable pull request", ()
 });
 
 describe("what GitHub says about the pull request it now has", () => {
-  it("records a conflicting verdict even when the harness's own merge went clean", async () => {
-    // The window this closes: the base can move between the harness's merge and
+  it("records a conflicting verdict even when the charrette's own merge went clean", async () => {
+    // The window this closes: the base can move between the charrette's merge and
     // the push, so a locally-clean branch can still arrive unmergeable.
     const { repo, origin } = repoWithOrigin();
     const { adapter } = fakeGitHub({ mergeable: "conflicting" });
@@ -382,11 +382,11 @@ describe("what GitHub says about the pull request it now has", () => {
 
     expect(store.mergeStatus(runId)).toMatchObject({ state: "conflicting", prNumber: 42 });
     expect(logs.join("\n")).toMatch(/#42 cannot be merged into release: GitHub reports it as conflicting/);
-    expect(logs.join("\n")).toMatch(/the base moved again between the harness's own merge and the push/);
+    expect(logs.join("\n")).toMatch(/the base moved again between the charrette's own merge and the push/);
     expect(controller.outcome(runId).line).toContain("CANNOT MERGE");
   });
 
-  it("confirms a mergeable one without changing what the harness already found", async () => {
+  it("confirms a mergeable one without changing what the charrette already found", async () => {
     const { repo, origin } = repoWithOrigin();
     const { adapter } = fakeGitHub({ mergeable: "mergeable" });
     const agents = pool({ origin, baseFile: { file: "unrelated.txt", body: "someone else's work\n" } });
@@ -402,7 +402,7 @@ describe("what GitHub says about the pull request it now has", () => {
     const { repo, origin } = repoWithOrigin();
     const { adapter } = fakeGitHub({ mergeable: "unknown" });
     const agents = pool({ origin });
-    // A settle budget of a second: this asserts what the harness does when the
+    // A settle budget of a second: this asserts what the charrette does when the
     // budget runs out, not how long the budget is.
     const { store, runId, controller } = await build(adapter, agents.pool, repo, { settleMinutes: 1 / 60 });
 
@@ -441,7 +441,7 @@ describe("the base that is not a conflict, and the one that is many", () => {
     expect(store.mergeStatus(runId)!.conflicts).toHaveLength(21);
     // Five in the log, twenty in the pull request: an operator reading a run's
     // output does not want twenty-one paths, and a reviewer does not want none.
-    expect(logs.join("\n")).toMatch(/conflicts with harness\/[a-z0-9]+\/main in 21 file\(s\):/);
+    expect(logs.join("\n")).toMatch(/conflicts with charrette\/[a-z0-9]+\/main in 21 file\(s\):/);
     expect(logs.join("\n")).toMatch(/, \+16 more/);
     expect(prs[0]!.body).toContain("Conflicts in 21 files:");
     expect(prs[0]!.body).toContain("- …and 1 more");
@@ -529,9 +529,9 @@ describe("what an unmergeable pull request leaves behind", () => {
     expect(prs.length).toBe(before);
   });
 
-  it("does not blame the base for moving twice when the harness never merged it", async () => {
+  it("does not blame the base for moving twice when the charrette never merged it", async () => {
     // The other half of the message: GitHub says conflicting and so did the
-    // harness, so this is the conflict it already reported, not a new one that
+    // charrette, so this is the conflict it already reported, not a new one that
     // appeared between the merge and the push.
     const { repo, origin } = repoWithOrigin();
     const { adapter } = fakeGitHub({ mergeable: "conflicting" });
@@ -592,7 +592,7 @@ describe("a second look at the base after the first agent gave up", () => {
 });
 
 describe("a run whose merge status was never written, or written without a base", () => {
-  /** Rewrites the run's last merge verdict as an older harness would have left it. */
+  /** Rewrites the run's last merge verdict as an older charrette would have left it. */
   function rewriteMergeStatus(store: Store, runId: string, payload: Record<string, unknown>): void {
     store.db.prepare("DELETE FROM events WHERE runId = ? AND type = 'run.merge_status'").run(runId);
     store.db
@@ -613,7 +613,7 @@ describe("a run whose merge status was never written, or written without a base"
     expect(controller.outcome(runId).line).toContain("the base branch merged in to keep it mergeable");
   });
 
-  it("reconciles a pull request the harness has no verdict for at all", async () => {
+  it("reconciles a pull request the charrette has no verdict for at all", async () => {
     // A run that was already in review when this phase shipped: there is a pull
     // request and no record of whether it merges. Resume finds out rather than
     // assuming the answer it never wrote down.

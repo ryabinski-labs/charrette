@@ -7,7 +7,7 @@ import { originSlug } from "./github.js";
 
 /** A repo whose `origin` is the given URL — no network, the remote is never contacted. */
 function repoWithRemote(url?: string): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-origin-slug-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-origin-slug-"));
   execFileSync("git", ["init", "-b", "main"], { cwd: dir, stdio: "ignore" });
   if (url) execFileSync("git", ["remote", "add", "origin", url], { cwd: dir, stdio: "ignore" });
   return dir;
@@ -39,6 +39,6 @@ describe("reading the repo slug off the origin remote", () => {
   });
 
   it("returns nothing for a path that is not a repository at all", async () => {
-    expect(await originSlug(mkdtempSync(path.join(tmpdir(), "harness-not-a-repo-")))).toBeNull();
+    expect(await originSlug(mkdtempSync(path.join(tmpdir(), "charrette-not-a-repo-")))).toBeNull();
   });
 });

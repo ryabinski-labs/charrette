@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { query, type HookInput, type HookJSONOutput, type Options, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import { AgentRole, providerFor } from "@harness/shared";
+import { AgentRole, providerFor } from "@charrette/shared";
 import { checkpointDue, checkpointPrompt, describeQuestions, isCheckpointOnly, parseCheckpoint, DEFAULT_EVERY } from "./checkpoint.js";
 import { toolLoop, unsupportedSpec, type PromptSource } from "./toolLoop.js";
 import { Bus } from "./bus.js";
@@ -12,7 +12,7 @@ import { Store } from "./store.js";
 import { BudgetExceeded, costUsd } from "./budget.js";
 import { humanWait, limitWaitMs, usageLimitOf, type UsageLimit } from "./usageLimit.js";
 import { describeReading, keepsTranscript, readRateLimitEvent, readUsageSnapshot, type SubscriptionReading } from "./subscription.js";
-import { harnessBuild } from "./build.js";
+import { charretteBuild } from "./build.js";
 import { infraGuardHook } from "./infraGuard.js";
 import { reapUnder, toolingMarkers } from "./reaper.js";
 import { rtkHooks } from "./rtk.js";
@@ -57,7 +57,7 @@ export { BASH_TIMEOUT_MS };
  * still running in the worktree at that moment. A worker that redirects a long
  * command, polls it a few times and then finishes its turn has its own job
  * killed and delivers an empty branch — run bc691359's `m1-live-block-witness`,
- * where the harness killed the container build the worker was waiting on and
+ * where the charrette killed the container build the worker was waiting on and
  * then counted the branch against it. So the denial says what the form costs as
  * well as what it buys.
  */
@@ -186,7 +186,7 @@ export interface AgentSpec {
   skills?: string[];
   maxTurns?: number;
   /**
-   * Characters of transcript the harness-run loop may send before it compacts.
+   * Characters of transcript the charrette-run loop may send before it compacts.
    * Ignored on the Anthropic transport, which compacts its own. Defaults per
    * provider; set it when a model's window is smaller than its family's.
    */
@@ -213,7 +213,7 @@ export interface AgentSpec {
   /**
    * Extra environment for the session and everything it spawns — the per-task
    * compose project and port block (see isolation.ts). Merged over the inherited
-   * environment, under the harness's own settings, which are not negotiable.
+   * environment, under the charrette's own settings, which are not negotiable.
    */
   env?: Record<string, string>;
   /**
@@ -234,7 +234,7 @@ export interface AgentSpec {
    * Called with the milliseconds this session spent waiting for the account's
    * usage limit to reset, once per wait.
    *
-   * Time the harness spends waiting for quota is not time the task spent going
+   * Time the charrette spends waiting for quota is not time the task spent going
    * nowhere, and every wall clock the caller keeps has to be told so. Without
    * it, a five-hour limit reached at minute 3 of a task comes back to a
    * 45-minute wall-clock gate — an escalation about slowness, raised against a
@@ -335,7 +335,7 @@ const DEFAULT_MAX_TURNS = 100;
 /**
  * How long the pre-run subscription check may take before the run starts
  * without it. Generous enough for a cold CLI subprocess on a slow machine,
- * short enough that nobody waits on it wondering whether `harness run` hung.
+ * short enough that nobody waits on it wondering whether `charrette run` hung.
  */
 const PREFLIGHT_TIMEOUT_MS = 20_000;
 
@@ -355,7 +355,7 @@ const PREFLIGHT_TIMEOUT_MS = 20_000;
  * plainly, because the transcript above it is full of evidence that it worked.
  */
 const LIMIT_CONTINUE_PROMPT =
-  "[HARNESS] Your session was cut off part-way through because the account hit its usage limit. The limit has reset and this is the same conversation, continued — everything you had already established still stands. Before doing anything, check what you had already finished (git log and git status in your working directory, the files you were editing); the last thing you were doing may already be done. One thing did not survive the pause: anything you had left running in the background — dev server, watcher, database, containers — was stopped when the session was cut off, so start what you need again rather than assuming it is still up. Then carry on from exactly there and finish the task you were given, ending in the output format you were originally asked for.";
+  "[CHARRETTE] Your session was cut off part-way through because the account hit its usage limit. The limit has reset and this is the same conversation, continued — everything you had already established still stands. Before doing anything, check what you had already finished (git log and git status in your working directory, the files you were editing); the last thing you were doing may already be done. One thing did not survive the pause: anything you had left running in the background — dev server, watcher, database, containers — was stopped when the session was cut off, so start what you need again rather than assuming it is still up. Then carry on from exactly there and finish the task you were given, ending in the output format you were originally asked for.";
 
 
 /**
@@ -371,7 +371,7 @@ const LIMIT_CONTINUE_PROMPT =
  * interrupted attempt's sweep killed whatever it had running.
  */
 const SWITCH_CONTINUE_PROMPT =
-  "[HARNESS] Your session was interrupted part-way through because the operator moved this run onto a different Claude subscription. Nothing about your work was wrong and no time has passed to speak of: this is the same conversation, continued, and everything you had already established still stands. One thing did not survive the interruption — anything you had left running in the background (dev server, watcher, database, containers) was stopped, so start what you need again rather than assuming it is still up. Then carry on from exactly where you were and finish the task you were given, ending in the output format you were originally asked for.";
+  "[CHARRETTE] Your session was interrupted part-way through because the operator moved this run onto a different Claude subscription. Nothing about your work was wrong and no time has passed to speak of: this is the same conversation, continued, and everything you had already established still stands. One thing did not survive the interruption — anything you had left running in the background (dev server, watcher, database, containers) was stopped, so start what you need again rather than assuming it is still up. Then carry on from exactly where you were and finish the task you were given, ending in the output format you were originally asked for.";
 
 /**
  * Why the model stopped talking, when it says. Absent on the tool-loop
@@ -462,7 +462,7 @@ export class PromptStream {
   }
 
   /**
-   * The same stdin, read the way the harness-run tool loop needs it: one
+   * The same stdin, read the way the charrette-run tool loop needs it: one
    * blocking read for the next message, and a non-blocking drain for anything
    * queued while the model was working. The SDK reads `stream()` instead — both
    * sit on the same queue, and a session uses exactly one of them.
@@ -775,7 +775,7 @@ export class AgentPool {
         // the process that started it: `resume` picks it up under whatever is
         // installed then, and only the session knows which fixes it could have had.
         .prepare("INSERT INTO sessions (id, runId, taskId, role, model, state, startedAt, build) VALUES (?,?,?,?,?,?,?,?)")
-        .run(sessionId, spec.runId, spec.taskId ?? null, spec.role, spec.model, "running", now, harnessBuild());
+        .run(sessionId, spec.runId, spec.taskId ?? null, spec.role, spec.model, "running", now, charretteBuild());
     } else {
       // Continuing after a usage-limit wait reopens the row it already has
       // rather than opening a second one. The ledger is keyed by session id and
@@ -863,7 +863,7 @@ export class AgentPool {
       env: {
         ...process.env,
         // Caller-supplied first — the per-task compose project and port block —
-        // so the harness's own settings below stay non-negotiable and a spec
+        // so the charrette's own settings below stay non-negotiable and a spec
         // cannot hand an agent back the two-minute Bash timeout.
         ...spec.env,
         // Which subscription pays for this session. Above the inherited
@@ -1029,7 +1029,7 @@ export class AgentPool {
               throw new AccountSwitched(next.name, carriesOver ? sdkSessionId : undefined);
             }
           }
-        } else if (message.type === "harness_note") {
+        } else if (message.type === "charrette_note") {
           // The tool loop reporting something it did to the transcript itself.
           // Not a model turn: no usage, and it must not count toward the cap.
           this.bus.publish({
@@ -1050,7 +1050,7 @@ export class AgentPool {
             unbooked.cacheWriteTokens += u.cache_creation_input_tokens ?? 0;
           }
           // A turn cut off at the per-message output ceiling ends the
-          // conversation whether or not the harness is finished with it.
+          // conversation whether or not the charrette is finished with it.
           //
           // The API requires the thinking blocks of the latest assistant
           // message to come back byte-identical, and a truncated turn's cannot
@@ -1111,7 +1111,7 @@ export class AgentPool {
           //
           // Pushed here rather than inside either transport because this is the
           // one place above the split that sees a turn go by: the same message
-          // reaches an SDK session and a harness-run tool loop, and only the
+          // reaches an SDK session and a charrette-run tool loop, and only the
           // second can do anything with the answer beyond recording it.
           //
           // Guarded on `truncated` for the same reason the wrap-up nudge is —
@@ -1131,7 +1131,7 @@ export class AgentPool {
           }
           if (turns === wrapUpAt && !truncated) {
             stream.push(
-              `[HARNESS] You are near this session's turn limit and will be cut off shortly. Stop investigating now and give your final answer immediately, in exactly the output format you were asked for. Report what you have actually established so far and say plainly what you did not get to — a partial answer in the right format is usable, and being cut off mid-investigation is not. If you have already given your final answer, ignore this message.`
+              `[CHARRETTE] You are near this session's turn limit and will be cut off shortly. Stop investigating now and give your final answer immediately, in exactly the output format you were asked for. Report what you have actually established so far and say plainly what you did not get to — a partial answer in the right format is usable, and being cut off mid-investigation is not. If you have already given your final answer, ignore this message.`
             );
             this.bus.publish({
               type: "agent.log",
@@ -1169,7 +1169,7 @@ export class AgentPool {
                   // little else, so the questions go out as log lines too —
                   // one apiece, because the CLI prints a log's first line and
                   // nothing more. Without this an operator at a terminal sees
-                  // "<harness-checkpoint>" scroll past and never learns what
+                  // "<charrette-checkpoint>" scroll past and never learns what
                   // was asked, which is the one thing a checkpoint is for.
                   for (const line of describeQuestions(checkpoint.questions)) {
                     this.bus.publish({ type: "agent.log", runId: spec.runId, taskId: spec.taskId, sessionId, text: `checkpoint question: ${line}`, ts: Date.now() });

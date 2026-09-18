@@ -1,6 +1,7 @@
 import path from "node:path";
 import fs from "node:fs";
-import type { RunState } from "@harness/shared";
+import type { RunState } from "@charrette/shared";
+import { statePaths } from "@charrette/shared";
 import type { Store } from "./store.js";
 import { git } from "./git.js";
 import { envNames, scanDarkSwitches, scannable, type ScannedFile } from "./darkSwitches.js";
@@ -41,7 +42,7 @@ export interface ReportSources {
   /** Environment names something on this machine already sets. */
   configured: string[];
   outcome: OutcomeFacts;
-  /** Whether a human merged the run's pull request. The harness never does. */
+  /** Whether a human merged the run's pull request. The charrette never does. */
   merged: boolean;
   prs: ReportPr[];
   /** The reporter agent's list of what it could not settle. */
@@ -180,7 +181,7 @@ export function outcomeFacts(store: Store, runId: string): OutcomeFacts {
 }
 
 /**
- * Whether a person merged the run's pull request. The harness never does it
+ * Whether a person merged the run's pull request. The charrette never does it
  * itself, so this is always a fact about the world rather than about the run.
  *
  * Two sources, and the order matters. What the run recorded is free and often
@@ -270,7 +271,7 @@ const lines = (out: string): string[] =>
  * state, so the interesting case is the one the obvious command cannot answer.
  *
  * The fallback walks the integration branch's own first-parent history back to
- * the last commit that predates the run. The harness made every commit above
+ * the last commit that predates the run. The charrette made every commit above
  * that line, during the run, so the line is exactly where the run began. It is
  * reconstruction rather than record — the clean fix is for a run to write its
  * base SHA down when it creates the branch, and this is what reads the runs
@@ -334,7 +335,7 @@ export async function changedFiles(
 
 /** Where a run's report lives, so the controller and the CLI cannot disagree. */
 export function reportPath(repoPath: string, runId: string): string {
-  return path.join(repoPath, ".harness", "reports", `${runId}.html`);
+  return path.join(statePaths(repoPath).dir, "reports", `${runId}.html`);
 }
 
 export interface ReportRequest {

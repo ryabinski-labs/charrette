@@ -13,7 +13,7 @@ import { rtkHooks } from "./rtk.js";
  * installed on the machine running the suite.
  */
 function fakeRtkOnPath(script: string): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-rtk-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-rtk-"));
   const bin = path.join(dir, "rtk");
   writeFileSync(bin, script);
   chmodSync(bin, 0o755);
@@ -24,10 +24,10 @@ function fakeRtkOnPath(script: string): string {
 
 /** A directory with no rtk in it, ahead of everything else. */
 function noRtkOnPath(): string {
-  return `${mkdtempSync(path.join(tmpdir(), "harness-empty-"))}${path.delimiter}/nonexistent-bin`;
+  return `${mkdtempSync(path.join(tmpdir(), "charrette-empty-"))}${path.delimiter}/nonexistent-bin`;
 }
 
-const saved = { path: process.env.PATH, off: process.env.HARNESS_RTK };
+const saved = { path: process.env.PATH, off: process.env.CHARRETTE_RTK };
 
 const bashInput = (command: string) =>
   ({
@@ -43,13 +43,13 @@ const fire = async (hook: (i: never, t: undefined, o: { signal: AbortSignal }) =
 
 describe("driving the real rtk binary", () => {
   beforeEach(() => {
-    delete process.env.HARNESS_RTK;
+    delete process.env.CHARRETTE_RTK;
   });
 
   afterEach(() => {
     process.env.PATH = saved.path;
-    if (saved.off === undefined) delete process.env.HARNESS_RTK;
-    else process.env.HARNESS_RTK = saved.off;
+    if (saved.off === undefined) delete process.env.CHARRETTE_RTK;
+    else process.env.CHARRETTE_RTK = saved.off;
   });
 
   it("applies the rewrite an rtk on PATH answers with", async () => {
@@ -102,7 +102,7 @@ describe("driving the real rtk binary", () => {
 
   it("is the guard alone when the operator switched rtk off", () => {
     process.env.PATH = fakeRtkOnPath(`#!/bin/sh\necho '{}'\n`);
-    process.env.HARNESS_RTK = "off";
+    process.env.CHARRETTE_RTK = "off";
 
     expect(bashHooks()!.PreToolUse!).toHaveLength(1);
   });

@@ -1,4 +1,4 @@
-import { modelId } from "@harness/shared";
+import { modelId } from "@charrette/shared";
 
 /**
  * Versioned price table (USD per MTok). Update alongside provider pricing changes.
@@ -10,7 +10,7 @@ import { modelId } from "@harness/shared";
  * over-charged and stops the run early, never under-charged and let run on.
  *
  * "Top tier" moved when Fable shipped. The fallback was Opus's $5/$25 for as
- * long as Opus was the dearest model the harness could be pointed at; the day
+ * long as Opus was the dearest model the charrette could be pointed at; the day
  * `models.planner` defaulted to `claude-fable-5-1` at $10/$50, a Fable row
  * missing from this table would have been charged at half its price — the one
  * direction this table exists to never go. The fallback below is Fable's rate
@@ -20,7 +20,7 @@ import { modelId } from "@harness/shared";
 export const PRICES: Record<string, { in: number; out: number }> = {
   // Cache reads on Fable 5.1 are a flat $0.25/MTok, not the 0.1x that
   // `CACHE_READ_MULT` applies to every model here ($1.00). Left as is: the
-  // harness over-charges Fable's cache hits by 4x, which stops a run early
+  // charrette over-charges Fable's cache hits by 4x, which stops a run early
   // rather than late, and a per-model cache rate is not worth a second table
   // until a run's bill is dominated by them.
   "claude-fable-5-1": { in: 10, out: 50 },
@@ -30,7 +30,7 @@ export const PRICES: Record<string, { in: number; out: number }> = {
   "claude-haiku-4-5-20251001": { in: 1, out: 5 },
   // OpenAI GPT-5.6, standard tier (developers.openai.com/api/docs/pricing).
   // Cached input is a flat 0.1x on all three, which is CACHE_READ_MULT already.
-  // Only the standard tier is listed: the harness sends interactive requests, so
+  // Only the standard tier is listed: the charrette sends interactive requests, so
   // batch and flex prices would under-charge, and fast mode would over-charge.
   "gpt-5.6-sol": { in: 5, out: 30 },
   "gpt-5.6-terra": { in: 2, out: 12 },
@@ -87,7 +87,7 @@ export class BudgetExceeded extends Error {
   constructor(public spent: number, public cap: number, public runId?: string) {
     super(
       `run budget exceeded: $${spent.toFixed(2)} >= $${cap.toFixed(2)}` +
-        (runId ? ` — run parked. Raise the cap and pick it up with: harness resume ${runId}` : "")
+        (runId ? ` — run parked. Raise the cap and pick it up with: charrette resume ${runId}` : "")
     );
   }
 }

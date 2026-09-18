@@ -7,7 +7,7 @@ built CLI and skills discovery, plus the full repository regression suite.
 ## Method and environment
 
 Discovered `qa-agent` using `search_skills` and read it using `describe_skill`
-through the built Harness MCP server's actual **stdio** transport. Followed its
+through the built Charrette MCP server's actual **stdio** transport. Followed its
 scenario-driven regression workflow and delegated independent reviews to
 `performance-engineer` and `sentinel`. No TDD artifact was found by the skill's
 artifact locator, so the ten scenarios below define this change's checks.
@@ -49,7 +49,7 @@ After the tested branch was pushed, GitHub reported **19 existing open
 Dependabot alerts on the default branch: 9 high and 10 moderate**. These concern
 unchanged dependencies (`fast-uri`, `nanoid`, `fastify`, `hono`, `qs`,
 `vitest`/`@vitest/mocker`), not new dependencies in this change. They remain
-tracked in [the repository's dependency alerts](https://github.com/ryabinski-labs/harness/security/dependabot).
+tracked in [the repository's dependency alerts](https://github.com/ryabinski-labs/charrette/security/dependabot).
 This PR does **not** remediate those advisories or establish their exploitability.
 An independent follow-up review confirmed the vulnerable versions are unchanged
 and found no demonstrated advisory trigger introduced by this feature.

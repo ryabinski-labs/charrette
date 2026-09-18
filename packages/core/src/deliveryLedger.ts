@@ -1,4 +1,4 @@
-import type { RunState, Runbook, TaskState } from "@harness/shared";
+import type { RunState, Runbook, TaskState } from "@charrette/shared";
 import type { DarkSwitch } from "./darkSwitches.js";
 
 /**
@@ -68,7 +68,7 @@ export interface LedgerTask {
 export interface LedgerInput {
   runState: RunState;
   tasks: LedgerTask[];
-  /** Whether a human merged the run's pull request — the boundary the harness does not cross. */
+  /** Whether a human merged the run's pull request — the boundary the charrette does not cross. */
   merged: boolean;
   deploy: { state: "passing" | "failing" | "pending" | "none"; failing: string[] } | null;
   prod: { url: string; verdict: "PASS" | "FAIL"; findings: string[] } | null;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { IntakeQuestion, RunConfig, type IntakeQuestion as Q } from "@harness/shared";
+import { IntakeQuestion, RunConfig, type IntakeQuestion as Q } from "@charrette/shared";
 import { Bus } from "./bus.js";
 import { AgentIntake, NOBODY_ANSWERED } from "./intakeDecider.js";
 import { answerBy, answerText, type IntakeUi } from "./intake.js";
@@ -29,7 +29,7 @@ function bus(): { bus: Bus; store: Store; logs: string[] } {
     state: "CREATED",
     prdPath: null,
     planHash: null,
-    integrationBranch: "harness/run1/main",
+    integrationBranch: "charrette/run1/main",
     config: RunConfig.parse({}),
   });
   const b = new Bus(store);

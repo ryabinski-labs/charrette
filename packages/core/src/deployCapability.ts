@@ -3,13 +3,13 @@
  * what the template now declares — read off the diff, at the task gate, while
  * a worker can still fix it.
  *
- * api-service-new-api's CD went red on `main` and stayed red. The task added one
+ * api-service's CD went red on `main` and stayed red. The task added one
  * resource to a CloudFormation template:
  *
  *   DeliveryLogRunnerPolicy:
  *     Type: AWS::IAM::ManagedPolicy
  *     Properties:
- *       ManagedPolicyName: api-service-delivery-log-runner-write
+ *       ManagedPolicyName: delivery-log-runner-write
  *
  * and the repo's deploy step ran `sam deploy --capabilities CAPABILITY_IAM`.
  * CloudFormation splits that acknowledgement in two — it will generate a
@@ -29,7 +29,7 @@
  *
  * So it runs here instead, on the diff, before the task is done. This is not a
  * lint for infrastructure in general: it asks one question that has one right
- * answer, comparing two files the harness already has in front of it, and it
+ * answer, comparing two files the charrette already has in front of it, and it
  * is silent on every repo that has no template, no deployer, or no named
  * resource. What it says when it does fire is the fix, in both directions the
  * work might intend.
@@ -168,7 +168,7 @@ export function deployCapabilities(text: string): string[] | null {
  *
  * Silent unless all three are true: a template names a resource, a deploy
  * command exists to be checked against, and it does not acknowledge named IAM.
- * A repo whose deployment the harness cannot see is a repo this says nothing
+ * A repo whose deployment the charrette cannot see is a repo this says nothing
  * about — guessing there would put a paragraph in front of QA on every task
  * that touches a YAML file, and a gate that cries on ordinary work is one
  * nobody reads by the third task.

@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { pushRunBranch, repoFileList, repoUnusable } from "./git.js";
 
 function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-gate-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-gate-"));
   execFileSync("git", ["init", "-b", "main"], { cwd: dir, stdio: "ignore" });
   execFileSync("git", ["config", "user.email", "t@example.com"], { cwd: dir, stdio: "ignore" });
   execFileSync("git", ["config", "user.name", "t"], { cwd: dir, stdio: "ignore" });
@@ -50,7 +50,7 @@ describe("repoUnusable", () => {
   });
 
   it("stops a directory that is not a repository at all", async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "harness-norepo-"));
+    const dir = mkdtempSync(path.join(tmpdir(), "charrette-norepo-"));
     expect(await repoUnusable(dir)).toMatch(/not a git repository/);
   });
 });
@@ -77,7 +77,7 @@ describe("repoFileList", () => {
   });
 
   it("is empty outside a repository instead of throwing into the planning phase", async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "harness-norepo-"));
+    const dir = mkdtempSync(path.join(tmpdir(), "charrette-norepo-"));
     expect(await repoFileList(dir)).toBe("");
   });
 
@@ -131,13 +131,13 @@ describe("pushRunBranch", () => {
   function withOrigin(): { dir: string; remote: string } {
     const dir = repo();
     commit(dir, ["README.md"]);
-    const remote = mkdtempSync(path.join(tmpdir(), "harness-origin-"));
+    const remote = mkdtempSync(path.join(tmpdir(), "charrette-origin-"));
     execFileSync("git", ["init", "--bare", "-b", "main", remote], { stdio: "ignore" });
     execFileSync("git", ["remote", "add", "origin", remote], { cwd: dir, stdio: "ignore" });
     return { dir, remote };
   }
 
-  const branch = "harness/abc12345/main";
+  const branch = "charrette/abc12345/main";
 
   it("pushes a branch that fast-forwards, and says nothing", async () => {
     const { dir } = withOrigin();
@@ -156,7 +156,7 @@ describe("pushRunBranch", () => {
     execFileSync("git", ["push", "-q", "origin", branch], { cwd: dir, stdio: "ignore" });
 
     // Someone else's commit lands on origin's copy of the branch...
-    const theirs = mkdtempSync(path.join(tmpdir(), "harness-theirs-"));
+    const theirs = mkdtempSync(path.join(tmpdir(), "charrette-theirs-"));
     execFileSync("git", ["clone", "-q", "--branch", branch, remote, theirs], { stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "t@example.com"], { cwd: theirs, stdio: "ignore" });
     execFileSync("git", ["config", "user.name", "t"], { cwd: theirs, stdio: "ignore" });
@@ -177,7 +177,7 @@ describe("pushRunBranch", () => {
     execFileSync("git", ["checkout", "-q", "-b", branch], { cwd: dir, stdio: "ignore" });
     commit(dir, ["a.ts"]);
     execFileSync("git", ["push", "-q", "origin", branch], { cwd: dir, stdio: "ignore" });
-    const theirs = mkdtempSync(path.join(tmpdir(), "harness-theirs2-"));
+    const theirs = mkdtempSync(path.join(tmpdir(), "charrette-theirs2-"));
     execFileSync("git", ["clone", "-q", "--branch", branch, remote, theirs], { stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "t@example.com"], { cwd: theirs, stdio: "ignore" });
     execFileSync("git", ["config", "user.name", "t"], { cwd: theirs, stdio: "ignore" });
@@ -190,7 +190,7 @@ describe("pushRunBranch", () => {
       (e: unknown) => String(e)
     );
     expect(why).toContain(`git merge origin/${branch}`);
-    expect(why).toContain("harness resume");
+    expect(why).toContain("charrette resume");
     expect(why).not.toMatch(/--force|-f\b/);
   });
 

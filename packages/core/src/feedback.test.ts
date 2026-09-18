@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { RunConfig } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
 import { describe, expect, it } from "vitest";
 import { Bus } from "./bus.js";
 import type { GitHubAdapter } from "./github.js";
@@ -23,11 +23,11 @@ const DAG =
 const gitIn = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "ignore" });
 
 function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-feedback-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-feedback-"));
   writeFileSync(path.join(dir, "README.md"), "# fixture\n");
   gitIn(dir, "init", "-b", "main");
-  gitIn(dir, "config", "user.email", "harness@example.com");
-  gitIn(dir, "config", "user.name", "harness");
+  gitIn(dir, "config", "user.email", "charrette@example.com");
+  gitIn(dir, "config", "user.name", "charrette");
   gitIn(dir, "add", "-A");
   gitIn(dir, "commit", "-m", "init");
   return dir;
@@ -204,7 +204,7 @@ describe("feedback that outlives the process", () => {
   /** A run parked on one task, built directly — the states sendFeedback branches on. */
   function parkedRun(store: Store): string {
     const runId = "run-1";
-    store.createRun({ id: runId, repoPath: "/tmp/x", assignment: "do a thing", state: "PLANNING", prdPath: null, planHash: null, integrationBranch: "harness/run-1/main", config: RunConfig.parse({ deterministicChecks: [] }) });
+    store.createRun({ id: runId, repoPath: "/tmp/x", assignment: "do a thing", state: "PLANNING", prdPath: null, planHash: null, integrationBranch: "charrette/run-1/main", config: RunConfig.parse({ deterministicChecks: [] }) });
     store.insertTasks(runId, [{ id: "epic-e", title: "E" }], [
       { id: "task-a", epicId: "epic-e", title: "A", spec: "s", acceptanceCriteria: ["x"], dependsOn: [], state: "PENDING", branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [], completionProbe: "", estimatedSize: "M" },
     ]);
@@ -219,8 +219,8 @@ describe("feedback that outlives the process", () => {
   it("survives a restart — the queue is a table, not a Map on the controller", () => {
     // The billing-app case: a note queued for a parked task is only read on a
     // later resume, in a later process. In memory it never got there.
-    const dir = mkdtempSync(path.join(tmpdir(), "harness-fbdb-"));
-    const file = path.join(dir, "harness.db");
+    const dir = mkdtempSync(path.join(tmpdir(), "charrette-fbdb-"));
+    const file = path.join(dir, "charrette.db");
     const first = new Store(file);
     first.queueFeedback("run-1", "task-a", "the failing check needs the service running");
     first.db.close();
@@ -275,7 +275,7 @@ describe("feedback that outlives the process", () => {
 
   it("reads comments on the task's issue into the worker's briefing", async () => {
     const polls: number[] = [];
-    const comments = [{ id: 9001, author: "cigan", body: "the IPv6 gap QA found is real — fix isSafeWebhookUrl" }];
+    const comments = [{ id: 9001, author: "maintainer", body: "the IPv6 gap QA found is real — fix isSafeWebhookUrl" }];
     const github = {
       enabled: true,
       async ensureIssue() {
@@ -297,7 +297,7 @@ describe("feedback that outlives the process", () => {
 
     expect(polls).toEqual([52, 52]); // polled per iteration, cheaply
     expect(workerPrompts[0]).toContain("isSafeWebhookUrl");
-    expect(workerPrompts[0]).toContain("cigan commented on issue #52");
+    expect(workerPrompts[0]).toContain("maintainer commented on issue #52");
     // Polling must not queue it twice, but a cold worker has no transcript:
     // it still needs the already-delivered instruction in its recovery brief.
     expect(store.db.prepare("SELECT COUNT(*) AS n FROM feedback WHERE source = 'issue'").get()).toEqual({ n: 1 });

@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { coChangeIndex, coChangeNote, emptyCoChange } from "./coChange.js";
 
 function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-cochange-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-cochange-"));
   execFileSync("git", ["init", "-b", "main"], { cwd: dir, stdio: "ignore" });
   execFileSync("git", ["config", "user.email", "t@example.com"], { cwd: dir, stdio: "ignore" });
   execFileSync("git", ["config", "user.name", "t"], { cwd: dir, stdio: "ignore" });
@@ -154,7 +154,7 @@ describe("a repository it cannot learn anything from", () => {
   it("widens nothing when the history cannot tell files apart", async () => {
     // A young project where every commit is a whole vertical slice really has
     // shipped most of its files with most of its others, so "what does this one
-    // usually arrive with" has no answer. Measured, the harness's own repository
+    // usually arrive with" has no answer. Measured, the charrette's own repository
     // is on this side of the line and every suggestion it produced was noise.
     const dir = repo();
     const everything = Array.from({ length: 25 }, (_, i) => `src/f${i}.ts`);
@@ -167,7 +167,7 @@ describe("a repository it cannot learn anything from", () => {
   it("does not throw on a directory that is not a repository", async () => {
     // A run must never die because history was unreadable — it falls back to
     // exactly the behaviour it had before this existed.
-    const index = await coChangeIndex(mkdtempSync(path.join(tmpdir(), "harness-norepo-")));
+    const index = await coChangeIndex(mkdtempSync(path.join(tmpdir(), "charrette-norepo-")));
     expect(index.commits).toBe(0);
     expect(index.widen(["a.ts"])).toEqual([]);
   });

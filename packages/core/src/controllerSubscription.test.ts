@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { RunConfig } from "@harness/shared";
-import type { HarnessEvent } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
+import type { CharretteEvent } from "@charrette/shared";
 import { Bus } from "./bus.js";
 import { GitHubAdapter } from "./github.js";
 import type { AgentPool, AgentResult, AgentSpec, SubscriptionPolicy } from "./pool.js";
@@ -30,7 +30,7 @@ afterEach(() => {
 });
 
 function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-sub-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-sub-"));
   made.push(dir, `${dir}-wt`);
   const run = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
   run("init", "-b", "main");
@@ -117,7 +117,7 @@ function watchingPool(
 function build(opts: { repoPath: string; pool: AgentPool; gates?: Partial<GateHandler> }) {
   const store = new Store(":memory:");
   const bus = new Bus(store);
-  const events: HarnessEvent[] = [];
+  const events: CharretteEvent[] = [];
   bus.subscribe(({ event }) => void events.push(event));
   const gates: GateHandler = {
     async resolvePlanGate() {
@@ -149,8 +149,8 @@ const ACCOUNTS = [
 const config = (over: Record<string, unknown> = {}) =>
   RunConfig.parse({ deterministicChecks: [], subscription: { accounts: ACCOUNTS, active: "work", preflight: false, ...(over.subscription as object) }, ...over });
 
-const stateChanges = (events: HarnessEvent[]) =>
-  events.filter((e): e is HarnessEvent & { type: "run.state_changed"; to: string } => e.type === "run.state_changed").map((e) => e.to);
+const stateChanges = (events: CharretteEvent[]) =>
+  events.filter((e): e is CharretteEvent & { type: "run.state_changed"; to: string } => e.type === "run.state_changed").map((e) => e.to);
 
 describe("what the run is spending", () => {
   it("hands the pool the account's credentials, resolved from the shell", async () => {
@@ -404,7 +404,7 @@ describe("a live session reporting the window running out", () => {
   });
 
   it("keeps going, loudly, when there is nobody to ask", async () => {
-    // A harness embedded with no gate handler. Parking a run nobody can resume
+    // A charrette embedded with no gate handler. Parking a run nobody can resume
     // would turn a warning into an outage, so the alert stands on the record
     // and the run carries on.
     const { pool } = watchingPool(ROLES, { reportOn: "worker", readings: [weekly(99)] });

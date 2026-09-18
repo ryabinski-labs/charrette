@@ -1,4 +1,4 @@
-import { PlannedTask } from "@harness/shared";
+import { PlannedTask } from "@charrette/shared";
 
 /**
  * The dimensions of a production application that a plan can simply not have a

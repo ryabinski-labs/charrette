@@ -1,7 +1,7 @@
 /**
  * Telling a starved CI runner apart from a defect in the suite.
  *
- * Harness CI runs on whichever self-hosted runner is free, on purpose — the
+ * Charrette CI runs on whichever self-hosted runner is free, on purpose — the
  * operator's rule is that every runner can take every workflow, and the
  * ephemeral pool is not always up to take them first. So the suite lands on
  * shared hosts that already have production work on them, and there it fails

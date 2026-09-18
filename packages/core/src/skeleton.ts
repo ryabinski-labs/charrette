@@ -1,10 +1,10 @@
-import type { RunSpec } from "@harness/shared";
+import type { RunSpec } from "@charrette/shared";
 
 /**
  * Whether a plan builds a spine before it builds breadth.
  *
- * waf's plan bought 13 Rust crates, a React operator UI, an Astro marketing
- * site, a fuzzing workspace, a benchmark harness, a parity suite, a Helm chart
+ * rust-service's plan bought 13 Rust crates, a React operator UI, an Astro marketing
+ * site, a fuzzing workspace, a benchmark charrette, a parity suite, a Helm chart
  * and 56,491 lines of documentation, and the first time anyone installed it on
  * a cluster and watched it block a request was after the last run declared
  * itself in review. Every piece was real and most were good. What never
@@ -59,7 +59,7 @@ const BREADTH = new RegExp(
     [
       "ci", "cd", "pipeline", "workflow", "github actions?", "dockerfile", "docker", "containeri[sz]e?d?", "helm", "chart",
       "kubernetes", "k8s", "terraform", "iac", "infra", "infrastructure", "deploy(ment)?", "release", "packaging",
-      "benchmark", "bench", "fuzz(ing)?", "load test", "perf(ormance)? (suite|harness)", "parity suite", "coverage",
+      "benchmark", "bench", "fuzz(ing)?", "load test", "perf(ormance)? (suite|charrette)", "parity suite", "coverage",
       "lint(ing|er)?", "formatter", "pre-commit",
       "docs?", "documentation", "readme", "changelog", "handover", "runbook", "adr", "marketing", "landing page",
       "website", "blog", "screenshots?",
@@ -117,7 +117,7 @@ export function planWeight(tasks: WeighableTask[]): PlanWeight {
  *
  * Not a rule about good plans — a mature product is mostly breadth, and so is
  * a run whose brief is "add CI to this repository". It is a threshold on when
- * the split is worth a sentence at the gate, and it is set where waf's plan
+ * the split is worth a sentence at the gate, and it is set where rust-service's plan
  * would have crossed it long before anyone noticed.
  */
 const BREADTH_LIMIT = 0.4;
@@ -147,7 +147,7 @@ export function skeletonShortfall(spec: RunSpec | null, tasks: WeighableTask[]):
     const worst = weight.breadthTasks.slice(0, 6).map((t) => `${t.id} (${t.title})`);
     gaps.push(
       `${Math.round(weight.breadthShare * 100)}% of this plan, by estimated size, is infrastructure, CI, benchmarking, documentation, dashboards or marketing rather than the product's own critical path: ${worst.join(", ")}${weight.breadthTasks.length > worst.length ? `, +${weight.breadthTasks.length - worst.length} more` : ""}. ` +
-        `All of it may be work you want. What it is not is work that makes the product run, and once it exists the run has to maintain it — waf spent its closing budget on Dockerfile build contexts and golden-file drift while its own WAF had never blocked a request. If this split is what you want, approve; if not, reject and say which of these should wait.`
+        `All of it may be work you want. What it is not is work that makes the product run, and once it exists the run has to maintain it — rust-service spent its closing budget on Dockerfile build contexts and golden-file drift while its own WAF had never blocked a request. If this split is what you want, approve; if not, reject and say which of these should wait.`
     );
   }
   return gaps;

@@ -7,7 +7,7 @@ import { humanWait, limitWaitMs, usageLimitOf } from "./usageLimit.js";
  * Two things are being pinned here, and the second matters more than the first.
  * One: the shapes the limit actually arrives in are recognised, and the time in
  * them is read in the zone the account is metered in. Two: nothing else is —
- * every wall the harness raises itself (turn ceilings, output ceilings, the
+ * every wall the charrette raises itself (turn ceilings, output ceilings, the
  * operator's budget cap) reaches the same code, and mistaking one of those for a
  * quota limit would park a session for hours over something a retry fixes.
  */
@@ -79,7 +79,7 @@ describe("recognising a usage limit", () => {
   });
 
   /**
-   * The same wall arriving over the harness's own transport.
+   * The same wall arriving over the charrette's own transport.
    *
    * Until `models.reviewer` was pinned to Google, nothing a default run did
    * reached this: every role ran on the Anthropic SDK, which says it in English.
@@ -127,7 +127,7 @@ describe("the walls that are not usage limits", () => {
     // A worker whose task is *about* rate limiting says the words all day.
     ["work that mentions limits", "the session ended in an error: implemented the rate limit middleware; the limit resets per window"],
     // Which is exactly why the transport case above matches the envelope the
-    // harness itself writes, and not the vendor's prose inside it: an agent
+    // charrette itself writes, and not the vendor's prose inside it: an agent
     // quoting Google's wording is not Google refusing.
     ["an agent quoting a vendor's quota copy", "the session ended in an error: the docs say You exceeded your current quota, RESOURCE_EXHAUSTED"],
     // A transient 5xx is the transport's own business — `post` retries it

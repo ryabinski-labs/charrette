@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { RunConfig, type HarnessEvent, type IntakeQuestion } from "@harness/shared";
+import { RunConfig, type CharretteEvent, type IntakeQuestion } from "@charrette/shared";
 import { Bus } from "./bus.js";
 import { BudgetExceeded } from "./budget.js";
 import { GitHubAdapter } from "./github.js";
@@ -15,7 +15,7 @@ import { Store } from "./store.js";
 /**
  * The specification phase, and the gate it feeds.
  *
- * Every gate this harness had before it is prose judged by prose, and they
+ * Every gate this charrette had before it is prose judged by prose, and they
  * share one failure mode: agreeing with the code because they misread the
  * requirement in the same direction it did. Run da8325bd merged one file of
  * twenty-one against a criterion that had, as written, genuinely been met.
@@ -31,7 +31,7 @@ afterEach(() => {
 });
 
 function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-spec-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-spec-"));
   made.push(dir, `${dir}-wt`);
   const run = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "ignore" });
   run("init", "-b", "main");
@@ -109,7 +109,7 @@ function rolePool(answers: Partial<Record<string, Answer>>) {
 function build(opts: { repoPath: string; pool: AgentPool }) {
   const store = new Store(":memory:");
   const bus = new Bus(store);
-  const events: HarnessEvent[] = [];
+  const events: CharretteEvent[] = [];
   const summaries: string[] = [];
   bus.subscribe(({ event }) => void events.push(event));
   const gates: GateHandler = {
@@ -302,7 +302,7 @@ describe("writing the specification before anything is planned", () => {
 
   /**
    * A run whose specification could not be written is a run without this gate,
-   * which is exactly the run every harness before this one was. Failing intake
+   * which is exactly the run every charrette before this one was. Failing intake
    * over it would trade a working run for no run.
    */
   it("carries on without a specification rather than failing the run over one", async () => {
@@ -356,7 +356,7 @@ describe("writing the specification before anything is planned", () => {
   /**
    * The specification is committed to the integration branch because task
    * branches are cut from it: that is what makes the failing tests something
-   * every worker inherits and the pull request carries, rather than a harness
+   * every worker inherits and the pull request carries, rather than a charrette
    * artifact that evaporates when the run ends.
    */
   it("commits what the spec agent wrote, so every task branch inherits it", async () => {
@@ -383,7 +383,7 @@ describe("writing the specification before anything is planned", () => {
     await controller.startRun("build a checkout", RunConfig.parse(BASE), operator());
 
     const runId = store.listRuns()[0]!.id;
-    const log = execFileSync("git", ["log", "--format=%s", `harness/${runId}/main`], { cwd: dir, encoding: "utf8" });
+    const log = execFileSync("git", ["log", "--format=%s", `charrette/${runId}/main`], { cwd: dir, encoding: "utf8" });
     expect(log).toContain("spec: 1 failing scenario(s) for checkout");
   });
 
@@ -431,7 +431,7 @@ describe("writing the specification before anything is planned", () => {
     await controller.startRun("build a checkout", RunConfig.parse(BASE), operator());
 
     const runId = store.listRuns()[0]!.id;
-    const log = execFileSync("git", ["log", "--format=%s", `harness/${runId}/main`], { cwd: dir, encoding: "utf8" });
+    const log = execFileSync("git", ["log", "--format=%s", `charrette/${runId}/main`], { cwd: dir, encoding: "utf8" });
     expect(log).toContain("spec: 1 failing scenario(s) for this run");
   });
 
@@ -469,7 +469,7 @@ describe("writing the specification before anything is planned", () => {
 
   /**
    * A run whose specification could not be written is a run without this gate,
-   * which is exactly the run every harness before this one was.
+   * which is exactly the run every charrette before this one was.
    */
   it("carries on when the specification agent dies outright", async () => {
     const dir = repo();
@@ -582,7 +582,7 @@ describe("the critical path the run is exercised on", () => {
   });
 
   /**
-   * The split waf's plan would have shown, at the one gate where changing it
+   * The split rust-service's plan would have shown, at the one gate where changing it
    * costs a re-plan rather than a run. Neither finding blocks the plan; both
    * are in front of the operator before a worker is paid (issue #118).
    */
@@ -671,7 +671,7 @@ describe("the critical path the run is exercised on", () => {
     await controller.startRun("build a checkout", RunConfig.parse({ ...LIVE_BASE, maxParallelWorkers: 1 }), operator());
 
     const runId = store.listRuns()[0]!.id;
-    // The planner is told the path, and what the harness will do with it.
+    // The planner is told the path, and what the charrette will do with it.
     expect(specs.filter((s) => s.role === "planner").map((s) => s.prompt).join("\n")).toContain("## The critical path");
     // The spine goes first, though the plan listed the docs first.
     expect(dispatched[0]).toBe("charge-a-card");
@@ -826,7 +826,7 @@ describe("the acceptance gate", () => {
     const runId = store.listRuns()[0]!.id;
     // One round of fixes, then the run stops rather than looping forever — and
     // stops in BLOCKED, not in review: a red suite with the rounds spent is the
-    // run asking for help, which is what waf de2cb7aa should have done instead
+    // run asking for help, which is what rust-service de2cb7aa should have done instead
     // of reporting "in review" over 27 unproven scenarios (issue #117).
     expect(store.listTasks(runId).filter((t) => t.id.startsWith("spec-fix-2-"))).toEqual([]);
     expect(store.getRun(runId)!.state).toBe("BLOCKED");

@@ -7,7 +7,7 @@ import { GitHubAdapter } from "./github.js";
 import type { AgentPool, AgentResult, AgentSpec } from "./pool.js";
 import { RunController } from "./runController.js";
 import { Store } from "./store.js";
-import { RunConfig } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
 import { BudgetExceeded } from "./budget.js";
 import { tasksPerMessage } from "./prompts.js";
 
@@ -28,8 +28,8 @@ function fakePool(outputs: string[], outcome: AgentResult["outcome"] = "done", e
   return { pool: pool as unknown as AgentPool, specs, calls: () => i };
 }
 
-function harness(outputs: string[], outcome?: AgentResult["outcome"], errorDetail?: string, dies?: (call: number) => Error | undefined) {
-  const repo = mkdtempSync(path.join(tmpdir(), "harness-plan-"));
+function charrette(outputs: string[], outcome?: AgentResult["outcome"], errorDetail?: string, dies?: (call: number) => Error | undefined) {
+  const repo = mkdtempSync(path.join(tmpdir(), "charrette-plan-"));
   const store = new Store(":memory:");
   const bus = new Bus(store);
   const events: { type: string; reason?: string }[] = [];
@@ -47,7 +47,7 @@ function harness(outputs: string[], outcome?: AgentResult["outcome"], errorDetai
 }
 
 const CONFIG = RunConfig.parse({});
-const attemptsDir = (repo: string, runId: string) => path.join(repo, ".harness", runId);
+const attemptsDir = (repo: string, runId: string) => path.join(repo, ".charrette", runId);
 
 /** A well-formed phase-A answer, so phase B is the thing under test. */
 const DOCS = "<prd>\n# PRD\n</prd>\n<conventions>\nuse vitest\n</conventions>";
@@ -61,14 +61,14 @@ const dagJson = (dependsOn: string[] = []) =>
 
 describe("planning failure diagnostics", () => {
   it("names the reason in the thrown error instead of a bare 'planning failed'", async () => {
-    const { controller } = harness([DOCS, "I could not complete this task."]);
+    const { controller } = charrette([DOCS, "I could not complete this task."]);
     await expect(controller.startRun("do a thing", CONFIG)).rejects.toThrow(
       /planner attempts rejected — the breakdown JSON could not be read: no JSON object found/
     );
   });
 
   it("records the reason on the run so `status` and the dashboard can show it", async () => {
-    const { controller, store } = harness([DOCS, "no json here"]);
+    const { controller, store } = charrette([DOCS, "no json here"]);
     await controller.startRun("do a thing", CONFIG).catch(() => undefined);
     const runId = (store.db.prepare("SELECT id FROM runs").get() as { id: string }).id;
     expect(store.getRun(runId)!.state).toBe("FAILED");
@@ -80,7 +80,7 @@ describe("planning failure diagnostics", () => {
   });
 
   it("persists every rejected attempt verbatim for post-mortem", async () => {
-    const { controller, repo, store } = harness([DOCS, "garbage one", "garbage two", "garbage three"]);
+    const { controller, repo, store } = charrette([DOCS, "garbage one", "garbage two", "garbage three"]);
     await controller.startRun("do a thing", CONFIG).catch(() => undefined);
     const runId = (store.db.prepare("SELECT id FROM runs").get() as { id: string }).id;
     const dir = attemptsDir(repo, runId);
@@ -95,21 +95,21 @@ describe("planning failure diagnostics", () => {
   });
 
   it("emits a plan_attempt_failed event per rejection, not just at the end", async () => {
-    const { controller, events } = harness([DOCS, "nope"]);
+    const { controller, events } = charrette([DOCS, "nope"]);
     await controller.startRun("do a thing", CONFIG).catch(() => undefined);
     const failures = events.filter((e) => e.type === "run.plan_attempt_failed");
     expect(failures).toHaveLength(3);
   });
 
   it("tells the planner what was wrong with its previous attempt", async () => {
-    const { controller, specs } = harness([DOCS, "nope"]);
+    const { controller, specs } = charrette([DOCS, "nope"]);
     await controller.startRun("do a thing", CONFIG).catch(() => undefined);
     expect(specs[1]!.prompt).not.toMatch(/rejected/);
     expect(specs[2]!.prompt).toMatch(/rejected: the breakdown JSON could not be read/);
   });
 
   it("surveys the repository exactly once, however many times the DAG is rejected", async () => {
-    const { controller, specs } = harness([DOCS, "I thought about it but forgot the JSON."]);
+    const { controller, specs } = charrette([DOCS, "I thought about it but forgot the JSON."]);
     await controller.startRun("do a thing", CONFIG).catch(() => undefined);
 
     // Phase A is the only call that may read anything.
@@ -126,28 +126,28 @@ describe("planning failure diagnostics", () => {
   });
 
   it("restates the PRD when the previous attempt returned nothing to repair", async () => {
-    const { controller, specs } = harness([DOCS, ""]);
+    const { controller, specs } = charrette([DOCS, ""]);
     await controller.startRun("do a thing", CONFIG).catch(() => undefined);
     // Nothing to hand back, so the retry gets the documents again, not an empty quote.
     expect(specs[2]!.prompt).toContain("# PRD");
   });
 
   it("surfaces an abnormal session end alongside the parse failure", async () => {
-    const { controller } = harness([DOCS], "error", "error_max_turns");
+    const { controller } = charrette([DOCS], "error", "error_max_turns");
     await expect(controller.startRun("do a thing", CONFIG)).rejects.toThrow(
       /session also ended abnormally: error_max_turns/
     );
   });
 
   it("reports a DAG violation as such rather than as a parse failure", async () => {
-    const { controller } = harness([DOCS, dagJson(["ghost"])]);
+    const { controller } = charrette([DOCS, dagJson(["ghost"])]);
     await expect(controller.startRun("do a thing", CONFIG)).rejects.toThrow(/not a valid DAG/);
   });
 
   it("accepts a PRD that embeds json fences — the case that failed in production", async () => {
     const prd = ["# PRD", "```json", '{"posts":[]}', "```"].join("\n");
     const docs = `<prd>\n${prd}\n</prd>\n<conventions>\nuse vitest\n</conventions>`;
-    const { controller, repo, store, calls } = harness([docs, dagJson()]);
+    const { controller, repo, store, calls } = charrette([docs, dagJson()]);
     // The subject here is that the PRD parses; the plan-intent check would add a
     // third agent call and make the count say nothing about that.
     await controller.startRun("do a thing", RunConfig.parse({ planIntentCheck: false })).catch(() => undefined);
@@ -166,7 +166,7 @@ describe("planner output truncation", () => {
   const CUT_OFF = "API Error: Claude's response exceeded the 32000 output token maximum.";
 
   it("splits planning in two so neither half has to carry the other", async () => {
-    const { controller, specs } = harness([DOCS, dagJson()]);
+    const { controller, specs } = charrette([DOCS, dagJson()]);
     await controller.startRun("do a thing", CONFIG).catch(() => undefined);
     // Phase A emits markdown, not JSON — no PRD is ever escaped into the DAG object.
     expect(specs[0]!.systemPrompt).toMatch(/<prd>/);
@@ -176,21 +176,21 @@ describe("planner output truncation", () => {
   });
 
   it("names truncation as the reason when the documents are cut off", async () => {
-    const { controller } = harness([CUT_OFF]);
+    const { controller } = charrette([CUT_OFF]);
     await expect(controller.startRun("do a thing", CONFIG)).rejects.toThrow(
       /ran past the output-token limit and were cut off/
     );
   });
 
   it("names truncation as the reason when the DAG is cut off", async () => {
-    const { controller } = harness([DOCS, CUT_OFF]);
+    const { controller } = charrette([DOCS, CUT_OFF]);
     await expect(controller.startRun("do a thing", CONFIG)).rejects.toThrow(
       /ran past the output-token limit and was cut off mid-JSON/
     );
   });
 
   it("asks for a shorter breakdown on retry, not the same one again", async () => {
-    const { controller, specs } = harness([DOCS, CUT_OFF]);
+    const { controller, specs } = charrette([DOCS, CUT_OFF]);
     await controller.startRun("do a thing", CONFIG).catch(() => undefined);
     expect(specs[2]!.prompt).toMatch(/Emit the breakdown again, SHORTER/);
     // The instruction that guarantees a repeat truncation must be absent.
@@ -198,14 +198,14 @@ describe("planner output truncation", () => {
   });
 
   it("still tells a merely malformed breakdown to re-emit in full", async () => {
-    const { controller, specs } = harness([DOCS, "here is my analysis, no json though"]);
+    const { controller, specs } = charrette([DOCS, "here is my analysis, no json though"]);
     await controller.startRun("do a thing", CONFIG).catch(() => undefined);
     expect(specs[2]!.prompt).toMatch(/Do not abbreviate/);
     expect(specs[2]!.prompt).not.toMatch(/SHORTER/);
   });
 
   it("raises the planner's output ceiling above the default that truncated it", async () => {
-    const { controller, specs } = harness(["nope"]);
+    const { controller, specs } = charrette(["nope"]);
     await controller.startRun("do a thing", CONFIG).catch(() => undefined);
     expect(specs[0]!.maxOutputTokens).toBeGreaterThan(32_000);
   });
@@ -234,7 +234,7 @@ describe("a DAG too big for one message", () => {
   const batch = (body: object) => "```json\n" + JSON.stringify(body) + "\n```";
 
   it("asks for the rest instead of settling for what fit in one message", async () => {
-    const { controller, store } = harness([
+    const { controller, store } = charrette([
       DOCS,
       batch({ epics: [epic], tasks: [task("task-a")], more: true }),
       batch({ tasks: [task("task-b")], more: false }),
@@ -247,7 +247,7 @@ describe("a DAG too big for one message", () => {
   it("still takes a plan that fits in one message, in one message", async () => {
     // The continuation only happens when the planner says there is more, so a
     // small plan costs exactly what it did before this existed.
-    const { controller, calls } = harness([DOCS, dagJson()]);
+    const { controller, calls } = charrette([DOCS, dagJson()]);
     await controller.startRun("do a thing", RunConfig.parse({ planIntentCheck: false })).catch(() => undefined);
     expect(calls()).toBe(2);
   });
@@ -256,7 +256,7 @@ describe("a DAG too big for one message", () => {
     // `dependsOn` has to point at ids from an earlier message. A continuation
     // that cannot see them invents an edge to a task under another name, which
     // validates as dangling and throws the whole plan away.
-    const { controller, specs } = harness([
+    const { controller, specs } = charrette([
       DOCS,
       batch({ epics: [epic], tasks: [task("task-a")], more: true }),
       batch({ tasks: [task("task-b", ["task-a"])], more: false }),
@@ -271,7 +271,7 @@ describe("a DAG too big for one message", () => {
     // `task-b` depends on `task-a`, which arrived in an earlier message. Checked
     // per message this is a dangling edge; checked on the assembled plan it is
     // the ordinary case.
-    const { controller, store } = harness([
+    const { controller, store } = charrette([
       DOCS,
       batch({ epics: [epic], tasks: [task("task-a")], more: true }),
       batch({ tasks: [task("task-b", ["task-a"])], more: false }),
@@ -282,7 +282,7 @@ describe("a DAG too big for one message", () => {
   });
 
   it("rejects a plan whose last message leaves it invalid", async () => {
-    const { controller, events } = harness([
+    const { controller, events } = charrette([
       DOCS,
       batch({ epics: [epic], tasks: [task("task-a")], more: true }),
       batch({ tasks: [task("task-b", ["ghost"])], more: false }),
@@ -297,7 +297,7 @@ describe("a DAG too big for one message", () => {
     // holding only the last one does not contain the defect it asks to be fixed
     // — which is how run 5122c83a's second attempt reconstructed two thirds of a
     // plan from nothing and renamed eight public routes doing it.
-    const { controller, specs } = harness([
+    const { controller, specs } = charrette([
       DOCS,
       batch({ epics: [epic], tasks: [task("task-a")], more: true }),
       batch({ tasks: [task("task-b", ["ghost"])], more: false }),
@@ -315,7 +315,7 @@ describe("a DAG too big for one message", () => {
   it("rejects a plan that finishes with no epic to hang the tasks on", async () => {
     // The shape is only checkable on the assembled whole: a continuation message
     // legitimately carries no epics, and the first message is what must.
-    const { controller } = harness([DOCS, batch({ tasks: [task("task-a")], more: false })]);
+    const { controller } = charrette([DOCS, batch({ tasks: [task("task-a")], more: false })]);
     await expect(controller.startRun("do a thing", CONFIG)).rejects.toThrow(/does not match the required shape: epics/);
   });
 
@@ -323,19 +323,19 @@ describe("a DAG too big for one message", () => {
     // Every field of a batch has a default, so an object is nearly always
     // readable — which makes the one thing that is not, a field of the wrong
     // type, worth naming rather than reporting as unparseable text.
-    const { controller } = harness([DOCS, batch({ epics: [epic], tasks: "all of them" })]);
+    const { controller } = charrette([DOCS, batch({ epics: [epic], tasks: "all of them" })]);
     await expect(controller.startRun("do a thing", CONFIG)).rejects.toThrow(/does not match the required shape: tasks/);
   });
 
   it("stops after eight messages rather than paying for an endless plan", async () => {
     // A planner that keeps saying "more" is enumerating, not decomposing.
-    const { controller, calls } = harness([DOCS, batch({ epics: [epic], tasks: [task("task-a")], more: true })]);
+    const { controller, calls } = charrette([DOCS, batch({ epics: [epic], tasks: [task("task-a")], more: true })]);
     await expect(controller.startRun("do a thing", CONFIG)).rejects.toThrow(/still unfinished after 8 messages/);
     expect(calls()).toBe(1 + 8 * 3); // phase A, then eight messages per attempt
   });
 
   it("keeps every message of the DAG on disk under its own name", async () => {
-    const { controller, repo, store } = harness([
+    const { controller, repo, store } = charrette([
       DOCS,
       batch({ epics: [epic], tasks: [task("task-a")], more: true }),
       batch({ tasks: [task("task-b")], more: false }),
@@ -348,12 +348,12 @@ describe("a DAG too big for one message", () => {
   });
 
   it("tells the planner how many tasks it may put in one message, and asks for the room to write them", async () => {
-    const { controller, specs } = harness([DOCS, dagJson()]);
+    const { controller, specs } = charrette([DOCS, dagJson()]);
     await controller.startRun("do a thing", CONFIG).catch(() => undefined);
     // Both numbers come from the SDK's own registry for this model, so they
     // cannot drift apart: the budget the message is given and the size the
     // planner is told to write for are the same figure. When the SDK could not
-    // be read at all, both fall back to the harness's own 64000.
+    // be read at all, both fall back to the charrette's own 64000.
     const asked = specs[1]!.maxOutputTokens!;
     expect(asked).toBeGreaterThanOrEqual(64_000);
     expect(specs[1]!.systemPrompt).toContain(`AT MOST ${tasksPerMessage(asked)} tasks`);
@@ -365,7 +365,7 @@ describe("what the operator is told about the output ceiling", () => {
     // The silent failure this exists for: the SDK hands an unlisted model 32k
     // however high the request, the message is cut off mid-JSON, and the retry
     // — with nothing to tell it otherwise — asks the planner to write less.
-    const { controller, events } = harness([DOCS, dagJson()]);
+    const { controller, events } = charrette([DOCS, dagJson()]);
     const config = RunConfig.parse({ planIntentCheck: false, models: { planner: "claude-opus-99-imaginary" } });
 
     await controller.startRun("do a thing", config).catch(() => undefined);
@@ -377,7 +377,7 @@ describe("what the operator is told about the output ceiling", () => {
   it("says nothing when the model is one the SDK knows", async () => {
     // Silence is the signal that the request was granted. A line printed every
     // run is a line nobody reads.
-    const { controller, events } = harness([DOCS, dagJson()]);
+    const { controller, events } = charrette([DOCS, dagJson()]);
 
     await controller.startRun("do a thing", RunConfig.parse({ planIntentCheck: false })).catch(() => undefined);
 
@@ -392,9 +392,9 @@ describe("a planner session that dies before it answers", () => {
   it("costs the attempt, not the run", async () => {
     // The first phase-B message died; the retry is what the attempt loop is
     // for. Before this the throw went straight past three attempts, out of
-    // `startRun`, and ended the run with `harness: fatal` — discarding an
+    // `startRun`, and ended the run with `charrette: fatal` — discarding an
     // intake and a PRD that had already been paid for.
-    const { controller, store } = harness([DOCS, dagJson()], undefined, undefined, (call) => (call === 1 ? died() : undefined));
+    const { controller, store } = charrette([DOCS, dagJson()], undefined, undefined, (call) => (call === 1 ? died() : undefined));
 
     // Planning is the subject; the run goes on to want a real git repo, which
     // this temp directory is not.
@@ -407,7 +407,7 @@ describe("a planner session that dies before it answers", () => {
   it("costs the attempt in phase A too", async () => {
     // The pool answers by call number, so the dead first call still consumes
     // the first canned output: phase A's retry is the second DOCS.
-    const { controller, store } = harness([DOCS, DOCS, dagJson()], undefined, undefined, (call) => (call === 0 ? died() : undefined));
+    const { controller, store } = charrette([DOCS, DOCS, dagJson()], undefined, undefined, (call) => (call === 0 ? died() : undefined));
 
     await controller.startRun("do a thing", RunConfig.parse({ planIntentCheck: false })).catch(() => undefined);
 
@@ -418,7 +418,7 @@ describe("a planner session that dies before it answers", () => {
   it("says the session died, rather than blaming the plan it never wrote", async () => {
     // "the breakdown JSON could not be read" would send the next planner off to
     // write better JSON for a message that was never emitted.
-    const { controller, events } = harness([DOCS, dagJson()], undefined, undefined, (call) => (call > 0 ? died() : undefined));
+    const { controller, events } = charrette([DOCS, dagJson()], undefined, undefined, (call) => (call > 0 ? died() : undefined));
 
     await expect(controller.startRun("do a thing", CONFIG)).rejects.toThrow(/planner session died before it answered/);
     expect(events.filter((e) => e.type === "run.plan_attempt_failed")).toHaveLength(3);
@@ -427,7 +427,7 @@ describe("a planner session that dies before it answers", () => {
   it("does not retry the operator's budget cap, which was reached on purpose", async () => {
     // Three attempts against a cap the operator set would spend three times the
     // number they set. A budget stop is a decision, not a failure.
-    const { controller } = harness([DOCS, dagJson()], undefined, undefined, (call) =>
+    const { controller } = charrette([DOCS, dagJson()], undefined, undefined, (call) =>
       call === 1 ? new BudgetExceeded(12, 10, "run1") : undefined
     );
 
@@ -437,7 +437,7 @@ describe("a planner session that dies before it answers", () => {
 
 describe("agent confinement", () => {
   it("gives the planner read-only tools — allowedTools alone does not restrict", async () => {
-    const { controller, specs } = harness(["nope"]);
+    const { controller, specs } = charrette(["nope"]);
     await controller.startRun("do a thing", CONFIG).catch(() => undefined);
     expect(specs[0]!.tools).toEqual(["Read", "Glob", "Grep"]);
     for (const t of ["Bash", "Edit", "Write"]) {
@@ -455,7 +455,7 @@ describe("agent confinement", () => {
  */
 describe("what the operator is shown before they approve a plan", () => {
   function planGateHarness(dag = dagJson()) {
-    const repo = mkdtempSync(path.join(tmpdir(), "harness-estimate-"));
+    const repo = mkdtempSync(path.join(tmpdir(), "charrette-estimate-"));
     const store = new Store(":memory:");
     const summaries: string[] = [];
     const { pool } = fakePool([DOCS, dag]);

@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { RunConfig } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
 import { describe, expect, it } from "vitest";
 import { Bus } from "./bus.js";
 import type { GitHubAdapter } from "./github.js";
@@ -14,13 +14,13 @@ const DOCS = "<prd>\n# PRD\n</prd>\n<conventions>\nc\n</conventions>";
 const gitIn = (cwd: string, ...a: string[]) => execFileSync("git", a, { cwd, stdio: "ignore" });
 
 function repoWithOrigin(): string {
-  const origin = mkdtempSync(path.join(tmpdir(), "harness-pub-origin-"));
+  const origin = mkdtempSync(path.join(tmpdir(), "charrette-pub-origin-"));
   gitIn(origin, "init", "--bare", "-b", "release");
-  const repo = mkdtempSync(path.join(tmpdir(), "harness-pub-"));
+  const repo = mkdtempSync(path.join(tmpdir(), "charrette-pub-"));
   writeFileSync(path.join(repo, "README.md"), "# fixture\n");
   gitIn(repo, "init", "-b", "release");
-  gitIn(repo, "config", "user.email", "harness@example.com");
-  gitIn(repo, "config", "user.name", "harness");
+  gitIn(repo, "config", "user.email", "charrette@example.com");
+  gitIn(repo, "config", "user.name", "charrette");
   gitIn(repo, "add", "-A");
   gitIn(repo, "commit", "-m", "init");
   gitIn(repo, "remote", "add", "origin", origin);

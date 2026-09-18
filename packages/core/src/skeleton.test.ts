@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RunSpec } from "@harness/shared";
+import { RunSpec } from "@charrette/shared";
 import { planWeight, skeletonShortfall, type WeighableTask } from "./skeleton.js";
 import { nextDispatch, type Dispatchable } from "./dispatchOrder.js";
 
@@ -7,7 +7,7 @@ import { nextDispatch, type Dispatchable } from "./dispatchOrder.js";
  * Whether a plan builds a spine before it builds breadth, and whether dispatch
  * holds it to that.
  *
- * waf's plan bought thirteen crates, an operator UI, a marketing site, a fuzzing
+ * rust-service's plan bought thirteen crates, an operator UI, a marketing site, a fuzzing
  * workspace and 56,491 lines of documentation, and nothing ran end to end in
  * $3,755 — then its closing budget went on Dockerfile build contexts and
  * golden-file drift, which is what breadth costs once you own it (issue #118).

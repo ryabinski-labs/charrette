@@ -3,8 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { RunConfig } from "@harness/shared";
-import type { HarnessEvent } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
+import type { CharretteEvent } from "@charrette/shared";
 import { Bus } from "./bus.js";
 import { GitHubAdapter } from "./github.js";
 import type { AgentPool, AgentResult, AgentSpec } from "./pool.js";
@@ -29,7 +29,7 @@ afterEach(() => {
 });
 
 function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-loop-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-loop-"));
   made.push(dir, `${dir}-wt`);
   const run = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
   run("init", "-b", "main");
@@ -54,10 +54,10 @@ function commitInWorktree(cwd: string, file: string, body: string): void {
 /** Lands a task branch on the integration branch without the store hearing about it. */
 function mergeIntoIntegration(dir: string, runId: string, taskId: string): void {
   const scratch = path.join(`${dir}-wt`, runId, "__landed__");
-  execFileSync("git", ["worktree", "add", scratch, `harness/${runId}/main`], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["worktree", "add", scratch, `charrette/${runId}/main`], { cwd: dir, stdio: "ignore" });
   execFileSync(
     "git",
-    ["-c", "user.email=i@example.invalid", "-c", "user.name=I", "merge", "--no-ff", "--no-edit", `harness/${runId}/${taskId}`],
+    ["-c", "user.email=i@example.invalid", "-c", "user.name=I", "merge", "--no-ff", "--no-edit", `charrette/${runId}/${taskId}`],
     { cwd: scratch, stdio: "ignore" }
   );
   execFileSync("git", ["worktree", "remove", "--force", scratch], { cwd: dir, stdio: "ignore" });
@@ -96,7 +96,7 @@ function rolePool(answers: Partial<Record<string, Answer>>) {
 interface Built {
   controller: RunController;
   store: Store;
-  events: HarnessEvent[];
+  events: CharretteEvent[];
   gates: TaskGate[];
   runId: string;
 }
@@ -115,7 +115,7 @@ function executing(opts: {
 }): Built {
   const store = new Store(":memory:");
   const bus = new Bus(store);
-  const events: HarnessEvent[] = [];
+  const events: CharretteEvent[] = [];
   bus.subscribe(({ event }) => void events.push(event));
   const gates: TaskGate[] = [];
   const handler: GateHandler = {
@@ -139,7 +139,7 @@ function executing(opts: {
     state: "CREATED",
     prdPath: null,
     planHash: null,
-    integrationBranch: `harness/${runId}/main`,
+    integrationBranch: `charrette/${runId}/main`,
     config: { ...config, baseBranch: "main" },
   });
   for (const to of ["PLANNING", "PLAN_REVIEW", "EXECUTING"] as const) store.transitionRun(runId, to);
@@ -178,8 +178,8 @@ function executing(opts: {
   return { controller, store, events, gates, runId };
 }
 
-const logs = (events: HarnessEvent[]) =>
-  events.filter((e): e is HarnessEvent & { text: string } => e.type === "agent.log").map((e) => e.text);
+const logs = (events: CharretteEvent[]) =>
+  events.filter((e): e is CharretteEvent & { text: string } => e.type === "agent.log").map((e) => e.text);
 
 const workerPrompts = (specs: AgentSpec[]) => specs.filter((s) => s.role === "worker").map((s) => s.prompt);
 
@@ -562,7 +562,7 @@ describe("what the plan said a task would touch", () => {
 
 /**
  * The one thing about an infrastructure change that no reader of the
- * infrastructure can see. api-service-new-api merged a template declaring a
+ * infrastructure can see. api-service merged a template declaring a
  * managed policy it named itself, past `sam validate --lint`, `sam build`, a
  * suite at 100% coverage and a green pull request, into a pipeline that
  * deployed with `--capabilities CAPABILITY_IAM`. CloudFormation refused the
@@ -674,8 +674,8 @@ describe("a branch that is empty because its work already landed", () => {
     // and not the integration branch's own pre-existing head.
     const merged = events.find((e) => e.type === "git.merged");
     expect(merged).toBeDefined();
-    expect((merged as HarnessEvent & { sha: string }).sha).toBe(
-      execFileSync("git", ["rev-parse", "harness/run1/main"], { cwd: dir, encoding: "utf8" }).trim()
+    expect((merged as CharretteEvent & { sha: string }).sha).toBe(
+      execFileSync("git", ["rev-parse", "charrette/run1/main"], { cwd: dir, encoding: "utf8" }).trim()
     );
     expect(logs(events).some((t) => t.includes("its work has landed, not because it has none"))).toBe(true);
   });
@@ -690,9 +690,9 @@ describe("a branch that is empty because its work already landed", () => {
     const built = executing({ repoPath: dir, pool, guidance: "look again" });
 
     // The branch exists with real work on it and is already on the integration
-    // branch: a task the harness merged without recording it, then reopened.
-    execFileSync("git", ["branch", "harness/run1/main"], { cwd: dir, stdio: "ignore" });
-    execFileSync("git", ["worktree", "add", path.join(`${dir}-wt`, "pre"), "-b", "harness/run1/task-a", "harness/run1/main"], { cwd: dir, stdio: "ignore" });
+    // branch: a task the charrette merged without recording it, then reopened.
+    execFileSync("git", ["branch", "charrette/run1/main"], { cwd: dir, stdio: "ignore" });
+    execFileSync("git", ["worktree", "add", path.join(`${dir}-wt`, "pre"), "-b", "charrette/run1/task-a", "charrette/run1/main"], { cwd: dir, stdio: "ignore" });
     commitInWorktree(path.join(`${dir}-wt`, "pre"), "work.txt", "done\n");
     execFileSync("git", ["worktree", "remove", "--force", path.join(`${dir}-wt`, "pre")], { cwd: dir, stdio: "ignore" });
     mergeIntoIntegration(dir, "run1", "task-a");
@@ -741,7 +741,7 @@ describe("a branch that arrives empty over and over", () => {
 
   /**
    * The counter that ends the loop used to be a local variable, so every
-   * restart of the harness process handed the task a fresh set of attempts.
+   * restart of the charrette process handed the task a fresh set of attempts.
    * Run bc691359 restarted many times a day; `m1-exit-evidence` went round
    * eight times with its recorded iteration count still reading 1.
    */
@@ -777,13 +777,13 @@ describe("a branch that arrives empty over and over", () => {
 
     await controller.resume(runId);
 
-    expect(logs(events).some((t) => /changes no file against harness\/run1\/main \(1 commit\)$/.test(t))).toBe(true);
+    expect(logs(events).some((t) => /changes no file against charrette\/run1\/main \(1 commit\)$/.test(t))).toBe(true);
     expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
   });
 });
 
 /**
- * The empty branch the harness caused itself.
+ * The empty branch the charrette caused itself.
  *
  * The background-shell denial tells a worker to redirect a long command —
  * `cmd > log 2>&1 &` — and poll for it; the teardown sweep then kills
@@ -811,7 +811,7 @@ describe("a branch that is empty because the session killed its own job", () => 
 
     const task = store.getTask(runId, "task-a")!;
     expect(task.state).toBe("MERGED");
-    // The attempt the harness caused is not spent out of the budget that parks
+    // The attempt the charrette caused is not spent out of the budget that parks
     // the task, and the operator was never asked about it.
     expect(task.emptyDeliveries).toBe(0);
     expect(task.abandonedJobs).toBe(1);
@@ -846,7 +846,7 @@ describe("a branch that is empty because the session killed its own job", () => 
 
   /**
    * The counter is on the task row rather than in a variable for the same
-   * reason `emptyDeliveries` is: run bc691359 restarted the harness many times
+   * reason `emptyDeliveries` is: run bc691359 restarted the charrette many times
    * a day, and a forgiveness budget that resets with the process is not a bound.
    */
   it("does not hand out a fresh set of forgiven attempts because the process restarted", async () => {
@@ -900,7 +900,7 @@ describe("a branch that is empty because the session killed its own job", () => 
  *
  * Run 7ef8fb4d's `api-delivery-table-infra` was written against a sibling
  * checkout the run did not own. Its branch was empty because the task was out
- * of scope, and every message the harness produced said the opposite — "check
+ * of scope, and every message the charrette produced said the opposite — "check
  * whether the work was written somewhere other than the worktree" — which is
  * how a worker ends up nesting a worktree of another repository inside its own
  * and committing where nothing will ever merge from. Plans are checked for this
@@ -960,7 +960,7 @@ describe("a branch that empties out after QA passed it", () => {
     const { pool, counts, specs } = rolePool({
       worker: (spec) => (commitInWorktree(spec.cwd, "work.txt", "done\n"), "did the work"),
       qa: (spec, nth) => {
-        if (nth === 1) execFileSync("git", ["reset", "--hard", "harness/run1/main"], { cwd: spec.cwd, stdio: "ignore" });
+        if (nth === 1) execFileSync("git", ["reset", "--hard", "charrette/run1/main"], { cwd: spec.cwd, stdio: "ignore" });
         return QA_PASS;
       },
     });
@@ -968,7 +968,7 @@ describe("a branch that empties out after QA passed it", () => {
 
     await controller.resume(runId);
 
-    expect(logs(events).some((t) => /merge produced nothing: harness\/run1\/task-a left harness\/run1\/main where it was/.test(t))).toBe(true);
+    expect(logs(events).some((t) => /merge produced nothing: charrette\/run1\/task-a left charrette\/run1\/main where it was/.test(t))).toBe(true);
     // Re-dispatched with the question the worker can answer, not with a merge
     // it has no way to resolve.
     expect(workerPrompts(specs)[1]).toContain("delivers nothing");
@@ -1148,7 +1148,7 @@ describe("checks that stay red", () => {
 
     await controller.resume(runId);
 
-    expect(logs(events).some((t) => /test -f never-exists\.txt also fails on harness\/run1\/main — not charged to this task/.test(t))).toBe(true);
+    expect(logs(events).some((t) => /test -f never-exists\.txt also fails on charrette\/run1\/main — not charged to this task/.test(t))).toBe(true);
     expect(workerPrompts(specs)[1]).toMatch(/do NOT try to fix them[\s\S]*never-exists\.txt/);
     const qa = specs.find((spec) => spec.role === "qa")!;
     const greenChecks = qa.prompt.split("checks successfully in this worktree:\n")[1]!.split("Use these results")[0]!;
@@ -1458,7 +1458,7 @@ describe("a merge that deploys ahead of the infrastructure it needs", () => {
     execFileSync("git", ["-c", "user.email=w@example.invalid", "-c", "user.name=W", "commit", "-m", "cutover"], { cwd, stdio: "ignore" });
   }
 
-  const SESSIONS_TF = `resource "aws_dynamodb_table" "sessions" {\n  name = "dns-project-sessions"\n}\n`;
+  const SESSIONS_TF = `resource "aws_dynamodb_table" "sessions" {\n  name = "dns-service-sessions"\n}\n`;
   const CD = `on:\n  push:\n    branches: [main]\n    paths:\n      - 'control-plane/**'\njobs:\n  api:\n    steps:\n      - run: kubectl rollout status deploy/api\n`;
 
   it("puts the ordering in front of QA before the task is done", async () => {

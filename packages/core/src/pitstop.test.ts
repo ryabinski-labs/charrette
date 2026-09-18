@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { TaskState } from "@harness/shared";
+import type { TaskState } from "@charrette/shared";
 import { demoUnavailable, pitStopDue, renderPitStop, type DemoReport, type PitStop, type PitStopHistory } from "./pitstop.js";
 
 /**
@@ -160,7 +160,7 @@ const STOP: Omit<PitStop, "markdown"> = {
   stopCostUsd: 3.75,
   projectedUsd: 98.25,
   intent: null,
-  artifactsDir: "/repo/.harness/run1/pitstops/2",
+  artifactsDir: "/repo/.charrette/run1/pitstops/2",
 };
 
 describe("the report the operator reads", () => {
@@ -239,7 +239,7 @@ describe("the report the operator reads", () => {
           { step: "see the receipt", result: "not-reached" },
         ],
         why: "1 of 3 step(s) worked; it broke at \"pay with a test card\" — POST /pay returned 500",
-        artifactsDir: "/r/.harness/run1/live",
+        artifactsDir: "/r/.charrette/run1/live",
       },
       intent: { verdict: "PASS", gaps: [], summary: "everything asked for is there" },
     });
@@ -248,7 +248,7 @@ describe("the report the operator reads", () => {
     expect(md).toContain("**The critical path is broken.**");
     expect(md).toContain("- **BROKE** — pay with a test card");
     expect(md).toContain("- not reached — see the receipt");
-    expect(md).toContain("What it captured: /r/.harness/run1/live");
+    expect(md).toContain("What it captured: /r/.charrette/run1/live");
     expect(md.indexOf("## Using the product")).toBeLessThan(md.indexOf("## Intent check"));
   });
 
@@ -290,7 +290,7 @@ describe("the report the operator reads", () => {
   });
 
   it("says how parked work gets the words, since it does not restart on its own", () => {
-    expect(renderPitStop(STOP)).toContain("`harness resume` asks about each one");
+    expect(renderPitStop(STOP)).toContain("`charrette resume` asks about each one");
   });
 
   it("drops the projection when there is nothing left to project", () => {
@@ -317,7 +317,7 @@ describe("the report the operator reads", () => {
   });
 
   it("points at the evidence directory when there is evidence", () => {
-    expect(renderPitStop(STOP)).toContain("All of it: /repo/.harness/run1/pitstops/2");
+    expect(renderPitStop(STOP)).toContain("All of it: /repo/.charrette/run1/pitstops/2");
   });
 
   /**
@@ -335,7 +335,7 @@ describe("the report the operator reads", () => {
     expect(md).toContain("### Cancelled — in the plan once, not any more");
     expect(md).toContain("- The engine (task-d) — replaced when you re-planned at a pit stop");
     // The sentence is the point: `resume` alone puts none of it back.
-    expect(md).toContain("`harness resume` does not bring these back");
+    expect(md).toContain("`charrette resume` does not bring these back");
   });
 
   it("says nothing about cancelled work when none was cancelled", () => {
@@ -343,7 +343,7 @@ describe("the report the operator reads", () => {
   });
 
   /**
-   * The stop `harness resume` opens runs no demo, because a checkpoint that
+   * The stop `charrette resume` opens runs no demo, because a checkpoint that
    * costs a demo and four reviewers to open is one an operator at their budget
    * cap cannot afford to look at — and that operator is exactly who needs it.
    */
@@ -377,15 +377,15 @@ describe("the report the operator reads", () => {
   });
 
   /**
-   * Only commands the harness ran a second time and agreed with reach this
+   * Only commands the charrette ran a second time and agreed with reach this
    * list, so the heading can say so — and an operator who reads "the suite is
    * green" here is reading a fact, not an agent's sentence about one.
    */
-  it("says of a confirmed command that the harness re-ran it", () => {
+  it("says of a confirmed command that the charrette re-ran it", () => {
     const md = renderPitStop({ ...STOP, demo: { ...DEMO, artifacts: [] } });
 
     expect(md).toContain("## Evidence");
-    expect(md).toContain("Re-run by the harness and confirmed:");
+    expect(md).toContain("Re-run by the charrette and confirmed:");
     expect(md).toContain("- `pnpm test` — the suite is green on this branch");
   });
 

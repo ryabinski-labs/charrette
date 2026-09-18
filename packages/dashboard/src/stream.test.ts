@@ -1,7 +1,7 @@
 import { connect } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { RunConfig } from "@harness/shared";
-import { Bus, Store } from "@harness/core";
+import { RunConfig } from "@charrette/shared";
+import { Bus, Store } from "@charrette/core";
 import { Dashboard } from "./index.js";
 import { PAGE_HTML } from "./page.js";
 
@@ -21,7 +21,7 @@ const otherSink = {
 /**
  * The parts of the dashboard the browser reaches over the wire: the page
  * itself, the event stream, the plan gate, and the checks that stand between a
- * page on another origin and a running harness.
+ * page on another origin and a running charrette.
  */
 
 const started: Dashboard[] = [];
@@ -47,7 +47,7 @@ function makeRun(store: Store, id = "r1"): void {
     state: "CREATED",
     prdPath: null,
     planHash: null,
-    integrationBranch: `harness/${id}/main`,
+    integrationBranch: `charrette/${id}/main`,
     config: RunConfig.parse({}),
   });
 }
@@ -305,7 +305,7 @@ describe("finding a port when every one is taken", () => {
   /**
    * Driven through a stubbed listen rather than by occupying 33 real ports:
    * one of those ports is very likely to be a dashboard the operator is
-   * actually using, and a test that fights a running harness for 4777 is a
+   * actually using, and a test that fights a running charrette for 4777 is a
    * test that fails for reasons unrelated to what it is checking.
    */
   function alwaysBusy(opts?: { port?: number }): Dashboard {
@@ -334,7 +334,7 @@ describe("finding a port when every one is taken", () => {
   it("does not scan at all past a port the operator named", async () => {
     // Moving silently would point them at a different run's dashboard.
     await expect(alwaysBusy({ port: 5000 }).start()).rejects.toThrow(
-      /dashboard port 5000 is already in use — another harness is probably serving there/
+      /dashboard port 5000 is already in use — another charrette is probably serving there/
     );
   });
 
@@ -492,7 +492,7 @@ describe("the event stream", () => {
   it.each(["abc", "Infinity", "-1", "1.5", "9007199254740992"])("replays from the start when the cursor is invalid: %s", async (after) => {
     // `Number("abc")` is NaN and every `seq > NaN` is false, so a garbled cursor
     // used to replay nothing at all — a feed that silently begins mid-run, which
-    // reads exactly like a harness that has not done anything yet.
+    // reads exactly like a charrette that has not done anything yet.
     const { dash, url, store, bus } = await serving();
     makeRun(store);
     bus.publish({ type: "agent.log", runId: "r1", sessionId: "s", text: "already done", ts: 1 });

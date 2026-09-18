@@ -1,13 +1,61 @@
-# Harness
+# Charrette
 
-**PRD in → reviewed pull requests, or an evidence-verified production release.**
+**A PRD in. Reviewed pull requests out — or a production release with the
+evidence to prove it shipped.**
 
-Harness is a multi-agent development orchestrator built on the [Claude Agent SDK](https://docs.anthropic.com/en/api/agent-sdk). Intake and specification agents turn the full brief into executable requirements; a planner builds a task DAG; you approve the plan; workers implement tasks in isolated worktrees and adversarial QA checks them. Review mode stops at reviewed PRs. Explicit production mode follows the release through merge, named deployment jobs, deployed-revision verification and production acceptance. Merging remains manual unless you explicitly authorize `--auto-merge`; GitHub protections still apply.
+It's for solo builders and small teams already working in Claude Code,
+so you can hand off a whole feature and supervise a board instead of
+babysitting a terminal.
+
+[![CI](https://github.com/ryabinski-labs/charrette/actions/workflows/ci.yml/badge.svg)](https://github.com/ryabinski-labs/charrette/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![Node](https://img.shields.io/badge/node-%E2%89%A522.13-brightgreen.svg)](https://nodejs.org)
+
+A *charrette* is an intense, deadline-bound work session that has to end in a
+reviewed deliverable. That is what this does: it staffs a fleet of Claude agents
+against your assignment, holds them to acceptance criteria, and stops at exactly
+two decision points that are yours — approve the plan, and merge the pull
+request. It never merges for you.
+
+![The Charrette dashboard: live agent activity, task board, intent tracking and a cost meter](./docs/images/dashboard.png)
+
+## At a glance
+
+| | |
+|---|---|
+| **What it is** | A local-first CLI + localhost dashboard that orchestrates a fleet of Claude agents through plan → build → adversarial QA → PR |
+| **Who it's for** | Solo builders and small teams already living in Claude Code, who want to hand off whole features rather than functions |
+| **The problem** | One agent session plans nothing reviewable, builds serially, grades its own homework, and forgets everything you have learned about how you build |
+| **What you get** | Reviewed PRs against a plan you approved, with a run ledger that makes agent-built software auditable — and a hard budget cap so it cannot run away with your money |
+| **Status** | Pre-release (v0.0 walking skeleton + v0.1 dashboard). Usable; not yet 1.0 |
+| **Cost** | ~$2 per merged task on a small greenfield repo, ~$21 on a large brownfield service |
+
+### Is this for you?
+
+**Use it if** you already pay for Claude API or Pro/Max usage, you maintain a
+library of `SKILL.md` playbooks you want routed to the right task automatically,
+and you would rather supervise a board than babysit a terminal.
+
+**Do not use it** if you need a framework for *building* agents — that is
+LangGraph, CrewAI or the Agent SDK directly. Charrette is not a framework; it is
+the thing that ships. Also skip it if you cannot run repositories you trust:
+until OS sandboxing lands, agents run with broad local permissions.
+
+Built on the [Claude Agent SDK](https://docs.anthropic.com/en/api/agent-sdk).
+Intake and specification agents turn the full brief into executable
+requirements; a planner builds a task DAG; you approve the plan; workers
+implement tasks in isolated git worktrees and adversarial QA checks them. Review
+mode stops at reviewed PRs. Explicit production mode follows the release through
+merge, named deployment jobs, deployed-revision verification and production
+acceptance. Merging remains manual unless you explicitly authorize
+`--auto-merge`; GitHub protections still apply.
 
 - **[docs/OPERATIONS.md](./docs/OPERATIONS.md)** — install, configure, run, observe, recover. Start here.
 - **[docs/PRODUCTION-DELIVERY.md](./docs/PRODUCTION-DELIVERY.md)** — full PRD → deployed release, authority, evidence and resume.
 - **[docs/CLAUDEFLOW-LEARNINGS.md](./docs/CLAUDEFLOW-LEARNINGS.md)** — Claude Flow comparison and adopted practices for focused context, recovery and efficient verification.
 - **[PRD.md](./PRD.md)** — the full product spec: architecture, threat model, performance budget, phasing.
+- **[CONTRIBUTING.md](./CONTRIBUTING.md)** — how to build, test, and send a change.
+- **[SECURITY.md](./SECURITY.md)** — what is in scope, and what is deliberately not.
 
 ## Status
 
@@ -16,17 +64,17 @@ Pre-release walking skeleton (v0.0 per the PRD phasing) plus the v0.1 dashboard 
 - ✅ Intake agent: repo-grounded clarifying questions with options and a recommendation → agreed brief
 - ✅ Planner → PRD + validated task DAG → plan approval gate (terminal or dashboard)
 - ✅ Worker → deterministic checks → QA agent loop with iteration caps
-- ✅ Continuous integration into `harness/<runId>/main`, idempotent GitHub issues + PRs
+- ✅ Continuous integration into `charrette/<runId>/main`, idempotent GitHub issues + PRs
 - ✅ Event-sourced SQLite state (`node:sqlite`, zero native deps), crash-resume
 - ✅ Budget caps enforced before every agent turn; live cost ledger; the plan gate prices the plan against the cap from what previous runs in the same repo actually cost
 - ✅ Intent validator reads the merged whole against your original assignment — seams, reachability, and whether the thing could actually be deployed and would move real money — and a FAIL queues one task per gap and builds them rather than just reporting them
 - ✅ An interrupted conversation is picked up where it stopped: `resume` re-asks the question nobody answered instead of planning around it
 - ✅ The plan gate says which external services the plan intends to build for real and which it intends to fake, before a worker is paid — and which of deployment, sign-in, visual design and failure-visibility your brief asked for that no task owns at all
 - ✅ The same intent question is asked of the **plan**, not only the result: could this plan, executed perfectly, deliver the assignment? Gaps reach you at the gate and the planner on a reject
-- ✅ `harness postmortem` — why a run produced what it produced: questions nobody answered, verdicts and whether they were heeded, tasks that could pass without anything leaving the process, spend by how sessions died, and which harness build each session ran under — because a fix built while a run is executing never reaches it
+- ✅ `charrette postmortem` — why a run produced what it produced: questions nobody answered, verdicts and whether they were heeded, tasks that could pass without anything leaving the process, spend by how sessions died, and which charrette build each session ran under — because a fix built while a run is executing never reaches it
 - ✅ Skills discovery: lexical SKILL.md matching with SHA-256 provenance (also exposed as a stdio MCP server)
 - ✅ Localhost dashboard: live activity feed (what each agent is reading, editing, running), task board, cost meter, gate approval (127.0.0.1-only, bearer token, Origin/Host checks)
-- ✅ A run ends when the product is proven, not when the task list empties: the acceptance suite green, the intent check PASS (it can also answer UNKNOWN, and an abstention is not a pass), and an agent having started the finished product from a clean checkout and driven the critical path the brief was turned into before any code existed. Anything short of that parks the run in `BLOCKED` with what is unmet on the record, opens no pull request, and re-enters the gates on `harness resume`
+- ✅ A run ends when the product is proven, not when the task list empties: the acceptance suite green, the intent check PASS (it can also answer UNKNOWN, and an abstention is not a pass), and an agent having started the finished product from a clean checkout and driven the critical path the brief was turned into before any code existed. Anything short of that parks the run in `BLOCKED` with what is unmet on the record, opens no pull request, and re-enters the gates on `charrette resume`
 - ✅ Pit stops: after every epic the run stops, a demo agent starts the half-built product and drives it, three named reviewers judge it, and you keep going, redirect the unbuilt tasks, re-plan them, or stop — [docs/PITSTOP.md](./docs/PITSTOP.md)
 - ✅ Parallel workers over the DAG, held apart by the planner's `touchedPaths` so two of them do not edit one file into a merge conflict
 - ⬜ Plan editing UI, OS sandboxing, semantic skill matching — see PRD §7
@@ -38,32 +86,33 @@ your own attention, against the repo rather than against the task count.
 
 ## Requirements
 
-- Node ≥ 22 (uses built-in `node:sqlite`), pnpm
+- Node ≥ 22.13 (uses built-in `node:sqlite`, which is unflagged from 22.13
+  and 23.4 on; earlier 22.x needs `--experimental-sqlite`), pnpm ≥ 11
 - Anthropic credentials, resolved by the Agent SDK from the environment:
   `CLAUDE_CODE_OAUTH_TOKEN` (Claude Pro/Max — run `claude setup-token`) or
   `ANTHROPIC_API_KEY`
-- Optional: `GITHUB_TOKEN` (fine-grained, single repo: contents/issues/PRs write) + `HARNESS_GITHUB_REPO=owner/repo`
+- Optional: `GITHUB_TOKEN` (fine-grained, single repo: contents/issues/PRs write) + `CHARRETTE_GITHUB_REPO=owner/repo`
 - `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) — **required**, not optional. The pit
   stop's `reviewer` is pinned to Gemini so that the agent judging the work is
   not from the family that wrote it; a run refuses to start without the key
   rather than discovering it at the first pit stop, after the epic is paid for
 - Optional: `OPENAI_API_KEY`, if you point a role at OpenAI. Every other role is
-  Anthropic by default; `harness run --model worker=gpt-5.6-terra` changes one,
-  and the same flag on `harness resume` changes it for the rest of a run already
+  Anthropic by default; `charrette run --model worker=gpt-5.6-terra` changes one,
+  and the same flag on `charrette resume` changes it for the rest of a run already
   in flight. `qa`, `prod` and `intake` stay on Anthropic and `reviewer` stays on
   Google; see [Using other providers](docs/OPERATIONS.md#using-other-providers)
-- Any of these may go in a `.env` file in the directory you run `harness` from
+- Any of these may go in a `.env` file in the directory you run `charrette` from
   (not the repository being built — a task spec can write to that one). An
   exported variable wins over the file
 
-## Usage
+## Quickstart
 
 ```bash
 pnpm install && pnpm build
-pnpm link-cli        # symlinks `harness` into ~/.local/bin
+pnpm link-cli        # symlinks `charrette` into ~/.local/bin
 
 cd ~/code/my-app     # the repo you want built
-harness run
+charrette run
 ```
 
 That is the whole command — no assignment, no flags. The target repo, the
@@ -102,6 +151,11 @@ next one). The agreed brief, not your first sentence, is what the planner
 receives, and it asks about the things that are expensive to change later:
 scope, look and feel, stack, data, performance, security, how it ships.
 
+The plan gate in the dashboard — every task the planner intends to build, the
+full PRD behind it, and one box that sends your objection back to the planner:
+
+![The plan approval gate: the task DAG, a Full PRD disclosure, and Approve & build / Reject with feedback](./docs/images/plan-gate.png)
+
 Then, every epic, it stops and shows you what it actually built:
 
 ```
@@ -125,24 +179,24 @@ What now?
   enter          keep going
   <anything>     send it to the 4 task(s) that have not run yet
   replan <words> re-plan the remaining work around what you say
-  stop           park the run; `harness resume` picks it up where it is
+  stop           park the run; `charrette resume` picks it up where it is
 ```
 
-Override any of it per run, or commit `harness.config.json` for per-repo defaults:
+Override any of it per run, or commit `charrette.config.json` for per-repo defaults:
 
 ```bash
-harness run "Add rate limiting"            # an assignment on the CLI skips the conversation
-harness run --check "npm test" --run-cap 50 --no-dashboard
-harness init                 # write harness.config.json with the resolved defaults
-harness resume <runId>       # continue after any interruption; nothing re-executes
-harness status               # run/task states, QA iterations, spend
-harness version              # the build this binary is, and whether `dist/` is current with `src/`
+charrette run "Add rate limiting"            # an assignment on the CLI skips the conversation
+charrette run --check "npm test" --run-cap 50 --no-dashboard
+charrette init                 # write charrette.config.json with the resolved defaults
+charrette resume <runId>       # continue after any interruption; nothing re-executes
+charrette status               # run/task states, QA iterations, spend
+charrette version              # the build this binary is, and whether `dist/` is current with `src/`
 ```
 
-`harness --version` prints that build on its own — `version@sha`, with a `+`
+`charrette --version` prints that build on its own — `version@sha`, with a `+`
 when the checkout is dirty. It is the same string every agent session is
 stamped with, so a session record and a binary can be matched without
-cross-referencing `git log` against process start times. `harness version`
+cross-referencing `git log` against process start times. `charrette version`
 adds the part a sha cannot answer: Node loads `dist/`, so a fix that is
 committed but never compiled leaves a clean sha in front of an old build.
 
@@ -156,11 +210,11 @@ Full configuration reference, recovery playbook, and troubleshooting: [docs/OPER
 | `packages/core` | store, event bus, budget, git/worktrees, agent pool, intake conversation, run controller, GitHub adapter |
 | `packages/skills-mcp` | SKILL.md indexer + stdio MCP server (`search_skills`, `describe_skill`) |
 | `packages/dashboard` | Fastify backend + single-file SPA (SSE via fetch-stream) |
-| `apps/cli` | `harness run / resume / status / init / version`, terminal intake chat, repo-root and default resolution |
+| `apps/cli` | `charrette run / resume / status / init / version`, terminal intake chat, repo-root and default resolution |
 
 ## Security model (v0 summary)
 
-Secrets never enter agent context; pushes are confined to `harness/<runId>/*` branches; the harness has no code path that merges PRs; the dashboard binds loopback only and every state-changing endpoint requires a bearer token plus Origin/Host validation. Full threat model and requirements: PRD §12. Until OS sandboxing lands (PRD v1.0): **run repos you trust**.
+Secrets never enter agent context; pushes are confined to `charrette/<runId>/*` branches; the charrette has no code path that merges PRs; the dashboard binds loopback only and every state-changing endpoint requires a bearer token plus Origin/Host validation. Full threat model and requirements: PRD §12. Until OS sandboxing lands (PRD v1.0): **run repos you trust**.
 
 ## License
 

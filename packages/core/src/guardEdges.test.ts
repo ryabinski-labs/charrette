@@ -30,7 +30,7 @@ describe("pricing a model nobody has priced", () => {
   it("prices the non-Anthropic models a run can now be pointed at", () => {
     // Caps are enforced from costUsd, so a routed-to model with no row here
     // spends money the budget gate cannot see. These are the published
-    // standard-tier prices, not the batch or flex ones — the harness sends
+    // standard-tier prices, not the batch or flex ones — the charrette sends
     // interactive requests, and batch prices would under-charge.
     expect(priceFor("gpt-5.6-terra")).toEqual({ in: 2, out: 12 });
     expect(priceFor("gpt-5.6-sol")).toEqual({ in: 5, out: 30 });
@@ -66,7 +66,7 @@ describe("what a budget refusal tells the operator", () => {
     const e = new BudgetExceeded(31.5, 30, "40da9337");
 
     expect(e.message).toContain("$31.50 >= $30.00");
-    expect(e.message).toContain("harness resume 40da9337");
+    expect(e.message).toContain("charrette resume 40da9337");
   });
 
   it("says only what it knows when there is no run to name", () => {

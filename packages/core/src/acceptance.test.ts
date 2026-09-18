@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { z } from "zod";
-import { RunSpec, blockingQuestions, gating, type SpecScenario } from "@harness/shared";
+import { RunSpec, blockingQuestions, gating, type SpecScenario } from "@charrette/shared";
 import { acceptanceVerdict, blockingQuestionsFor, failingScenarios, scenarioCommand, scenarioProbeCommand, specCoverage, suiteRunFrom } from "./acceptance.js";
 
 const scenario = (over: Partial<SpecScenario> & { id: string }): SpecScenario =>
@@ -316,7 +316,7 @@ describe("what the specification proves about the finished run", () => {
 
 describe("reading what a failed suite command actually said", () => {
   /**
-   * A suite the harness killed produced no verdict at all. Reporting its
+   * A suite the charrette killed produced no verdict at all. Reporting its
    * partial output as "these scenarios failed" would name whichever ones
    * happened to run first, which is a statement about ordering.
    */

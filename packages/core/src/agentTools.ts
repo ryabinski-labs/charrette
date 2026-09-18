@@ -5,10 +5,10 @@ import { BASH_TIMEOUT_MS } from "./limits.js";
 import { denialReason, infraMutation } from "./infraGuard.js";
 
 /**
- * The tools an agent gets when the harness runs its tool loop itself.
+ * The tools an agent gets when the charrette runs its tool loop itself.
  *
  * On the Anthropic transport the SDK supplies Bash/Read/Write/Edit/Glob/Grep
- * and the harness only inspects them through PreToolUse hooks. Off that
+ * and the charrette only inspects them through PreToolUse hooks. Off that
  * transport there is no SDK, so the tools are implemented here — and the guard
  * that stops an agent applying real infrastructure has to be implemented *with*
  * them, not around them.
@@ -354,7 +354,7 @@ export const TOOLS: LocalTool[] = [
  * `tools`/`allowedTools`/`disallowedTools` narrowing the SDK applies.
  *
  * `tools` names what exists at all (read-only roles pass `["Read","Glob","Grep"]`
- * and must not get a shell); `disallowedTools` subtracts. A name the harness
+ * and must not get a shell); `disallowedTools` subtracts. A name the charrette
  * asks for that this transport cannot implement — WebSearch, WebFetch, an MCP
  * tool — is simply not offered, which is why `unsupportedTools` exists to catch
  * that at the gate instead of leaving an agent quietly unable to do its job.

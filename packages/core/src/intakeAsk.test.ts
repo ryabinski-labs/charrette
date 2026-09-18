@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { RunConfig } from "@harness/shared";
-import type { HarnessEvent, IntakeQuestion } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
+import type { CharretteEvent, IntakeQuestion } from "@charrette/shared";
 
 /**
  * The `ask_user` half of intake.
@@ -41,7 +41,7 @@ const BRIEF = (over: Record<string, unknown> = {}) =>
 
 let store: Store;
 let bus: Bus;
-let events: HarnessEvent[];
+let events: CharretteEvent[];
 
 /** A pool whose session runs `body` while the intake tools are live. */
 function poolThat(resultText: string, body?: (spec: AgentSpec) => Promise<void>): { pool: AgentPool; specs: AgentSpec[] } {
@@ -269,7 +269,7 @@ describe("how the intake session is set up", () => {
     expect(spec.role).toBe("intake");
     expect(spec.cwd).toBe("/repo");
     expect(spec.tools).toEqual(["Read", "Glob", "Grep"]);
-    expect(spec.allowedTools).toEqual(["Read", "Glob", "Grep", "mcp__harness_intake__ask_user"]);
+    expect(spec.allowedTools).toEqual(["Read", "Glob", "Grep", "mcp__charrette_intake__ask_user"]);
     expect(spec.maxTurns).toBe(60);
     expect(spec.prompt).toContain("add rate limiting");
     expect(createSdkMcpServerMock).toHaveBeenCalledOnce();

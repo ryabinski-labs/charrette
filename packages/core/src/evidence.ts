@@ -123,7 +123,7 @@ function paeth(a: number, b: number, c: number): number {
  */
 export function inspectPng(buf: Buffer): ImageVerdict {
   const png = parsePng(buf);
-  if (!png) return { kind: "unreadable", detail: "not a PNG this harness can decode" };
+  if (!png) return { kind: "unreadable", detail: "not a PNG this charrette can decode" };
   if (png.interlace) return { kind: "unreadable", detail: "interlaced PNG" };
   const channels = CHANNELS[png.colorType];
   if (!channels || (png.depth !== 8 && png.depth !== 16)) {
@@ -247,7 +247,7 @@ export function checkEvidence(artifacts: ArtifactClaim[], read: (file: string) =
  * contradicted on the first surface it rendered — and the only thing standing
  * behind that report was the sentence itself.
  *
- * So a claim about a command has to carry the command, and the harness runs it
+ * So a claim about a command has to carry the command, and the charrette runs it
  * again. What comes back decides which heading the claim is printed under, the
  * same three-way outcome the artifacts get: confirmed, struck, or — for a
  * command that cannot be safely repeated — reported as the unverified thing it
@@ -261,7 +261,7 @@ export interface CommandClaim {
 
 export interface CommandCheck extends CommandClaim {
   ok: boolean;
-  /** Whether the harness actually ran it. False means the claim is unverified, not disproved. */
+  /** Whether the charrette actually ran it. False means the claim is unverified, not disproved. */
   verified: boolean;
   /** Why it is not evidence, in the operator's language. Empty when ok. */
   fault: string;
@@ -272,7 +272,7 @@ export interface CommandCheck extends CommandClaim {
  *
  * Re-running a check is free; re-running a POST creates a second booking, and
  * re-running an install or a migration changes the tree the operator is about
- * to review. The harness would rather report a claim as unverified than cause
+ * to review. The charrette would rather report a claim as unverified than cause
  * the thing it was trying to confirm.
  */
 const NOT_REPEATABLE: { re: RegExp; why: string; unless?: (command: string) => boolean }[] = [
@@ -292,7 +292,7 @@ const NOT_REPEATABLE: { re: RegExp; why: string; unless?: (command: string) => b
   },
   {
     // The tools above are how a repository migrates; this is how a person does
-    // the same thing by hand, and the harness has to recognise both. Scoped to
+    // the same thing by hand, and the charrette has to recognise both. Scoped to
     // a database client and a statement that writes, so `psql -c "SELECT
     // count(*) FROM bookings"` — the shape a probe actually wants — still runs.
     re: /\b(psql|mysql|mariadb|sqlite3|mongosh|mongo|redis-cli|clickhouse-client|cqlsh)\b[\s\S]*?\b(drop|delete|truncate|insert|update|alter|create|flushall)\b/i,
@@ -315,7 +315,7 @@ export function repeatable(command: string): { ok: true } | { ok: false; why: st
   const trimmed = command.trim();
   if (!trimmed) return { ok: false, why: "there is no command to run" };
   const mutation = infraMutation(trimmed);
-  if (mutation) return { ok: false, why: `${mutation.what} changes real infrastructure and the harness will not run it` };
+  if (mutation) return { ok: false, why: `${mutation.what} changes real infrastructure and the charrette will not run it` };
   for (const { re, why, unless } of NOT_REPEATABLE) if (re.test(trimmed) && !unless?.(trimmed)) return { ok: false, why };
   return { ok: true };
 }
@@ -330,14 +330,14 @@ export interface Rerun {
  * Grade every command the agent offered as proof.
  *
  * `rerun` runs one command and says how it went, or returns null when the
- * harness had nowhere to run it — which keeps this pure, and means "there was
+ * charrette had nowhere to run it — which keeps this pure, and means "there was
  * no worktree to check in" is reported as unverified rather than as failed.
  */
 export function checkCommands(
   claims: CommandClaim[],
   rerun: (command: string) => Rerun | null,
-  /** Why a command the harness was willing to repeat was not repeated after all. */
-  notRunReason = "the harness did not run it again"
+  /** Why a command the charrette was willing to repeat was not repeated after all. */
+  notRunReason = "the charrette did not run it again"
 ): CommandCheck[] {
   const seen = new Set<string>();
   return claims.map((c) => {
@@ -351,12 +351,12 @@ export function checkCommands(
     if (!shows) return unverified("run with no statement of what it proves, so nobody can tell what it settles");
 
     const repeat = repeatable(command);
-    if (!repeat.ok) return unverified(`not re-run by the harness because ${repeat.why}`);
+    if (!repeat.ok) return unverified(`not re-run by the charrette because ${repeat.why}`);
 
     const result = rerun(command);
     if (!result) return unverified(notRunReason);
     if (!result.ok) {
-      return { command, shows, ok: false, verified: true, fault: `re-run by the harness and it failed:\n${result.output.slice(-1200)}` };
+      return { command, shows, ok: false, verified: true, fault: `re-run by the charrette and it failed:\n${result.output.slice(-1200)}` };
     }
     return { command, shows, ok: true, verified: true, fault: "" };
   });
@@ -395,7 +395,7 @@ export function strikeCommands<T extends { commands: CommandClaim[]; couldNotRea
  * A weak demo does not announce itself. "I started it and clicked twice"
  * arrives in exactly the same shape as "I drove six journeys and photographed
  * each", gets summarised into the same report, and is read by four reviewers on
- * the most expensive model in the harness who have no way to tell which one
+ * the most expensive model in the charrette who have no way to tell which one
  * they were handed. They then reason confidently about a product nobody
  * exercised. That is the same failure as a weak judge returning PASS: the
  * output is not wrong, it is unfounded, and nothing downstream can see the
@@ -496,7 +496,7 @@ export interface LiveStep {
   observed: string;
 }
 
-/** What the live-exercise agent came back with, before the harness scores it. */
+/** What the live-exercise agent came back with, before the charrette scores it. */
 export interface LiveFindings {
   started: boolean;
   howStarted: string;
@@ -594,7 +594,7 @@ export function strikeEvidence<T extends { artifacts: ArtifactClaim[]; couldNotR
       ...struck.map(
         (c) =>
           `${c.shows || c.file || "an artifact"} — not verified: ${c.file ? `\`${c.file}\` ` : ""}${c.fault}` +
-          " (struck from the evidence by the harness, which inspected the file)"
+          " (struck from the evidence by the charrette, which inspected the file)"
       ),
     ],
   };

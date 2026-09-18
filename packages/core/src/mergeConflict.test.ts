@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { RunConfig } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
 import { describe, expect, it } from "vitest";
 import { Bus } from "./bus.js";
 import type { GitHubAdapter } from "./github.js";
@@ -35,11 +35,11 @@ const DAG =
 const gitIn = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "ignore" });
 
 function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-conflict-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-conflict-"));
   writeFileSync(path.join(dir, "shared.ts"), "export const keys = {\n};\n");
   gitIn(dir, "init", "-b", "main");
-  gitIn(dir, "config", "user.email", "harness@example.com");
-  gitIn(dir, "config", "user.name", "harness");
+  gitIn(dir, "config", "user.email", "charrette@example.com");
+  gitIn(dir, "config", "user.name", "charrette");
   gitIn(dir, "add", "-A");
   gitIn(dir, "commit", "-m", "init");
   return dir;
@@ -125,7 +125,7 @@ describe("merge conflicts between parallel tasks", () => {
     expect(workerPrompts.filter((p) => p.includes("ACCEPTED by QA"))).toHaveLength(1);
 
     // Both tasks' work survived the resolution — the whole point of the union.
-    const merged = execFileSync("git", ["show", `harness/${runId}/main:shared.ts`], { cwd: dir, encoding: "utf8" });
+    const merged = execFileSync("git", ["show", `charrette/${runId}/main:shared.ts`], { cwd: dir, encoding: "utf8" });
     expect(merged).toContain("task-a");
     expect(merged).toContain("task-b");
   }, 30_000);

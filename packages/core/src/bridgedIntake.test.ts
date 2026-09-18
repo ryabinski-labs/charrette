@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { IntakeQuestion } from "@harness/shared";
+import { IntakeQuestion } from "@charrette/shared";
 import { BridgedIntake } from "./bridgedIntake.js";
 import type { IntakeAnswer, IntakeUi } from "./intake.js";
 

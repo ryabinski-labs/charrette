@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { Budget, RunConfig } from "@harness/shared";
+import { Budget, RunConfig } from "@charrette/shared";
 import { Bus } from "./bus.js";
 import { InvalidTransition, Store } from "./store.js";
 
@@ -26,7 +26,7 @@ function withRun(id = "run1"): { store: Store; bus: Bus } {
     state: "CREATED",
     prdPath: null,
     planHash: null,
-    integrationBranch: `harness/${id}/main`,
+    integrationBranch: `charrette/${id}/main`,
     config: RunConfig.parse({}),
   });
   return { store: s, bus: new Bus(s) };
@@ -46,8 +46,8 @@ describe("opening the database a run actually uses", () => {
    * dashboard read and write it from their own processes.
    */
   it("puts a file-backed database into WAL mode so other processes can read it", () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "harness-store-"));
-    const s = new Store(path.join(dir, "harness.db"));
+    const dir = mkdtempSync(path.join(tmpdir(), "charrette-store-"));
+    const s = new Store(path.join(dir, "charrette.db"));
 
     const mode = s.db.prepare("PRAGMA journal_mode").get() as { journal_mode: string };
     expect(mode.journal_mode).toBe("wal");
@@ -104,7 +104,7 @@ describe("a write that fails part-way", () => {
   });
 });
 
-describe("reading back a row an older harness wrote", () => {
+describe("reading back a row an older charrette wrote", () => {
   /**
    * Writes straight to the events table, bypassing `appendEvent`.
    *
@@ -295,7 +295,7 @@ describe("what intake writes back", () => {
 describe("a publish failure written without its reason", () => {
   it("still answers that publishing failed, rather than answering nothing", () => {
     // `error` is defaulted in the schema, so an event written by an older
-    // harness — or by a throw whose String() was empty — arrives with none.
+    // charrette — or by a throw whose String() was empty — arrives with none.
     // The gates key on whether this returns a value at all: an empty string
     // would read as "no failure" and let a run past the CI hold, which is the
     // exact confusion the event was added to end.

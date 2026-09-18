@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import Fastify from "fastify";
-import { Bus, BudgetGate, GateHandler, IntakeBridge, IntentPosture, PitStop, PitStopDecision, Store, SubscriptionChoice, SubscriptionGate, TaskGate, intentPosture, originSlug } from "@harness/core";
+import { Bus, BudgetGate, GateHandler, IntakeBridge, IntentPosture, PitStop, PitStopDecision, Store, SubscriptionChoice, SubscriptionGate, TaskGate, intentPosture, originSlug } from "@charrette/core";
 import { PAGE_HTML } from "./page.js";
 
 export interface DashboardOptions {
@@ -11,7 +11,7 @@ export interface DashboardOptions {
    *
    * A dashboard attached to a run drives itself from the open ones, so a run
    * that ends leaves the page — correct there, because the page is a view of
-   * work in flight. `harness dashboard` is the opposite case: nothing is
+   * work in flight. `charrette dashboard` is the opposite case: nothing is
    * executing and the finished run *is* the subject, so excluding it serves an
    * empty page for the one thing the operator opened it to read.
    */
@@ -21,7 +21,7 @@ export interface DashboardOptions {
    *
    * The difference from `port` is who asked. `port` is the operator naming one,
    * so a busy port is an error — moving them silently would point them at some
-   * other run's dashboard. This one is the harness recognising the port the
+   * other run's dashboard. This one is the charrette recognising the port the
    * *previous* process served this same run on, which is a preference and
    * nothing more: something else holding it is a reason to take the next free
    * one, never a reason to refuse to resume a run.
@@ -33,7 +33,7 @@ export interface DashboardOptions {
    * Only `resume` passes this, and only from the link it recorded when the run
    * started: the point is that a run picked up after a pause is reachable at
    * the URL already open in the operator's browser. A token read back from
-   * `.harness/dashboard.json` — 0600, gitignored — is no weaker than the one
+   * `.charrette/dashboard.json` — 0600, gitignored — is no weaker than the one
    * that wrote it, because it *is* the one that wrote it.
    */
   token?: string;
@@ -73,10 +73,10 @@ const TERMINAL_RUN_STATES = new Set(["PR_REVIEW", "BLOCKED", "FAILED", "ABORTED"
  * slug still files issues, and its chips were rendering as dead plain text.
  */
 async function githubSlug(configured: string | undefined, repoPath: string): Promise<string | null> {
-  const slug = process.env.HARNESS_GITHUB_REPO ?? configured;
+  const slug = process.env.CHARRETTE_GITHUB_REPO ?? configured;
   if (slug && /^[\w.-]+\/[\w.-]+$/.test(slug)) return slug;
   // Cached because /api/state is polled every five seconds and a remote does not
-  // change under a running harness — without this it is a subprocess per poll.
+  // change under a running charrette — without this it is a subprocess per poll.
   const key = `${configured ?? ""}\u0000${repoPath}`;
   if (!slugCache.has(key)) slugCache.set(key, await originSlug(repoPath));
   return slugCache.get(key)!;
@@ -97,7 +97,7 @@ export class Dashboard implements GateHandler {
    * A resumed run used to mint a fresh token and therefore a fresh URL, which
    * quietly broke the one thing an operator is holding: the tab they already
    * had open. The fragment *is* the credential, so a new one does not merely
-   * relocate the page — it 401s the old one. `harness resume` passes back the
+   * relocate the page — it 401s the old one. `charrette resume` passes back the
    * token it recorded, so pausing and picking up again lands in the same tab.
    */
   readonly token: string;
@@ -546,7 +546,7 @@ export class Dashboard implements GateHandler {
   }
 
   /**
-   * One harness drives one repo, so several dashboards run at once and a busy
+   * One charrette drives one repo, so several dashboards run at once and a busy
    * port is routine rather than fatal — take the next free one. A port the
    * operator asked for explicitly is honoured exactly: silently moving would
    * point them at a different run's dashboard.
@@ -598,7 +598,7 @@ export class Dashboard implements GateHandler {
     }
     throw new Error(
       this.opts.port !== undefined
-        ? `dashboard port ${first} is already in use — another harness is probably serving there. ` +
+        ? `dashboard port ${first} is already in use — another charrette is probably serving there. ` +
           `Pass a different --port, or --no-dashboard.`
         : `no free dashboard port between ${first} and ${last}. Pass --port <n> or --no-dashboard.`
     );

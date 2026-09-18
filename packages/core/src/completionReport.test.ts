@@ -114,7 +114,7 @@ describe("what happened when someone used it", () => {
           ],
           howStarted: "pnpm dev",
           why: "1 of 3 step(s) worked",
-          artifactsDir: "/r/.harness/run/live",
+          artifactsDir: "/r/.charrette/run/live",
         },
       })
     );
@@ -123,7 +123,7 @@ describe("what happened when someone used it", () => {
     expect(html).toContain("BROKE — pay with a test card");
     expect(html).toContain("not reached — see the receipt");
     expect(html).toContain("Started with:");
-    expect(html).toContain("/r/.harness/run/live");
+    expect(html).toContain("/r/.charrette/run/live");
   });
 
   it("says a working path worked, without the noise of a run that has nothing to explain", () => {

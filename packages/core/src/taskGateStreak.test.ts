@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RunConfig } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
 import { Store } from "./store.js";
 
 /**
@@ -22,7 +22,7 @@ function store(): Store {
     state: "CREATED",
     prdPath: null,
     planHash: null,
-    integrationBranch: "harness/run1",
+    integrationBranch: "charrette/run1",
     config: RunConfig.parse({}),
   });
   return s;

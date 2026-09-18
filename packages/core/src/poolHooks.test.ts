@@ -74,7 +74,7 @@ describe("the hooks every agent session runs with", () => {
 
   /**
    * Run 40da9337: the CLI announces a finished background task by queueing it
-   * as a `task-notification`, and the streaming-input loop the harness runs in —
+   * as a `task-notification`, and the streaming-input loop the charrette runs in —
    * held open so the operator can speak mid-flight — throws on any queued
    * command that is not a prompt. 8 of the 21 sessions that ended up with a
    * tracked background task died on it; 0 of the 138 without one. The kill
@@ -123,7 +123,7 @@ describe("the hooks every agent session runs with", () => {
  * them, and wrong to call them the work the session left behind.
  */
 describe("the tooling markers a session's sweep is given", () => {
-  const home = () => realpathSync(mkdtempSync(path.join(tmpdir(), "harness-home-")));
+  const home = () => realpathSync(mkdtempSync(path.join(tmpdir(), "charrette-home-")));
 
   it("reads the servers the SDK will start from the config the SDK reads them from", () => {
     const dir = home();

@@ -10,7 +10,7 @@ const dirs = process.argv.slice(2).length
   ? process.argv.slice(2)
   : [path.join(os.homedir(), ".claude", "skills"), path.join(os.homedir(), "skills")];
 
-const server = new McpServer({ name: "harness-skills-discovery", version: "0.0.1" });
+const server = new McpServer({ name: "charrette-skills-discovery", version: "0.0.1" });
 
 server.tool(
   "search_skills",

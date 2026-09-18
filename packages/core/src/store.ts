@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { HarnessEvent, RunConfig, RunSpec, RunState, type Runbook, RunbookShape, TaskState, RUN_TRANSITIONS, TASK_TRANSITIONS, modelId } from "@harness/shared";
+import { CharretteEvent, RunConfig, RunSpec, RunState, type Runbook, RunbookShape, TaskState, RUN_TRANSITIONS, TASK_TRANSITIONS, modelId } from "@charrette/shared";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS runs (
@@ -190,7 +190,7 @@ export interface TaskRow {
    *
    * Persisted for one reason: the caps that read them are the only thing that
    * ends a loop, and both used to live in a local variable inside the dispatch
-   * function. Every restart of the harness process — and this harness restarts
+   * function. Every restart of the charrette process — and this charrette restarts
    * a great deal — put them back to zero, so a task could repeat the identical
    * failure indefinitely and each attempt would believe it was the first.
    * `m1-exit-evidence` went round eight times in run bc691359 with its QA
@@ -217,7 +217,7 @@ export interface TaskRow {
    * the empty-delivery budget that parks the task.
    *
    * Persisted for the same reason `emptyDeliveries` is: a counter that lives
-   * in a variable is reset by every restart of the harness process. Unlike
+   * in a variable is reset by every restart of the charrette process. Unlike
    * every other counter on this row it is never reset — not by an operator's
    * answer, not by reviving a parked task. Those resets exist because an
    * operator has changed the conditions the old failures happened under, and
@@ -240,7 +240,7 @@ export interface SessionRow {
   endedAt: number | null;
   turns: number;
   costUsd: number;
-  /** The harness build this session was spawned under; "" before it was recorded. */
+  /** The charrette build this session was spawned under; "" before it was recorded. */
   build: string;
 }
 
@@ -276,14 +276,14 @@ export class Store {
     }
   }
 
-  releaseEvidence(runId: string, phase?: string): import("@harness/shared").ReleaseEvidence | null {
+  releaseEvidence(runId: string, phase?: string): import("@charrette/shared").ReleaseEvidence | null {
     const row = this.db.prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.release_evidence' AND (? IS NULL OR json_extract(payload, '$.phase') = ?) ORDER BY seq DESC LIMIT 1")
       .get(runId, phase ?? null, phase ?? null) as { payload: string } | undefined;
     return row ? JSON.parse(row.payload) : null;
   }
 
   readonly db: DatabaseSync;
-  private appendListeners = new Set<(e: { seq: number; event: HarnessEvent }) => void>();
+  private appendListeners = new Set<(e: { seq: number; event: CharretteEvent }) => void>();
 
   constructor(dbPath: string) {
     this.db = new DatabaseSync(dbPath);
@@ -302,7 +302,7 @@ export class Store {
   }
 
   /**
-   * Bring a database written by an older harness up to the current schema.
+   * Bring a database written by an older charrette up to the current schema.
    *
    * `CREATE TABLE IF NOT EXISTS` creates the current shape for a fresh run and
    * silently leaves an existing table at whatever shape it already had, so a
@@ -452,7 +452,7 @@ export class Store {
    * to Google hold `claude-opus-5`, which `RunConfig` now refuses — and it
    * compared vendors, which is what a vendor migration needs. That left the
    * ordinary case out. `gemini-3.6-flash` and `gemini-3.8-flash` are the same
-   * vendor, so a run frozen on 3.6 kept it through every `harness resume`, and
+   * vendor, so a run frozen on 3.6 kept it through every `charrette resume`, and
    * the only way onto the current default was to type
    * `--model reviewer=gemini-3.8-flash` on every resume line for the rest of that
    * run's life. Comparing the *model* is what the operator meant by "resume
@@ -464,7 +464,7 @@ export class Store {
    * Nothing on the row can tell a default frozen at creation from a choice
    * somebody made, and of the two readings this is the one the operator asked
    * for. A deliberate choice still has a home that survives — `models.reviewer`
-   * in harness.config.json, or `--model` on the resume line — because `harness
+   * in charrette.config.json, or `--model` on the resume line — because `charrette
    * resume` applies both *after* the store opens, so either wins over this.
    *
    * This is not the same problem `freezeLightTier` solves, and the difference is
@@ -535,13 +535,13 @@ export class Store {
    * transitions written straight through the store — every run and task state
    * change — reach live subscribers too, not only the events table.
    */
-  onAppend(fn: (e: { seq: number; event: HarnessEvent }) => void): () => void {
+  onAppend(fn: (e: { seq: number; event: CharretteEvent }) => void): () => void {
     this.appendListeners.add(fn);
     return () => void this.appendListeners.delete(fn);
   }
 
-  appendEvent(ev: HarnessEvent, materialize?: () => void): number {
-    const parsed = HarnessEvent.parse(ev);
+  appendEvent(ev: CharretteEvent, materialize?: () => void): number {
+    const parsed = CharretteEvent.parse(ev);
     const insert = this.db.prepare(
       "INSERT INTO events (runId, taskId, sessionId, type, payload, ts) VALUES (?, ?, ?, ?, ?, ?)"
     );
@@ -642,7 +642,7 @@ export class Store {
    * in a later process, and the operator's answer has to still be there when it
    * is. The row survives; `drainFeedback` consumes it exactly once.
    *
-   * `sourceId` deduplicates notes the harness reads from somewhere else — a
+   * `sourceId` deduplicates notes the charrette reads from somewhere else — a
    * GitHub issue comment is queued the first time it is seen and ignored on
    * every later poll. Returns whether a row was actually written.
    */
@@ -933,7 +933,7 @@ export class Store {
   }
 
   /** What an agent found when it went and looked at production. */
-  productionEvidence(runId: string): Extract<HarnessEvent, { type: "run.prod_verdict" }> | null {
+  productionEvidence(runId: string): Extract<CharretteEvent, { type: "run.prod_verdict" }> | null {
     const row = this.db.prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.prod_verdict' ORDER BY seq DESC LIMIT 1")
       .get(runId) as { payload: string } | undefined;
     return row ? JSON.parse(row.payload) : null;
@@ -1003,7 +1003,7 @@ export class Store {
    * Derived from the event log for the same reason `pitStopHistory` is: the gap
    * between asking and the stop actually opening is however long the in-flight
    * tasks take to settle, and that gap is exactly where a process restart, a
-   * `harness resume` or a crash lands. A request held on the controller would be
+   * `charrette resume` or a crash lands. A request held on the controller would be
    * lost in precisely the window it has to survive.
    *
    * Three event types, one pass, last-one-wins: a request is pending until
@@ -1081,7 +1081,7 @@ export class Store {
    * The bound on `taskGate.autoAnswerRounds` reads this. It counts answers, not
    * openings: an escalation the decider handed back to the operator is one the
    * decider did not spend, and a task whose gate a person answered is not any
-   * closer to the round where the harness stops trusting an agent with it.
+   * closer to the round where the charrette stops trusting an agent with it.
    *
    * *Consecutive*, and that is the whole point of the counter. What it exists to
    * catch is an agent answering its own escalation in a circle, and a circle is
@@ -1278,7 +1278,7 @@ export class Store {
    * Every run, newest first — including the finished ones.
    *
    * `listOpenRuns` is what the dashboard drives itself from, so a run that ends
-   * disappears from it by design. That left `harness status` printing "No open
+   * disappears from it by design. That left `charrette status` printing "No open
    * runs" for a repo whose last run parked three tasks and opened no pull request,
    * which is the moment the operator most needs to be told what happened.
    */
@@ -1324,7 +1324,7 @@ export class Store {
   /**
    * Replace the run's caps — from a resolved budget gate, or from an operator
    * raising a cap live before it was ever reached (`RunController.raiseBudget`).
-   * Persisted rather than held in memory so `harness resume` continues under
+   * Persisted rather than held in memory so `charrette resume` continues under
    * the cap that was last agreed to instead of tripping again immediately.
    */
   setRunBudget(runId: string, budget: RunConfig["budget"]): void {
@@ -1385,7 +1385,7 @@ export class Store {
    * input to a pre-run cost estimate.
    *
    * Scoped to the database, which is scoped to the repository, because the
-   * repository is what actually decides the rate: the same harness costs an
+   * repository is what actually decides the rate: the same charrette costs an
    * order of magnitude more per task on a large brownfield service than on a
    * small greenfield one. The run being estimated is excluded so that a resumed
    * or re-planned run does not predict itself from its own spend so far.
@@ -1483,7 +1483,7 @@ export class Store {
   /**
    * Rewrite the task's definition of done, and say on the record who did it and
    * why. Deliberately not part of `updateTask`: every other field there is
-   * bookkeeping the harness owns, and this one is a judgment about the work that
+   * bookkeeping the charrette owns, and this one is a judgment about the work that
    * has to survive in the event log for a postmortem to explain why a probe the
    * planner wrote is not the probe the task was held to.
    *
@@ -1507,7 +1507,7 @@ export class Store {
    *
    * The operator could already amend a task's probe and could not amend the bar
    * behind it, which left one shape with no way out at all: a task whose
-   * criteria no agent in this harness can satisfy. Run bc691359's
+   * criteria no agent in this charrette can satisfy. Run bc691359's
    * `tier1-three-arm-capture` asked for a bundle produced by `terraform apply`,
    * which `infraGuard` denies at the Bash chokepoint — so five QA passes, four
    * correct refusals and a rewritten probe all ended the same way, because QA
@@ -1579,7 +1579,7 @@ export class Store {
 
   /**
    * Mark every session still "running" as interrupted. Sessions live and die
-   * with the single harness process, so at process start a "running" row can
+   * with the single charrette process, so at process start a "running" row can
    * only be the residue of a crash or a kill — and left alone it haunts the
    * dashboard as a live agent whose heartbeat froze hours ago.
    */
@@ -1652,10 +1652,10 @@ export class Store {
     return (q as { s: number }).s;
   }
 
-  eventsSince(runId: string, afterSeq: number, limit = 500): { seq: number; event: HarnessEvent }[] {
+  eventsSince(runId: string, afterSeq: number, limit = 500): { seq: number; event: CharretteEvent }[] {
     const rows = this.db
       .prepare("SELECT seq, payload FROM events WHERE runId = ? AND seq > ? ORDER BY seq LIMIT ?")
       .all(runId, afterSeq, limit) as { seq: number; payload: string }[];
-    return rows.map((r) => ({ seq: r.seq, event: JSON.parse(r.payload) as HarnessEvent }));
+    return rows.map((r) => ({ seq: r.seq, event: JSON.parse(r.payload) as CharretteEvent }));
   }
 }

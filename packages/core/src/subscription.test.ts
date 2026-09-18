@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SubscriptionConfig } from "@harness/shared";
+import { SubscriptionConfig } from "@charrette/shared";
 import {
   accountEnv,
   alternatives,
@@ -239,8 +239,8 @@ describe("the run parked on quota", () => {
   it("says what parked it and what un-parks it", () => {
     const paused = new SubscriptionPaused("96% of the weekly limit", "abc123");
     expect(paused.message).toMatch(/96% of the weekly limit/);
-    expect(paused.message).toMatch(/harness resume abc123 --account <name>/);
+    expect(paused.message).toMatch(/charrette resume abc123 --account <name>/);
     // Thrown without a run id by anything that has none to give.
-    expect(new SubscriptionPaused("96% of the weekly limit").message).not.toMatch(/harness resume/);
+    expect(new SubscriptionPaused("96% of the weekly limit").message).not.toMatch(/charrette resume/);
   });
 });

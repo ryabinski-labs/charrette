@@ -1,4 +1,4 @@
-import type { TaskState } from "@harness/shared";
+import type { TaskState } from "@charrette/shared";
 import { describe, expect, it } from "vitest";
 import { leverage, nextDispatch, pathsCollide, type Dispatchable } from "./dispatchOrder.js";
 
@@ -87,7 +87,7 @@ describe("what the scheduler starts next", () => {
 /**
  * 23 merge conflicts across 36 tasks in run 40da9337, each one two workers who
  * branched from the same commit and edited the same file. The planner had said
- * which files each task would touch since the first version of the harness; the
+ * which files each task would touch since the first version of the charrette; the
  * scheduler had never read it.
  */
 describe("two tasks reaching for the same file", () => {

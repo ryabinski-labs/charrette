@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { RunConfig } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
 import { describe, expect, it } from "vitest";
 import { Bus } from "./bus.js";
 import { GitHubAdapter } from "./github.js";
@@ -41,13 +41,13 @@ function spendingPool(store: Store, perCallUsd: number, outputs: string[]) {
 /** Planning is two calls: the documents, then the DAG. Both are on the ledger. */
 const DOCS = "<prd>\n# PRD\n</prd>\n<conventions>\nc\n</conventions>";
 
-function harness(opts: {
+function charrette(opts: {
   perCallUsd: number;
   runCapUsd: number;
   onBudget: (gate: BudgetGate) => Promise<number | null>;
   outputs?: string[];
 }) {
-  const repo = mkdtempSync(path.join(tmpdir(), "harness-budget-"));
+  const repo = mkdtempSync(path.join(tmpdir(), "charrette-budget-"));
   const store = new Store(":memory:");
   const bus = new Bus(store);
   const events: { type: string; [k: string]: unknown }[] = [];
@@ -78,7 +78,7 @@ function harness(opts: {
 describe("budget gate", () => {
   it("asks the operator instead of killing the run the moment a cap is reached", async () => {
     // $0.60 a call against a $1.00 cap: the third call is the one that trips it.
-    const h = harness({ perCallUsd: 0.6, runCapUsd: 1, onBudget: async () => 10 });
+    const h = charrette({ perCallUsd: 0.6, runCapUsd: 1, onBudget: async () => 10 });
     await h.controller.startRun("do a thing", h.config).catch(() => undefined);
 
     expect(h.seen).toHaveLength(1);
@@ -90,15 +90,15 @@ describe("budget gate", () => {
   });
 
   it("persists the raised cap so a resume does not trip on the old one", async () => {
-    const h = harness({ perCallUsd: 0.6, runCapUsd: 1, onBudget: async () => 10 });
+    const h = charrette({ perCallUsd: 0.6, runCapUsd: 1, onBudget: async () => 10 });
     await h.controller.startRun("do a thing", h.config).catch(() => undefined);
     expect(h.store.getRun(h.runId())!.config.budget.runCapUsd).toBe(10);
   });
 
   it("stops with a resumable message when the operator declines", async () => {
-    const h = harness({ perCallUsd: 0.6, runCapUsd: 1, onBudget: async () => null });
+    const h = charrette({ perCallUsd: 0.6, runCapUsd: 1, onBudget: async () => null });
     await expect(h.controller.startRun("do a thing", h.config)).rejects.toThrow(
-      /run budget exceeded: \$1\.20 >= \$1\.00 — run parked\. Raise the cap and pick it up with: harness resume/
+      /run budget exceeded: \$1\.20 >= \$1\.00 — run parked\. Raise the cap and pick it up with: charrette resume/
     );
     // The cap it declined to raise is still the cap on record.
     expect(h.store.getRun(h.runId())!.config.budget.runCapUsd).toBe(1);
@@ -106,7 +106,7 @@ describe("budget gate", () => {
 
   it("treats a new cap at or below what is already spent as a decline, not a loop", async () => {
     let asked = 0;
-    const h = harness({
+    const h = charrette({
       perCallUsd: 0.6,
       runCapUsd: 1,
       onBudget: async () => {
@@ -119,7 +119,7 @@ describe("budget gate", () => {
   });
 
   it("records the gate on the event stream so the dashboard and audit log see it", async () => {
-    const h = harness({ perCallUsd: 0.6, runCapUsd: 1, onBudget: async () => 10 });
+    const h = charrette({ perCallUsd: 0.6, runCapUsd: 1, onBudget: async () => 10 });
     await h.controller.startRun("do a thing", h.config).catch(() => undefined);
     const opened = h.events.find((e) => e.type === "run.gate_opened" && e.kind === "budget");
     const resolved = h.events.find((e) => e.type === "run.gate_resolved" && e.kind === "budget");
@@ -132,12 +132,12 @@ describe("budget gate", () => {
 describe("budget hold", () => {
   /** A repo the worktree manager can actually operate on. */
   function gitRepo(): string {
-    const repo = mkdtempSync(path.join(tmpdir(), "harness-hold-"));
+    const repo = mkdtempSync(path.join(tmpdir(), "charrette-hold-"));
     writeFileSync(path.join(repo, "README.md"), "# fixture\n");
     for (const args of [
       ["init", "-b", "main"],
-      ["config", "user.email", "harness@example.com"],
-      ["config", "user.name", "harness"],
+      ["config", "user.email", "charrette@example.com"],
+      ["config", "user.name", "charrette"],
       ["add", "-A"],
       ["commit", "-m", "init"],
     ]) {

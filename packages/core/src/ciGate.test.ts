@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { RunConfig } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
 import { describe, expect, it } from "vitest";
 import { Bus } from "./bus.js";
 import type { GitHubAdapter } from "./github.js";
@@ -36,13 +36,13 @@ const PASS = '{"verdict":"PASS","gaps":[],"summary":"delivers the assignment"}';
 const gitIn = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "ignore" });
 
 function repoWithOrigin(): string {
-  const origin = mkdtempSync(path.join(tmpdir(), "harness-ci-origin-"));
+  const origin = mkdtempSync(path.join(tmpdir(), "charrette-ci-origin-"));
   gitIn(origin, "init", "--bare", "-b", "release");
-  const repo = mkdtempSync(path.join(tmpdir(), "harness-ci-"));
+  const repo = mkdtempSync(path.join(tmpdir(), "charrette-ci-"));
   writeFileSync(path.join(repo, "README.md"), "# fixture\n");
   gitIn(repo, "init", "-b", "release");
-  gitIn(repo, "config", "user.email", "harness@example.com");
-  gitIn(repo, "config", "user.name", "harness");
+  gitIn(repo, "config", "user.email", "charrette@example.com");
+  gitIn(repo, "config", "user.name", "charrette");
   gitIn(repo, "add", "-A");
   gitIn(repo, "commit", "-m", "init");
   gitIn(repo, "remote", "add", "origin", origin);
@@ -489,7 +489,7 @@ describe("a failure that outlives its rounds", () => {
     expect(store.lastRunStateChange(runId)!.reason).toMatch(/^green hold: CI is red on #7/);
     expect(store.ciStatus(runId)).toMatchObject({ state: "failing" });
     expect(controller.outcome(runId).line).toContain("CI red (Backend test)");
-    expect(logs.join("\n")).toMatch(/no pit stop can grant more here, so the run is pausing. `harness resume` grants another 2/);
+    expect(logs.join("\n")).toMatch(/no pit stop can grant more here, so the run is pausing. `charrette resume` grants another 2/);
   });
 
   it("stops treating it as its own work and leaves the verdict on the record, with the hold off", async () => {
@@ -799,7 +799,7 @@ describe("a resume onto a branch whose CI moved while the run was parked", () =>
     // The recheck itself must be visible while it runs: PR_REVIEW is the one
     // working moment the dashboard's listOpenRuns cannot see, so the resume
     // wears INTEGRATING for the wait and hands PR_REVIEW back afterwards.
-    // Without this, `harness resume` against run 5743ce85 showed a dashboard
+    // Without this, `charrette resume` against run 5743ce85 showed a dashboard
     // that said "no active runs" while twelve checks were being re-asked.
     const states = store
       .eventsSince(runId, 0, 10_000)
@@ -838,7 +838,7 @@ describe("the run that reports whatever the repo said, with the hold off", () =>
   it("parks the run when the operator says stop, and does not blame the hold for it", async () => {
     // The same stop, without the hold: the run was stopped at a pit stop, and
     // the reason says exactly that rather than naming a gate that is switched
-    // off. `harness resume` must not read it back as a grant.
+    // off. `charrette resume` must not read it back as a grant.
     const repo = repoWithOrigin();
     const { adapter } = fakeGitHub([{ state: "failing", failing: ["Backend test"], total: 1 }]);
     const stop = spentStop();
@@ -871,7 +871,7 @@ describe("the run that reports whatever the repo said, with the hold off", () =>
 describe("a branch that went red after the run stood down", () => {
   it("asks GitHub again before trusting the pass on the record, and turns the red into work", async () => {
     // What the operator found on #527: the run in PR_REVIEW with "CI green"
-    // on the record, `test` red on GitHub, and `harness resume` answering that
+    // on the record, `test` red on GitHub, and `charrette resume` answering that
     // there was nothing to resume — because the only thing anyone consulted
     // was the record. The record is a snapshot; the pull request is live.
     const repo = repoWithOrigin();
@@ -905,7 +905,7 @@ describe("a branch that went red after the run stood down", () => {
   });
 
   it("holds the fresh reading to the checks the record saw on the same commit, so a resume inside a re-run's gap waits rather than believing it", async () => {
-    // The same three seconds as the re-run tests above, met by `harness
+    // The same three seconds as the re-run tests above, met by `charrette
     // resume` instead of by the wait: the operator re-runs `test` by hand and
     // resumes at once. The one reading the refresh takes is the short one, and
     // read as a pass it would say "nothing to resume" over a job that is about
@@ -941,7 +941,7 @@ describe("a branch that went red after the run stood down", () => {
   });
 
   it("asks about a run that never waited for CI, once the wait is switched on for its resume", async () => {
-    // `harness resume` patches `waitForChecks` from the config file before
+    // `charrette resume` patches `waitForChecks` from the config file before
     // resuming, which is how a run recorded with the wait off comes to be
     // asked: it is in review, its pull request is open, and nothing is on the
     // record at all.

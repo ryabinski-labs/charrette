@@ -15,7 +15,7 @@ import path from "node:path";
  * said the request was refused, so the retry told the planner to *write less* —
  * advice that would have been right if the plan were genuinely too big and was
  * wrong here. The second time was worse: the truncated turn was followed by the
- * harness's own wrap-up message, which the API refuses to accept after a
+ * charrette's own wrap-up message, which the API refuses to accept after a
  * `max_tokens` stop, and the 400 took the whole run down (see the `max_tokens`
  * branch in `pool.run`).
  *
@@ -39,7 +39,7 @@ import path from "node:path";
  *
  * ## Why this warns rather than refuses to start
  *
- * The harness already survives the clamp — planning is split in two precisely so
+ * The charrette already survives the clamp — planning is split in two precisely so
  * that no single message has to carry a whole plan (see `plan`). Halting a run
  * over a ceiling the run is built to work under would turn a recoverable
  * condition into an outage for every operator on an SDK that predates their
@@ -64,7 +64,7 @@ export interface CeilingTable {
  * What the installed SDK will grant one model — or why that is not known.
  *
  * The two unknowns are kept apart because they call for opposite advice. An
- * unreadable table is the harness's problem and the operator can do nothing
+ * unreadable table is the charrette's problem and the operator can do nothing
  * about it, so it says nothing. A model the table does not list is the
  * operator's problem and entirely fixable: upgrade the SDK.
  */
@@ -145,7 +145,7 @@ export function modelCeiling(table: CeilingTable | undefined, model: string): Ce
 let cached: Promise<CeilingTable | undefined> | undefined;
 
 /**
- * Where the SDK's bundle lives. It is the entry point the harness already
+ * Where the SDK's bundle lives. It is the entry point the charrette already
  * imports: through 0.1.x the registry sat in a sibling `cli.js`, and from 0.2
  * the entry itself carries it.
  */
@@ -160,7 +160,7 @@ function bundlePath(): string {
  * From 0.3.25x the entry bundle is a thin bridge and the model table moved
  * into the platform binary (`@anthropic-ai/claude-agent-sdk-darwin-arm64`
  * and its siblings), which is the Claude Code build the sessions actually run
- * on. It is resolved from the SDK's own directory rather than the harness's,
+ * on. It is resolved from the SDK's own directory rather than the charrette's,
  * so a pnpm layout that hoists nothing still finds the copy the SDK uses.
  */
 function binaryPath(): string {
@@ -174,7 +174,7 @@ function binaryPath(): string {
  * Code binary every agent session is spawned from, and the manifest that says
  * how big it ought to be.
  *
- * Exported for `harness version`, which reports whether they are actually
+ * Exported for `charrette version`, which reports whether they are actually
  * there. The platform package is an `optionalDependencies` entry, and a failed
  * fetch of one is not an install error — run de2cb7aa was resumed onto a
  * 0-byte package behind a valid-looking symlink, with pnpm recording the
@@ -190,7 +190,7 @@ export function agentBinaryFiles(): { binary: string; manifest: string } {
 /**
  * What the SDK's CLI binary is called. Only Windows differs, and only one
  * platform's binary package is ever installed — so this is a rule about a
- * machine the harness may run on tomorrow, not one it can resolve today.
+ * machine the charrette may run on tomorrow, not one it can resolve today.
  */
 export function binaryName(platform: string): string {
   return platform === "win32" ? "claude.exe" : "claude";
@@ -243,10 +243,10 @@ export async function installedCeilingTable(
 /**
  * The installed SDK's ceiling for one model.
  *
- * The registry does not change while the harness runs, so it is read once per
+ * The registry does not change while the charrette runs, so it is read once per
  * process. Never throws: an SDK that cannot be resolved, read, or parsed
  * produces no opinion. `load` is the seam tests use to hand in a bundle; the
- * harness itself reads whatever the installed SDK keeps.
+ * charrette itself reads whatever the installed SDK keeps.
  */
 export async function sdkCeiling(model: string, load?: () => Promise<string>): Promise<CeilingReading> {
   cached ??= (load ? load().then(ceilingTable) : installedCeilingTable()).catch(() => undefined);
@@ -259,9 +259,9 @@ export function forgetCeilingTable(): void {
 }
 
 /**
- * How much output the harness may plan around: what it asked for, or the model's
+ * How much output the charrette may plan around: what it asked for, or the model's
  * ceiling when that is lower. A ceiling that could not be read means taking the
- * request at face value, which is what the harness did before it could read one.
+ * request at face value, which is what the charrette did before it could read one.
  */
 export function grantedTokens(reading: CeilingReading, asked: number): number {
   return reading.known ? Math.min(reading.upper, asked) : asked;

@@ -43,8 +43,8 @@ export interface PrRef {
   fresh?: boolean;
 }
 
-/** Stamped on every comment the harness writes, so it never reads its own back. */
-const HARNESS_COMMENT_MARKER = "<!-- harness-comment -->";
+/** Stamped on every comment the charrette writes, so it never reads its own back. */
+const CHARRETTE_COMMENT_MARKER = "<!-- charrette-comment -->";
 
 /** An issue or pull request as the operator would read it, thread included. */
 export interface IssueRead {
@@ -80,7 +80,7 @@ const THREAD_BUDGET_CHARS = 40_000;
 /**
  * GitHub adapter (PRD §11.1): the only module that talks to GitHub. Every write is
  * idempotent via a deterministic marker in the body, so crash-replays never duplicate.
- * When no token/repo is configured the harness runs local-only and all methods no-op.
+ * When no token/repo is configured the charrette runs local-only and all methods no-op.
  *
  * Idempotency deliberately avoids the search API. Search is eventually consistent —
  * an issue created seconds ago is not indexed yet — so a replay during that window
@@ -124,12 +124,12 @@ export class GitHubAdapter {
   }
 
   private marker(runId: string, id: string): string {
-    return `<!-- harness-run:${runId}/${id} -->`;
+    return `<!-- charrette-run:${runId}/${id} -->`;
   }
 
   /** Scopes every issue a run files, so they can be listed back exactly. */
   private runLabel(runId: string): string {
-    return `harness-run:${runId}`;
+    return `charrette-run:${runId}`;
   }
 
   /** Load this run's already-filed issues once, keyed by their body marker. */
@@ -148,7 +148,7 @@ export class GitHubAdapter {
     for (const item of items) {
       // listForRepo returns pull requests too; they are not issues we filed.
       if (item.pull_request) continue;
-      const m = /<!-- harness-run:[^/]+\/([^ ]+) -->/.exec(item.body ?? "");
+      const m = /<!-- charrette-run:[^/]+\/([^ ]+) -->/.exec(item.body ?? "");
       if (m) found.set(this.marker(runId, m[1]!), { number: item.number, url: item.html_url });
     }
     this.issueCache.set(runId, found);
@@ -177,13 +177,13 @@ export class GitHubAdapter {
   }
 
   /**
-   * Every comment on an issue the harness filed, oldest first.
+   * Every comment on an issue the charrette filed, oldest first.
    *
-   * The harness used to write issues and never read them, so an operator who
+   * The charrette used to write issues and never read them, so an operator who
    * answered a stuck task in its issue thread — the most natural place to
    * answer it — was talking to nobody. This is the read half.
    *
-   * Comments the harness wrote itself are excluded by id, not by author: the
+   * Comments the charrette wrote itself are excluded by id, not by author: the
    * token may well be the operator's own, and dropping everything that account
    * said would drop exactly the words we came for.
    */
@@ -193,7 +193,7 @@ export class GitHubAdapter {
       .paginate(this.octokit.rest.issues.listComments, { owner: this.owner, repo: this.repo, issue_number: issueNumber, per_page: 100 })
       .catch(() => []);
     return items
-      .filter((c) => !(c.body ?? "").includes(HARNESS_COMMENT_MARKER))
+      .filter((c) => !(c.body ?? "").includes(CHARRETTE_COMMENT_MARKER))
       .map((c) => ({ id: c.id, author: c.user?.login ?? "someone", body: (c.body ?? "").trim() }))
       .filter((c) => c.body.length > 0);
   }
@@ -202,12 +202,12 @@ export class GitHubAdapter {
    * Read any issue or pull request — this repo's or another one the token can
    * see — as title, body, labels and thread.
    *
-   * The harness wrote to GitHub from the beginning and only ever read back the
+   * The charrette wrote to GitHub from the beginning and only ever read back the
    * threads it started itself. But an operator's opening sentence is routinely
    * "implement ryabinski-labs/agentdraft#480": the specification is already
    * written, on GitHub, and this process is holding a token that can fetch it.
    * With no tool for it the intake agent had one move left — ask the operator to
-   * paste the issue back at it — which is a strange thing for a harness that
+   * paste the issue back at it — which is a strange thing for a charrette that
    * files issues to be doing.
    *
    * `null` when GitHub is not configured, or the issue does not exist, or the
@@ -265,8 +265,8 @@ export class GitHubAdapter {
       for await (const { data } of pages) {
         for (const c of data) {
           seen++;
-          // The harness's own status comments are not part of the specification.
-          if ((c.body ?? "").includes(HARNESS_COMMENT_MARKER)) continue;
+          // The charrette's own status comments are not part of the specification.
+          if ((c.body ?? "").includes(CHARRETTE_COMMENT_MARKER)) continue;
           const body = (c.body ?? "").trim();
           if (!body) continue;
           if (chars + body.length > THREAD_BUDGET_CHARS) {
@@ -287,10 +287,10 @@ export class GitHubAdapter {
   /**
    * Write a status comment on an issue, once per `key`.
    *
-   * Keyed rather than unconditional because every status the harness has to say
+   * Keyed rather than unconditional because every status the charrette has to say
    * is replayable: a resumed run re-walks the same terminal states, and an issue
    * that collects "merged" three times is noise an operator has to read past.
-   * The harness marker goes on too, so `issueComments` never reads this back as
+   * The charrette marker goes on too, so `issueComments` never reads this back as
    * an operator answer — the run would otherwise take its own status update as
    * guidance and hand it to the next worker.
    *
@@ -298,7 +298,7 @@ export class GitHubAdapter {
    */
   async commentOnIssue(issueNumber: number, key: string, body: string): Promise<boolean> {
     if (!this.octokit) return false;
-    const marker = `<!-- harness-status:${key} -->`;
+    const marker = `<!-- charrette-status:${key} -->`;
     const existing = await this.octokit
       .paginate(this.octokit.rest.issues.listComments, { owner: this.owner, repo: this.repo, issue_number: issueNumber, per_page: 100 })
       .catch(() => []);
@@ -307,7 +307,7 @@ export class GitHubAdapter {
       owner: this.owner,
       repo: this.repo,
       issue_number: issueNumber,
-      body: `${body}\n\n${HARNESS_COMMENT_MARKER}\n${marker}`,
+      body: `${body}\n\n${CHARRETTE_COMMENT_MARKER}\n${marker}`,
     });
     return true;
   }
@@ -633,9 +633,9 @@ export class GitHubAdapter {
    * but the base has moved since the branch was cut and a protection rule that
    * requires branches to be up to date will refuse the merge button. It used to
    * read as mergeable here, which is true of the diff and false of the pull
-   * request. It is its own state because the remedy is the harness's own base
+   * request. It is its own state because the remedy is the charrette's own base
    * merge, not a person's. Every other `mergeable_state` a true `mergeable`
-   * can carry — `clean`, `blocked` (a review this harness will never give),
+   * can carry — `clean`, `blocked` (a review this charrette will never give),
    * `unstable`, `has_hooks` — is mergeable for this purpose.
    *
    * `null` means GitHub is off or the pull request could not be read, which is
@@ -704,7 +704,7 @@ export class GitHubAdapter {
     const evidence = { successful, ...(unavailable ? { unavailable: true } : {}) };
     if (!total) return { state: "none", failing: [], total: 0, names, sha: ref, ...evidence };
     // A failure with other checks still pending is not yet the whole answer —
-    // only report "failing" once nothing is left running. web-app run 428d77f8
+    // only report "failing" once nothing is left running. The shared runner run 428d77f8
     // reported "CI is red: Frontend" the moment that one job failed, while
     // Backend/E2E/Android hadn't even started on the repo's single, serialized
     // self-hosted runner; they went on to fail too, minutes later, and the
@@ -728,7 +728,7 @@ export class GitHubAdapter {
     if (!this.octokit) return false;
     const { data } = await this.octokit.rest.pulls.get({ owner: this.owner, repo: this.repo, pull_number: prNumber });
     if (data.state !== "open") return false;
-    await this.octokit.rest.issues.createComment({ owner: this.owner, repo: this.repo, issue_number: prNumber, body: `${comment}\n\n${HARNESS_COMMENT_MARKER}` });
+    await this.octokit.rest.issues.createComment({ owner: this.owner, repo: this.repo, issue_number: prNumber, body: `${comment}\n\n${CHARRETTE_COMMENT_MARKER}` });
     await this.octokit.rest.pulls.update({ owner: this.owner, repo: this.repo, pull_number: prNumber, state: "closed" });
     return true;
   }
@@ -789,7 +789,7 @@ export const MAX_PR_BODY = 65_536;
  */
 export function fitPrBody(body: string, runId: string, limit = MAX_PR_BODY): string {
   if (body.length <= limit) return body;
-  const notice = `\n\n…truncated: this body hit GitHub's 65,536-character limit. The full list is in \`.harness/${runId}/REPORT.md\`.`;
+  const notice = `\n\n…truncated: this body hit GitHub's 65,536-character limit. The full list is in \`.charrette/${runId}/REPORT.md\`.`;
   const head = body.slice(0, Math.max(0, limit - notice.length));
   const nl = head.lastIndexOf("\n");
   return `${nl > 0 ? head.slice(0, nl) : head}${notice}`;

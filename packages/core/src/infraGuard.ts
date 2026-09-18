@@ -6,7 +6,7 @@ import { MAX_NESTING, invocation, rawTokens, segments, stripHeredocBodies, strip
  *
  * Agents run with `permissionMode: "bypassPermissions"` — there is no prompt
  * between a command an agent writes and the machine running it. Every guardrail
- * the harness has around cloud tooling has until now been prose in a system
+ * the charrette has around cloud tooling has until now been prose in a system
  * prompt ("READ ONLY", "NEVER `apply`"), which is a request, not a control. For
  * application code that is an acceptable trade: the blast radius is a worktree,
  * and the integration branch is reviewed before anything reaches the operator.
@@ -15,7 +15,7 @@ import { MAX_NESTING, invocation, rawTokens, segments, stripHeredocBodies, strip
  * cluster cannot be reverted by parking a task.
  *
  * So the rule that already appears in every infra prompt is enforced here, at
- * the one chokepoint that sees every Bash command an agent runs. The harness
+ * the one chokepoint that sees every Bash command an agent runs. The charrette
  * produces reviewed configuration; a human applies it. `terraform plan`,
  * `cdk synth`, `helm template` and `kubectl --dry-run=server` are how the work
  * gets verified, and none of them are blocked.
@@ -23,10 +23,10 @@ import { MAX_NESTING, invocation, rawTokens, segments, stripHeredocBodies, strip
  * A denial is not a dead end. The agent is told what was blocked, why, and which
  * verb to use instead, so the usual outcome is that it re-runs a `plan` and
  * carries on. There is deliberately no run-config knob to switch this off: the
- * operator's decision was that the harness produces reviewed configuration and
+ * operator's decision was that the charrette produces reviewed configuration and
  * never provisions, and a flag that turns a safety control off is a flag an
  * agent's task spec can talk somebody into setting. The `allow` parameter below
- * exists so the seam is testable, and is never passed by the harness.
+ * exists so the seam is testable, and is never passed by the charrette.
  *
  * Conservative by construction: an unrecognised command is always allowed — this
  * denies a known-dangerous list rather than permitting a known-safe one. What it
@@ -200,7 +200,7 @@ export function infraMutation(command: string, depth = 0): { what: string; inste
 
 /** The refusal an agent reads — what was blocked, why, and what to run instead. */
 export function denialReason(m: { what: string; instead: string }): string {
-  return `Blocked: ${m.what} changes real infrastructure, and this harness produces reviewed configuration rather than provisioned resources — an apply cannot be reviewed after the fact, only undone. Run ${m.instead} instead; that is what verifies this work and it is not blocked. If the task genuinely cannot be completed without provisioning, do not try to work around this: say so plainly in your final summary and stop, so the operator can decide.`;
+  return `Blocked: ${m.what} changes real infrastructure, and this charrette produces reviewed configuration rather than provisioned resources — an apply cannot be reviewed after the fact, only undone. Run ${m.instead} instead; that is what verifies this work and it is not blocked. If the task genuinely cannot be completed without provisioning, do not try to work around this: say so plainly in your final summary and stop, so the operator can decide.`;
 }
 
 /**

@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { RunConfig, type HarnessEvent } from "@harness/shared";
+import { RunConfig, type CharretteEvent } from "@charrette/shared";
 import { describe, expect, it } from "vitest";
 import { Bus } from "./bus.js";
 import type { GitHubAdapter } from "./github.js";
@@ -33,11 +33,11 @@ const DAG =
 const gitIn = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "ignore" });
 
 function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-skills-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-skills-"));
   writeFileSync(path.join(dir, "README.md"), "# fixture\n");
   gitIn(dir, "init", "-b", "main");
-  gitIn(dir, "config", "user.email", "harness@example.com");
-  gitIn(dir, "config", "user.name", "harness");
+  gitIn(dir, "config", "user.email", "charrette@example.com");
+  gitIn(dir, "config", "user.name", "charrette");
   gitIn(dir, "add", "-A");
   gitIn(dir, "commit", "-m", "init");
   return dir;
@@ -106,7 +106,7 @@ describe("role-aware skill injection", () => {
     expect(workerSystem).not.toContain("branding-manager");
 
     // The QA session carries a testing playbook even though the task spec
-    // never mentions testing — the harness is opinionated about review.
+    // never mentions testing — the charrette is opinionated about review.
     const qaSystem = byRole.qa![0]!.systemPrompt!;
     expect(qaSystem).toContain('<skill name="qa-playbook"');
     expect(qaSystem).not.toContain("branding-manager");
@@ -128,7 +128,7 @@ describe("role-aware skill injection", () => {
 /**
  * Scoring cannot be trusted to find these — measured against a real corpus, the
  * top lexical match for a sanctions task was `testimonial-collector` — so the
- * operator names them and the harness obeys.
+ * operator names them and the charrette obeys.
  */
 describe("skill routing", () => {
   const routedDag = (title: string, spec: string) =>
@@ -150,7 +150,7 @@ describe("skill routing", () => {
     "branding-manager",
     "online-sales-specialist",
     "persona-panel",
-    "dns-project-iac-engineer",
+    "dns-iac-engineer",
     "fullstack-app",
     "visual-qa-agent",
     "github-pipeline-expert",
@@ -233,8 +233,8 @@ describe("skill routing", () => {
    * dropped at the cap.
    */
   it("routes DNS work to the DNS engineer even when the task reads as infrastructure", async () => {
-    const system = await inject("Migrate DNS to dns-project", "Update the Terraform infrastructure for cert-manager DNS-01 issuers and the ACME solver");
-    expect(system).toContain('<skill name="dns-project-iac-engineer"');
+    const system = await inject("Migrate DNS to a managed provider", "Update the Terraform infrastructure for cert-manager DNS-01 issuers and the ACME solver");
+    expect(system).toContain('<skill name="dns-iac-engineer"');
     // Four slots, five matching skills: the architecture rule's last one gives way.
     expect(system).not.toContain('<skill name="frontend-design"');
   }, 30_000);
@@ -408,7 +408,7 @@ describe("a roleSkills pin this machine cannot honour", () => {
     const { pool } = recordingPool();
     const store = new Store(":memory:");
     const bus = new Bus(store);
-    const seen: HarnessEvent[] = [];
+    const seen: CharretteEvent[] = [];
     bus.subscribe(({ event }) => void seen.push(event));
     const controller = new RunController(store, bus, pool, noGithub, approveAll, repo());
 
@@ -436,7 +436,7 @@ describe("a roleSkills pin this machine cannot honour", () => {
     const { pool } = recordingPool();
     const store = new Store(":memory:");
     const bus = new Bus(store);
-    const seen: HarnessEvent[] = [];
+    const seen: CharretteEvent[] = [];
     bus.subscribe(({ event }) => void seen.push(event));
     const controller = new RunController(store, bus, pool, noGithub, approveAll, repo());
 
@@ -453,7 +453,7 @@ describe("a roleSkills pin this machine cannot honour", () => {
     const { pool } = recordingPool();
     const store = new Store(":memory:");
     const bus = new Bus(store);
-    const seen: HarnessEvent[] = [];
+    const seen: CharretteEvent[] = [];
     bus.subscribe(({ event }) => void seen.push(event));
     const dir = skillsDir();
     mkdirSync(path.join(dir, "product-manager"));

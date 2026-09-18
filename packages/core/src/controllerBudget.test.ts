@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { RunConfig } from "@harness/shared";
-import type { HarnessEvent } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
+import type { CharretteEvent } from "@charrette/shared";
 import type { BudgetGate } from "./runController.js";
 import { Bus } from "./bus.js";
 import { GitHubAdapter } from "./github.js";
@@ -27,7 +27,7 @@ afterEach(() => {
 });
 
 function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-budget-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-budget-"));
   made.push(dir, `${dir}-wt`);
   const run = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
   run("init", "-b", "main");
@@ -100,7 +100,7 @@ function build(opts: {
 }) {
   const store = new Store(":memory:");
   const bus = new Bus(store);
-  const events: HarnessEvent[] = [];
+  const events: CharretteEvent[] = [];
   bus.subscribe(({ event }) => void events.push(event));
   const gates: GateHandler = {
     async resolvePlanGate() {
@@ -140,10 +140,10 @@ describe("reaching the run's cap", () => {
 
     await expect(
       controller.startRun("build a thing", RunConfig.parse({ deterministicChecks: [], budget: { runCapUsd: 30 } }))
-    ).rejects.toThrow(/run budget exceeded[\s\S]*harness resume/);
+    ).rejects.toThrow(/run budget exceeded[\s\S]*charrette resume/);
 
     expect(asked[0]).toMatchObject({ capUsd: 30 });
-    const resolutions = events.filter((e): e is HarnessEvent & { resolution?: string } => e.type === "run.gate_resolved");
+    const resolutions = events.filter((e): e is CharretteEvent & { resolution?: string } => e.type === "run.gate_resolved");
     expect(resolutions[0]!.resolution).toBe("rejected");
   });
 
@@ -173,7 +173,7 @@ describe("reaching the run's cap", () => {
     expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
     expect(store.getRun(runId)!.config.budget.runCapUsd).toBeGreaterThan(30);
     expect(events.some((e) => e.type === "run.budget_updated")).toBe(true);
-    const resolutions = events.filter((e): e is HarnessEvent & { resolution?: string } => e.type === "run.gate_resolved");
+    const resolutions = events.filter((e): e is CharretteEvent & { resolution?: string } => e.type === "run.gate_resolved");
     expect(resolutions[0]!.resolution).toBe("approved");
   });
 
@@ -222,7 +222,7 @@ describe("reopening a run the operator parked", () => {
 
     // A second controller over the same store: the operator has come back.
     const bus = new Bus(first.store);
-    const events: HarnessEvent[] = [];
+    const events: CharretteEvent[] = [];
     bus.subscribe(({ event }) => void events.push(event));
     const controller = new RunController(
       first.store,
@@ -272,7 +272,7 @@ describe("reopening a run the operator parked", () => {
     execFileSync("git", ["add", "-A"], { cwd: wt, stdio: "ignore" });
     execFileSync("git", ["-c", "user.email=w@e.invalid", "-c", "user.name=W", "commit", "-m", "late work"], { cwd: wt, stdio: "ignore" });
     const merge = path.join(`${dir}-wt`, runId, "__integration__");
-    execFileSync("git", ["-c", "user.email=i@e.invalid", "-c", "user.name=I", "merge", "--no-ff", "--no-edit", `harness/${runId}/task-b`], { cwd: merge, stdio: "ignore" });
+    execFileSync("git", ["-c", "user.email=i@e.invalid", "-c", "user.name=I", "merge", "--no-ff", "--no-edit", `charrette/${runId}/task-b`], { cwd: merge, stdio: "ignore" });
 
     await controller.resume(runId);
 
@@ -295,9 +295,9 @@ describe("reopening a run the operator parked", () => {
     execFileSync("git", ["add", "-A"], { cwd: wt, stdio: "ignore" });
     execFileSync("git", ["-c", "user.email=w@e.invalid", "-c", "user.name=W", "commit", "-m", "late work"], { cwd: wt, stdio: "ignore" });
     const merge = path.join(`${dir}-wt`, runId, "__integration__");
-    execFileSync("git", ["-c", "user.email=i@e.invalid", "-c", "user.name=I", "merge", "--no-ff", "--no-edit", `harness/${runId}/task-b`], { cwd: merge, stdio: "ignore" });
+    execFileSync("git", ["-c", "user.email=i@e.invalid", "-c", "user.name=I", "merge", "--no-ff", "--no-edit", `charrette/${runId}/task-b`], { cwd: merge, stdio: "ignore" });
     // Where a run whose process died sits: still executing, nobody driving it.
-    store.transitionRun(runId, "EXECUTING", "the previous harness process died");
+    store.transitionRun(runId, "EXECUTING", "the previous charrette process died");
 
     await controller.resume(runId);
 

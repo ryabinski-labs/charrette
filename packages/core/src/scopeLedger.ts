@@ -1,9 +1,9 @@
-import { type RunSpec, type SpecRequirement, type TaskState } from "@harness/shared";
+import { type RunSpec, type SpecRequirement, type TaskState } from "@charrette/shared";
 
 /**
  * Which of the promises the brief made are still standing at the end of a run.
  *
- * waf cancelled 177 tasks against 377 merged — 32% of everything it ever
+ * rust-service cancelled 177 tasks against 377 merged — 32% of everything it ever
  * planned. 138 were replaced at a pit-stop re-plan, 47 died as `unreachable:
  * dependencies parked`, 35 were superseded when the plan was rewritten. Every
  * one of those transitions is legitimate and none of them leaves anything

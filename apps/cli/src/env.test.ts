@@ -9,18 +9,18 @@ import { loadDotEnv } from "./env.js";
  *
  * Worth real coverage rather than a smoke test, because the failure it prevents
  * is the one an operator cannot diagnose: the key is *written down*, in the file
- * every other tool reads, and the harness says it is not set.
+ * every other tool reads, and the charrette says it is not set.
  */
 
 function tempDir(): { dir: string; cleanup: () => void } {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-env-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-env-"));
   return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 describe("loading .env from the working directory", () => {
   it("puts a key nobody exported into the environment", () => {
     const { dir, cleanup } = tempDir();
-    writeFileSync(path.join(dir, ".env"), "HARNESS_TEST_GEMINI=from_file\n");
+    writeFileSync(path.join(dir, ".env"), "CHARRETTE_TEST_GEMINI=from_file\n");
     const seen: Record<string, string> = {};
 
     // The real loader writes to the live process.env; the fake records what it
@@ -38,26 +38,26 @@ describe("loading .env from the working directory", () => {
     // The test above proves the path; this one proves the wiring, using the
     // real `process.loadEnvFile` rather than a stand-in.
     const { dir, cleanup } = tempDir();
-    writeFileSync(path.join(dir, ".env"), "HARNESS_TEST_ONLY_KEY=lives\n");
+    writeFileSync(path.join(dir, ".env"), "CHARRETTE_TEST_ONLY_KEY=lives\n");
 
     expect(loadDotEnv(dir)).toBe(path.join(dir, ".env"));
-    expect(process.env.HARNESS_TEST_ONLY_KEY).toBe("lives");
+    expect(process.env.CHARRETTE_TEST_ONLY_KEY).toBe("lives");
 
-    delete process.env.HARNESS_TEST_ONLY_KEY;
+    delete process.env.CHARRETTE_TEST_ONLY_KEY;
     cleanup();
   });
 
   it("lets an exported variable win over the file", () => {
-    // `GEMINI_API_KEY=… harness run` has to stay a working one-off override of
+    // `GEMINI_API_KEY=… charrette run` has to stay a working one-off override of
     // whatever the project committed.
     const { dir, cleanup } = tempDir();
-    writeFileSync(path.join(dir, ".env"), "HARNESS_TEST_PRECEDENCE=from_file\n");
-    process.env.HARNESS_TEST_PRECEDENCE = "from_shell";
+    writeFileSync(path.join(dir, ".env"), "CHARRETTE_TEST_PRECEDENCE=from_file\n");
+    process.env.CHARRETTE_TEST_PRECEDENCE = "from_shell";
 
     loadDotEnv(dir);
 
-    expect(process.env.HARNESS_TEST_PRECEDENCE).toBe("from_shell");
-    delete process.env.HARNESS_TEST_PRECEDENCE;
+    expect(process.env.CHARRETTE_TEST_PRECEDENCE).toBe("from_shell");
+    delete process.env.CHARRETTE_TEST_PRECEDENCE;
     cleanup();
   });
 

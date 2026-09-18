@@ -27,7 +27,7 @@ export const RunbookShape = z.object({
 });
 export type Runbook = z.infer<typeof RunbookShape>;
 
-export const HarnessEvent = z.discriminatedUnion("type", [
+export const CharretteEvent = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("run.release_evidence"), ...ReleaseEvidence.shape }),
   z.object({ ...base, type: z.literal("run.created"), assignment: z.string(), repoPath: z.string() }),
   z.object({ ...base, type: z.literal("run.state_changed"), from: RunState, to: RunState, reason: z.string().default("") }),
@@ -198,7 +198,7 @@ export const HarnessEvent = z.discriminatedUnion("type", [
    * PASS, FAIL, or UNKNOWN. The third answer is for what the turn budget did
    * not reach: a validator with no way to abstain resolves "I ran out of turns"
    * as a PASS with the unchecked items listed underneath, where nothing reads
-   * them — waf de2cb7aa closed on exactly that verdict. `unchecked` is what an
+   * them — rust-service de2cb7aa closed on exactly that verdict. `unchecked` is what an
    * UNKNOWN could not settle, in the validator's words.
    */
   z.object({
@@ -223,7 +223,7 @@ export const HarnessEvent = z.discriminatedUnion("type", [
    * had no way to record.
    *
    * A validator that cannot evidence an answer and says so in prose is behaving
-   * correctly; it was the harness that had nowhere to put "I could not tell".
+   * correctly; it was the charrette that had nowhere to put "I could not tell".
    * So the parse error was swallowed as a log line and `intentVerdict` went on
    * returning the last verdict that *did* parse, which is how ledger-app
    * a8df0107 closed with "intent check found 2 gaps" — the fifth pass's answer,
@@ -276,10 +276,10 @@ export const HarnessEvent = z.discriminatedUnion("type", [
    *
    * The sibling of `run.ci_status`, for the half of "is this branch shippable"
    * that CI cannot see. A green check on a branch whose base moved underneath it
-   * is still a branch nobody can merge, and the harness used to report exactly
+   * is still a branch nobody can merge, and the charrette used to report exactly
    * that as a finished run.
    *
-   * `conflicts` carries the files when the harness found them itself, merging
+   * `conflicts` carries the files when the charrette found them itself, merging
    * the base into the integration branch. It is empty when the verdict came from
    * GitHub, which reports mergeability without saying where it broke.
    */
@@ -289,7 +289,7 @@ export const HarnessEvent = z.discriminatedUnion("type", [
     prNumber: z.number().int().default(0),
     // "behind": no conflict, but the base moved and a protection rule can
     // refuse the merge until the branch is brought up to date — which is the
-    // harness's own base merge, so the green hold reconciles and re-asks.
+    // charrette's own base merge, so the green hold reconciles and re-asks.
     state: z.enum(["mergeable", "conflicting", "behind", "unknown"]),
     baseBranch: z.string().default(""),
     conflicts: z.array(z.string()).default([]),
@@ -421,7 +421,7 @@ export const HarnessEvent = z.discriminatedUnion("type", [
    * A requirement the brief named that this run will not deliver, and the
    * answer that made that a decision rather than an omission.
    *
-   * waf cancelled 177 tasks against 377 merged and carried none of their
+   * rust-service cancelled 177 tasks against 377 merged and carried none of their
    * requirements anywhere: they stopped existing and reappeared as sections of
    * a 118 KB gaps file. A write-off is the same outcome with a person's answer
    * attached, and the difference is the whole of issue #120.
@@ -549,11 +549,11 @@ export const HarnessEvent = z.discriminatedUnion("type", [
   // event log answers "was the run specified against the standard?" without
   // anyone having to remember what was installed that day.
   z.object({ ...base, type: z.literal("skills.unresolved"), role: z.string(), skill: z.string(), reason: z.enum(["missing", "changed"]) }),
-  // A skill the harness wrote for itself because nothing in the operator's
+  // A skill the charrette wrote for itself because nothing in the operator's
   // collection matched a task (skillForge.ts). The event is the provenance
   // trail SEC-14 asks for: the file on disk says what the skill claims, this
   // says which run and task put it there and what it hashed to at birth.
   z.object({ ...base, type: z.literal("skills.forged"), taskId: z.string(), name: z.string(), sha256: z.string(), path: z.string(), action: z.enum(["created", "extended"]), tokensApprox: z.number().int() }),
 ]);
-export type HarnessEvent = z.infer<typeof HarnessEvent>;
-export type HarnessEventType = HarnessEvent["type"];
+export type CharretteEvent = z.infer<typeof CharretteEvent>;
+export type CharretteEventType = CharretteEvent["type"];

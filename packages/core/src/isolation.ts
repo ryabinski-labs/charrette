@@ -70,7 +70,7 @@ export interface TaskIsolation {
 export function taskIsolation(runId: string, taskId: string): TaskIsolation {
   const portBase = PORT_RANGE_START + (hash(`${runId}/${taskId}`) % PORT_SLOTS) * PORTS_PER_TASK;
   return {
-    composeProject: `harness-${slug(taskId)}-${(hash(runId) % 0xffff).toString(16).padStart(4, "0")}`,
+    composeProject: `charrette-${slug(taskId)}-${(hash(runId) % 0xffff).toString(16).padStart(4, "0")}`,
     portBase,
     portEnd: portBase + PORTS_PER_TASK - 1,
   };
@@ -80,8 +80,8 @@ export function taskIsolation(runId: string, taskId: string): TaskIsolation {
 export function isolationEnv(iso: TaskIsolation): Record<string, string> {
   return {
     COMPOSE_PROJECT_NAME: iso.composeProject,
-    HARNESS_PORT_BASE: String(iso.portBase),
-    HARNESS_PORT_END: String(iso.portEnd),
+    CHARRETTE_PORT_BASE: String(iso.portBase),
+    CHARRETTE_PORT_END: String(iso.portEnd),
   };
 }
 

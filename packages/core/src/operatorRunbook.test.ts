@@ -4,8 +4,8 @@ import { parseRunbook, renderRunbook, runbookEmail, withRunbook } from "./operat
 const full = {
   blocked: "the endpoints have to be deployed and called with a real magic-link token",
   steps: [
-    { do: "Merge the endpoint pull request", command: "gh pr merge 1631 --squash --repo ryabinski-labs/api-service-new-api" },
-    { do: "Wait for CD to finish", command: "gh run watch --repo ryabinski-labs/api-service-new-api" },
+    { do: "Merge the endpoint pull request", command: "gh pr merge 1631 --squash --repo ryabinski-labs/api-service" },
+    { do: "Wait for CD to finish", command: "gh run watch --repo ryabinski-labs/api-service" },
     { do: "Sign in as an account you own and copy the bearer token out of devtools" },
   ],
   sendBack: "the HTTP status and the first line of the JSON body from step 3",
@@ -66,7 +66,7 @@ describe("what the operator reads", () => {
     const out = renderRunbook(parseRunbook(full));
     expect(out).toContain("This part is yours, not the agent's: the endpoints have to be deployed");
     expect(out).toContain("1. Merge the endpoint pull request");
-    expect(out).toContain("       gh pr merge 1631 --squash --repo ryabinski-labs/api-service-new-api");
+    expect(out).toContain("       gh pr merge 1631 --squash --repo ryabinski-labs/api-service");
     expect(out).toContain("3. Sign in as an account you own");
     expect(out).toContain("Then answer this gate with: the HTTP status and the first line");
   });
@@ -95,10 +95,10 @@ describe("what the operator reads", () => {
 
 describe("the same runbook as mail", () => {
   it("names the project in the subject, lists the steps, and links back to the gate", () => {
-    const mail = runbookEmail("api-service-new-api", "api-deploy-and-live-endpoint-proof", parseRunbook(full), "http://127.0.0.1:4781/#tok", "QA could not reach the deployed host.");
-    expect(mail.subject).toBe("api-service-new-api: api-deploy-and-live-endpoint-proof needs you");
+    const mail = runbookEmail("api-service", "api-deploy-and-live-endpoint-proof", parseRunbook(full), "http://127.0.0.1:4781/#tok", "QA could not reach the deployed host.");
+    expect(mail.subject).toBe("api-service: api-deploy-and-live-endpoint-proof needs you");
     expect(mail.html).toContain("<ol>");
-    expect(mail.html).toContain("<code>gh pr merge 1631 --squash --repo ryabinski-labs/api-service-new-api</code>");
+    expect(mail.html).toContain("<code>gh pr merge 1631 --squash --repo ryabinski-labs/api-service</code>");
     expect(mail.html).toContain("<strong>Send back:</strong> the HTTP status");
     expect(mail.html).toContain('<a href="http://127.0.0.1:4781/#tok">');
     expect(mail.html).toContain("QA could not reach the deployed host.");

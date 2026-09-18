@@ -52,7 +52,7 @@ describe("a failure whose tool talks on both streams", () => {
     expect(result.failures[0]!.output.length).toBeLessThanOrEqual(4001);
   });
 
-  it("keeps both ends of a command the harness had to kill, too", async () => {
+  it("keeps both ends of a command the charrette had to kill, too", async () => {
     const result = await runDeterministicChecks(
       "/tmp",
       [`printf 'the last thing the suite said\\n'; printf 'progress\\n' >&2; sleep 30`],
@@ -269,7 +269,7 @@ describe("excusing the failures the repository already knows are weather", () =>
   });
 });
 
-describe("a check the harness killed is not a verdict", () => {
+describe("a check the charrette killed is not a verdict", () => {
   const green: CheckResult = { ok: true, failures: [] };
   // 0.01 minutes = 600ms. The unit is minutes because that is what an operator
   // configures; the runner keeps it in milliseconds so a test can afford one.

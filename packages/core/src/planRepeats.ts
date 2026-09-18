@@ -1,7 +1,7 @@
 /**
  * Work a run is about to pay for twice.
  *
- * waf paid three separate tasks for one body parser. `seclang ast types` merged
+ * rust-service paid three separate tasks for one body parser. `seclang ast types` merged
  * twice under two ids; the multipart, JSON and XML body parsers were each
  * planned and merged twice; and the run then paid for a third task,
  * *"Consolidate duplicate body parsers into one per format"*, to clean up after
@@ -148,7 +148,7 @@ const SHOWN = 5;
  * What to put to the operator about it, if anything.
  *
  * Empty for a plan that repeats nothing. Phrased as what was noticed rather
- * than as a verdict: the harness is comparing two lists of words, and the
+ * than as a verdict: the charrette is comparing two lists of words, and the
  * question of whether the second task is worth paying for is not one a word
  * comparison can answer.
  */

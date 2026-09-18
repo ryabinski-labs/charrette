@@ -7,7 +7,7 @@
  * times to double it — each of those gates a surprise, and each answered blind,
  * because nobody had ever been shown a number to compare the cap against.
  *
- * The estimate is deliberately a range. The harness's own recorded runs span
+ * The estimate is deliberately a range. The charrette's own recorded runs span
  * $1.96 to $21.49 per task depending on how large and how brownfield the repo
  * is, and a single confident number across that spread would be worse than no
  * number at all — it would make the surprise feel like a broken promise instead
@@ -20,7 +20,7 @@ const WEIGHT: Record<"S" | "M" | "L", number> = { S: 1, M: 2, L: 4 };
 
 /**
  * Dollars per weight unit when this repository has no finished run to learn
- * from, taken from the harness's own field history: marrymath merged 17 tasks
+ * from, taken from the charrette's own field history: marrymath merged 17 tasks
  * for $33 and billing-app merged 36 for $774. Those bound the band; the point
  * estimate sits low inside it because most repositories are not billing-app, and
  * an estimate that reads high gets the cap set high and the run never questioned.
@@ -55,7 +55,7 @@ export function planWeight(tasks: SizedTask[]): number {
  * Estimate a plan against whatever this repository's history supports.
  *
  * History is per-repository because that is the variable that actually moves the
- * number: the same harness on the same models costs an order of magnitude more
+ * number: the same charrette on the same models costs an order of magnitude more
  * per task on a large brownfield service than on a small greenfield one, and the
  * repository is what decides which of those a run is.
  *
@@ -70,7 +70,7 @@ export function estimatePlan(tasks: SizedTask[], history: RunCost[]): Estimate {
       usd: weight * DEFAULT_RATE.usd,
       low: weight * DEFAULT_RATE.low,
       high: weight * DEFAULT_RATE.high,
-      basis: "no finished run in this repository yet — this is the spread across every repository the harness has run",
+      basis: "no finished run in this repository yet — this is the spread across every repository the charrette has run",
     };
   }
   const rates = useful.map((h) => h.spentUsd / h.weight).sort((a, b) => a - b);

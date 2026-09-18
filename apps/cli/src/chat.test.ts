@@ -119,7 +119,7 @@ describe("what the chat puts on the screen", () => {
   });
 
   it("wraps a long message to the terminal width instead of one endless line", () => {
-    const sentence = "the harness never merges its own work and that part is left to you ".repeat(4);
+    const sentence = "the charrette never merges its own work and that part is left to you ".repeat(4);
 
     new TerminalChat(scripted([])).say(sentence);
 

@@ -3,8 +3,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { RunConfig } from "@harness/shared";
-import type { HarnessEvent } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
+import type { CharretteEvent } from "@charrette/shared";
 import { Bus } from "./bus.js";
 import { GitHubAdapter } from "./github.js";
 import type { PitStop, PitStopDecision } from "./pitstop.js";
@@ -24,7 +24,7 @@ afterEach(() => {
 });
 
 function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-pit-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-pit-"));
   made.push(dir, `${dir}-wt`);
   const run = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "ignore" });
   run("init", "-b", "main");
@@ -124,7 +124,7 @@ const BASE = { deterministicChecks: [] as string[], waitForChecks: false, maxPar
 interface Built {
   controller: RunController;
   store: Store;
-  events: HarnessEvent[];
+  events: CharretteEvent[];
   stops: PitStop[];
 }
 
@@ -136,7 +136,7 @@ function build(opts: {
 }): Built {
   const store = new Store(":memory:");
   const bus = new Bus(store);
-  const events: HarnessEvent[] = [];
+  const events: CharretteEvent[] = [];
   const stops: PitStop[] = [];
   bus.subscribe(({ event }) => void events.push(event));
   const gates: GateHandler = {
@@ -210,10 +210,10 @@ describe("stopping at an epic boundary", () => {
 
     const runId = await controller.startRun("build a thing", RunConfig.parse(BASE));
 
-    const stopDir = path.join(dir, ".harness", runId, "pitstops", "1");
+    const stopDir = path.join(dir, ".charrette", runId, "pitstops", "1");
     expect(existsSync(path.join(stopDir, "REPORT.md"))).toBe(true);
     expect(readFileSync(path.join(stopDir, "REPORT.md"), "utf8")).toContain("# Pit stop 1");
-    // .harness is already ignored, so none of this reaches the operator's diff.
+    // .charrette is already ignored, so none of this reaches the operator's diff.
     expect(existsSync(path.join(stopDir, "pitstop.json"))).toBe(true);
   });
 
@@ -258,10 +258,10 @@ describe("stopping at an epic boundary", () => {
 
     const stop = stops[0]!;
     expect(stop.demo!.commands).toEqual([{ command: "test -f README.md", shows: "the demo ran against the merged tree" }]);
-    expect(stop.markdown).toContain("Re-run by the harness and confirmed:");
+    expect(stop.markdown).toContain("Re-run by the charrette and confirmed:");
     expect(stop.markdown).toContain("- `test -f README.md` — the demo ran against the merged tree");
     const unchecked = stop.demo!.couldNotReach.join("\n");
-    expect(unchecked).toContain("the suite is green — not verified: `false` re-run by the harness and it failed");
+    expect(unchecked).toContain("the suite is green — not verified: `false` re-run by the charrette and it failed");
     expect(unchecked).toContain("repeat the write");
     // The demo's own answer is not deleted, only moved: the operator still sees
     // every claim, under the heading that is true of it.
@@ -285,9 +285,9 @@ describe("stopping at an epic boundary", () => {
     // Six confirmed and the seventh named as unverified — a truncated list that
     // reads as a complete one is the failure this whole gate exists to stop.
     expect(stops[0]!.demo!.commands.map((c) => c.command)).toEqual(claims.slice(0, 6).map((c) => c.command));
-    expect(stops[0]!.demo!.couldNotReach.join("\n")).toContain("claim 7 — not verified: `echo proof-7` the harness re-runs at most 6 commands per pit stop");
+    expect(stops[0]!.demo!.couldNotReach.join("\n")).toContain("claim 7 — not verified: `echo proof-7` the charrette re-runs at most 6 commands per pit stop");
     expect(
-      events.some((e) => e.type === "agent.log" && e.text === "the demo claimed 7 commands; the harness re-ran the first 6 and reported the rest as unverified")
+      events.some((e) => e.type === "agent.log" && e.text === "the demo claimed 7 commands; the charrette re-ran the first 6 and reported the rest as unverified")
     ).toBe(true);
   });
 
@@ -546,7 +546,7 @@ describe("evidence that does not survive being looked at", () => {
     // assumes the surface was covered.
     expect(stop.markdown).toContain("## What it could NOT check");
     expect(stop.markdown).toContain("the signed-in home page");
-    expect(stop.markdown).toContain("struck from the evidence by the harness");
+    expect(stop.markdown).toContain("struck from the evidence by the charrette");
   });
 
   it("keeps a file the agent listed with no idea what it proves out of the evidence", async () => {
@@ -887,25 +887,25 @@ describe("giving the machine back at a pit stop", () => {
 
     await controller.startRun("build a thing", RunConfig.parse(BASE));
 
-    return events.filter((e): e is HarnessEvent & { text: string } => e.type === "agent.log" && e.text.startsWith("swept after"));
+    return events.filter((e): e is CharretteEvent & { text: string } => e.type === "agent.log" && e.text.startsWith("swept after"));
   };
 
   it("says what it took back, in the singular when there was one of each", async () => {
-    const lines = await swept(["podman:harness-sign-in-0001"], [{ pid: 4131, command: "node server.js", signal: "SIGKILL", tooling: false }]);
+    const lines = await swept(["podman:charrette-sign-in-0001"], [{ pid: 4131, command: "node server.js", signal: "SIGKILL", tooling: false }]);
 
     expect(lines[0]!.text).toBe(
-      "swept after pit stop 1: 1 container stack still up and brought down (podman:harness-sign-in-0001); 1 orphaned process killed"
+      "swept after pit stop 1: 1 container stack still up and brought down (podman:charrette-sign-in-0001); 1 orphaned process killed"
     );
   });
 
   it("names the first few stacks and stops, rather than printing thirty", async () => {
     const lines = await swept(
-      Array.from({ length: 7 }, (_, i) => `podman:harness-task-${i + 1}`),
+      Array.from({ length: 7 }, (_, i) => `podman:charrette-task-${i + 1}`),
       []
     );
 
     expect(lines[0]!.text).toBe(
-      "swept after pit stop 1: 7 container stacks still up and brought down (podman:harness-task-1, podman:harness-task-2, podman:harness-task-3, podman:harness-task-4, podman:harness-task-5, …)"
+      "swept after pit stop 1: 7 container stacks still up and brought down (podman:charrette-task-1, podman:charrette-task-2, podman:charrette-task-3, podman:charrette-task-4, podman:charrette-task-5, …)"
     );
   });
 

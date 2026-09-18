@@ -1,0 +1,125 @@
+name: OSS compliance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: oss-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  compliance:
+    name: required files, workflow safety, secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          # Full history so the secret scan can see what was committed, not
+          # just the tip. A credential removed in the last commit is still a
+          # leaked credential.
+          fetch-depth: 0
+
+      - name: Required files are present
+        run: |
+          missing=0
+          for f in LICENSE README.md CONTRIBUTING.md CODE_OF_CONDUCT.md \
+                   SECURITY.md SUPPORT.md MAINTAINERS.md CHANGELOG.md \
+                   .github/CODEOWNERS .github/dependabot.yml; do
+            [ -f "$f" ] || { echo "::error file=$f::missing required file $f"; missing=1; }
+          done
+          exit $missing
+
+      - name: License is present and declared consistently
+        run: |
+          grep -q 'MIT License' LICENSE \
+            || { echo "::error file=LICENSE::LICENSE does not contain the MIT License text"; exit 1; }
+          declared=$(node -p "require('./package.json').license")
+          [ "$declared" = "MIT" ] \
+            || { echo "::error file=package.json::package.json license is '$declared', LICENSE is MIT"; exit 1; }
+          node -p "require('./package.json').repository.url" >/dev/null \
+            || { echo "::error file=package.json::package.json is missing repository metadata"; exit 1; }
+
+      - name: The maintainer roster resolves
+        run: |
+          grep -q 'cigan1@gmail.com' MAINTAINERS.md \
+            || { echo "::error file=MAINTAINERS.md::the maintainer contact is missing"; exit 1; }
+          grep -q 'cigan1@gmail.com\|security/advisories' SECURITY.md \
+            || { echo "::error file=SECURITY.md::no vulnerability reporting route"; exit 1; }
+
+      - name: No workflow builds untrusted code on self-hosted runners
+        # The failure this exists to prevent: a `pull_request` job on a
+        # self-hosted runner lets anyone with a fork run arbitrary code on the
+        # project's own machines. It is a one-word change to reintroduce and
+        # invisible in review, so it is checked rather than remembered.
+        run: |
+          bad=0
+          for wf in .github/workflows/*.yml; do
+            grep -qE '^[[:space:]]*pull_request:?[[:space:]]*$' "$wf" || continue
+            if grep -qE '^[[:space:]]+runs-on:.*self-hosted' "$wf"; then
+              echo "::error file=$wf::a pull_request workflow runs on a self-hosted runner"
+              bad=1
+            fi
+            if grep -qE '^[[:space:]]*-?[[:space:]]*pull_request_target:' "$wf"; then
+              echo "::error file=$wf::pull_request_target runs fork code with repository secrets"
+              bad=1
+            fi
+          done
+          exit $bad
+
+      - name: Every workflow declares its permissions
+        run: |
+          bad=0
+          for wf in .github/workflows/*.yml; do
+            grep -qE '^permissions:' "$wf" \
+              || { echo "::error file=$wf::no top-level permissions block"; bad=1; }
+          done
+          exit $bad
+
+      - name: No credentials in the tree or its history
+        run: |
+          pattern='sk-ant-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{50,}|AIza[0-9A-Za-z_-]{35}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+          if git grep -nIE "$pattern" -- . ; then
+            echo "::error::a credential pattern is present in the working tree"
+            exit 1
+          fi
+          if git log -p --no-color | grep -nIE "$pattern"; then
+            echo "::error::a credential pattern is present in git history"
+            exit 1
+          fi
+          echo "clean"
+
+      - name: No private project names reintroduced
+        # These are the author's unreleased repositories. They were scrubbed
+        # from code comments and fixtures for the public release; a copied
+        # snippet is the likely way one comes back.
+        run: |
+          # `:(exclude)` this file: the names are listed here literally, so the
+          # check would otherwise always fail on itself.
+          if git grep -nIiwE 'api-service|billing-app|dns-project|ledger-app|offers-app|search-app|web-app' \
+               -- . ':(exclude).github/workflows/oss-compliance.yml'; then
+            echo "::error::a private project name is present — anonymize it before merging"
+            exit 1
+          fi
+          echo "clean"
+
+      - name: No run state is tracked
+        # `.harness/` and `.charrette/` hold run databases, agent transcripts,
+        # demo screenshots and QA evidence from real runs against real (often
+        # private) repositories. Renaming the project once un-ignored the old
+        # name and staged 2.8 MB of exactly that, so the tree is checked rather
+        # than the ignore file trusted.
+        run: |
+          if git ls-files | grep -E '^\.(harness|charrette)/'; then
+            echo "::error::run state is tracked — it must stay ignored"
+            exit 1
+          fi
+          echo "clean"

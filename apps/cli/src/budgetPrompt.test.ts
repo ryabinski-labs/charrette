@@ -4,7 +4,7 @@ const { createInterfaceMock } = vi.hoisted(() => ({ createInterfaceMock: vi.fn()
 vi.mock("node:readline/promises", () => ({ createInterface: createInterfaceMock }));
 
 import { promptForNewCap, watchBudgetCommands } from "./budget.js";
-import type { RunController } from "@harness/core";
+import type { RunController } from "@charrette/core";
 
 const GATE = { spentUsd: 8.5, capUsd: 8 };
 

@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { RunConfig } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Bus } from "./bus.js";
 import type { GitHubAdapter } from "./github.js";
@@ -23,11 +23,11 @@ const DAG =
 const gitIn = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "ignore" });
 
 function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-gate-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-gate-"));
   writeFileSync(path.join(dir, "README.md"), "# fixture\n");
   gitIn(dir, "init", "-b", "main");
-  gitIn(dir, "config", "user.email", "harness@example.com");
-  gitIn(dir, "config", "user.name", "harness");
+  gitIn(dir, "config", "user.email", "charrette@example.com");
+  gitIn(dir, "config", "user.name", "charrette");
   gitIn(dir, "add", "-A");
   gitIn(dir, "commit", "-m", "init");
   return dir;
@@ -666,8 +666,8 @@ describe("a completion probe that cannot pass", () => {
 
     expect(store.getTask(runId, "task-a")!.completionProbe).toBe("test -f nope.txt");
     expect(store.eventsSince(runId, 0).map((e) => e.event).filter((e) => e.type === "task.probe_amended")).toHaveLength(0);
-    const hint = logs(store, runId).find((t) => t.includes("harness probe"));
-    expect(hint).toContain(`harness probe task-a 'test -f feature.txt' --run ${runId}`);
+    const hint = logs(store, runId).find((t) => t.includes("charrette probe"));
+    expect(hint).toContain(`charrette probe task-a 'test -f feature.txt' --run ${runId}`);
   });
 
   it("hands them a withdrawal the same way, in the words that argued for it", async () => {
@@ -682,9 +682,9 @@ describe("a completion probe that cannot pass", () => {
     const { store, runId } = await run(gates(async () => null), pool);
 
     expect(store.getTask(runId, "task-a")!.completionProbe).toBe("test -f nope.txt");
-    const hint = logs(store, runId).find((t) => t.includes("harness probe"));
+    const hint = logs(store, runId).find((t) => t.includes("charrette probe"));
     expect(hint).toContain("looks wrong — the file it names went to the task this one was split off from.");
-    expect(hint).toContain(`harness probe task-a --clear --run ${runId}`);
+    expect(hint).toContain(`charrette probe task-a --clear --run ${runId}`);
   });
 
   it("is left exactly as it was when the advisor's best proposal is the probe itself", async () => {
@@ -701,7 +701,7 @@ describe("a completion probe that cannot pass", () => {
     expect(store.taskProbeAmendments(runId, "task-a")).toBe(0);
     // Not refused, either — the operator is handed a command only when there was
     // a change to make and the advisor lacked the authority to make it.
-    expect(logs(store, runId).some((t) => t.includes("harness probe"))).toBe(false);
+    expect(logs(store, runId).some((t) => t.includes("charrette probe"))).toBe(false);
     expect(logs(store, runId).some((t) => t.includes("product-manager answered this task's escalation"))).toBe(true);
   });
 
@@ -721,7 +721,7 @@ describe("a completion probe that cannot pass", () => {
     expect(store.getTask(runId, "task-a")!.completionProbe).toBe("test -f still-nope.txt");
     // The second rewrite is not silently swallowed: it becomes the operator's
     // command, and the escalation becomes theirs to answer.
-    expect(logs(store, runId).some((t) => t.includes(`harness probe task-a 'test -f feature.txt'`))).toBe(true);
+    expect(logs(store, runId).some((t) => t.includes(`charrette probe task-a 'test -f feature.txt'`))).toBe(true);
     expect(asked).toHaveLength(1);
     expect(store.getTask(runId, "task-a")!.state).toBe("NEEDS_HUMAN");
   });
@@ -764,7 +764,7 @@ describe("a completion probe that cannot pass", () => {
 
     expect(store.getTask(runId, "task-a")!.completionProbe).toBe("test -f nope.txt");
     expect(store.taskProbeAmendments(runId, "task-a")).toBe(0);
-    expect(logs(store, runId).some((t) => t.includes("harness probe"))).toBe(true);
+    expect(logs(store, runId).some((t) => t.includes("charrette probe"))).toBe(true);
   });
 });
 
@@ -793,8 +793,8 @@ describe("a gate that keeps opening on the same task", () => {
     // The way out, named rather than implied — and it was only ever in agent.log,
     // which is not where anyone answering a gate is looking.
     expect(asked[1]).toContain("test -f nope.txt");
-    expect(asked[1]).toContain(`harness probe task-a 'test -f nope.txt' --run ${runId}`);
-    expect(asked[1]).toContain(`harness probe task-a --clear --run ${runId}`);
+    expect(asked[1]).toContain(`charrette probe task-a 'test -f nope.txt' --run ${runId}`);
+    expect(asked[1]).toContain(`charrette probe task-a --clear --run ${runId}`);
     expect(store.getTask(runId, "task-a")!.state).toBe("NEEDS_HUMAN");
   });
 
@@ -970,7 +970,7 @@ describe("the task-escalation gate, answered by a skill", () => {
   });
 
   it("answers a headless run, where there was never anyone to ask", async () => {
-    // `harness run` in CI has no gate handler at all: every escalation parked on
+    // `charrette run` in CI has no gate handler at all: every escalation parked on
     // the spot. The decider needs no terminal and no dashboard.
     const { pool, workerPrompts } = decidingPool(() => '```json\n{"recommendation":"the fixture path moved to test/fixtures","checked":[],"needsOperator":false}\n```');
     const { store, runId } = await run(gates(), pool, { taskGate: { decidedBy: "product-manager", autoAnswerRounds: 1 } });
@@ -1077,9 +1077,9 @@ describe("acceptance criteria that cannot all be met", () => {
     const { store, runId } = await run(gates(async () => null), pool);
 
     expect(amendments(store, runId)).toHaveLength(0);
-    const hint = logs(store, runId).find((t) => t.includes("harness criteria"));
+    const hint = logs(store, runId).find((t) => t.includes("charrette criteria"));
     expect(hint).toContain("look unsatisfiable — one forbade the only file that satisfies the other.");
-    expect(hint).toContain(`harness criteria task-a 'the workspace suite is green' 'no file outside crates/parser is modified, except docs/passrate.md' --run ${runId}`);
+    expect(hint).toContain(`charrette criteria task-a 'the workspace suite is green' 'no file outside crates/parser is modified, except docs/passrate.md' --run ${runId}`);
   });
 
   it("hand the operator the command even when the advisor never says why", async () => {
@@ -1092,7 +1092,7 @@ describe("acceptance criteria that cannot all be met", () => {
     );
     const { store, runId } = await run(gates(async () => null), pool);
 
-    const hint = logs(store, runId).find((t) => t.includes("harness criteria"));
+    const hint = logs(store, runId).find((t) => t.includes("charrette criteria"));
     expect(hint).toContain("look unsatisfiable. QA grades against them");
     expect(hint).not.toContain(" — ");
     expect(amendments(store, runId)).toHaveLength(0);
@@ -1107,7 +1107,7 @@ describe("acceptance criteria that cannot all be met", () => {
 
     expect(criteriaOf(store, runId)).toHaveLength(2);
     expect(amendments(store, runId)).toHaveLength(0);
-    const hint = logs(store, runId).find((t) => t.includes("harness criteria"));
+    const hint = logs(store, runId).find((t) => t.includes("charrette criteria"));
     expect(hint).toContain("The product-manager proposed dropping 1 of them, which is not its to drop.");
   });
 
@@ -1118,7 +1118,7 @@ describe("acceptance criteria that cannot all be met", () => {
     });
 
     expect(amendments(store, runId)).toHaveLength(0);
-    expect(logs(store, runId).some((t) => t.includes("harness criteria"))).toBe(true);
+    expect(logs(store, runId).some((t) => t.includes("charrette criteria"))).toBe(true);
   });
 
   it("are left exactly as they were when the advisor's best proposal is the list it was given", async () => {
@@ -1127,7 +1127,7 @@ describe("acceptance criteria that cannot all be met", () => {
     const { store, runId } = await run(gates(async () => null), pool, { taskGate: { decidedBy: "product-manager" } });
 
     expect(amendments(store, runId)).toHaveLength(0);
-    expect(logs(store, runId).some((t) => t.includes("harness criteria"))).toBe(false);
+    expect(logs(store, runId).some((t) => t.includes("charrette criteria"))).toBe(false);
   });
 
   it("survive a list with nothing left in it", async () => {

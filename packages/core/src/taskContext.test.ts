@@ -38,7 +38,7 @@ function checkpoint(store: Store, sessionId: string, digest: string, role = "wor
 
 describe("worker recovery context", () => {
   it("persists scoped task guidance with its authority and skips parked gate answers", () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "harness-guidance-"));
+    const dir = mkdtempSync(path.join(tmpdir(), "charrette-guidance-"));
     dirs.push(dir);
     const filename = path.join(dir, "state.db");
     const store = database(filename);
@@ -64,7 +64,7 @@ describe("worker recovery context", () => {
   });
 
   it("survives reopening SQLite and ignores other roles, tasks and runs", () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "harness-context-"));
+    const dir = mkdtempSync(path.join(tmpdir(), "charrette-context-"));
     dirs.push(dir);
     const filename = path.join(dir, "state.db");
     const store = database(filename);

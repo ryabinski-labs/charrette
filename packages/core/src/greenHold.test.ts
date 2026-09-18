@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { RunConfig } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
 import { describe, expect, it } from "vitest";
 import { Bus } from "./bus.js";
 import type { GitHubAdapter } from "./github.js";
@@ -37,13 +37,13 @@ const PASS = '{"verdict":"PASS","gaps":[],"summary":"delivers the assignment"}';
 const gitIn = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "ignore" });
 
 function repoWithOrigin(): string {
-  const origin = mkdtempSync(path.join(tmpdir(), "harness-hold-origin-"));
+  const origin = mkdtempSync(path.join(tmpdir(), "charrette-hold-origin-"));
   gitIn(origin, "init", "--bare", "-b", "release");
-  const repo = mkdtempSync(path.join(tmpdir(), "harness-hold-"));
+  const repo = mkdtempSync(path.join(tmpdir(), "charrette-hold-"));
   writeFileSync(path.join(repo, "README.md"), "# fixture\n");
   gitIn(repo, "init", "-b", "release");
-  gitIn(repo, "config", "user.email", "harness@example.com");
-  gitIn(repo, "config", "user.name", "harness");
+  gitIn(repo, "config", "user.email", "charrette@example.com");
+  gitIn(repo, "config", "user.name", "charrette");
   gitIn(repo, "add", "-A");
   gitIn(repo, "commit", "-m", "init");
   gitIn(repo, "remote", "add", "origin", origin);
@@ -220,7 +220,7 @@ describe("a repository with no CI", () => {
 
     expect(store.getRun(runId)!.state).toBe("PAUSED");
     expect(store.lastRunStateChange(runId)!.reason).toBe("green hold: #7 has no CI, so nothing has checked the merged branch");
-    expect(logs.join("\n")).toMatch(/add a workflow, or `harness resume` to publish it anyway/);
+    expect(logs.join("\n")).toMatch(/add a workflow, or `charrette resume` to publish it anyway/);
 
     await controller.resume(runId);
 

@@ -1,7 +1,7 @@
 import { createServer, type Server } from "node:http";
 import { once } from "node:events";
 import { afterEach, describe, expect, it } from "vitest";
-import { RunConfig, RunSpec } from "@harness/shared";
+import { RunConfig, RunSpec } from "@charrette/shared";
 import { acceptanceVerdict, passedScenarios } from "./acceptance.js";
 import { deploymentProblems, deployedRevision, deliveryConfigProblems, productionPlanInstructions, releaseSpecProblems, sourceDigest } from "./productionDelivery.js";
 import { scopeLedger, scopeUnmet, replanDrops, type ScopedTask } from "./scopeLedger.js";
@@ -91,7 +91,7 @@ describe("production release prerequisites", () => {
 describe("positive scenario execution evidence", () => {
   it("keeps the explicit review-only legacy override separate from production policy", () => {
     expect(acceptanceVerdict(releaseSpec(), { exitCode: 0, output: "" }, false).verdict).toBe("green");
-    expect(prodValidatorSystemPrompt("", "", "harness test tenant")).toContain("writes ONLY in this isolated scope: harness test tenant");
+    expect(prodValidatorSystemPrompt("", "", "charrette test tenant")).toContain("writes ONLY in this isolated scope: charrette test tenant");
   });
   it.each(["", "0 tests", "ok 1 - SC-1 # SKIP unavailable", "ok 1 - SC-1 # TODO later", "✓ SC-10", "✓ SC-1\nFAIL SC-1"]) ("rejects an exit-zero suite without unambiguous evidence: %s", (output) => {
     expect(acceptanceVerdict(releaseSpec(), { exitCode: 0, output }).verdict).toBe("red");
@@ -129,8 +129,8 @@ describe("controller-owned network identity check", () => {
   }
   it("verifies a real HTTP response and rejects an old otherwise healthy deployment", async () => {
     const url = await endpoint(JSON.stringify({ revision: "full-merged-sha" }));
-    expect((await deployedRevision(url, "/.well-known/harness-release", "full-merged-sha")).ok).toBe(true);
-    expect((await deployedRevision(url, "/.well-known/harness-release", "new-sha")).ok).toBe(false);
+    expect((await deployedRevision(url, "/.well-known/charrette-release", "full-merged-sha")).ok).toBe(true);
+    expect((await deployedRevision(url, "/.well-known/charrette-release", "new-sha")).ok).toBe(false);
     expect((await deployedRevision(url, "//example.invalid/escape", "new-sha")).ok).toBe(false);
     expect((await deployedRevision(url, "/revision", "")).ok).toBe(false);
     expect((await deployedRevision("invalid-url", "/revision", "sha")).ok).toBe(false);

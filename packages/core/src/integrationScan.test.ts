@@ -1,10 +1,10 @@
-import { PlannedTask } from "@harness/shared";
+import { PlannedTask } from "@charrette/shared";
 import { describe, expect, it } from "vitest";
 import { renderIntegrations, scanIntegrations } from "./integrationScan.js";
 
 /**
  * The fixtures here are the real acceptance criteria run 40da9337's planner
- * wrote, copied out of `billing-app/.harness/harness.db`. That run merged all 36
+ * wrote, copied out of `billing-app/.charrette/charrette.db`. That run merged all 36
  * tasks, passed every QA verdict, and shipped six of seven vendors as
  * `throw liveProviderNotConfigured(...)` — so the question these tests answer is
  * whether the plan gate would have said anything about it.

@@ -25,7 +25,7 @@ export function stripQuoted(segment: string): string {
  *
  * An infra task writes deployment runbooks, and a runbook lists `terraform apply`
  * on a line of its own because that is what a human runs. Read as a script, that
- * document is an apply; blocking it would stop the harness documenting the very
+ * document is an apply; blocking it would stop the charrette documenting the very
  * work it is allowed to do.
  */
 export function stripHeredocBodies(command: string): string {

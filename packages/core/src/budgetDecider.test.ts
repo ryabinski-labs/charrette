@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { RunConfig } from "@harness/shared";
-import type { HarnessEvent } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
+import type { CharretteEvent } from "@charrette/shared";
 import { Bus } from "./bus.js";
 import { BudgetExceeded } from "./budget.js";
 import { GitHubAdapter } from "./github.js";
@@ -36,7 +36,7 @@ afterEach(() => {
 });
 
 function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-budgetpm-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-budgetpm-"));
   made.push(dir, `${dir}-wt`);
   const run = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "ignore" });
   run("init", "-b", "main");
@@ -106,7 +106,7 @@ function build(opts: { repoPath: string; pool: AgentPool; ref: { store: Store | 
   const store = new Store(":memory:");
   opts.ref.store = store;
   const bus = new Bus(store);
-  const events: HarnessEvent[] = [];
+  const events: CharretteEvent[] = [];
   const asked: BudgetGate[] = [];
   bus.subscribe(({ event }) => void events.push(event));
   const gates: GateHandler = {
@@ -133,8 +133,8 @@ const config = (budget: Record<string, unknown>) =>
     budget,
   });
 
-const budgetGates = (events: HarnessEvent[]) => events.filter((e) => e.type === "run.gate_resolved" && (e as { kind: string }).kind === "budget");
-const logs = (events: HarnessEvent[]) => events.filter((e) => e.type === "agent.log").map((e) => (e as { text: string }).text);
+const budgetGates = (events: CharretteEvent[]) => events.filter((e) => e.type === "run.gate_resolved" && (e as { kind: string }).kind === "budget");
+const logs = (events: CharretteEvent[]) => events.filter((e) => e.type === "agent.log").map((e) => (e as { text: string }).text);
 
 describe("the run's budget cap answered by a skill", () => {
   it("raises it without asking anyone, tells it what's in flight and what's left, and the run carries on", async () => {

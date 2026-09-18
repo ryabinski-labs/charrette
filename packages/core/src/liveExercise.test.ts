@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RunSpec, hasCriticalPath } from "@harness/shared";
+import { RunSpec, hasCriticalPath } from "@charrette/shared";
 import { liveVerdict, type LiveFindings } from "./evidence.js";
 
 /**

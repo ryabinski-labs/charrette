@@ -1,10 +1,10 @@
 {
-  "name": "@harness/skills-mcp",
+  "name": "@charrette/skills-mcp",
   "version": "0.0.1",
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
-    "harness-skills-mcp": "./dist/server.js"
+    "charrette-skills-mcp": "./dist/server.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

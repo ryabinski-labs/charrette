@@ -1,10 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
-import { indexSkills, type IndexedSkill } from "@harness/skills-mcp";
+import { indexSkills, type IndexedSkill } from "@charrette/skills-mcp";
+import { statePaths } from "@charrette/shared";
 
 /**
- * The forge: where the harness keeps the skills it wrote for itself.
+ * The forge: where the charrette keeps the skills it wrote for itself.
  *
  * A task about to dispatch with no matched skill is the one case the skills
  * system cannot help with — the matcher's honest answer is "your collection
@@ -12,11 +13,11 @@ import { indexSkills, type IndexedSkill } from "@harness/skills-mcp";
  * gap without crossing the PRD's line that no agent modifies the skills
  * registry: a `skillsmith` session *drafts* a playbook as JSON, and the code
  * in this file — not the agent — validates it and writes it to disk, in a
- * directory that is harness state rather than the operator's collection.
+ * directory that is charrette state rather than the operator's collection.
  *
- * The directory sits beside the run database (`<repo>/.harness/skills/`),
+ * The directory sits beside the run database (`<repo>/.charrette/skills/`),
  * which buys three properties at once: it is scoped to one repository by
- * construction, it is gitignored with the rest of `.harness/` so a forged
+ * construction, it is gitignored with the rest of `.charrette/` so a forged
  * skill can never ride into a PR, and it survives the run — the second run in
  * a repository should not pay a session to relearn what the first one wrote
  * down. Forged files are plain markdown the operator can read, edit or
@@ -26,7 +27,7 @@ import { indexSkills, type IndexedSkill } from "@harness/skills-mcp";
 
 /** Where forged skills live for a repository. */
 export function forgeDir(repoPath: string): string {
-  return path.join(repoPath, ".harness", "skills");
+  return path.join(statePaths(repoPath).dir, "skills");
 }
 
 /**
@@ -38,7 +39,7 @@ export function forgeDir(repoPath: string): string {
  *   - `extend` — an earlier *forged* skill was close but missed this task;
  *     add what it lacked rather than fragmenting the topic across files.
  *     Only forged skills can be extended — the operator's own files are not
- *     the harness's to grow.
+ *     the charrette's to grow.
  *   - `none`  — no playbook would help (the task is self-evident, or too
  *     particular to ever recur). A skill that restates the task spec is
  *     context spent twice, so this answer is a success, not a failure.
@@ -62,7 +63,7 @@ export const FORGED_TOKEN_CAP = 1400;
 const TOKENS = (text: string) => Math.ceil(text.length / 4);
 
 /** One line of provenance, written into every forged file's frontmatter. */
-const provenanceLine = (prov: { runId: string; taskId: string }) => `forged-by: harness run ${prov.runId}, task ${prov.taskId}`;
+const provenanceLine = (prov: { runId: string; taskId: string }) => `forged-by: charrette run ${prov.runId}, task ${prov.taskId}`;
 
 export interface ForgedDraft {
   slug: string;
@@ -79,9 +80,9 @@ const composeFile = (draft: ForgedDraft, prov: { runId: string; taskId: string }
 
 /**
  * True when `p` resolves outside the forge directory. Everything under the
- * forge is fair game for the harness to write; a symlink planted inside it —
+ * forge is fair game for the charrette to write; a symlink planted inside it —
  * a slug directory or a SKILL.md pointing at an operator's file — must not
- * become a pen the harness writes through. Both arguments exist when this is
+ * become a pen the charrette writes through. Both arguments exist when this is
  * called, so realpath resolves every link before the comparison.
  */
 function escapesForge(dir: string, p: string): boolean {

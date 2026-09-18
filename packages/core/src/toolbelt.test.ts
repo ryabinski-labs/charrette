@@ -6,7 +6,7 @@ import { detectToolbelt, toolbeltBlock } from "./toolbelt.js";
 
 /** A PATH directory holding fake executables with the given names. */
 function fakeBin(...names: string[]): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-bin-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-bin-"));
   for (const name of names) {
     const file = path.join(dir, name);
     writeFileSync(file, "#!/bin/sh\n");
@@ -29,7 +29,7 @@ describe("toolbelt detection", () => {
   });
 
   it("ignores a non-executable file of the right name", () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "harness-bin-"));
+    const dir = mkdtempSync(path.join(tmpdir(), "charrette-bin-"));
     writeFileSync(path.join(dir, "aws"), "not executable");
     expect(detectToolbelt(undefined, env(dir))).toEqual([]);
   });

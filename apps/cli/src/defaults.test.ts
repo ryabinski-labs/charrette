@@ -12,7 +12,7 @@ vi.mock("node:child_process", async (importOriginal) => {
 import { detectChecks, loadFileConfig, resolveGitHub, resolveRepoRoot, verifyChecks } from "./defaults.js";
 
 function tmpRepo(files: Record<string, string> = {}, withGit = true): string {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "harness-cli-"));
+  const dir = mkdtempSync(path.join(os.tmpdir(), "charrette-cli-"));
   if (withGit) mkdirSync(path.join(dir, ".git"));
   for (const [name, body] of Object.entries(files)) {
     mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
@@ -28,7 +28,7 @@ describe("resolveRepoRoot", () => {
   });
 
   it("throws with actionable text outside a repo", () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "harness-nogit-"));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "charrette-nogit-"));
     expect(() => resolveRepoRoot(dir)).toThrow(/not inside a git repository/);
   });
 });
@@ -99,17 +99,17 @@ describe("loadFileConfig", () => {
   });
 
   it("parses a valid config", () => {
-    const repo = tmpRepo({ "harness.config.json": JSON.stringify({ budget: { runCapUsd: 50 }, dashboard: false }) });
+    const repo = tmpRepo({ "charrette.config.json": JSON.stringify({ budget: { runCapUsd: 50 }, dashboard: false }) });
     expect(loadFileConfig(repo).config).toEqual({ budget: { runCapUsd: 50 }, dashboard: false });
   });
 
   it("rejects unknown keys rather than ignoring them", () => {
-    const repo = tmpRepo({ "harness.config.json": JSON.stringify({ runCapUsd: 50 }) });
+    const repo = tmpRepo({ "charrette.config.json": JSON.stringify({ runCapUsd: 50 }) });
     expect(() => loadFileConfig(repo)).toThrow(/is invalid/);
   });
 
   it("reports malformed JSON with the file path", () => {
-    const repo = tmpRepo({ "harness.config.json": "{ nope" });
+    const repo = tmpRepo({ "charrette.config.json": "{ nope" });
     expect(() => loadFileConfig(repo)).toThrow(/not valid JSON/);
   });
 
@@ -124,21 +124,21 @@ describe("loadFileConfig", () => {
       skillRouting: [{ when: "\\b(payments|billing)\\b", skills: ["fintech-reviewer"] }],
       roleSkills: { planner: ["product-manager"], qa: ["security-engineer"] },
     };
-    const repo = tmpRepo({ "harness.config.json": JSON.stringify(declared) });
+    const repo = tmpRepo({ "charrette.config.json": JSON.stringify(declared) });
     expect(loadFileConfig(repo).config).toEqual(declared);
   });
 
   it("accepts who answers a task that hits its cap", () => {
     // Same trap as above: a knob only settable in the type is not settable.
-    // `decidedBy: "operator"` is the whole opt-out from the harness answering
+    // `decidedBy: "operator"` is the whole opt-out from the charrette answering
     // its own escalations, and it has to be writable in the file that opts out.
     const declared = { taskGate: { decidedBy: "operator" as const }, pitStop: { decidedBy: "operator" as const } };
-    const repo = tmpRepo({ "harness.config.json": JSON.stringify(declared) });
+    const repo = tmpRepo({ "charrette.config.json": JSON.stringify(declared) });
     expect(loadFileConfig(repo).config).toEqual(declared);
   });
 
   it("still rejects a routing rule that is not one", () => {
-    const repo = tmpRepo({ "harness.config.json": JSON.stringify({ skillRouting: [{ when: "x" }] }) });
+    const repo = tmpRepo({ "charrette.config.json": JSON.stringify({ skillRouting: [{ when: "x" }] }) });
     expect(() => loadFileConfig(repo)).toThrow(/is invalid/);
   });
 });
@@ -200,7 +200,7 @@ describe("detectChecks in monorepo layouts", () => {
 });
 
 describe("resolveGitHub", () => {
-  const saved = { token: process.env.GITHUB_TOKEN, repo: process.env.HARNESS_GITHUB_REPO };
+  const saved = { token: process.env.GITHUB_TOKEN, repo: process.env.CHARRETTE_GITHUB_REPO };
 
   /**
    * `gh` is stubbed rather than shelled out to. What this function returns
@@ -222,7 +222,7 @@ describe("resolveGitHub", () => {
   });
 
   afterEach(() => {
-    for (const [k, v] of [["GITHUB_TOKEN", saved.token], ["HARNESS_GITHUB_REPO", saved.repo]] as const) {
+    for (const [k, v] of [["GITHUB_TOKEN", saved.token], ["CHARRETTE_GITHUB_REPO", saved.repo]] as const) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
@@ -230,27 +230,27 @@ describe("resolveGitHub", () => {
 
   it("takes the environment when it is set, without shelling out to gh", () => {
     process.env.GITHUB_TOKEN = "ghp_from_env";
-    process.env.HARNESS_GITHUB_REPO = "acme/widgets";
+    process.env.CHARRETTE_GITHUB_REPO = "acme/widgets";
     const gh = resolveGitHub(tmpRepo(), undefined);
     expect(gh).toEqual({
       token: "ghp_from_env",
       slug: "acme/widgets",
-      source: "GITHUB_TOKEN + HARNESS_GITHUB_REPO",
+      source: "GITHUB_TOKEN + CHARRETTE_GITHUB_REPO",
     });
     expect(execFileSyncMock).not.toHaveBeenCalled();
   });
 
   it("names both sources when the token and the slug come from different places", () => {
     process.env.GITHUB_TOKEN = "ghp_from_env";
-    delete process.env.HARNESS_GITHUB_REPO;
+    delete process.env.CHARRETTE_GITHUB_REPO;
     const gh = resolveGitHub(tmpRepo(), "acme/widgets");
     expect(gh.slug).toBe("acme/widgets");
-    expect(gh.source).toBe("GITHUB_TOKEN + harness.config.json");
+    expect(gh.source).toBe("GITHUB_TOKEN + charrette.config.json");
   });
 
   it("falls back to the gh CLI for both, and names it once", () => {
     delete process.env.GITHUB_TOKEN;
-    delete process.env.HARNESS_GITHUB_REPO;
+    delete process.env.CHARRETTE_GITHUB_REPO;
     ghSays({ token: "ghp_from_cli", slug: "acme/from-cli" });
 
     expect(resolveGitHub(tmpRepo(), undefined)).toEqual({
@@ -262,7 +262,7 @@ describe("resolveGitHub", () => {
 
   it("says how to fix it when nothing has authenticated", () => {
     delete process.env.GITHUB_TOKEN;
-    delete process.env.HARNESS_GITHUB_REPO;
+    delete process.env.CHARRETTE_GITHUB_REPO;
     ghSays({});
 
     const gh = resolveGitHub(tmpRepo(), undefined);
@@ -274,7 +274,7 @@ describe("resolveGitHub", () => {
 
   it("withholds the slug when there is a token but no remote, so the adapter stays disabled", () => {
     delete process.env.GITHUB_TOKEN;
-    delete process.env.HARNESS_GITHUB_REPO;
+    delete process.env.CHARRETTE_GITHUB_REPO;
     ghSays({ token: "ghp_from_cli" });
 
     const gh = resolveGitHub(tmpRepo(), undefined);
@@ -286,7 +286,7 @@ describe("resolveGitHub", () => {
 
   it("caches per repo, so gh is not shelled out to twice for the same answer", () => {
     delete process.env.GITHUB_TOKEN;
-    delete process.env.HARNESS_GITHUB_REPO;
+    delete process.env.CHARRETTE_GITHUB_REPO;
     ghSays({ token: "ghp_from_cli", slug: "acme/from-cli" });
     const repo = tmpRepo();
 
@@ -300,7 +300,7 @@ describe("resolveGitHub", () => {
 
   it("does not serve a cached answer to a caller whose environment has changed", () => {
     delete process.env.GITHUB_TOKEN;
-    delete process.env.HARNESS_GITHUB_REPO;
+    delete process.env.CHARRETTE_GITHUB_REPO;
     ghSays({ token: "ghp_from_cli", slug: "acme/from-cli" });
     const repo = tmpRepo();
     expect(resolveGitHub(repo, undefined).token).toBe("ghp_from_cli");
@@ -312,7 +312,7 @@ describe("resolveGitHub", () => {
 
   it("treats an empty answer from gh as no answer", () => {
     delete process.env.GITHUB_TOKEN;
-    delete process.env.HARNESS_GITHUB_REPO;
+    delete process.env.CHARRETTE_GITHUB_REPO;
     // `gh auth token` exits 0 with an empty line in some logged-out states;
     // an empty string is not a token.
     execFileSyncMock.mockReturnValue("  \n");
@@ -322,7 +322,7 @@ describe("resolveGitHub", () => {
 
   it("never puts the token in the provenance string", () => {
     process.env.GITHUB_TOKEN = "ghp_supersecret";
-    process.env.HARNESS_GITHUB_REPO = "acme/widgets";
+    process.env.CHARRETTE_GITHUB_REPO = "acme/widgets";
     expect(resolveGitHub(tmpRepo(), undefined).source).not.toContain("ghp_supersecret");
   });
 });
@@ -465,7 +465,7 @@ describe("proving a check can pass here before adopting it", () => {
   });
 
   /**
-   * waf's `cargo test --workspace --all-features` passed in 304s, failed in
+   * rust-service's `cargo test --workspace --all-features` passed in 304s, failed in
    * 454s during an init run alongside a worker in the same repo, and passed
    * again in 430s afterwards. On that one sample it was deleted from the
    * config, leaving the repository with no test check at all.
@@ -507,7 +507,7 @@ describe("proving a check can pass here before adopting it", () => {
   });
 
   /**
-   * The reason `cargo test --workspace --all-features` was dropped from waf's
+   * The reason `cargo test --workspace --all-features` was dropped from rust-service's
    * config was `running 6 tests` — the first line a test binary prints, and
    * true of every run of it that ever passed. An operator reading that cannot
    * tell whether the check is broken or the tree is, which is the only thing

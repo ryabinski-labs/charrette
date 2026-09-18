@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Bus } from "@harness/core";
+import type { Bus } from "@charrette/core";
 import { agentdraftScript, mailBanner, mailTarget, watchGateMail, type MailTarget, type Send } from "./gateMail.js";
 
 const env = { HOME: "/Users/someone" };
@@ -13,11 +13,11 @@ describe("where gate mail goes", () => {
 
   it("goes nowhere until an address is named", () => {
     expect(mailTarget(env, () => true)).toBeNull();
-    expect(mailTarget({ ...env, HARNESS_GATE_EMAIL: "   " }, () => true)).toBeNull();
+    expect(mailTarget({ ...env, CHARRETTE_GATE_EMAIL: "   " }, () => true)).toBeNull();
   });
 
   it("uses the agentdraft skill when it is installed", () => {
-    expect(mailTarget({ ...env, HARNESS_GATE_EMAIL: " you@example.com " }, (p) => p === AGENTDRAFT)).toEqual({
+    expect(mailTarget({ ...env, CHARRETTE_GATE_EMAIL: " you@example.com " }, (p) => p === AGENTDRAFT)).toEqual({
       to: "you@example.com",
       cmd: "python3",
       args: [AGENTDRAFT],
@@ -27,7 +27,7 @@ describe("where gate mail goes", () => {
   it("announces itself in the banner only when it is on", () => {
     expect(mailBanner(null)).toEqual([]);
     expect(mailBanner({ to: "you@example.com", cmd: "x", args: [] })).toEqual([
-      "gate mail  you@example.com   (gates only you can answer; HARNESS_GATE_EMAIL)",
+      "gate mail  you@example.com   (gates only you can answer; CHARRETTE_GATE_EMAIL)",
     ]);
   });
 
@@ -37,11 +37,11 @@ describe("where gate mail goes", () => {
    * a feature nobody uses is worse than the missing mail.
    */
   it("goes nowhere when no sender is installed", () => {
-    expect(mailTarget({ ...env, HARNESS_GATE_EMAIL: "you@example.com" }, () => false)).toBeNull();
+    expect(mailTarget({ ...env, CHARRETTE_GATE_EMAIL: "you@example.com" }, () => false)).toBeNull();
   });
 
   it("splits an explicit command so an interpreter and its script both fit in one variable", () => {
-    expect(mailTarget({ ...env, HARNESS_GATE_EMAIL: "you@example.com", HARNESS_GATE_MAIL_CMD: "  python3   /opt/send.py --quiet " }, () => false)).toEqual({
+    expect(mailTarget({ ...env, CHARRETTE_GATE_EMAIL: "you@example.com", CHARRETTE_GATE_MAIL_CMD: "  python3   /opt/send.py --quiet " }, () => false)).toEqual({
       to: "you@example.com",
       cmd: "python3",
       args: ["/opt/send.py", "--quiet"],
@@ -82,12 +82,12 @@ describe("mailing the operator when a run stops on them", () => {
     const send = vi.fn<Send>();
     const { bus, emit } = fakeBus();
     const target: MailTarget = { to: "you@example.com", cmd: "python3", args: ["/s.py"] };
-    watchGateMail(bus, { project: "api-service-new-api", url: "http://127.0.0.1:4781/#tok", target, send });
+    watchGateMail(bus, { project: "api-service", url: "http://127.0.0.1:4781/#tok", target, send });
     emit(gate(RUNBOOK));
     expect(send).toHaveBeenCalledTimes(1);
     const [sentTo, mail] = send.mock.calls[0]!;
     expect(sentTo).toBe(target);
-    expect(mail.subject).toBe("api-service-new-api: api-deploy-and-live-endpoint-proof needs you");
+    expect(mail.subject).toBe("api-service: api-deploy-and-live-endpoint-proof needs you");
     expect(mail.html).toContain("gh pr merge 1631");
     expect(mail.html).toContain("http://127.0.0.1:4781/#tok");
     // The escalation's own text rides along, because the steps are an answer to

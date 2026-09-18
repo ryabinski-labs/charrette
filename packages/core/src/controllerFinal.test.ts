@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { RunConfig } from "@harness/shared";
-import type { HarnessEvent } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
+import type { CharretteEvent } from "@charrette/shared";
 import { Bus } from "./bus.js";
 import { GitHubAdapter } from "./github.js";
 import type { AgentPool, AgentResult, AgentSpec } from "./pool.js";
@@ -14,7 +14,7 @@ import { Store } from "./store.js";
 /**
  * The last of it: verification against a repo that has not merged, regrouping
  * pull requests that overlap, and the handful of guards that only fire when the
- * harness is asked about a run in a state it does not normally reach.
+ * charrette is asked about a run in a state it does not normally reach.
  */
 
 const made: string[] = [];
@@ -24,7 +24,7 @@ afterEach(() => {
 });
 
 function repo(remote = false): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-final-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-final-"));
   made.push(dir, `${dir}-wt`);
   const run = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "ignore" });
   run("init", "-b", "main");
@@ -34,7 +34,7 @@ function repo(remote = false): string {
   run("add", "-A");
   run("commit", "-m", "first");
   if (remote) {
-    const bare = mkdtempSync(path.join(tmpdir(), "harness-final-remote-"));
+    const bare = mkdtempSync(path.join(tmpdir(), "charrette-final-remote-"));
     made.push(bare);
     execFileSync("git", ["init", "--bare", "-b", "main"], { cwd: bare, stdio: "ignore" });
     run("remote", "add", "origin", bare);
@@ -131,7 +131,7 @@ function gh(over: { pulls?: Record<string, unknown>; checks?: Record<string, unk
 function build(opts: { repoPath: string; pool: AgentPool; github?: GitHubAdapter; gates?: Partial<GateHandler> }) {
   const store = new Store(":memory:");
   const bus = new Bus(store);
-  const events: HarnessEvent[] = [];
+  const events: CharretteEvent[] = [];
   bus.subscribe(({ event }) => void events.push(event));
   const gates: GateHandler = {
     async resolvePlanGate() {
@@ -161,7 +161,7 @@ describe("asking about a run that cannot be verified", () => {
     const { controller, store } = build({ repoPath: dir, pool, github: gh().adapter });
     store.createRun({
       id: "run1", repoPath: dir, assignment: "a", state: "CREATED", prdPath: null, planHash: null,
-      integrationBranch: "harness/run1/main", config: RunConfig.parse({ prodUrl: "https://app.example.com" }),
+      integrationBranch: "charrette/run1/main", config: RunConfig.parse({ prodUrl: "https://app.example.com" }),
     });
 
     // A run still being planned has nothing deployed to check.
@@ -174,7 +174,7 @@ describe("asking about a run that cannot be verified", () => {
     const { controller, store } = build({ repoPath: dir, pool, github: gh().adapter });
     store.createRun({
       id: "run1", repoPath: dir, assignment: "a", state: "CREATED", prdPath: null, planHash: null,
-      integrationBranch: "harness/run1/main", config: RunConfig.parse({ prodUrl: "https://app.example.com" }),
+      integrationBranch: "charrette/run1/main", config: RunConfig.parse({ prodUrl: "https://app.example.com" }),
     });
     for (const to of ["PLANNING", "PLAN_REVIEW", "EXECUTING", "INTEGRATING", "PR_REVIEW"] as const) store.transitionRun("run1", to);
 

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { blockingQuestions, type RunConfig, type RunSpec } from "@harness/shared";
+import { blockingQuestions, type RunConfig, type RunSpec } from "@charrette/shared";
 import type { PrChecks } from "./github.js";
 
 export const sourceDigest = (text: string): string => createHash("sha256").update(text).digest("hex");
@@ -106,7 +106,7 @@ export function productionPlanInstructions(config: RunConfig): string {
     `Production test authority: ${config.delivery.productionTestScope ? `test-data writes only within ${config.delivery.productionTestScope}; never real payments, outbound messages, customer data or infrastructure changes` : "read-only; mutation-dependent checks require the operator to declare an isolated production test scope"}.\n` +
     `Build the packaging and CI deployment workflow, using the operator's established deployment credentials and target. Name its exact successful check names in release.deploymentChecks. No new paid resource or account is authorized by this mode; surface missing access as a prerequisite.\n` +
     `Serve JSON {"revision":"<full deployed git SHA>"} at ${config.delivery.revisionPath}, populated by the deployment workflow from the actual build revision. Never hardcode a guessed SHA.\n` +
-    `In the specification, populate release.environment, release.productionCommand and release.productionScenarioIds. Every P0/P1 requirement needs behavioral acceptance scenarios, and every required acceptance scenario must be validated in production. The command receives HARNESS_PROD_URL and HARNESS_DEPLOY_SHA. It must test the deployed service, print each scenario ID and its pass/fail result, and fail on skipped or unavailable required behavior. Respect the production test authority above; checks requiring unauthorized test writes, destructive failure injection, human trials or unavailable credentials stay blocked until the operator has provided the necessary authority/evidence.\n` +
+    `In the specification, populate release.environment, release.productionCommand and release.productionScenarioIds. Every P0/P1 requirement needs behavioral acceptance scenarios, and every required acceptance scenario must be validated in production. The command receives CHARRETTE_PROD_URL and CHARRETTE_DEPLOY_SHA. It must test the deployed service, print each scenario ID and its pass/fail result, and fail on skipped or unavailable required behavior. Respect the production test authority above; checks requiring unauthorized test writes, destructive failure injection, human trials or unavailable credentials stay blocked until the operator has provided the necessary authority/evidence.\n` +
     `Cover the PRD's durability, recovery, topology, security, load and performance requirements through real acceptance tests in an isolated representative environment; do not substitute a short soak or a single-node topology for a different requirement.\n` +
     `Mark the smallest real end-to-end slice and its prerequisites as skeleton tasks. It will be exercised before other tasks can start. Deferral or documentation does not satisfy a requirement.\n`;
 }

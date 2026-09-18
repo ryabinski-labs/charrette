@@ -38,7 +38,7 @@ describe("reading a .env-shaped file", () => {
 });
 
 describe("secrets the run's code needs and nothing sets", () => {
-  it("finds an environment read in every language the harness runs against", () => {
+  it("finds an environment read in every language the charrette runs against", () => {
     const files = [
       file("a.ts", `const k = process.env.STRIPE_SECRET_KEY;`),
       file("b.ts", `process.env["SENDGRID_API_KEY"]`),
@@ -208,7 +208,7 @@ describe("DNS, which fails somewhere the template may not reach", () => {
 
   it("recognises the other record providers and the certificate cases", () => {
     expect(named([file("cf.tf", `resource "cloudflare_record" "www" {}`)])).toContain("cf.tf (www)");
-    expect(named([file("dc.tf", `resource "dns-project_record" "mx" {}`)])).toContain("dc.tf (mx)");
+    expect(named([file("dc.tf", `resource "dns_record" "mx" {}`)])).toContain("dc.tf (mx)");
     expect(named([file("cfn.yaml", `AWS::Route53::RecordSet`)])).toEqual(["cfn.yaml"]);
     expect(named([file("acm.yaml", `AWS::CertificateManager::Certificate`)])).toEqual(["acm.yaml"]);
     expect(named([file("issuer.yaml", `solvers:\n  - dns01: {}`)])).toEqual(["issuer.yaml"]);

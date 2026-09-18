@@ -5,8 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { indexSkills, verifyHash } from "./indexer.js";
 
 /**
- * A skills directory is the operator's own, not something the harness owns, so
- * it can contain anything: a broken symlink, a skill directory the harness
+ * A skills directory is the operator's own, not something the charrette owns, so
+ * it can contain anything: a broken symlink, a skill directory the charrette
  * cannot read, a file where a directory was expected. None of them may stop the
  * other skills being indexed.
  */
@@ -14,7 +14,7 @@ import { indexSkills, verifyHash } from "./indexer.js";
 const made: string[] = [];
 
 function skillsDir(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-skills-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-skills-"));
   made.push(dir);
   return dir;
 }
@@ -70,7 +70,7 @@ describe("indexing a directory the operator controls", () => {
   });
 
   it("ignores a directory that has never been created", () => {
-    expect(indexSkills([path.join(tmpdir(), "harness-no-such-skills-dir")])).toEqual([]);
+    expect(indexSkills([path.join(tmpdir(), "charrette-no-such-skills-dir")])).toEqual([]);
   });
 
   it("indexes the same skill once when two configured directories are the same place", () => {

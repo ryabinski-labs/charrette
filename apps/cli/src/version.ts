@@ -4,7 +4,7 @@ import path from "node:path";
 /**
  * What this binary is, and whether it is the thing the source says it is.
  *
- * `harnessBuild()` in core answers the first half — `version@sha`, with a `+`
+ * `charretteBuild()` in core answers the first half — `version@sha`, with a `+`
  * when the checkout is dirty — and stamps it on every agent session so a run
  * can be attributed to a commit. The half a sha cannot answer is that Node
  * loads `dist/`, not `src/`: a fix that is committed but never compiled leaves
@@ -19,7 +19,7 @@ import path from "node:path";
  * neither used to leave a trace — a stale build is invisible from inside the
  * process it produced.
  *
- * So `harness version` prints the sha to say which tree, and the build times
+ * So `charrette version` prints the sha to say which tree, and the build times
  * below to say whether that tree is the one executing.
  */
 
@@ -40,7 +40,7 @@ export type PackageBuild = {
 export type AgentBinary = { ok: true; version: string; path: string } | { ok: false; why: string };
 
 export type VersionInfo = {
-  /** `harnessBuild()`: `version@sha`, `+` for a dirty checkout, bare version off a tarball. */
+  /** `charretteBuild()`: `version@sha`, `+` for a dirty checkout, bare version off a tarball. */
   build: string;
   node: string;
   platform: string;
@@ -190,7 +190,7 @@ function declared(file: string): { version: string; size: number } | null {
  * dependency, so a fetch that never happened is not an install failure: the
  * symlink is written, `.modules.yaml` records the install as complete, and the
  * 190MB payload is simply absent. Nothing reports it until an agent is spawned
- * — which, for a harness, means finding out by restarting a run.
+ * — which, for a charrette, means finding out by restarting a run.
  *
  * Size is checked as well as presence because the failure that produced this
  * check was a package that existed and was empty, and a half-written 190MB
@@ -243,7 +243,7 @@ export function collectVersion(build: string, from: string, sdk: () => { binary:
   };
 }
 
-/** UTC to the second — the same shape `.harness/harness.log` stamps process starts with. */
+/** UTC to the second — the same shape `.charrette/charrette.log` stamps process starts with. */
 const stamp = (ms: number): string => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
 
 export function formatVersion(info: VersionInfo): string {
@@ -256,7 +256,7 @@ export function formatVersion(info: VersionInfo): string {
   // command was written to end, so it is named rather than left to be read.
   const noCommit = info.root !== null && !info.build.includes("@");
   const lines = [
-    `harness    ${info.build}${noCommit ? "   (no commit — git did not answer here)" : ""}`,
+    `charrette    ${info.build}${noCommit ? "   (no commit — git did not answer here)" : ""}`,
     `node       ${info.node} (${info.platform})`,
   ];
   lines.push(

@@ -68,7 +68,7 @@ describe("checkpointPrompt", () => {
     // Round-trip against the parser: a format the prompt asks for and the
     // parser cannot read is the failure mode this feature dies of quietly.
     const example = checkpointPrompt(20, 20);
-    const block = example.slice(example.indexOf("<harness-checkpoint>\nSTATE:"));
+    const block = example.slice(example.indexOf("<charrette-checkpoint>\nSTATE:"));
     const parsed = parseCheckpoint(block);
     expect(parsed).not.toBeNull();
     expect(parsed!.questions).toHaveLength(1);
@@ -80,12 +80,12 @@ describe("parseCheckpoint", () => {
     const parsed = parseCheckpoint(
       [
         "Working on it.",
-        "<harness-checkpoint>",
+        "<charrette-checkpoint>",
         "STATE: auth middleware lives in src/auth/mw.ts and already handles refresh.",
         "QUESTION: reuse the existing retry helper or add one?",
         "OPTIONS: reuse src/util/retry.ts | add a local helper | no retry",
         "RECOMMENDED: reuse src/util/retry.ts",
-        "</harness-checkpoint>",
+        "</charrette-checkpoint>",
       ].join("\n")
     );
     expect(parsed!.digest).toBe("auth middleware lives in src/auth/mw.ts and already handles refresh.");
@@ -102,7 +102,7 @@ describe("parseCheckpoint", () => {
     // Agents wrap STATE far more often than they keep it to one line. Dropping
     // the continuation would record a first sentence as the whole account.
     const parsed = parseCheckpoint(
-      ["<harness-checkpoint>", "STATE: first line.", "second line.", "third line.", "</harness-checkpoint>"].join("\n")
+      ["<charrette-checkpoint>", "STATE: first line.", "second line.", "third line.", "</charrette-checkpoint>"].join("\n")
     );
     expect(parsed!.digest).toBe("first line.\nsecond line.\nthird line.");
   });
@@ -110,7 +110,7 @@ describe("parseCheckpoint", () => {
   it("reads several questions", () => {
     const parsed = parseCheckpoint(
       [
-        "<harness-checkpoint>",
+        "<charrette-checkpoint>",
         "STATE: half done.",
         "QUESTION: first?",
         "OPTIONS: a | b",
@@ -118,7 +118,7 @@ describe("parseCheckpoint", () => {
         "QUESTION: second?",
         "OPTIONS: c | d",
         "RECOMMENDED: d",
-        "</harness-checkpoint>",
+        "</charrette-checkpoint>",
       ].join("\n")
     );
     expect(parsed!.questions.map((q) => q.question)).toEqual(["first?", "second?"]);
@@ -128,7 +128,7 @@ describe("parseCheckpoint", () => {
   it("accepts a digest with no questions", () => {
     // "Nothing is genuinely open" is a valid answer and must not read as a
     // malformed one.
-    const parsed = parseCheckpoint(["<harness-checkpoint>", "STATE: on track.", "</harness-checkpoint>"].join("\n"));
+    const parsed = parseCheckpoint(["<charrette-checkpoint>", "STATE: on track.", "</charrette-checkpoint>"].join("\n"));
     expect(parsed!.questions).toEqual([]);
     expect(parsed!.digest).toBe("on track.");
   });
@@ -136,23 +136,23 @@ describe("parseCheckpoint", () => {
   it("keeps the digest from a truncated block", () => {
     // The normal shape of an answer cut off at the output ceiling. Discarding a
     // written digest over an unwritten closing tag is a pure loss.
-    const parsed = parseCheckpoint(["<harness-checkpoint>", "STATE: got as far as the schema."].join("\n"));
+    const parsed = parseCheckpoint(["<charrette-checkpoint>", "STATE: got as far as the schema."].join("\n"));
     expect(parsed!.digest).toBe("got as far as the schema.");
   });
 
   it("is case-insensitive about the tag", () => {
-    expect(parseCheckpoint("<HARNESS-CHECKPOINT>\nSTATE: x\n</HARNESS-CHECKPOINT>")!.digest).toBe("x");
+    expect(parseCheckpoint("<CHARRETTE-CHECKPOINT>\nSTATE: x\n</CHARRETTE-CHECKPOINT>")!.digest).toBe("x");
   });
 
   it("returns null when there is no block, and never throws", () => {
     expect(parseCheckpoint("just an ordinary answer")).toBeNull();
     expect(parseCheckpoint("")).toBeNull();
-    expect(parseCheckpoint("<harness-checkpoint></harness-checkpoint>")).toBeNull();
+    expect(parseCheckpoint("<charrette-checkpoint></charrette-checkpoint>")).toBeNull();
   });
 
   it("drops a question with no text but keeps the digest", () => {
     const parsed = parseCheckpoint(
-      ["<harness-checkpoint>", "STATE: fine.", "QUESTION:", "OPTIONS: a | b", "</harness-checkpoint>"].join("\n")
+      ["<charrette-checkpoint>", "STATE: fine.", "QUESTION:", "OPTIONS: a | b", "</charrette-checkpoint>"].join("\n")
     );
     expect(parsed!.digest).toBe("fine.");
     expect(parsed!.questions).toEqual([]);
@@ -160,14 +160,14 @@ describe("parseCheckpoint", () => {
 
   it("tolerates a question with no options or recommendation", () => {
     const parsed = parseCheckpoint(
-      ["<harness-checkpoint>", "STATE: fine.", "QUESTION: is the staging URL right?", "</harness-checkpoint>"].join("\n")
+      ["<charrette-checkpoint>", "STATE: fine.", "QUESTION: is the staging URL right?", "</charrette-checkpoint>"].join("\n")
     );
     expect(parsed!.questions).toEqual([{ question: "is the staging URL right?", options: [], recommended: "" }]);
   });
 });
 
 describe("isCheckpointOnly", () => {
-  const block = ["<harness-checkpoint>", "STATE: rewrote the retry helper", "</harness-checkpoint>"].join("\n");
+  const block = ["<charrette-checkpoint>", "STATE: rewrote the retry helper", "</charrette-checkpoint>"].join("\n");
 
   it("recognises a turn that was nothing but a checkpoint", () => {
     expect(isCheckpointOnly(block)).toBe(true);
@@ -176,7 +176,7 @@ describe("isCheckpointOnly", () => {
 
   it("recognises a truncated one", () => {
     // The block ran into the output ceiling. Still nothing but a checkpoint.
-    expect(isCheckpointOnly("<harness-checkpoint>\nSTATE: half a dig")).toBe(true);
+    expect(isCheckpointOnly("<charrette-checkpoint>\nSTATE: half a dig")).toBe(true);
   });
 
   it("does not claim a real answer that happens to carry a digest", () => {

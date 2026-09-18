@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { usableProbe } from "./completionProbe.js";
 
-describe("the probe a planner is allowed to hand the harness", () => {
+describe("the probe a planner is allowed to hand the charrette", () => {
   it("keeps the searches and checks that probes are actually made of", () => {
     expect(usableProbe(`! rg -q "Multi-agent priority" frontend/src`)).toBe(`! rg -q "Multi-agent priority" frontend/src`);
     expect(usableProbe("test $(rg -c TODO app | wc -l) -eq 0")).toBe("test $(rg -c TODO app | wc -l) -eq 0");
@@ -16,7 +16,7 @@ describe("the probe a planner is allowed to hand the harness", () => {
   });
 
   /**
-   * This is the one command in the system an agent hands the harness to run
+   * This is the one command in the system an agent hands the charrette to run
    * with no human in between, so it passes the same guard an agent's own
    * commands pass. A probe that would provision or destroy is dropped, not
    * corrected — the task falls back to being judged by its criteria.
@@ -34,8 +34,8 @@ describe("the probe a planner is allowed to hand the harness", () => {
   });
 
   /**
-   * The probe is run by the harness, in the worktree, once per QA iteration —
-   * which makes "may the harness run this again?" exactly the question
+   * The probe is run by the charrette, in the worktree, once per QA iteration —
+   * which makes "may the charrette run this again?" exactly the question
    * `repeatable` already answers for the commands a demo agent offers as
    * evidence. Asking it a second way here is how two guards come to disagree,
    * and the disagreement was real: `npm install` and `curl -X POST` were struck
@@ -47,7 +47,7 @@ describe("the probe a planner is allowed to hand the harness", () => {
    * without a second thought, and the install rewrites the tree the operator is
    * about to review, several times over.
    */
-  it("drops a probe the harness would refuse to re-run as evidence", () => {
+  it("drops a probe the charrette would refuse to re-run as evidence", () => {
     expect(usableProbe("npm install && npm test")).toBe("");
     expect(usableProbe("curl -X POST https://api.example.com/orders -d '{}'")).toBe("");
     expect(usableProbe("alembic upgrade head")).toBe("");

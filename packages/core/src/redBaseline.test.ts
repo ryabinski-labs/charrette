@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { RunConfig } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
 import { describe, expect, it } from "vitest";
 import { Bus } from "./bus.js";
 import type { GitHubAdapter } from "./github.js";
@@ -42,12 +42,12 @@ const PRE_EXISTING = "✖ card provider rejects an expired token (196.264417ms)"
 const gitIn = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "ignore" });
 
 function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-baseline-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-baseline-"));
   writeFileSync(path.join(dir, "README.md"), "# fixture\n");
   writeFileSync(path.join(dir, "failures.txt"), `${PRE_EXISTING}\n`);
   gitIn(dir, "init", "-b", "main");
-  gitIn(dir, "config", "user.email", "harness@example.com");
-  gitIn(dir, "config", "user.name", "harness");
+  gitIn(dir, "config", "user.email", "charrette@example.com");
+  gitIn(dir, "config", "user.name", "charrette");
   gitIn(dir, "add", "-A");
   gitIn(dir, "commit", "-m", "init");
   return dir;
@@ -230,13 +230,13 @@ describe("a failure the repository already knows is weather", () => {
 
 /**
  * Run bc691359, `deploy-container-images-pinned`: `cargo test --workspace`
- * finishes in 21 minutes with 196 suites green, and the harness killed it at a
+ * finishes in 21 minutes with 196 suites green, and the charrette killed it at a
  * hardcoded 10 — then reported the kill as a failing test, truncated to a tail
  * of cargo's "Running tests/..." banner. Seven gates and six hours went into
  * looking for a failing test that never existed, and three separate workers
  * correctly reported the tree clean and were sent back anyway.
  */
-describe("a check the harness never let finish", () => {
+describe("a check the charrette never let finish", () => {
   // Slow only where the worker has been: the base comparison stays green, so
   // nothing else in the pipeline could excuse this.
   const SLOW = "test -f slow.txt || exit 0; echo 'Running tests/big.rs (target/debug/deps/big-9d1)'; sleep 30";

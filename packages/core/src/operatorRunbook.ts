@@ -22,7 +22,7 @@
  * mailbox.
  */
 
-import type { Runbook } from "@harness/shared";
+import type { Runbook } from "@charrette/shared";
 
 export type { Runbook };
 type RunbookStep = Runbook["steps"][number];

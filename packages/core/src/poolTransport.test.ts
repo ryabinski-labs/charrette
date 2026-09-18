@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { RunConfig } from "@harness/shared";
-import type { HarnessEvent } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
+import type { CharretteEvent } from "@charrette/shared";
 
 const { queryMock, reapUnderMock } = vi.hoisted(() => ({ queryMock: vi.fn(), reapUnderMock: vi.fn() }));
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({ query: queryMock }));
@@ -24,7 +24,7 @@ import { AgentPool, PromptStream, type AgentSpec } from "./pool.js";
 let store: Store;
 let bus: Bus;
 let pool: AgentPool;
-let events: HarnessEvent[];
+let events: CharretteEvent[];
 let requests: { url: string; body: Record<string, unknown> }[];
 
 /** An OpenAI that answers each request from a script. */
@@ -71,7 +71,7 @@ beforeEach(() => {
   vi.stubEnv("GEMINI_API_KEY", "gem-test");
   // Keep rtk out of it; whether the operator has it installed is not this test's
   // subject, and it is covered on its own in rtk.test.ts.
-  vi.stubEnv("HARNESS_RTK", "off");
+  vi.stubEnv("CHARRETTE_RTK", "off");
   store = new Store(":memory:");
   store.createRun({
     id: "run1",
@@ -80,7 +80,7 @@ beforeEach(() => {
     state: "CREATED",
     prdPath: null,
     planHash: null,
-    integrationBranch: "harness/run1/main",
+    integrationBranch: "charrette/run1/main",
     config: RunConfig.parse({}),
   });
   bus = new Bus(store);
@@ -210,7 +210,7 @@ describe("a session that outgrows its context window", () => {
     stubOpenAI([said("done")]);
     const result = await pool.run(spec({ contextBudget: 1 }));
 
-    const logs = events.filter((e): e is HarnessEvent & { text: string } => e.type === "agent.log");
+    const logs = events.filter((e): e is CharretteEvent & { text: string } => e.type === "agent.log");
     expect(logs.some((l) => /over the 1-character budget/.test(l.text))).toBe(true);
     // The note is bookkeeping, not a turn: one model call, one turn.
     expect(result.turns).toBe(1);
@@ -221,12 +221,12 @@ describe("a session that outgrows its context window", () => {
     stubOpenAI([said("done")]);
     await pool.run(spec());
 
-    const logs = events.filter((e): e is HarnessEvent & { text: string } => e.type === "agent.log");
+    const logs = events.filter((e): e is CharretteEvent & { text: string } => e.type === "agent.log");
     expect(logs.some((l) => /context budget|characters of older tool output/.test(l.text))).toBe(false);
   });
 });
 
-describe("the pairings the harness refuses outright", () => {
+describe("the pairings the charrette refuses outright", () => {
   it("will not start a role whose tools this transport cannot provide", async () => {
     await expect(pool.run(spec({ tools: ["Read", "WebSearch"] }))).rejects.toThrow(/cannot run on gpt-5.6-terra.*WebSearch/s);
     // Nothing was spent and no session was opened.
@@ -234,7 +234,7 @@ describe("the pairings the harness refuses outright", () => {
   });
 
   it("will not start a role that needs in-process MCP tools", async () => {
-    await expect(pool.run(spec({ mcpServers: { harness_intake: {} } as never }))).rejects.toThrow(/in-process MCP tools/);
+    await expect(pool.run(spec({ mcpServers: { charrette_intake: {} } as never }))).rejects.toThrow(/in-process MCP tools/);
   });
 
   it("points the operator at the setting they need to change", async () => {

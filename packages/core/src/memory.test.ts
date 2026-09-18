@@ -70,7 +70,7 @@ describe("writing down what a run watched happen", () => {
     // Two Store instances over one file, which is what a later run in the same
     // repository actually is. An in-memory database would pass this test while
     // proving nothing about it.
-    const dbPath = path.join(mkdtempSync(path.join(tmpdir(), "harness-memory-")), "harness.db");
+    const dbPath = path.join(mkdtempSync(path.join(tmpdir(), "charrette-memory-")), "charrette.db");
     const first = new Store(dbPath);
     observe(first, { kind: "check", subject: "pnpm test", verdict: "failed", detail: "", runId: "run-1" }, NOW);
     first.db.close();

@@ -81,7 +81,7 @@ describe("installForged", () => {
     expect(skill.description).toBe("rotating logs here");
     expect(skill.body).toContain("Do it like this.");
     const raw = readFileSync(path.join(d, "log-rotation", "SKILL.md"), "utf8");
-    expect(raw).toContain("forged-by: harness run r1, task t1");
+    expect(raw).toContain("forged-by: charrette run r1, task t1");
   });
 
   it("adopts an existing file instead of clobbering one another task may be carrying the hash of", () => {
@@ -205,8 +205,8 @@ describe("the skillsmith's briefing", () => {
 });
 
 describe("forgeDir", () => {
-  it("keeps the forge beside the run database, inside .harness", () => {
-    expect(forgeDir("/repo")).toBe(path.join("/repo", ".harness", "skills"));
+  it("keeps the forge beside the run database, inside .charrette", () => {
+    expect(forgeDir("/repo")).toBe(path.join("/repo", ".charrette", "skills"));
   });
 });
 

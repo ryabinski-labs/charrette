@@ -29,7 +29,7 @@ const usage = (over: Partial<Parameters<Store["recordUsage"]>[0]>) => ({
 
 describe("a ledger written before the attribution columns existed", () => {
   it("gains them on open, and keeps the rows that were already there", () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "harness-ledger-"));
+    const dir = mkdtempSync(path.join(tmpdir(), "charrette-ledger-"));
     const dbPath = path.join(dir, "old.db");
     const old = new DatabaseSync(dbPath);
     old.exec(`CREATE TABLE ledger (

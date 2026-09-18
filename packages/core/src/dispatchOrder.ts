@@ -1,4 +1,4 @@
-import type { TaskState } from "@harness/shared";
+import type { TaskState } from "@charrette/shared";
 
 /** The states a task can no longer do work in. */
 const TERMINAL: TaskState[] = ["MERGED", "NEEDS_HUMAN", "CANCELLED"];
@@ -106,9 +106,9 @@ export function leverage(tasks: Dispatchable[], id: string): number {
  * planner marked `skeleton` is still live, nothing else starts: the skeleton is
  * the thinnest slice that makes the critical path run at all, and a run that
  * builds breadth alongside it arrives at the end with thirteen crates, a
- * marketing site and no thread that runs — which is what waf did with $3,755
+ * marketing site and no thread that runs — which is what rust-service did with $3,755
  * (issue #118). Leverage cannot express this on its own, because breadth is
- * often exactly what everything else depends on: waf's Helm chart had leverage.
+ * often exactly what everything else depends on: rust-service's Helm chart had leverage.
  *
  * What the hold lets through is the skeleton and whatever the skeleton is
  * waiting on. A spine task can depend on something the planner did not mark —

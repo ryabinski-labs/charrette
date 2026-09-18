@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { RunConfig } from "@harness/shared";
-import type { HarnessEvent } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
+import type { CharretteEvent } from "@charrette/shared";
 import { Bus } from "./bus.js";
 import { GitHubAdapter } from "./github.js";
 import type { PitStop, PitStopDecision } from "./pitstop.js";
@@ -24,7 +24,7 @@ afterEach(() => {
 });
 
 function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-replan-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-replan-"));
   made.push(dir, `${dir}-wt`);
   const run = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "ignore" });
   run("init", "-b", "main");
@@ -103,7 +103,7 @@ const BASE = { deterministicChecks: [] as string[], waitForChecks: false, maxPar
 function build(opts: { repoPath: string; pool: AgentPool; decide?: (stop: PitStop) => PitStopDecision }) {
   const store = new Store(":memory:");
   const bus = new Bus(store);
-  const events: HarnessEvent[] = [];
+  const events: CharretteEvent[] = [];
   const stops: PitStop[] = [];
   bus.subscribe(({ event }) => void events.push(event));
   const gates: GateHandler = {
@@ -186,7 +186,7 @@ describe("the pit stop a FAIL verdict opens", () => {
     await controller.resume(runId);
 
     // The verdict has already been shown and answered; re-asking would be the
-    // harness nagging about a decision the operator already made.
+    // charrette nagging about a decision the operator already made.
     expect(stops.length).toBe(1);
   });
 

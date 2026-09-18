@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
-import { RunConfig, RunSpec, type TaskState } from "@harness/shared";
+import { RunConfig, RunSpec, type TaskState } from "@charrette/shared";
 import { Bus } from "./bus.js";
 import { InvalidTransition, Store } from "./store.js";
 import { costUsd } from "./budget.js";
@@ -20,7 +20,7 @@ function makeRun(store: Store, id = "run1"): void {
     state: "CREATED",
     prdPath: null,
     planHash: null,
-    integrationBranch: `harness/${id}/main`,
+    integrationBranch: `charrette/${id}/main`,
     config: RunConfig.parse({}),
   });
 }
@@ -127,17 +127,17 @@ describe("live event delivery", () => {
     const seed = (id: string, state: string) =>
       store.db
         .prepare("INSERT INTO runs (id, repoPath, assignment, state, integrationBranch, config, createdAt, updatedAt) VALUES (?,?,?,?,?,?,?,?)")
-        .run(id, "/tmp/repo", "a", state, `harness/${id}/main`, JSON.stringify(RunConfig.parse({})), 0, 0);
+        .run(id, "/tmp/repo", "a", state, `charrette/${id}/main`, JSON.stringify(RunConfig.parse({})), 0, 0);
     for (const [id, state] of [["r-exec", "EXECUTING"], ["r-verify", "VERIFYING"], ["r-done", "DONE"], ["r-pr", "PR_REVIEW"], ["r-abort", "ABORTED"]]) {
       seed(id!, state!);
     }
     expect(store.listOpenRuns().map((r) => r.id).sort()).toEqual(["r-exec", "r-verify"]);
-    // …and none of them are lost: `harness status --all` still reaches every one.
+    // …and none of them are lost: `charrette status --all` still reaches every one.
     expect(store.listRuns()).toHaveLength(5);
   });
 
   it("backfills config fields that did not exist when the run was recorded", () => {
-    // Every long-lived run carries a config frozen at `harness run` time, and a
+    // Every long-lived run carries a config frozen at `charrette run` time, and a
     // resume reads it back months and several releases later. A field added
     // since then must arrive as its default, not as undefined: `qaMaxTurns`
     // reaches arithmetic (the retry raises it), where undefined becomes NaN and
@@ -149,7 +149,7 @@ describe("live event delivery", () => {
     delete legacy.waitForChecks;
     store.db
       .prepare("INSERT INTO runs (id, repoPath, assignment, state, integrationBranch, config, createdAt, updatedAt) VALUES (?,?,?,?,?,?,?,?)")
-      .run("old", "/tmp/repo", "a", "CREATED", "harness/old/main", JSON.stringify(legacy), 0, 0);
+      .run("old", "/tmp/repo", "a", "CREATED", "charrette/old/main", JSON.stringify(legacy), 0, 0);
 
     const config = store.getRun("old")!.config;
     expect(config.qaMaxTurns).toBe(90);
@@ -183,7 +183,7 @@ describe("costUsd", () => {
 
 /**
  * `touchedPaths` and `estimatedSize` were emitted by the planner from the first
- * version of the harness and thrown away at the door. The scheduler needs the
+ * version of the charrette and thrown away at the door. The scheduler needs the
  * first to keep two workers out of one file; the plan gate needs the second to
  * tell the operator what a run is likely to cost.
  */
@@ -208,7 +208,7 @@ describe("what a task remembers about the plan that made it", () => {
   it("adds the columns to a database written before they existed", () => {
     // A run resumed across an upgrade is exactly the run that most needs to
     // resume, and `CREATE TABLE IF NOT EXISTS` would have left it short a column.
-    const dir = mkdtempSync(path.join(tmpdir(), "harness-migrate-"));
+    const dir = mkdtempSync(path.join(tmpdir(), "charrette-migrate-"));
     const dbPath = path.join(dir, "old.db");
     const old = new DatabaseSync(dbPath);
     old.exec(`CREATE TABLE tasks (
@@ -281,7 +281,7 @@ describe("rewriting a task's definition of done", () => {
   it("records who moved the acceptance criteria and what they were before", () => {
     // The lever `amendProbe` could not pull. Run bc691359's
     // `tier1-three-arm-capture` was judged against a bundle only `terraform
-    // apply` could produce, which this harness denies — so a rewritten probe
+    // apply` could produce, which this charrette denies — so a rewritten probe
     // changed nothing, because QA reads the criteria.
     const store = makeStore();
     makeRun(store);
@@ -406,7 +406,7 @@ describe("the run's specification, read back", () => {
       state: "CREATED",
       prdPath: null,
       planHash: null,
-      integrationBranch: "harness/run-1/main",
+      integrationBranch: "charrette/run-1/main",
       config: RunConfig.parse({}),
     });
     return { store, bus };
@@ -489,7 +489,7 @@ describe("what the intent check left behind", () => {
 
   it("reads a verdict recorded by a build that wrote no gap list", () => {
     // Not hypothetical: the event schema defaults `gaps` today, so every verdict
-    // this harness writes has one. A run resumed from a database written before
+    // this charrette writes has one. A run resumed from a database written before
     // it did must still produce a posture rather than a crash.
     const store = makeStore();
     makeRun(store);
@@ -529,7 +529,7 @@ describe("what the intent check left behind", () => {
       steps: [{ step: "pay", result: "broken" }],
       howStarted: "pnpm dev",
       why: "500 on /pay",
-      artifactsDir: "/r/.harness/run-1/live",
+      artifactsDir: "/r/.charrette/run-1/live",
       proof: ["shot.png — the error"],
       couldNotReach: ["the receipt"],
       ts: 1,
@@ -540,7 +540,7 @@ describe("what the intent check left behind", () => {
       steps: [{ step: "pay", result: "broken" }],
       howStarted: "pnpm dev",
       why: "500 on /pay",
-      artifactsDir: "/r/.harness/run-1/live",
+      artifactsDir: "/r/.charrette/run-1/live",
       proof: ["shot.png — the error"],
       couldNotReach: ["the receipt"],
     });
@@ -578,10 +578,10 @@ describe("what the intent check left behind", () => {
     const store = makeStore();
     makeRun(store);
     const bus = new Bus(store);
-    bus.publish({ type: "git.merged", runId: "run1", taskId: "t1", branch: "harness/run1/t1", sha: "a", ts: 1 });
+    bus.publish({ type: "git.merged", runId: "run1", taskId: "t1", branch: "charrette/run1/t1", sha: "a", ts: 1 });
     bus.publish({ type: "run.intent_verdict", runId: "run1", verdict: "FAIL", gaps: ["g"], unchecked: [], summary: "", ts: 2 });
-    bus.publish({ type: "git.merged", runId: "run1", taskId: "t2", branch: "harness/run1/t2", sha: "b", ts: 3 });
-    bus.publish({ type: "git.merged", runId: "run1", taskId: "t3", branch: "harness/run1/t3", sha: "c", ts: 4 });
+    bus.publish({ type: "git.merged", runId: "run1", taskId: "t2", branch: "charrette/run1/t2", sha: "b", ts: 3 });
+    bus.publish({ type: "git.merged", runId: "run1", taskId: "t3", branch: "charrette/run1/t3", sha: "c", ts: 4 });
 
     const at = store.lastEventSeq("run1", "run.intent_verdict");
     // The merge before the verdict is part of what it read; the two after it
@@ -595,7 +595,7 @@ describe("what the intent check left behind", () => {
  * Which of a run's gates are still asking, computed from the open/resolve pair.
  *
  * Both cases below are rows an *older build* wrote. `gateId` and `kind` are
- * required by the event schema, so nothing this harness publishes today can be
+ * required by the event schema, so nothing this charrette publishes today can be
  * missing either — but `openRunGates` is read on resume, against whatever
  * database the run already had, and a reader that mishandles an old row on the
  * resume path is a reader that mishandles it while somebody is waiting.

@@ -74,12 +74,12 @@ describe("what the guard deliberately allows", () => {
 
   it("tells a listing apart from a change for the verbs that do both", () => {
     expect(blocked("git -C /tmp/repo branch")).toBeNull();
-    expect(blocked("git -C /tmp/repo branch --list 'harness/*'")).toBeNull();
+    expect(blocked("git -C /tmp/repo branch --list 'charrette/*'")).toBeNull();
     expect(blocked("git -C /tmp/repo config --get user.email")).toBeNull();
     expect(blocked("git -C /tmp/repo remote -v")).toBeNull();
 
     expect(blocked("git -C /tmp/repo branch feature-x")).toBe("git branch -> /tmp/repo");
-    expect(blocked("git -C /tmp/repo branch -D harness/old")).toBe("git branch -> /tmp/repo");
+    expect(blocked("git -C /tmp/repo branch -D charrette/old")).toBe("git branch -> /tmp/repo");
     expect(blocked("git -C /tmp/repo config user.email a@b.c")).toBe("git config -> /tmp/repo");
     expect(blocked("git -C /tmp/repo remote add upstream u")).toBe("git remote -> /tmp/repo");
   });
@@ -89,7 +89,7 @@ describe("what the guard deliberately allows", () => {
    * it is refusing the task's own commits. A worktree reached through a symlink
    * has two true absolute paths, and an agent gets the second one for free:
    * `git rev-parse --show-toplevel` answers with the canonical form while the
-   * session's cwd is the form the harness recorded. Judging them as strings
+   * session's cwd is the form the charrette recorded. Judging them as strings
    * denies every commit the task makes, and a task that cannot commit delivers
    * an empty branch — precisely the failure the guard was written to stop.
    *
@@ -99,11 +99,11 @@ describe("what the guard deliberately allows", () => {
    * reason ("/private/var vs /var").
    */
   it("allows the task's own commits when the worktree is reached through a symlink", () => {
-    const real = mkdtempSync(path.join(realpathSync(tmpdir()), "harness-wt-"));
+    const real = mkdtempSync(path.join(realpathSync(tmpdir()), "charrette-wt-"));
     const link = path.join(path.dirname(real), `${path.basename(real)}-link`);
     symlinkSync(real, link);
 
-    // Whichever form the harness recorded, the other is still the same tree.
+    // Whichever form the charrette recorded, the other is still the same tree.
     expect(blocked("git commit -am x", link)).toBeNull();
     expect(blocked(`cd ${real} && git commit -am x`, link)).toBeNull();
     expect(blocked(`git -C ${real} commit -am x`, link)).toBeNull();

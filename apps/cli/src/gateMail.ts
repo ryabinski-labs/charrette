@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { runbookEmail, type Bus, type RunbookEmail } from "@harness/core";
+import { runbookEmail, type Bus, type RunbookEmail } from "@charrette/core";
 
 /**
  * Mail the operator when a run stops on something only they can do.
@@ -20,11 +20,11 @@ import { runbookEmail, type Bus, type RunbookEmail } from "@harness/core";
  *
  * Everything here is best-effort and off by default. It is configured by
  * environment rather than by run config on purpose: the recipient is a property
- * of the person running the harness, not of the run, and a run config is
+ * of the person running the charrette, not of the run, and a run config is
  * recorded in the database and copied into pull requests.
  *
- *   HARNESS_GATE_EMAIL      where to send. Unset — the default — sends nothing.
- *   HARNESS_GATE_MAIL_CMD   the sender. Defaults to the agentdraft-email skill's
+ *   CHARRETTE_GATE_EMAIL      where to send. Unset — the default — sends nothing.
+ *   CHARRETTE_GATE_MAIL_CMD   the sender. Defaults to the agentdraft-email skill's
  *                           script when it is installed.
  *
  * The sender is invoked as `<cmd> send --to <addr> --subject <s> --raw-json <j>`
@@ -50,9 +50,9 @@ export function agentdraftScript(env: NodeJS.ProcessEnv): string {
  * feature nobody switched on.
  */
 export function mailTarget(env: NodeJS.ProcessEnv = process.env, exists: (p: string) => boolean = existsSync): MailTarget | null {
-  const to = (env.HARNESS_GATE_EMAIL ?? "").trim();
+  const to = (env.CHARRETTE_GATE_EMAIL ?? "").trim();
   if (!to) return null;
-  const explicit = (env.HARNESS_GATE_MAIL_CMD ?? "").trim();
+  const explicit = (env.CHARRETTE_GATE_MAIL_CMD ?? "").trim();
   if (explicit) {
     // Split on whitespace so an interpreter and its script both fit in one
     // variable — `python3 /path/to/sender.py` is the shape people reach for.
@@ -70,7 +70,7 @@ export function mailTarget(env: NodeJS.ProcessEnv = process.env, exists: (p: str
  * set or not.
  */
 export function mailBanner(target: MailTarget | null): string[] {
-  return target ? [`gate mail  ${target.to}   (gates only you can answer; HARNESS_GATE_EMAIL)`] : [];
+  return target ? [`gate mail  ${target.to}   (gates only you can answer; CHARRETTE_GATE_EMAIL)`] : [];
 }
 
 export type Send = (target: MailTarget, mail: RunbookEmail) => void;

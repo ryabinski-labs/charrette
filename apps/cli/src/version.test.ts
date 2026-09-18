@@ -27,7 +27,7 @@ import {
 const EARLY = new Date("2026-09-06T10:00:00Z");
 const LATE = new Date("2026-09-06T11:00:00Z");
 
-const tmp = (): string => mkdtempSync(path.join(os.tmpdir(), "harness-version-"));
+const tmp = (): string => mkdtempSync(path.join(os.tmpdir(), "charrette-version-"));
 
 /** Creates each file and stamps it with the mtime given, parents included. */
 function write(dir: string, files: Record<string, Date>): void {
@@ -47,7 +47,7 @@ function manifest(dir: string, contents: unknown): void {
 /** A package whose one source is compiled and current, for cases that vary one thing. */
 function pkg(files: Record<string, Date> = {}): string {
   const dir = tmp();
-  manifest(dir, { name: "@harness/x", version: "1.2.3" });
+  manifest(dir, { name: "@charrette/x", version: "1.2.3" });
   write(dir, files);
   return dir;
 }
@@ -67,7 +67,7 @@ function sdk(bytes: number | null, manifest: unknown = { version: "2.1.257", pla
 const OK: AgentBinary = { ok: true, version: "2.1.257", path: "/sdk/claude" };
 
 const built = (over: Partial<PackageBuild> = {}): PackageBuild => ({
-  name: "@harness/x",
+  name: "@charrette/x",
   version: "0.0.1",
   builtAt: EARLY.getTime(),
   sourceAt: EARLY.getTime(),
@@ -90,7 +90,7 @@ describe("scanPackage", () => {
     });
 
     expect(scanPackage(dir)).toEqual({
-      name: "@harness/x",
+      name: "@charrette/x",
       version: "1.2.3",
       builtAt: LATE.getTime(),
       sourceAt: EARLY.getTime(),
@@ -177,13 +177,13 @@ describe("scanPackage", () => {
 
   it("keeps a private package that carries no version", () => {
     const dir = tmp();
-    manifest(dir, { name: "@harness/private" });
+    manifest(dir, { name: "@charrette/private" });
     write(dir, { "src/a.ts": EARLY });
 
     // npm does not require a version on a private workspace package. Dropping
     // one would take it out of the count as well as the check — a silent
     // omission from the command whose job is to notice what is missing.
-    expect(scanPackage(dir)).toMatchObject({ name: "@harness/private", version: null, stale: 1 });
+    expect(scanPackage(dir)).toMatchObject({ name: "@charrette/private", version: null, stale: 1 });
   });
 
   it("is not a package without a readable manifest", () => {
@@ -205,19 +205,19 @@ describe("scanPackage", () => {
 describe("scanWorkspace", () => {
   it("reads packages/ then apps/, each in name order, and skips what is not a package", () => {
     const root = tmp();
-    manifest(path.join(root, "packages", "shared"), { name: "@harness/shared", version: "0.0.1" });
-    manifest(path.join(root, "packages", "core"), { name: "@harness/core", version: "0.0.1" });
-    manifest(path.join(root, "apps", "cli"), { name: "@harness/cli", version: "0.0.1" });
+    manifest(path.join(root, "packages", "shared"), { name: "@charrette/shared", version: "0.0.1" });
+    manifest(path.join(root, "packages", "core"), { name: "@charrette/core", version: "0.0.1" });
+    manifest(path.join(root, "apps", "cli"), { name: "@charrette/cli", version: "0.0.1" });
     writeFileSync(path.join(root, "packages", "README.md"), "");
 
-    expect(scanWorkspace(root).map((p) => p.name)).toEqual(["@harness/core", "@harness/shared", "@harness/cli"]);
+    expect(scanWorkspace(root).map((p) => p.name)).toEqual(["@charrette/core", "@charrette/shared", "@charrette/cli"]);
   });
 
   it("skips a parent directory that does not exist", () => {
     const root = tmp();
-    manifest(path.join(root, "packages", "core"), { name: "@harness/core", version: "0.0.1" });
+    manifest(path.join(root, "packages", "core"), { name: "@charrette/core", version: "0.0.1" });
 
-    expect(scanWorkspace(root).map((p) => p.name)).toEqual(["@harness/core"]);
+    expect(scanWorkspace(root).map((p) => p.name)).toEqual(["@charrette/core"]);
   });
 });
 
@@ -232,9 +232,9 @@ describe("sourceRoot", () => {
 
   it("is null when what is three levels up is not a workspace", () => {
     const root = tmp();
-    mkdirSync(path.join(root, "node_modules", "@harness", "cli"), { recursive: true });
+    mkdirSync(path.join(root, "node_modules", "@charrette", "cli"), { recursive: true });
 
-    expect(sourceRoot(path.join(root, "node_modules", "@harness", "cli"))).toBeNull();
+    expect(sourceRoot(path.join(root, "node_modules", "@charrette", "cli"))).toBeNull();
   });
 });
 
@@ -242,17 +242,17 @@ describe("collectVersion", () => {
   it("carries the build string and scans the workspace it was run out of", () => {
     const root = tmp();
     writeFileSync(path.join(root, "pnpm-workspace.yaml"), "");
-    manifest(path.join(root, "packages", "core"), { name: "@harness/core", version: "0.0.1" });
+    manifest(path.join(root, "packages", "core"), { name: "@charrette/core", version: "0.0.1" });
 
     const info = collectVersion("0.0.1@7453d60", path.join(root, "apps", "cli", "dist"), sdk(64));
 
     expect(info).toMatchObject({ build: "0.0.1@7453d60", root, node: process.version });
     expect(info.platform).toBe(`${process.platform} ${process.arch}`);
-    expect(info.packages.map((p) => p.name)).toEqual(["@harness/core"]);
+    expect(info.packages.map((p) => p.name)).toEqual(["@charrette/core"]);
   });
 
   it("scans nothing when the binary is not running out of a checkout", () => {
-    const info = collectVersion("0.0.1", path.join(tmp(), "node_modules", "@harness", "cli"), sdk(64));
+    const info = collectVersion("0.0.1", path.join(tmp(), "node_modules", "@charrette", "cli"), sdk(64));
 
     expect(info.root).toBeNull();
     expect(info.packages).toEqual([]);
@@ -263,7 +263,7 @@ describe("formatVersion", () => {
   it("says there is nothing to compare when there is no checkout", () => {
     const text = formatVersion({ build: "0.0.1", node: "v22.0.0", platform: "linux x64", root: null, packages: [], agent: OK });
 
-    expect(text).toContain("harness    0.0.1\n");
+    expect(text).toContain("charrette    0.0.1\n");
     expect(text).toContain("node       v22.0.0 (linux x64)");
     expect(text).toContain("installed, not a checkout");
     // Off a tarball a bare version is the whole truth, so nothing is flagged
@@ -279,7 +279,7 @@ describe("formatVersion", () => {
     // things that contradict each other, and hides that the `+` for a dirty
     // tree is missing too — so a modified checkout and a clean one would stamp
     // their sessions identically.
-    expect(text).toContain("harness    0.0.1   (no commit — git did not answer here)");
+    expect(text).toContain("charrette    0.0.1   (no commit — git did not answer here)");
   });
 
   it("says so loudly when no agent session could start", () => {
@@ -307,7 +307,7 @@ describe("formatVersion", () => {
       platform: "linux x64",
       root: "/repo",
       agent: OK,
-      packages: [built(), built({ name: "@harness/y", builtAt: LATE.getTime() })],
+      packages: [built(), built({ name: "@charrette/y", builtAt: LATE.getTime() })],
     });
 
     expect(text).toContain("source     /repo");
@@ -338,17 +338,17 @@ describe("formatVersion", () => {
       root: "/repo",
       agent: OK,
       packages: [
-        built({ name: "@harness/core", stale: 2, sourceAt: LATE.getTime() }),
-        built({ name: "@harness/dashboard", builtAt: null, stale: 1, sourceAt: LATE.getTime() }),
-        built({ name: "@harness/shared" }),
+        built({ name: "@charrette/core", stale: 2, sourceAt: LATE.getTime() }),
+        built({ name: "@charrette/dashboard", builtAt: null, stale: 1, sourceAt: LATE.getTime() }),
+        built({ name: "@charrette/shared" }),
       ],
     });
 
     expect(text).toContain("2 of 3 package(s) are behind their source:");
     // Padded to the longest name that is actually listed, so the counts line up.
-    expect(text).toContain("  @harness/core       2 file(s) newer than the build of 2026-09-06T10:00:00Z");
-    expect(text).toContain("  @harness/dashboard  1 file(s) newer, never built");
-    expect(text).not.toContain("@harness/shared");
+    expect(text).toContain("  @charrette/core       2 file(s) newer than the build of 2026-09-06T10:00:00Z");
+    expect(text).toContain("  @charrette/dashboard  1 file(s) newer, never built");
+    expect(text).not.toContain("@charrette/shared");
     // The line the command exists for: a clean sha above says which commit is
     // checked out, not which one is compiled.
     expect(text).toContain("Node loads `dist/`, not `src/` — run `pnpm build` before trusting a fix is live.");

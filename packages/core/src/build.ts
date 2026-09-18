@@ -3,10 +3,10 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 /**
- * Which harness this process is.
+ * Which charrette this process is.
  *
  * Answering "did fix X reach run Y?" cost an hour of cross-referencing
- * `git log` against process-start times in `.harness/harness.log`, and the
+ * `git log` against process-start times in `.charrette/charrette.log`, and the
  * answer for run 40da9337 was no: the per-worktree isolation fix landed at
  * 14:33 while the process carrying the run had started at 11:47. Node loads its
  * build at process start, so the 189 sessions that began after the commit had
@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
  *
  * Stamping this on each session at spawn makes that a lookup instead of an
  * excavation, and makes the failure mode visible at all: a run whose sessions
- * carry two different builds did not run one harness.
+ * carry two different builds did not run one charrette.
  */
 
 /**
@@ -46,7 +46,7 @@ let cached: string | undefined;
  * change while the process lives, which is the whole reason it is worth
  * recording per session.
  */
-export function harnessBuild(): string {
+export function charretteBuild(): string {
   if (cached === undefined) {
     const root = fileURLToPath(new URL("..", import.meta.url));
     const version = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;

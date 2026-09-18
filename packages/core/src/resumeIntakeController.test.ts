@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { RunConfig } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
 import { afterEach, describe, expect, it } from "vitest";
 import { Bus } from "./bus.js";
 import { GitHubAdapter } from "./github.js";
@@ -30,12 +30,12 @@ const BRIEF = '```json\n{"goal":"g","context":"c","decisions":[],"constraints":[
 
 const gitIn = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "ignore" });
 function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-resume-intake-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-resume-intake-"));
   made.push(dir, `${dir}-wt`);
   writeFileSync(path.join(dir, "README.md"), "# fixture\n");
   gitIn(dir, "init", "-b", "main");
-  gitIn(dir, "config", "user.email", "harness@example.com");
-  gitIn(dir, "config", "user.name", "harness");
+  gitIn(dir, "config", "user.email", "charrette@example.com");
+  gitIn(dir, "config", "user.name", "charrette");
   gitIn(dir, "add", "-A");
   gitIn(dir, "commit", "-m", "init");
   return dir;
@@ -69,7 +69,7 @@ function interrupted(dir: string, over: Record<string, unknown> = {}) {
     state: "CREATED",
     prdPath: null,
     planHash: null,
-    integrationBranch: "harness/run-1/main",
+    integrationBranch: "charrette/run-1/main",
     config: RunConfig.parse({ deterministicChecks: [], waitForChecks: false, ...over }),
   });
   store.transitionRun("run-1", "INTAKE");
@@ -169,7 +169,7 @@ describe("resuming a run that stopped mid-conversation", () => {
       state: "CREATED",
       prdPath: null,
       planHash: null,
-      integrationBranch: "harness/run-1/main",
+      integrationBranch: "charrette/run-1/main",
       config: RunConfig.parse({ deterministicChecks: [], waitForChecks: false }),
     });
     store.transitionRun("run-1", "INTAKE");

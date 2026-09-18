@@ -3,8 +3,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { RunConfig } from "@harness/shared";
-import type { HarnessEvent } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
+import type { CharretteEvent } from "@charrette/shared";
 import { Bus } from "./bus.js";
 import { BudgetExceeded } from "./budget.js";
 import { GitHubAdapter } from "./github.js";
@@ -32,7 +32,7 @@ afterEach(() => {
 });
 
 function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-pmdecide-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-pmdecide-"));
   made.push(dir, `${dir}-wt`);
   const run = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "ignore" });
   run("init", "-b", "main");
@@ -114,7 +114,7 @@ const BASE = { deterministicChecks: [] as string[], waitForChecks: false, maxPar
 function build(opts: { repoPath: string; pool: AgentPool; decide?: (stop: PitStop) => PitStopDecision }) {
   const store = new Store(":memory:");
   const bus = new Bus(store);
-  const events: HarnessEvent[] = [];
+  const events: CharretteEvent[] = [];
   const asked: PitStop[] = [];
   bus.subscribe(({ event }) => void events.push(event));
   const gates: GateHandler = {
@@ -141,8 +141,8 @@ const config = (decidedBy?: string) =>
     budget: { runCapUsd: 1000 },
   });
 
-const resolved = (events: HarnessEvent[]) => events.filter((e) => e.type === "run.pitstop_resolved");
-const logs = (events: HarnessEvent[]) => events.filter((e) => e.type === "agent.log").map((e) => (e as { text: string }).text);
+const resolved = (events: CharretteEvent[]) => events.filter((e) => e.type === "run.pitstop_resolved");
+const logs = (events: CharretteEvent[]) => events.filter((e) => e.type === "agent.log").map((e) => (e as { text: string }).text);
 
 describe("a pit stop that decides for itself", () => {
   it("asks the named skill instead of the operator, and records that it did", async () => {
@@ -198,7 +198,7 @@ describe("a pit stop that decides for itself", () => {
 
     const runId = await controller.startRun("build a thing", config());
 
-    const report = readFileSync(path.join(dir, ".harness", runId, "pitstops", "1", "REPORT.md"), "utf8");
+    const report = readFileSync(path.join(dir, ".charrette", runId, "pitstops", "1", "REPORT.md"), "utf8");
     expect(report).toContain("## Decision — redirect");
     expect(report).toContain("Decided by: product-manager");
     expect(report).toContain("the empty states are missing everywhere");
@@ -230,7 +230,7 @@ describe("a pit stop that decides for itself", () => {
 
     // A checkpoint that decides on its own is still spending the run's money,
     // and the operator can only turn off a cost they can see.
-    expect(readFileSync(path.join(dir, ".harness", runId, "pitstops", "1", "REPORT.md"), "utf8")).toContain("Decided by: product-manager ($0.25)");
+    expect(readFileSync(path.join(dir, ".charrette", runId, "pitstops", "1", "REPORT.md"), "utf8")).toContain("Decided by: product-manager ($0.25)");
   });
 
   it("stops the run when the decider says to, without asking anyone", async () => {
@@ -421,7 +421,7 @@ describe("a pit stop the operator kept for themselves", () => {
     expect(asked.length).toBeGreaterThan(0);
     expect(specs.some((s) => s.role === "pm")).toBe(false);
     expect(resolved(events)[0]).toMatchObject({ action: "continue", decidedBy: "operator" });
-    expect(readFileSync(path.join(dir, ".harness", runId, "pitstops", "1", "REPORT.md"), "utf8")).toContain("Decided by: operator\n");
+    expect(readFileSync(path.join(dir, ".charrette", runId, "pitstops", "1", "REPORT.md"), "utf8")).toContain("Decided by: operator\n");
     expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
   });
 });

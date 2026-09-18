@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { HarnessEvent } from "@harness/shared";
+import { CharretteEvent } from "@charrette/shared";
 import { Store } from "./store.js";
 
 /**
@@ -17,11 +17,11 @@ export class Bus {
     this.store.onAppend((e) => this.emitter.emit("event", e));
   }
 
-  publish(ev: HarnessEvent, materialize?: () => void): number {
+  publish(ev: CharretteEvent, materialize?: () => void): number {
     return this.store.appendEvent(ev, materialize);
   }
 
-  subscribe(fn: (e: { seq: number; event: HarnessEvent }) => void): () => void {
+  subscribe(fn: (e: { seq: number; event: CharretteEvent }) => void): () => void {
     this.emitter.on("event", fn);
     return () => this.emitter.off("event", fn);
   }

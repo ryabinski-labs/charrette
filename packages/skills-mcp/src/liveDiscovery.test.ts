@@ -43,7 +43,7 @@ async function bootServer(): Promise<Map<string, ToolHandler>> {
 
 /**
  * A skill collection is not a static thing. The operator adds one mid-session,
- * `skillForge` writes one into `<repo>/.harness/skills/` when a task matches
+ * `skillForge` writes one into `<repo>/.charrette/skills/` when a task matches
  * nothing, and either way the next question asked over this stdio connection
  * has to be able to find it — the server is long-lived and nothing restarts it
  * between tool calls.

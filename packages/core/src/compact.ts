@@ -1,11 +1,11 @@
-import { providerFor, type Provider } from "@harness/shared";
+import { providerFor, type Provider } from "@charrette/shared";
 import type { LoopMessage } from "./providerClients.js";
 
 /**
  * Keeping a long session inside the model's context window.
  *
  * The Claude Agent SDK compacts its own transcript, so the Anthropic transport
- * never needed this. The harness-run loop (toolLoop.ts) only ever appends, and a
+ * never needed this. The charrette-run loop (toolLoop.ts) only ever appends, and a
  * worker on a tool-heavy task appends fast: agentTools clamps a single tool
  * result at 30k characters, and forty turns of those is past every window on the
  * market. What that produces is the worst kind of failure — the session dies

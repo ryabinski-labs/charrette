@@ -2,7 +2,7 @@
  * Which company's API answers for a given model, and which roles are not
  * allowed to leave Anthropic.
  *
- * The harness has always stored a model as a plain string — `models.worker`
+ * The charrette has always stored a model as a plain string — `models.worker`
  * is `"claude-sonnet-5"`, not an object with a provider field — and runs
  * already recorded carry those strings in their frozen config. So the provider
  * is *derived* from the name rather than configured beside it: every existing
@@ -16,7 +16,7 @@ export type Provider = (typeof Provider)[number];
 
 /**
  * Families, longest-lived first. Anthropic is also the fallback for a name
- * that matches nothing: the harness spoke only to Anthropic until now, and an
+ * that matches nothing: the charrette spoke only to Anthropic until now, and an
  * unrecognised string reaching the SDK is the behaviour every prior run had.
  */
 const FAMILIES: [RegExp, Provider][] = [
@@ -119,7 +119,7 @@ export const PINNED_ROLES: Record<string, { provider: Provider; why: string }> =
  *
  * `PINNED_ROLES` was written to stop a judging role changing *company*, and for
  * most of its life that was the same thing as stopping it getting weaker —
- * every Anthropic model the harness routed to was Sonnet or Opus. Pointing
+ * every Anthropic model the charrette routed to was Sonnet or Opus. Pointing
  * `demo` and `repair` at Haiku ended that: `models.qa = "claude-haiku-4-5-…"`
  * is an Anthropic model, so the vendor check waved it through, and the guard
  * whose entire stated reason is "a weaker judge reports PASS rather than
@@ -138,7 +138,7 @@ export const PINNED_ROLES: Record<string, { provider: Provider; why: string }> =
  *
  * The cost of being wrong here is asymmetric in the same direction as
  * modelTier.ts: a refusal the operator disagrees with is a one-line config
- * error at `harness run`, and a permission it should not have granted is a
+ * error at `charrette run`, and a permission it should not have granted is a
  * merge nobody caught.
  */
 const JUDGING_FLOOR: Partial<Record<Provider, { below: RegExp; instead: string }>> = {

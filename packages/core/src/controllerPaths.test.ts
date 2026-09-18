@@ -3,8 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { RunConfig } from "@harness/shared";
-import type { HarnessEvent } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
+import type { CharretteEvent } from "@charrette/shared";
 import { Bus } from "./bus.js";
 import { GitHubAdapter } from "./github.js";
 import type { AgentPool, AgentResult, AgentSpec } from "./pool.js";
@@ -26,7 +26,7 @@ afterEach(() => {
 });
 
 function repo(withRemote = false): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-ctl-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-ctl-"));
   made.push(dir, `${dir}-wt`);
   const run = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
   run("init", "-b", "main");
@@ -39,7 +39,7 @@ function repo(withRemote = false): string {
     // A bare repo standing in for GitHub. Without somewhere to push, opening a
     // pull request fails and the run stops one step short of everything the
     // production check is about.
-    const remote = mkdtempSync(path.join(tmpdir(), "harness-remote-"));
+    const remote = mkdtempSync(path.join(tmpdir(), "charrette-remote-"));
     made.push(remote);
     execFileSync("git", ["init", "--bare", "-b", "main"], { cwd: remote, stdio: "ignore" });
     run("remote", "add", "origin", remote);
@@ -100,10 +100,10 @@ function build(opts: {
   pool: AgentPool;
   gates?: Partial<GateHandler>;
   github?: GitHubAdapter;
-}): { controller: RunController; store: Store; events: HarnessEvent[] } {
+}): { controller: RunController; store: Store; events: CharretteEvent[] } {
   const store = new Store(":memory:");
   const bus = new Bus(store);
-  const events: HarnessEvent[] = [];
+  const events: CharretteEvent[] = [];
   bus.subscribe(({ event }) => void events.push(event));
   const gates: GateHandler = {
     async resolvePlanGate() {
@@ -128,7 +128,7 @@ function seedRun(store: Store, state: string, config = RunConfig.parse({})): str
     state: "CREATED",
     prdPath: null,
     planHash: null,
-    integrationBranch: `harness/${id}/main`,
+    integrationBranch: `charrette/${id}/main`,
     config,
   });
   // Walk the state machine rather than writing the column, so the row and its
@@ -154,7 +154,7 @@ describe("resuming a run that was interrupted mid-conversation", () => {
     await controller.resume(runId);
 
     const reasons = events
-      .filter((e): e is HarnessEvent & { reason?: string; to?: string } => e.type === "run.state_changed")
+      .filter((e): e is CharretteEvent & { reason?: string; to?: string } => e.type === "run.state_changed")
       .map((e) => `${e.to}:${e.reason ?? ""}`);
     expect(reasons).toContain("PLANNING:resumed mid-intake");
     // No intake session was opened — the brief is gone and re-asking would make
@@ -171,7 +171,7 @@ describe("resuming a run that was interrupted mid-conversation", () => {
     await controller.resume(runId);
 
     const reasons = events
-      .filter((e): e is HarnessEvent & { reason?: string; to?: string } => e.type === "run.state_changed")
+      .filter((e): e is CharretteEvent & { reason?: string; to?: string } => e.type === "run.state_changed")
       .map((e) => `${e.to}:${e.reason ?? ""}`);
     expect(reasons).toContain("EXECUTING:resumed from budget hold");
   });
@@ -312,7 +312,7 @@ describe("the closing line", () => {
 describe("checking the deployed system", () => {
   /**
    * A GitHub where the run's pull request is merged and the deploy on that
-   * commit is green — the only state in which the harness asks production
+   * commit is green — the only state in which the charrette asks production
    * anything at all.
    */
   function githubWithMergedPr(): GitHubAdapter {
@@ -384,7 +384,7 @@ describe("checking the deployed system", () => {
     const runId = await controller.startRun("build a thing", PROD_CONFIG);
 
     expect(store.prodVerdict(runId)).toMatchObject({ verdict: "FAIL", findings: ["production validation did not complete"] });
-    const logs = events.filter((e): e is HarnessEvent & { text: string } => e.type === "agent.log");
+    const logs = events.filter((e): e is CharretteEvent & { text: string } => e.type === "agent.log");
     expect(logs.some((e) => e.text.includes("production validation did not complete"))).toBe(true);
     // And the run stays open rather than calling itself done.
     expect(store.getRun(runId)!.state).toBe("VERIFYING");
@@ -469,7 +469,7 @@ describe("recording a planner attempt that cannot be saved", () => {
     const { controller } = build({ repoPath: dir, pool });
     // The attempts directory cannot be created, so there is nowhere to put the
     // raw output — the diagnosis must survive that.
-    writeFileSync(path.join(dir, ".harness"), "not a directory");
+    writeFileSync(path.join(dir, ".charrette"), "not a directory");
 
     await expect(controller.startRun("build a thing", RunConfig.parse({}))).rejects.toThrow(
       /Raw output: \(could not be written\)/
@@ -502,7 +502,7 @@ describe("routing rules the operator wrote by hand", () => {
 });
 
 describe("clearing the ground a resume is about to work on", () => {
-  it("says what an earlier harness process left running", async () => {
+  it("says what an earlier charrette process left running", async () => {
     const dir = repo();
     const { pool } = rolePool({});
     const { controller, store, events } = build({ repoPath: dir, pool });
@@ -515,7 +515,7 @@ describe("clearing the ground a resume is about to work on", () => {
 
     await controller.resume(runId);
 
-    const logs = events.filter((e): e is HarnessEvent & { text: string } => e.type === "agent.log");
+    const logs = events.filter((e): e is CharretteEvent & { text: string } => e.type === "agent.log");
     expect(logs.some((e) => e.text.includes("swept 2 processes left over in this run's worktrees"))).toBe(true);
   });
 
@@ -527,7 +527,7 @@ describe("clearing the ground a resume is about to work on", () => {
 
     await controller.resume(runId);
 
-    const logs = events.filter((e): e is HarnessEvent & { text: string } => e.type === "agent.log");
+    const logs = events.filter((e): e is CharretteEvent & { text: string } => e.type === "agent.log");
     expect(logs.some((e) => e.text.includes("swept"))).toBe(false);
   });
 });
@@ -544,7 +544,7 @@ describe("what a finished run leaves on disk", () => {
 
     const runId = await controller.startRun("build a thing", RunConfig.parse({ deterministicChecks: [] }));
 
-    const prd = path.join(dir, ".harness", runId, "PRD.md");
+    const prd = path.join(dir, ".charrette", runId, "PRD.md");
     expect(existsSync(prd)).toBe(true);
     expect(readFileSync(prd, "utf8")).toContain("Build the thing");
   });
@@ -602,7 +602,7 @@ describe("telling the breakdown which files the repository already has", () => {
   it("says nothing about files when the repository tracks none", async () => {
     // A repository with one commit and nothing in it still plans; it just has
     // no file list to offer, and an empty block would only be noise.
-    const dir = mkdtempSync(path.join(tmpdir(), "harness-ctl-"));
+    const dir = mkdtempSync(path.join(tmpdir(), "charrette-ctl-"));
     made.push(dir, `${dir}-wt`);
     for (const args of [["init", "-b", "main"], ["config", "user.email", "t@example.invalid"], ["config", "user.name", "T"], ["commit", "--allow-empty", "-m", "first"]]) {
       execFileSync("git", args, { cwd: dir, stdio: "ignore" });

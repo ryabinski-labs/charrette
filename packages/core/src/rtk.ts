@@ -18,7 +18,7 @@ import { onPath } from "./toolbelt.js";
  * of what it can compress; commands it doesn't know come back untouched.
  *
  * rtk being absent, slow or broken must never cost an agent its command:
- * every failure path means "run it as written". `HARNESS_RTK=off` disables
+ * every failure path means "run it as written". `CHARRETTE_RTK=off` disables
  * the whole thing.
  */
 
@@ -76,7 +76,7 @@ export function rtkBashRewriter(run: RtkRunner) {
  * while the other is not.
  */
 function rtkRunner(env: NodeJS.ProcessEnv, run?: RtkRunner): RtkRunner | undefined {
-  if (/^(off|0|false)$/i.test(env.HARNESS_RTK ?? "")) return undefined;
+  if (/^(off|0|false)$/i.test(env.CHARRETTE_RTK ?? "")) return undefined;
   if (run) return run;
   const rtkPath = onPath("rtk", env.PATH ?? "");
   return rtkPath ? execRtkHook(rtkPath) : undefined;
@@ -95,7 +95,7 @@ export function rtkHooks(env: NodeJS.ProcessEnv = process.env, run?: RtkRunner):
 /**
  * The same rewrite, for the transports that have no SDK hook to hang it on.
  *
- * Agents on OpenAI or Google run their tool loop inside the harness (toolLoop.ts),
+ * Agents on OpenAI or Google run their tool loop inside the charrette (toolLoop.ts),
  * so there is no PreToolUse plumbing to register with — but there is no reason
  * they should pay full price for `git log` when Anthropic sessions do not. This
  * asks rtk exactly the same question through exactly the same rewriter, and
