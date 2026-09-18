@@ -1,4 +1,4 @@
-import { indexSkills, verifyHash, type IndexedSkill } from "@harness/skills-mcp";
+import { indexSkills, verifyHash, type IndexedSkill } from "@charrette/skills-mcp";
 
 /**
  * A `roleSkills` pin that will not reach the role it was written for.

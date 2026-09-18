@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HarnessEvent, PlannedTask, RunConfig, RunSpec } from "@harness/shared";
+import { CharretteEvent, PlannedTask, RunConfig, RunSpec } from "@charrette/shared";
 import { Bus } from "./bus.js";
 import { GitHubAdapter, type PrChecks } from "./github.js";
 import type { IntakeUi } from "./intake.js";
@@ -22,8 +22,8 @@ const command = (cwd: string, ...args: string[]) => execFileSync("git", args, { 
 const commit = (cwd: string) => { command(cwd, "add", "-A"); command(cwd, "commit", "-m", "fixture changes"); };
 
 async function fixture(options: { auto?: boolean; seed?: boolean; command?: string; fixes?: number; noSkeleton?: boolean; productionBug?: boolean } = {}) {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-release-"));
-  const bare = mkdtempSync(path.join(tmpdir(), "harness-release-origin-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-release-"));
+  const bare = mkdtempSync(path.join(tmpdir(), "charrette-release-origin-"));
   cleanup.push(() => { for (const target of [`${dir}-wt`, dir, bare]) rmSync(target, { recursive: true, force: true }); });
   command(dir, "init", "-b", "main");
   command(dir, "config", "user.email", "test@example.invalid");
@@ -37,7 +37,7 @@ async function fixture(options: { auto?: boolean; seed?: boolean; command?: stri
   const deployed = { sha: "", value: "", serveOld: false, fail: false, revisionReads: 0, changeAfter: Infinity };
   const server: Server = createServer((req, res) => {
     res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify(req.url === "/.well-known/harness-release" ? { revision: deployed.serveOld || ++deployed.revisionReads > deployed.changeAfter ? "old" : deployed.sha } : { value: deployed.fail ? "broken" : deployed.value }));
+    res.end(JSON.stringify(req.url === "/.well-known/charrette-release" ? { revision: deployed.serveOld || ++deployed.revisionReads > deployed.changeAfter ? "old" : deployed.sha } : { value: deployed.fail ? "broken" : deployed.value }));
   }).listen(0, "127.0.0.1");
   await once(server, "listening");
   cleanup.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
@@ -51,13 +51,13 @@ async function fixture(options: { auto?: boolean; seed?: boolean; command?: stri
   });
   const writeTests = (cwd: string) => {
     writeFileSync(path.join(cwd, "acceptance.test.cjs"), "const {test}=require('node:test'); const assert=require('node:assert/strict'); test('SC-1',()=>assert.equal(require('./product.cjs').value,'ready'));\n");
-    writeFileSync(path.join(cwd, "production.test.cjs"), "const {test}=require('node:test'); const assert=require('node:assert/strict'); test('SC-1',async()=>{ const r=await fetch(process.env.HARNESS_PROD_URL); assert.equal(r.status,200); assert.equal((await r.json()).value,'ready'); });\n");
+    writeFileSync(path.join(cwd, "production.test.cjs"), "const {test}=require('node:test'); const assert=require('node:assert/strict'); test('SC-1',async()=>{ const r=await fetch(process.env.CHARRETTE_PROD_URL); assert.equal(r.status,200); assert.equal((await r.json()).value,'ready'); });\n");
   };
   const task = PlannedTask.parse({ id: "slice", epicId: "product", title: "Build response", spec: "Return ready", acceptanceCriteria: ["returns ready"], scenarioIds: ["SC-1"], skeleton: !options.noSkeleton, estimatedSize: "S" });
   const store = new Store(":memory:");
   cleanup.push(() => store.db.close());
   const bus = new Bus(store);
-  const events: HarnessEvent[] = [];
+  const events: CharretteEvent[] = [];
   bus.subscribe(({ event }) => events.push(event));
   let runId = "seed";
   let observations = true;
@@ -84,7 +84,7 @@ async function fixture(options: { auto?: boolean; seed?: boolean; command?: stri
   const github = new GitHubAdapter("unused", "test/repo");
   let currentPr = 7;
   const mergedPrs = new Map<number, string>();
-  const head = () => command(dir, "rev-parse", `harness/${runId}/main`);
+  const head = () => command(dir, "rev-parse", `charrette/${runId}/main`);
   const merge = (number = currentPr) => {
     deployed.sha = head();
     const source = command(dir, "show", `${deployed.sha}:product.cjs`);
@@ -118,12 +118,12 @@ async function fixture(options: { auto?: boolean; seed?: boolean; command?: stri
   if (options.seed) {
     writeTests(dir);
     writeFileSync(path.join(dir, "product.cjs"), "exports.value = 'ready';\n"); commit(dir);
-    command(dir, "branch", "harness/seed/main");
-    store.createRun({ id: "seed", repoPath: dir, assignment: "Return ready to a user", state: "PR_REVIEW", config: { ...config, baseBranch: "main" }, prdPath: null, planHash: null, integrationBranch: "harness/seed/main" });
+    command(dir, "branch", "charrette/seed/main");
+    store.createRun({ id: "seed", repoPath: dir, assignment: "Return ready to a user", state: "PR_REVIEW", config: { ...config, baseBranch: "main" }, prdPath: null, planHash: null, integrationBranch: "charrette/seed/main" });
     store.insertTasks("seed", [{ id: "product", title: "product" }], [{ ...task, state: "MERGED", branch: null, worktreePath: null, githubIssueNumber: null, prNumber: 7, qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null }]);
     bus.publish({ type: "run.spec_ready", runId: "seed", spec, ts: Date.now() });
     store.bindRelease(config.delivery.releaseId, config.delivery.prdSha256, "Return ready to a user", spec, "seed");
-    mkdirSync(path.join(dir, ".harness"), { recursive: true });
+    mkdirSync(path.join(dir, ".charrette"), { recursive: true });
   }
   const internals = controller as unknown as {
     deliverProduction(id: string): Promise<boolean>; driveRun(id: string): Promise<void>; reopen(id: string): Promise<void>;
@@ -226,7 +226,7 @@ describe("production delivery lifecycle", () => {
 
   it("cannot inherit waived requirements into a production release", async () => {
     const f = await fixture({ seed: true });
-    f.store.appendEvent(HarnessEvent.parse({ type: "run.scope_written_off", runId: "seed", requirementId: "R-1", answer: "skip it", decidedBy: "operator", ts: Date.now() }));
+    f.store.appendEvent(CharretteEvent.parse({ type: "run.scope_written_off", runId: "seed", requirementId: "R-1", answer: "skip it", decidedBy: "operator", ts: Date.now() }));
     expect(f.internals.proofOf("seed").unmet).toContain("the release has written-off requirements; a reduced scope needs its own release contract");
   });
 
@@ -265,7 +265,7 @@ describe("production delivery lifecycle", () => {
   it.each(["PAUSED", "BUDGET_HOLD", "LIMIT_HOLD"] as const)("resumes production verification from %s", async (state) => {
     const f = await fixture({ seed: true }); f.merge();
     f.store.transitionRun("seed", "VERIFYING");
-    f.store.appendEvent(HarnessEvent.parse({ type: "run.release_evidence", runId: "seed", releaseId: "default", phase: "deploy", verdict: "blocked", ts: Date.now() }));
+    f.store.appendEvent(CharretteEvent.parse({ type: "run.release_evidence", runId: "seed", releaseId: "default", phase: "deploy", verdict: "blocked", ts: Date.now() }));
     f.store.transitionRun("seed", state);
     await f.internals.driveRun("seed");
     expect(f.store.getRun("seed")!.state).toBe("DONE");
@@ -398,12 +398,12 @@ describe("production delivery lifecycle", () => {
     expect(await f.internals.checkReleaseSkeleton("seed")).toBe(false);
     f.store.db.prepare("UPDATE tasks SET state='MERGED' WHERE runId='seed'").run();
     expect(await f.internals.checkReleaseSkeleton("seed")).toBe(false);
-    f.store.appendEvent(HarnessEvent.parse({ type: "run.live_verdict", runId: "seed", verdict: "broken", why: "cannot start", ts: Date.now() }));
+    f.store.appendEvent(CharretteEvent.parse({ type: "run.live_verdict", runId: "seed", verdict: "broken", why: "cannot start", ts: Date.now() }));
     expect(await f.internals.checkReleaseSkeleton("seed")).toBe(false);
     expect(f.store.releaseEvidence("seed")!.unmet).toEqual(["cannot start"]);
     fixes.mockResolvedValueOnce(["slice"]);
     expect(await f.internals.checkReleaseSkeleton("seed")).toBe(true);
-    f.store.appendEvent(HarnessEvent.parse({ type: "run.live_verdict", runId: "seed", verdict: "worked", ts: Date.now() }));
+    f.store.appendEvent(CharretteEvent.parse({ type: "run.live_verdict", runId: "seed", verdict: "worked", ts: Date.now() }));
     expect(await f.internals.checkReleaseSkeleton("seed")).toBe(true);
     exercise.mockClear();
     expect(await f.internals.checkReleaseSkeleton("seed")).toBe(true);
@@ -414,7 +414,7 @@ describe("production delivery lifecycle", () => {
     const f = await fixture({ seed: true, auto: true });
     expect(await f.internals.deliverProduction("seed")).toBe(false);
     vi.spyOn(f.internals, "proofOf").mockReturnValue({ proven: true, unmet: [], held: true });
-    const base: PrChecks = { state: "passing", sha: command(f.dir, "rev-parse", "harness/seed/main"), total: 1, failing: [], successful: ["test"] };
+    const base: PrChecks = { state: "passing", sha: command(f.dir, "rev-parse", "charrette/seed/main"), total: 1, failing: [], successful: ["test"] };
     for (const value of [null, { ...base, unavailable: true }, { ...base, state: "pending" as const }, { ...base, sha: "changed" }, { ...base, total: 0 }, { ...base, successful: [] }]) {
       f.store.transitionRun("seed", "VERIFYING");
       vi.mocked(f.github.prChecks).mockResolvedValueOnce(value);

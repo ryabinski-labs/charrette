@@ -1,32 +1,32 @@
 ---
-name: harness-report
-description: Produce and publish a harness run's completion report — what the run delivered, which features are live, which are dark, and the literal steps that switch each dark one on — as a shareable Artifact. Use when a harness run has finished and the user asks for a completion report, a delivery summary, a "what shipped" writeup, a live-versus-dark feature breakdown, or an artifact of what a run produced and what still needs turning on.
-tags: harness, reporting, artifact, delivery, activation
+name: charrette-report
+description: Produce and publish a charrette run's completion report — what the run delivered, which features are live, which are dark, and the literal steps that switch each dark one on — as a shareable Artifact. Use when a charrette run has finished and the user asks for a completion report, a delivery summary, a "what shipped" writeup, a live-versus-dark feature breakdown, or an artifact of what a run produced and what still needs turning on.
+tags: charrette, reporting, artifact, delivery, activation
 ---
 
-# Harness completion report
+# Charrette completion report
 
 Turns a finished run into one page a person reads: the ledger of what was built,
 which half of it is switched on, and — for everything that is not — the commands
 that switch it on.
 
-The harness generates the page. This skill's job is to verify what it claims and
+The charrette generates the page. This skill's job is to verify what it claims and
 publish it.
 
 ## 1. Generate
 
 ```bash
-harness report [<runId>] --repo <path>
+charrette report [<runId>] --repo <path>
 ```
 
 Defaults to the most recent run in that repo. It writes
-`.harness/reports/<runId>.html` and prints the headline plus the live/dark
+`.charrette/reports/<runId>.html` and prints the headline plus the live/dark
 counts. Read the counts before going further — they tell you how much
 verification is worth doing.
 
 The generated page is **derived, not verified**. It says so in its own footnote.
 Everything in its Dark section is a candidate read off the merged diff: the
-harness can see that `process.env.STRIPE_SECRET_KEY` appears in code the run
+charrette can see that `process.env.STRIPE_SECRET_KEY` appears in code the run
 wrote, and cannot see whether the operator set it in production last Tuesday.
 
 ## 2. Verify before publishing
@@ -64,7 +64,7 @@ Three outcomes per row, and the third is a real answer:
 
 ## 3. Fold your findings back in
 
-Edit `.harness/reports/<runId>.html` directly. It is one self-contained file
+Edit `.charrette/reports/<runId>.html` directly. It is one self-contained file
 with no build step. Keep its structure and voice; you are correcting content,
 not redesigning it.
 
@@ -94,7 +94,7 @@ Hand the user the URL.
 ## Updating a report later
 
 Same file path re-publishes to the same URL. When the operator throws some of
-the switches and wants the page refreshed, re-run `harness report` (which
+the switches and wants the page refreshed, re-run `charrette report` (which
 regenerates from current state), re-verify, and publish the same path again. If
 the report was published in an earlier session, pass its `url` so it updates in
 place instead of claiming a new link — find it with `action: "list"` or ask.

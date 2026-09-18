@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { DEFAULT_CHECK_TIMEOUT_MINUTES } from "@harness/shared";
+import { DEFAULT_CHECK_TIMEOUT_MINUTES } from "@charrette/shared";
 
 const execFileP = promisify(execFile);
 
@@ -8,7 +8,7 @@ export interface CheckFailure {
   command: string;
   output: string;
   /**
-   * The harness killed this command at the timeout rather than the command
+   * The charrette killed this command at the timeout rather than the command
    * deciding anything. Nothing it printed is a verdict on the tree — a kill
    * lands mid-suite, so the tail is whatever the runner happened to be saying
    * — and it is never charged to a task.
@@ -23,7 +23,7 @@ export interface CheckResult {
 
 /**
  * Deterministic checks (PRD §11.1 QA Pipeline): build/lint/test commands from
- * harness config, run in the worktree BEFORE any QA tokens are spent.
+ * charrette config, run in the worktree BEFORE any QA tokens are spent.
  * Output is truncated to tails — full logs stay on disk in the worktree (PERF risk #4).
  *
  * The commands run concurrently: lint/typecheck/test read the same tree but do
@@ -69,7 +69,7 @@ export async function runDeterministicChecks(cwd: string, commands: string[], ti
           return {
             command,
             timedOut: true,
-            output: `the harness killed this command after ${timeoutMinutes} minute(s) — it never finished, so nothing below is a verdict on this tree:\n${tails(1000)}`,
+            output: `the charrette killed this command after ${timeoutMinutes} minute(s) — it never finished, so nothing below is a verdict on this tree:\n${tails(1000)}`,
           };
         }
         return { command, output };
@@ -136,7 +136,7 @@ export interface InheritedSplit {
   /** Failures that fail on the base too, named so that nobody is sent to chase them. */
   inherited: { command: string; signatures: string[] }[];
   /**
-   * Commands the harness killed at the timeout. Not a verdict on anything, so
+   * Commands the charrette killed at the timeout. Not a verdict on anything, so
    * not charged and not re-run — but not silently dropped either: a check that
    * never finishes is the operator's problem to fix, in the configuration, and
    * it has to be visible to be fixed.
@@ -170,7 +170,7 @@ export interface ConfirmedFailures extends InheritedSplit {
  * A check can fail for reasons that have nothing to do with the tree it ran in:
  * another worktree's leftover process writing to the same local database, a port
  * that was still bound, a suite that shares a counter between its own cases. The
- * harness cannot tell those from a real defect by reading the output — but it
+ * charrette cannot tell those from a real defect by reading the output — but it
  * can ask again, and a contaminated failure usually does not survive the asking.
  *
  * Charging one to the task is expensive twice over: the worker spends an
@@ -261,7 +261,7 @@ export async function confirmFailures(cwd: string, split: InheritedSplit, base: 
  * pulls that branch in mid-flight — so a suite that is red on the base is red in
  * the worktree of every task in the run. Holding a task to account for that
  * spends its iteration cap on other people's bugs and then parks work nobody
- * ever found fault with, which is the single most expensive way this harness
+ * ever found fault with, which is the single most expensive way this charrette
  * fails. A failure that also fails on the base is not evidence about this task.
  */
 export function splitInheritedFailures(current: CheckResult, base: CheckResult): InheritedSplit {

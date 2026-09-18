@@ -1,5 +1,5 @@
 import { createInterface } from "node:readline/promises";
-import type { BudgetGate, RunController } from "@harness/core";
+import type { BudgetGate, RunController } from "@charrette/core";
 
 /** Ask on stdin. Split out so the prompt can be tested without a terminal. */
 async function askOnTerminal(question: string): Promise<string> {

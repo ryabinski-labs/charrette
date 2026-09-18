@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { RunConfig } from "@harness/shared";
-import type { HarnessEvent } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
+import type { CharretteEvent } from "@charrette/shared";
 
 const { queryMock, reapUnderMock } = vi.hoisted(() => ({ queryMock: vi.fn(), reapUnderMock: vi.fn() }));
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({ query: queryMock }));
@@ -16,7 +16,7 @@ import { AgentPool, type AgentSpec } from "./pool.js";
  *
  * A limit kills every session in flight at the same instant, with a sentence
  * that has nothing to do with the work: run f338b5c8 spent all three planner
- * attempts on one inside a second, ended `harness: fatal`, and took the
+ * attempts on one inside a second, ended `charrette: fatal`, and took the
  * operator's intake conversation with it. Waiting it out belongs here — the one
  * place every role passes through — so no caller has to know a limit from a
  * failure. What these cases pin is that the wait continues the *same* session
@@ -51,7 +51,7 @@ function scripts(...runs: Message[][]): void {
 
 let store: Store;
 let bus: Bus;
-let events: HarnessEvent[];
+let events: CharretteEvent[];
 let slept: number[];
 let pool: AgentPool;
 
@@ -88,7 +88,7 @@ function build(config: Partial<Parameters<typeof RunConfig.parse>[0]> = {}): voi
     state: "CREATED",
     prdPath: null,
     planHash: null,
-    integrationBranch: "harness/run1/main",
+    integrationBranch: "charrette/run1/main",
     config: RunConfig.parse(config),
   });
   bus = new Bus(store);

@@ -1,4 +1,4 @@
-import { RunConfig } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
 import { describe, expect, it } from "vitest";
 import { Bus } from "./bus.js";
 import { resumedIntakeBlock } from "./prompts.js";
@@ -28,7 +28,7 @@ function conversation(): Store {
     state: "CREATED",
     prdPath: null,
     planHash: null,
-    integrationBranch: "harness/run-1/main",
+    integrationBranch: "charrette/run-1/main",
     config: RunConfig.parse({}),
   });
   const ask = (question: string) => bus.publish({ type: "intake.question", runId: "run-1", sessionId: "s1", question, options: [], ts: 1 });

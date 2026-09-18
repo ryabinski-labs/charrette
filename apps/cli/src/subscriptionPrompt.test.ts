@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 const { createInterfaceMock } = vi.hoisted(() => ({ createInterfaceMock: vi.fn() }));
 vi.mock("node:readline/promises", () => ({ createInterface: createInterfaceMock }));
 
-import type { SubscriptionGate } from "@harness/core";
+import type { SubscriptionGate } from "@charrette/core";
 import { promptForAccount } from "./subscription.js";
 
 /**

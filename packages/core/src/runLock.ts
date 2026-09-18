@@ -3,15 +3,15 @@ import { hostname } from "node:os";
 import path from "node:path";
 
 /**
- * One harness process per run.
+ * One charrette process per run.
  *
  * Everything the scheduler does assumes it is the only thing driving a run.
  * The clearest statement of that assumption is the requeue sweeper at the top
- * of `execute`: a task it finds in WORKING or QA "belongs to a harness process
+ * of `execute`: a task it finds in WORKING or QA "belongs to a charrette process
  * that died mid-task: this controller is the only runner, so nothing can
  * actually be WORKING or in QA when the loop starts". Nothing enforced it.
  *
- * Run bc691359 had two `harness resume bc691359` processes alive at once — one
+ * Run bc691359 had two `charrette resume bc691359` processes alive at once — one
  * started an hour and fifty-four minutes before the other, neither aware of the
  * other. The second one's sweeper requeued WORKING -> READY a task the *first*
  * one was still running. Twelve minutes later the first finished its
@@ -27,7 +27,7 @@ import path from "node:path";
  * with no window between the two.
  *
  * Staleness is decided by asking the operating system whether the recorded pid
- * is still alive, not by a timeout. A harness killed with SIGKILL, or gone with
+ * is still alive, not by a timeout. A charrette killed with SIGKILL, or gone with
  * its terminal, leaves its lock file behind and takes its pid with it, so the
  * next acquire reclaims it — which is also why nothing here needs to run from a
  * signal handler.
@@ -66,13 +66,13 @@ const held = new Set<string>();
 export class RunLocked extends Error {
   constructor(readonly heldBy: LockHolder, readonly lockPath: string) {
     super(
-      `run ${heldBy.runId} is already being driven by harness pid ${heldBy.pid}` +
+      `run ${heldBy.runId} is already being driven by charrette pid ${heldBy.pid}` +
         (heldBy.host === hostname() ? "" : ` on ${heldBy.host}`) +
         ` (started ${new Date(heldBy.startedAt).toISOString()}, last heartbeat ${ago(heldBy.heartbeatAt)}).\n` +
-        `Two harness processes on one run corrupt each other's task states — one requeues a task the other is still working, ` +
+        `Two charrette processes on one run corrupt each other's task states — one requeues a task the other is still working, ` +
         `and the work that was already committed gets parked as NEEDS_HUMAN.\n` +
         `Stop the other one first:  kill -INT ${heldBy.pid}\n` +
-        `If pid ${heldBy.pid} is not a harness (the number was reused), delete ${lockPath} and try again.`
+        `If pid ${heldBy.pid} is not a charrette (the number was reused), delete ${lockPath} and try again.`
     );
     this.name = "RunLocked";
   }
@@ -154,7 +154,7 @@ export function acquireRunLock(
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
       const other = readHolder(p);
       if (other && alive(other.pid) && other.pid !== pid) throw new RunLocked(other, p);
-      // Nobody is behind it: a harness that was SIGKILLed, a machine that went
+      // Nobody is behind it: a charrette that was SIGKILLed, a machine that went
       // down mid-run, or a file that never finished being written. Clear it and
       // take the lock properly rather than writing over it in place — the
       // exclusive create is the only thing keeping two simultaneous reclaimers
@@ -225,7 +225,7 @@ export function acquireRunLock(
   // file this user cannot delete. Not the case the lock is for, and not
   // something to drive a run through either.
   throw new Error(
-    `could not take the lock for run ${runId}: ${p} exists, names no running harness, and could not be removed. Delete it and try again.`
+    `could not take the lock for run ${runId}: ${p} exists, names no running charrette, and could not be removed. Delete it and try again.`
   );
 }
 

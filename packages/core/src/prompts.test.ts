@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RunSpec } from "@harness/shared";
+import { RunSpec } from "@charrette/shared";
 import {
   INTERFACE_STANDARD,
   advisorPrompt,
@@ -97,7 +97,7 @@ describe("extractJson", () => {
 });
 
 /**
- * The harness could not build infrastructure for a reason that had nothing to do
+ * The charrette could not build infrastructure for a reason that had nothing to do
  * with the worker: QA's only notion of "verified" was a green test suite, so
  * declarative configuration — which has no unit tests by construction — was
  * rejected for missing evidence it can never produce, three times, then parked.
@@ -146,7 +146,7 @@ describe("infrastructure work", () => {
    * 406 planned tasks across twelve runs, 305 carried no probe at all. A task
    * without one cannot reach the light tier however small it is — `taskTier`
    * refuses it outright — so the instruction, not the rule, was what kept the
-   * cheap worker at zero tasks in every run this harness has ever done.
+   * cheap worker at zero tasks in every run this charrette has ever done.
    */
   it("asks for a completion probe on every small task, not only on sweeps", () => {
     const p = plannerBreakdownSystemPrompt();
@@ -168,7 +168,7 @@ describe("infrastructure work", () => {
     const p = plannerBreakdownSystemPrompt();
     expect(p).toMatch(/a probe that is red before the task starts parks the task forever/);
     expect(p).toMatch(/a wrong probe costs far more than a missing one/);
-    // Still read-only and still re-runnable: the harness runs it on every QA
+    // Still read-only and still re-runnable: the charrette runs it on every QA
     // iteration against the tree the operator is about to review.
     expect(p).toMatch(/never something that writes, deploys, installs or provisions/);
   });
@@ -297,11 +297,11 @@ describe("what the demo agent photographs", () => {
     expect(p).toMatch(/LOOK AT EVERY SCREENSHOT YOU TAKE, with Read, before you list it/);
     expect(p).toMatch(/one flat colour is a failed capture/);
     // Told how to fix it, not just that it is forbidden: both failures the
-    // harness has actually seen — an unpainted page, and a device descriptor
+    // charrette has actually seen — an unpainted page, and a device descriptor
     // pinning a browser that is not installed.
     expect(p).toContain("--wait-for-timeout=3000");
     expect(p).toContain("--viewport-size=390,844");
-    expect(p).toMatch(/The harness inspects every image you list/);
+    expect(p).toMatch(/The charrette inspects every image you list/);
   });
 
   it("asks for the claim each file backs, not a list of filenames", () => {
@@ -466,9 +466,9 @@ describe("what the advisor is told about the repository", () => {
  */
 describe("telling a worker its branch delivers nothing", () => {
   it("says a branch with no commits has none", () => {
-    const p = emptyBranchPrompt("harness/r/task-a", 0);
+    const p = emptyBranchPrompt("charrette/r/task-a", 0);
 
-    expect(p).toContain("`harness/r/task-a` delivers nothing: it has no commits on it at all.");
+    expect(p).toContain("`charrette/r/task-a` delivers nothing: it has no commits on it at all.");
     expect(p).toContain("git stash list");
   });
 
@@ -479,16 +479,16 @@ describe("telling a worker its branch delivers nothing", () => {
 });
 
 /**
- * The third mistake, and the only one the harness caused: the worker did commit
+ * The third mistake, and the only one the charrette caused: the worker did commit
  * nothing, because the command that would have produced something was killed
  * when its turn ended. Sending it to `git stash list` is advice about work that
  * does not exist.
  */
 describe("telling a worker its own job was killed when its session ended", () => {
   it("names the command, because the worker never saw it die", () => {
-    const p = abandonedJobPrompt("harness/r/task-a", ["bash bench/scripts/m1-live-smoke.sh > /tmp/out.log 2>&1"]);
+    const p = abandonedJobPrompt("charrette/r/task-a", ["bash bench/scripts/m1-live-smoke.sh > /tmp/out.log 2>&1"]);
 
-    expect(p).toContain("`harness/r/task-a` delivers nothing, and this time the harness knows why");
+    expect(p).toContain("`charrette/r/task-a` delivers nothing, and this time the charrette knows why");
     expect(p).toContain("- `bash bench/scripts/m1-live-smoke.sh > /tmp/out.log 2>&1`");
     expect(p).toContain("a command you had started was still running");
     expect(p).toContain("this was killed part-way through");
@@ -519,7 +519,7 @@ describe("telling a worker its own job was killed when its session ended", () =>
 
 describe("the prompt an agent is given for a conflict with the base", () => {
   it("lists the conflicted files", () => {
-    const p = baseConflictPrompt("harness/run1/main", "origin/main", ["a.ts", "b.ts"], 1, 2);
+    const p = baseConflictPrompt("charrette/run1/main", "origin/main", ["a.ts", "b.ts"], 1, 2);
 
     expect(p).toContain("- a.ts");
     expect(p).toContain("- b.ts");
@@ -529,7 +529,7 @@ describe("the prompt an agent is given for a conflict with the base", () => {
     // `git diff --diff-filter=U` can come back empty on a merge that failed for
     // a reason other than a textual conflict. Sending an agent in with an empty
     // bullet list reads as "there is nothing to do", which is the opposite.
-    const p = baseConflictPrompt("harness/run1/main", "origin/main", [], 1, 2);
+    const p = baseConflictPrompt("charrette/run1/main", "origin/main", [], 1, 2);
 
     expect(p).toContain("- (see `git status`)");
   });
@@ -590,7 +590,7 @@ describe("what the specification agent and the planner are told", () => {
 
   /**
    * The path is what the run is exercised on at the end, so the planner is
-   * shown it and told what the harness will do with it (issue #118).
+   * shown it and told what the charrette will do with it (issue #118).
    */
   it("hands the planner the critical path, and asks it to mark the walking skeleton", () => {
     const block = specPlanBlock(spec({ criticalPath: { name: "take a payment", steps: ["open the checkout", "pay"] } }));

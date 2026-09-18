@@ -22,7 +22,7 @@ export interface ExternalTool {
 const CANDIDATES: { name: string; use: string }[] = [
   {
     name: "gh",
-    use: "GitHub CLI, already authenticated. READ ONLY: `gh issue view`, `gh run view/log`, `gh api` GETs. Never `gh pr create`, `gh pr merge`, `gh repo` writes, or anything that pushes — the harness owns integration.",
+    use: "GitHub CLI, already authenticated. READ ONLY: `gh issue view`, `gh run view/log`, `gh api` GETs. Never `gh pr create`, `gh pr merge`, `gh repo` writes, or anything that pushes — the charrette owns integration.",
   },
   {
     name: "aws",

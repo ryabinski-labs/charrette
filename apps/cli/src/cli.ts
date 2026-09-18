@@ -1,12 +1,12 @@
 import { Command } from "commander";
 import { createInterface } from "node:readline/promises";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { sourceDigest, deliveryConfigProblems } from "@harness/core";
+import { sourceDigest, deliveryConfigProblems } from "@charrette/core";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_CHECK_TIMEOUT_MINUTES, ModelRoutingShape, RunConfig, SubscriptionConfig } from "@harness/shared";
-import { AgentPool, Bus, GateHandler, BridgedIntake, IntakeBridge, GitHubAdapter, RunController, Store, accountEnv, agentBinaryFiles, assembleReport, checkMemoryBanner, detectToolbelt, ensureIgnored, harnessBuild, missingKeys, originSlug, postmortem, renderPostmortem, reportPath, pinsInPlay, runLockHolder, skillPinBanner, standaloneReport, repoUnusable, wasMerged } from "@harness/core";
-import { Dashboard } from "@harness/dashboard";
+import { DEFAULT_CHECK_TIMEOUT_MINUTES, ModelRoutingShape, RunConfig, SubscriptionConfig, statePaths } from "@charrette/shared";
+import { AgentPool, Bus, GateHandler, BridgedIntake, IntakeBridge, GitHubAdapter, RunController, Store, accountEnv, agentBinaryFiles, assembleReport, checkMemoryBanner, detectToolbelt, ensureIgnored, charretteBuild, missingKeys, originSlug, postmortem, renderPostmortem, reportPath, pinsInPlay, runLockHolder, skillPinBanner, standaloneReport, repoUnusable, wasMerged } from "@charrette/core";
+import { Dashboard } from "@charrette/dashboard";
 import { promptForNewCap, watchBudgetCommands } from "./budget.js";
 import { promptForAccount } from "./subscription.js";
 import {
@@ -27,7 +27,7 @@ import { mailBanner, mailTarget, watchGateMail } from "./gateMail.js";
 import { collectVersion, formatVersion } from "./version.js";
 
 /**
- * The run a dashboard is currently working on, so `harness pause` does not make
+ * The run a dashboard is currently working on, so `charrette pause` does not make
  * the operator look up an id to stop the only thing that is running.
  *
  * Deliberately narrow: only EXECUTING and INTEGRATING can be paused, so a page
@@ -74,7 +74,7 @@ function makeDashboardFactory(want: boolean, port: number | undefined, repoPath:
     // Same direction as feedback and for the same reason: the answer travels
     // browser-or-watcher → run, so the transport is wired in after it exists.
     connectIntake: (intake) => dash?.attachIntake(intake),
-    // Written down as well as printed: the banner scrolls away, and `harness
+    // Written down as well as printed: the banner scrolls away, and `charrette
     // status` in another terminal is where an operator looks for the run.
     start: async () => {
       const url = await dash!.start();
@@ -96,19 +96,19 @@ function makeDashboardFactory(want: boolean, port: number | undefined, repoPath:
  * The store for a command that only reads, without bringing a run's worth of
  * state into being to read it.
  *
- * `makeController` creates `.harness/`, arms the crash log and adds a
+ * `makeController` creates `.charrette/`, arms the crash log and adds a
  * `.gitignore` entry, because every one of its callers is about to write a
  * run's worth of state. `status` and `postmortem` are not: they answer "what
  * has happened here", and in a repo where nothing has, the honest answer is
  * "nothing" — not a new state directory, an empty database and a modified
- * `.gitignore` in someone's clean checkout. Running `harness status` to look
+ * `.gitignore` in someone's clean checkout. Running `charrette status` to look
  * at a repository should leave it exactly as it was found.
  *
  * Null means the repo has never been run, which every caller already has a
  * sentence for.
  */
 function readOnlyStore(repoPath: string): Store | null {
-  const db = path.join(repoPath, ".harness", "harness.db");
+  const { db } = statePaths(repoPath);
   return existsSync(db) ? new Store(db) : null;
 }
 
@@ -116,15 +116,15 @@ function makeController(
   repoPath: string,
   gateOverride?: (bus: Bus, store: Store) => GateHandler
 ): { controller: RunController; store: Store; bus: Bus; liveRunId: () => string | undefined } {
-  const stateDir = path.join(repoPath, ".harness");
+  const { dir: stateDir, db: dbPath, log: logPath, dirName } = statePaths(repoPath);
   mkdirSync(stateDir, { recursive: true });
   // The first moment there is somewhere durable to write down why this process
   // stopped. Every run and resume passes through here.
-  armCrashLog(stateDir);
+  armCrashLog(logPath);
   // Every run and resume passes through here, so this is the one place the state
   // directory is known to exist before anything writes to it.
-  if (ensureIgnored(repoPath, ".harness/")) process.stdout.write("  added .harness/ to .gitignore (harness run state, not source)\n");
-  const store = new Store(path.join(stateDir, "harness.db"));
+  if (ensureIgnored(repoPath, `${dirName}/`)) process.stdout.write(`  added ${dirName}/ to .gitignore (charrette run state, not source)\n`);
+  const store = new Store(dbPath);
   const bus = new Bus(store);
   // The intake agent owns the terminal while it is talking to the operator, so
   // its own log/tool traffic must not interleave with the conversation.
@@ -222,7 +222,7 @@ function makeController(
             (stop.parked.length ? `, and to the ${stop.parked.length} parked one(s) for when you revive them` : "") +
             `\n` +
             `  replan <words> re-plan the remaining work around what you say\n` +
-            `  stop           park the run; \`harness resume\` picks it up where it is\n> `
+            `  stop           park the run; \`charrette resume\` picks it up where it is\n> `
         )
       ).trim();
       rl.close();
@@ -299,13 +299,13 @@ async function reportOutcome(
       lines.push(
         "",
         `  CANNOT MERGE: this run's branch conflicts with ${out.mergeable.baseBranch || "its base"}.`,
-        `    ${out.mergeable.baseBranch || "The base branch"} moved while the run was working. The harness merged it in, gave an`,
+        `    ${out.mergeable.baseBranch || "The base branch"} moved while the run was working. The charrette merged it in, gave an`,
         "    agent the conflict and could not resolve it, so the branch is unchanged and the pull",
         "    request is held as a draft — there is no version of it a reviewer can merge yet."
       );
       for (const f of out.mergeable.conflicts.slice(0, 10)) lines.push(`    - ${f}`);
       if (out.mergeable.conflicts.length > 10) lines.push(`    …and ${out.mergeable.conflicts.length - 10} more`);
-      lines.push("    Resolve it in the run's integration worktree, then `harness resume`.");
+      lines.push("    Resolve it in the run's integration worktree, then `charrette resume`.");
     } else {
       lines.push("", `  Mergeable: UNCONFIRMED — GitHub did not settle whether this branch merges into ${out.mergeable.baseBranch || "its base"}.`);
     }
@@ -342,12 +342,12 @@ async function reportOutcome(
       lines.push("", `  Production check: FAIL at ${out.prod.url} — the deployed system does not do what you asked:`);
       for (const f of out.prod.findings) lines.push(`    - ${f.replace(/\s+/g, " ").slice(0, 240)}`);
       if (out.prod.summary) lines.push(`    ${out.prod.summary.replace(/\s+/g, " ").slice(0, 240)}`);
-      lines.push("    Fix it, then `harness resume` to re-check — the run stays open until production agrees.");
+      lines.push("    Fix it, then `charrette resume` to re-check — the run stays open until production agrees.");
     }
   }
 
   if (out.prs.length) {
-    lines.push("", "  Open for review (the harness never merges — that part is yours):");
+    lines.push("", "  Open for review (the charrette never merges — that part is yours):");
     for (const pr of out.prs) lines.push(`    ${link("pull", pr.number)}  ${pr.title}`);
   }
 
@@ -375,7 +375,7 @@ async function reportOutcome(
     );
   }
 
-  lines.push("", `  Full picture: harness status --repo ${repoPath}`);
+  lines.push("", `  Full picture: charrette status --repo ${repoPath}`);
   process.stdout.write(`${lines.join("\n")}\n`);
   // Re-reading a finished run is not an event worth a desktop notification.
   if (opts.notify !== false) notifyDone(`${path.basename(repoPath)} — run done`, `${runId}: ${out.line}.`);
@@ -482,19 +482,21 @@ export function parseRunConfig(input: unknown): RunConfig {
 }
 
 /**
- * Layer the run settings: CLI flag > harness.config.json > auto-detection >
+ * Layer the run settings: CLI flag > charrette.config.json > auto-detection >
  * built-in default. Every resolved value is reported in the banner so a bare
- * `harness run` is never silently doing something surprising.
+ * `charrette run` is never silently doing something surprising.
  */
 function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined): Resolved {
   const repo = resolveRepoRoot(opts.repo);
   const { config: file, path: filePath } = loadFileConfig(repo);
   const fromCli = (name: string): boolean => cmd.getOptionValueSource(name) === "cli";
-  const via = filePath ? CONFIG_FILENAME : "";
-  // Which harness this is, at the one moment the operator can still act on it.
+  // The file that was actually read, which on a repo configured before the
+  // rename is still `harness.config.json`.
+  const via = filePath ? path.basename(filePath) : "";
+  // Which charrette this is, at the one moment the operator can still act on it.
   // Every session this run spawns is stamped with the same string, so a
   // postmortem months later can say which fixes it actually had.
-  const banner: string[] = [`repo       ${repo}`, `build      ${harnessBuild()}`];
+  const banner: string[] = [`repo       ${repo}`, `build      ${charretteBuild()}`];
 
   let checks: string[];
   let checksFrom: string;
@@ -511,11 +513,11 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
     const detected = detectChecks(repo);
     checks = detected.checks;
     // Lifted out of the repo's workflows but not yet run here, and a check that
-    // cannot pass in a fresh worktree parks every task in the run. `harness
+    // cannot pass in a fresh worktree parks every task in the run. `charrette
     // init` runs each one before writing it down; this path has no moment at
     // which it could, so it says so instead of implying they are proven.
     checksFrom = detected.skipped.length || /CI workflow/.test(detected.source)
-      ? `auto-detected from ${detected.source} — not yet run here; \`harness init\` proves them first`
+      ? `auto-detected from ${detected.source} — not yet run here; \`charrette init\` proves them first`
       : `auto-detected from ${detected.source}`;
   }
   banner.push(
@@ -658,7 +660,7 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
     banner.push(`models     ${moved.map(([role, model]) => `${role}→${model}`).join(" · ")}   (pinned roles are not movable)`);
   }
 
-  if (filePath) banner.push(`config     ${CONFIG_FILENAME}`);
+  if (filePath) banner.push(`config     ${path.basename(filePath)}`);
   return { repo, config, dashboard, dashboardPort, chat, banner };
 }
 
@@ -699,7 +701,7 @@ export function modelOverrides(pairs: string[] = []): Record<string, string> {
  *
  * Printed rather than thrown: the reason is several lines and the line that
  * matters is the command to run, while the crash log renders only an error's
- * first line. The exit code still fails, so a script wrapping the harness can
+ * first line. The exit code still fails, so a script wrapping the charrette can
  * tell.
  */
 async function repoBlocked(repoPath: string): Promise<boolean> {
@@ -712,12 +714,12 @@ async function repoBlocked(repoPath: string): Promise<boolean> {
 
 export function buildProgram(): Command {
   const program = new Command();
-  program.name("harness").description("Multi-agent development harness: assignment in, reviewed PRs out");
+  program.name("charrette").description("Multi-agent development orchestrator: a PRD in, reviewed pull requests out");
   // The same string every agent session is stamped with, so the answer to
-  // "which harness ran this?" is one flag rather than a cross-reference
-  // between `git log` and process start times in `.harness/harness.log`.
-  // `harness version` says whether that sha is also what is compiled.
-  program.version(harnessBuild(), "-V, --version", "print the build this binary runs as");
+  // "which charrette ran this?" is one flag rather than a cross-reference
+  // between `git log` and process start times in `.charrette/charrette.log`.
+  // `charrette version` says whether that sha is also what is compiled.
+  program.version(charretteBuild(), "-V, --version", "print the build this binary runs as");
 
   program
     .command("run")
@@ -1006,11 +1008,11 @@ export function buildProgram(): Command {
       //
       // The check above fires only when `--model` changed something, which was
       // right while a run's routing could not change any other way: a resume
-      // that touched nothing inherited a table `harness run` had already
+      // that touched nothing inherited a table `charrette run` had already
       // cleared. Pinning `reviewer` to Google ended that. `freezeReviewer`
       // rewrites every pre-pin run at open, so a run planned and half-executed
       // when everything was Anthropic acquires a Google dependency between one
-      // command and the next, having been asked nothing — and a plain `harness
+      // command and the next, having been asked nothing — and a plain `charrette
       // resume` would carry on without ever looking for the key.
       //
       // What that costs is the thing `missingKeys` exists to prevent, twice
@@ -1034,7 +1036,7 @@ export function buildProgram(): Command {
       // because the question is about *this machine*: the run recorded which
       // skills it wants and nothing recorded whether the laptop resuming it has
       // them. The directories come with the lines — without the `skills` line
-      // that `harness run` prints above them, "in none of those directories"
+      // that `charrette run` prints above them, "in none of those directories"
       // would name nothing.
       if (resumed) {
         const pinned = skillPinBanner(resumed.config.skillsDirs, pinsInPlay(resumed.config));
@@ -1140,7 +1142,7 @@ export function buildProgram(): Command {
 
   program
     .command("criteria")
-    .description("rewrite the acceptance criteria a task is judged against — for a bar no agent in this harness can clear")
+    .description("rewrite the acceptance criteria a task is judged against — for a bar no agent in this charrette can clear")
     .argument("<taskId>", "the task whose bar is wrong")
     .argument("<criteria...>", "the criteria to judge it by instead, one argument each")
     .option("-r, --repo <path>", "target repo (default: the git repo containing the cwd)", process.cwd())
@@ -1193,7 +1195,7 @@ export function buildProgram(): Command {
         process.stdout.write(runIdArg ? `No run ${runIdArg} in this repo.\n` : "No runs yet.\n");
         // Naming a run that does not exist is a failure to do what was asked,
         // and `probe` and `regroup` already exit 1 on it. Reporting it as
-        // success is what lets `harness postmortem $ID && rm -rf $WORKTREE`
+        // success is what lets `charrette postmortem $ID && rm -rf $WORKTREE`
         // reach the second half after a typo. Asking with no id at all is not
         // the same thing: nothing specific was requested and "No runs yet" is
         // a true and complete answer to it.
@@ -1208,7 +1210,7 @@ export function buildProgram(): Command {
     .argument("[runId]", "the run to report on (default: the most recent)")
     .description("what the run delivered, which of it is live, and what turns on the rest — written as one HTML page")
     .option("-r, --repo <path>", "target repo (default: the git repo containing the cwd)", process.cwd())
-    .option("-o, --out <path>", "where to write it (default: .harness/reports/<runId>.html)")
+    .option("-o, --out <path>", "where to write it (default: .charrette/reports/<runId>.html)")
     .action(async (runIdArg: string | undefined, opts: { repo: string; out?: string }) => {
       const repo = resolveRepoRoot(opts.repo);
       const store = readOnlyStore(repo);
@@ -1269,10 +1271,10 @@ export function buildProgram(): Command {
         process.stdout.write(`run ${run.id} [${run.state}] $${store.spentUsd(run.id).toFixed(2)} — ${run.assignment.slice(0, 60)}\n`);
         // Which process is driving it, if any. An EXECUTING run says nothing
         // about whether anything is actually working it — run bc691359 spent
-        // days in EXECUTING with no harness alive, and then spent an afternoon
+        // days in EXECUTING with no charrette alive, and then spent an afternoon
         // in EXECUTING with two.
-        const holder = runLockHolder(path.join(repo, ".harness"), run.id);
-        if (holder) process.stdout.write(`  driven by harness pid ${holder.pid} since ${new Date(holder.startedAt).toISOString()}\n`);
+        const holder = runLockHolder(statePaths(repo).dir, run.id);
+        if (holder) process.stdout.write(`  driven by charrette pid ${holder.pid} since ${new Date(holder.startedAt).toISOString()}\n`);
         const dep = store.deployStatus(run.id);
         if (dep && dep.state !== "none") process.stdout.write(`  deploy ${dep.sha.slice(0, 7)}: ${dep.state}${dep.failing.length ? ` — ${dep.failing.join(", ")}` : ""}\n`);
         const prod = store.prodVerdict(run.id);
@@ -1303,7 +1305,7 @@ export function buildProgram(): Command {
       process.stdout.write(
         live
           ? `\ndashboard  ${live}   (the fragment is your auth token)\n`
-          : `\ndashboard  none running — \`harness dashboard\` serves this repo's runs\n`
+          : `\ndashboard  none running — \`charrette dashboard\` serves this repo's runs\n`
       );
     });
 
@@ -1317,7 +1319,7 @@ export function buildProgram(): Command {
       // The run lives in another process — the one holding the worktrees and the
       // agent sessions — so pausing is a request sent to it, not something this
       // command can do itself. Its dashboard is the door that is already open:
-      // 127.0.0.1, bearer-authenticated, and recorded in .harness/ by whoever
+      // 127.0.0.1, bearer-authenticated, and recorded in .charrette/ by whoever
       // started it. No dashboard means no reachable run.
       const url = await liveDashboardUrl(repo);
       if (!url) {
@@ -1338,7 +1340,7 @@ export function buildProgram(): Command {
       const body = (await res.json().catch(() => ({}))) as { message?: string; error?: string };
       process.stdout.write(
         res.ok
-          ? `${body.message ?? "pausing"}\n\nPick it up with: harness resume ${runId}\nIt comes back on this same dashboard: ${url}\n`
+          ? `${body.message ?? "pausing"}\n\nPick it up with: charrette resume ${runId}\nIt comes back on this same dashboard: ${url}\n`
           : `could not pause: ${body.error ?? res.status}\n`
       );
     });
@@ -1351,7 +1353,7 @@ export function buildProgram(): Command {
     .action(async (opts: { repo: string; port?: string }) => {
       // The dashboard was only ever reachable for the length of the run that
       // served it, so the record of a $939 run became unbrowsable the moment it
-      // finished — every question about it answered by `harness status` and a
+      // finished — every question about it answered by `charrette status` and a
       // SQLite file. Nothing about the page needs a run in flight: it reads the
       // same store, and the event log outlives the process that wrote it.
       const repo = resolveRepoRoot(opts.repo);
@@ -1417,7 +1419,7 @@ export function buildProgram(): Command {
       // mid-run through the budget gate, and overwriting it with the default
       // is silent in the worst way. The file still looks right afterwards, and
       // the next run stops at thirty dollars for a reason nothing on screen
-      // explains. waf's cap had been raised to 2000 and a re-init put it back.
+      // explains. rust-service's cap had been raised to 2000 and a re-init put it back.
       const existingBudget = (existing.budget ?? {}) as Record<string, unknown>;
       const existingCap = existingBudget.runCapUsd;
       const runCapUsd =
@@ -1497,7 +1499,7 @@ export function buildProgram(): Command {
         for (const s of detected.skipped.slice(0, SHOWN)) out(`  ${s.source}\n      ${s.reason}`);
         if (detected.skipped.length > SHOWN) out(`  … and ${detected.skipped.length - SHOWN} more`);
       }
-      out(`\nEdit it and re-run \`harness run "<assignment>"\` — no flags needed.`);
+      out(`\nEdit it and re-run \`charrette run "<assignment>"\` — no flags needed.`);
     });
 
   program
@@ -1506,9 +1508,9 @@ export function buildProgram(): Command {
     .option("--json", "emit the same facts as JSON, for a script that gates on the build")
     .action((opts: { json?: boolean }) => {
       // Resolved from this module's own location rather than the cwd: the
-      // question is which harness is running, and `harness version` is most
+      // question is which charrette is running, and `charrette version` is most
       // often typed from inside the repo being worked on, not this one.
-      const info = collectVersion(harnessBuild(), fileURLToPath(new URL(".", import.meta.url)), agentBinaryFiles);
+      const info = collectVersion(charretteBuild(), fileURLToPath(new URL(".", import.meta.url)), agentBinaryFiles);
       process.stdout.write(opts.json ? `${JSON.stringify(info, null, 2)}\n` : formatVersion(info));
     });
 

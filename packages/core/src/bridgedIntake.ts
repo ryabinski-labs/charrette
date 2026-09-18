@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { IntakeQuestion } from "@harness/shared";
+import type { IntakeQuestion } from "@charrette/shared";
 import type { IntakeAnswer, IntakeUi } from "./intake.js";
 
 /**

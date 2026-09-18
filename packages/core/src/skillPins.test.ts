@@ -2,12 +2,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { indexSkills, type IndexedSkill } from "@harness/skills-mcp";
+import { indexSkills, type IndexedSkill } from "@charrette/skills-mcp";
 import { pinsInPlay, skillPinBanner, skillPinLines, unresolvedRoleSkills } from "./skillPins.js";
 
 /**
  * A `roleSkills` pin is a name, and names are matched against a collection the
- * harness does not own. Until this existed, a pin that matched nothing was
+ * charrette does not own. Until this existed, a pin that matched nothing was
  * dropped without a word — including the default `spec` → `prd-to-tdd`, whose
  * absence changes what the run is judged against and nothing else that anyone
  * can see.
@@ -16,7 +16,7 @@ import { pinsInPlay, skillPinBanner, skillPinLines, unresolvedRoleSkills } from 
 const made: string[] = [];
 
 function skillsDir(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-pins-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-pins-"));
   made.push(dir);
   return dir;
 }

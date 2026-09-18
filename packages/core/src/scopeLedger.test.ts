@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { RunSpec, type TaskState } from "@harness/shared";
+import { RunSpec, type TaskState } from "@charrette/shared";
 import { replanDrops, scopeLedger, scopeUnmet, type ScopedTask } from "./scopeLedger.js";
 
 /**
  * What became of the promises the brief made.
  *
- * waf cancelled 177 tasks against 377 merged — 138 replaced at a re-plan, 47
+ * rust-service cancelled 177 tasks against 377 merged — 138 replaced at a re-plan, 47
  * dead as `unreachable: dependencies parked`, 35 superseded. Every one of those
  * transitions is legitimate and none of them left anything behind: the
  * requirement stopped existing and came back as a section in a 118 KB gaps

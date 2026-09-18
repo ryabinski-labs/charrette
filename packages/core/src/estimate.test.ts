@@ -21,7 +21,7 @@ describe("weighing a plan", () => {
 });
 
 describe("with nothing to learn from", () => {
-  it("prices the plan across the whole spread the harness has seen", () => {
+  it("prices the plan across the whole spread the charrette has seen", () => {
     const e = estimatePlan(tasks("M", "M"), []);
 
     expect(e.usd).toBe(4 * DEFAULT_RATE.usd);

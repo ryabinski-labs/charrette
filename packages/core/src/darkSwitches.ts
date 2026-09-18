@@ -1,4 +1,4 @@
-import type { Runbook } from "@harness/shared";
+import type { Runbook } from "@charrette/shared";
 
 /**
  * The switches a run declared and could not throw — read off the diff it
@@ -10,7 +10,7 @@ import type { Runbook } from "@harness/shared";
  * template declares was never created, the migration that adds the table has
  * not run. The code shipped. The feature did not.
  *
- * The harness is structurally incapable of throwing these itself —
+ * The charrette is structurally incapable of throwing these itself —
  * `infraGuard` denies `terraform apply` to every agent because they run under
  * `bypassPermissions`, and no agent is given the operator's production
  * credentials. So the gap is not a bug to fix, it is a permanent property of
@@ -89,7 +89,7 @@ const AMBIENT = new Set([
 ]);
 
 /**
- * How the languages this harness actually runs against read their environment.
+ * How the languages this charrette actually runs against read their environment.
  *
  * One pass per pattern rather than one clever union: the capture group sits in
  * a different place in each, and a single expression that handles all of them
@@ -124,7 +124,7 @@ const SOURCE_EXT = /\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|rb|java|kt|swift|php|cs|
 /**
  * Files whose contents describe a test, not a running system.
  *
- * A `_test.go` that reads `dns-project_API_TOKEN` is naming a fixture, and a
+ * A `_test.go` that reads `DNS_API_TOKEN` is naming a fixture, and a
  * runbook's `.bats` file quoting a command is documentation. Reporting either
  * as a switch the operator has to throw is how a section of 23 findings ends up
  * with 17 that are wrong — at which point the six real ones are gone too,
@@ -341,7 +341,7 @@ function infrastructure(files: ScannedFile[]): DarkSwitch[] {
       kind: "infrastructure" as const,
       name: one ? paths[0]! : `${paths.length} ${rule.tool} files in ${dir}`,
       where: paths.join(", "),
-      why: `${one ? paths[0]! : `${dir} (${paths.length} files)`} declares ${rule.tool} resources. No agent in this run could have created them — the harness denies apply to every agent it runs — so they exist as a description until the pipeline or a person applies it.`,
+      why: `${one ? paths[0]! : `${dir} (${paths.length} files)`} declares ${rule.tool} resources. No agent in this run could have created them — the charrette denies apply to every agent it runs — so they exist as a description until the pipeline or a person applies it.`,
       steps: [
         { do: `Check whether this repository's deploy pipeline applies ${rule.tool} on merge. If it does, this is already live and only needs confirming.` },
         { do: `If nothing applies it automatically, apply it yourself, and read the plan before you do.`, command: rule.apply.replace("<path>", dir) },
@@ -377,7 +377,7 @@ const DNS_DECLARATIONS: { pattern: RegExp; what: string }[] = [
   { pattern: /^(?![^\S\n]*#).*AWS::Route53::RecordSet/gm, what: "a Route53 record" },
   { pattern: /resource\s+"aws_route53_record"\s+"([A-Za-z0-9_-]+)"/g, what: "a Route53 record" },
   { pattern: /resource\s+"cloudflare_record"\s+"([A-Za-z0-9_-]+)"/g, what: "a Cloudflare record" },
-  { pattern: /resource\s+"dns-project_record"\s+"([A-Za-z0-9_-]+)"/g, what: "a dns-project record" },
+  { pattern: /resource\s+"dns_record"\s+"([A-Za-z0-9_-]+)"/g, what: "a DNS record" },
   { pattern: /^(?![^\S\n]*#).*AWS::CertificateManager::Certificate/gm, what: "an ACM certificate, which is issued only once its validation record resolves" },
   { pattern: /^[^\S\n]*-?[^\S\n]*dns01:/gm, what: "an ACME DNS-01 solver, which cannot issue a certificate until its TXT record resolves" },
 ];

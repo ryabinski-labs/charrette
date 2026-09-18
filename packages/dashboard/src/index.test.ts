@@ -4,8 +4,8 @@ import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { PINNED_ROLES, RunConfig, RunState, TaskState } from "@harness/shared";
-import { Bus, Store } from "@harness/core";
+import { PINNED_ROLES, RunConfig, RunState, TaskState } from "@charrette/shared";
+import { Bus, Store } from "@charrette/core";
 import { Dashboard } from "./index.js";
 import { PAGE_HTML } from "./page.js";
 
@@ -22,7 +22,7 @@ const otherSink = {
 };
 
 
-/** Hold a port the way a second harness would. */
+/** Hold a port the way a second charrette would. */
 function occupy(port: number): Promise<Server> {
   return new Promise((resolve, reject) => {
     const server = createServer();
@@ -48,7 +48,7 @@ describe("port selection", () => {
 
   /**
    * The lowest port a dashboard would pick whose successor is also free. Without
-   * this the test asserts base+1 on a machine where a real harness is already
+   * this the test asserts base+1 on a machine where a real charrette is already
    * listening there, and fails for a reason that has nothing to do with the code.
    * Ports it rules out stay held for the duration so the search cannot loop.
    */
@@ -75,7 +75,7 @@ describe("port selection", () => {
     // and a suite that fails one run in ten teaches people to re-run CI rather
     // than read it.
     for (let attempt = 1; ; attempt++) {
-      // A free base port, then squat on it exactly as a running harness would.
+      // A free base port, then squat on it exactly as a running charrette would.
       const base = await freeAdjacentBase();
       held.push(await occupy(base));
 
@@ -128,7 +128,7 @@ describe("which runs the page shows", () => {
       state: "CREATED",
       prdPath: null,
       planHash: null,
-      integrationBranch: "harness/run1/main",
+      integrationBranch: "charrette/run1/main",
       config: RunConfig.parse({}),
     });
     for (const to of ["PLANNING", "PLAN_REVIEW", "EXECUTING", "INTEGRATING", "PR_REVIEW"] as RunState[]) {
@@ -149,7 +149,7 @@ describe("which runs the page shows", () => {
     expect(await runIds(finishedRun())).toEqual([]);
   });
 
-  it("keeps it for `harness dashboard`, where the finished run is the whole subject", async () => {
+  it("keeps it for `charrette dashboard`, where the finished run is the whole subject", async () => {
     // Nothing is executing when that command runs, so the open-runs view serves
     // an empty page for the one thing the operator opened it to read.
     expect(await runIds(finishedRun(), { includeFinished: true })).toEqual(["run1"]);
@@ -160,12 +160,12 @@ describe("linking issues and PRs", () => {
   const started: Dashboard[] = [];
   afterEach(async () => {
     for (const d of started.splice(0)) await d.stop();
-    delete process.env.HARNESS_GITHUB_REPO;
+    delete process.env.CHARRETTE_GITHUB_REPO;
   });
 
   /** A run in a real repo whose only record of the GitHub slug is its origin remote. */
   function runWithoutSlug(): Store {
-    const repo = mkdtempSync(path.join(tmpdir(), "harness-dash-repo-"));
+    const repo = mkdtempSync(path.join(tmpdir(), "charrette-dash-repo-"));
     execFileSync("git", ["init", "-b", "main"], { cwd: repo, stdio: "ignore" });
     execFileSync("git", ["remote", "add", "origin", "git@github.com:ryabinski-labs/billing-app.git"], {
       cwd: repo,
@@ -179,7 +179,7 @@ describe("linking issues and PRs", () => {
       state: "CREATED",
       prdPath: null,
       planHash: null,
-      integrationBranch: "harness/run1/main",
+      integrationBranch: "charrette/run1/main",
       config: RunConfig.parse({}), // no githubRepo — as every run before it was persisted
     });
     return store;
@@ -196,13 +196,13 @@ describe("linking issues and PRs", () => {
   it("falls back to the origin remote, so old runs still link their issues", async () => {
     // The reported symptom: a task card showed "issue #28" as dead plain text
     // because the run config, written before the slug was persisted, had no repo.
-    delete process.env.HARNESS_GITHUB_REPO;
+    delete process.env.CHARRETTE_GITHUB_REPO;
     const body = await state(runWithoutSlug());
     expect(body.runs[0]!.githubRepo).toBe("ryabinski-labs/billing-app");
   });
 
   it("lets the environment override what the remote says", async () => {
-    process.env.HARNESS_GITHUB_REPO = "someone/else";
+    process.env.CHARRETTE_GITHUB_REPO = "someone/else";
     const body = await state(runWithoutSlug());
     expect(body.runs[0]!.githubRepo).toBe("someone/else");
   });
@@ -221,7 +221,7 @@ describe("saying why a task is parked", () => {
     const store = new Store(":memory:");
     store.createRun({
       id: "run1", repoPath: "/tmp/x", assignment: "a", state: "CREATED", prdPath: null, planHash: null,
-      integrationBranch: "harness/run1/main", config: RunConfig.parse({}),
+      integrationBranch: "charrette/run1/main", config: RunConfig.parse({}),
     });
     store.insertTasks("run1", [{ id: "e1", title: "E" }], [
       { id: "t1", epicId: "e1", title: "T", spec: "", acceptanceCriteria: [], dependsOn: [], state: "PENDING", branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [], completionProbe: "", estimatedSize: "M" as const },
@@ -242,7 +242,7 @@ describe("saying why a task is parked", () => {
     const store = new Store(":memory:");
     store.createRun({
       id: "run1", repoPath: "/tmp/x", assignment: "a", state: "CREATED", prdPath: null, planHash: null,
-      integrationBranch: "harness/run1/main", config: RunConfig.parse({}),
+      integrationBranch: "charrette/run1/main", config: RunConfig.parse({}),
     });
     const task = (id: string, errorSummary: string | null) => ({
       id, epicId: "e1", title: id.toUpperCase(), spec: "", acceptanceCriteria: [], dependsOn: [], state: "PENDING" as TaskState,
@@ -284,7 +284,7 @@ describe("task-escalation gate", () => {
     const pending = dash.resolveTaskGate({
       runId: "r1", taskId: "t1", title: "Wire the toggle", why: "QA rejected it 3 times (the cap): never wired", iterations: 3,
       recommendation: "wire the toggle to the store in Settings.tsx, then re-run the suite",
-      branch: "harness/r1/t1", worktreePath: null,
+      branch: "charrette/r1/t1", worktreePath: null,
     });
     const post = (body: unknown) =>
       fetch(new URL("/api/gates/task", url), {
@@ -301,7 +301,7 @@ describe("task-escalation gate", () => {
     const body = (await res.json()) as { taskGates: { taskId: string; why: string; branch: string | null; recommendation: string }[] };
     expect(body.taskGates).toHaveLength(1);
     expect(body.taskGates[0]!.why).toContain("QA rejected it 3 times");
-    expect(body.taskGates[0]!.branch).toBe("harness/r1/t1");
+    expect(body.taskGates[0]!.branch).toBe("charrette/r1/t1");
     expect(body.taskGates[0]!.recommendation).toContain("Settings.tsx");
   });
 
@@ -370,7 +370,7 @@ describe("the pit stop gate", () => {
     stopCostUsd: 3.75,
     projectedUsd: 98,
     intent: null,
-    artifactsDir: "/repo/.harness/r1/pitstops/2",
+    artifactsDir: "/repo/.charrette/r1/pitstops/2",
     markdown: "# Pit stop 2\n\n**It runs.** pnpm dev on :5173",
   };
 
@@ -1146,7 +1146,7 @@ describe("pausing the run", () => {
   });
 
   it("answers a caller that declares JSON and sends none", async () => {
-    // How the Pause button and `harness pause` both actually call it: the
+    // How the Pause button and `charrette pause` both actually call it: the
     // content-type is copied from the posts that do carry a body. Fastify's own
     // parser answers that with a 400 before the route runs, which shipped a
     // button that did nothing — no console error, no event, no state change.
@@ -1219,7 +1219,7 @@ describe("serving on a token the operator already holds", () => {
   });
 
   it("takes another port rather than refusing to come back at all", async () => {
-    // Something else is on the remembered port — a second harness, or the
+    // Something else is on the remembered port — a second charrette, or the
     // operator's own paused process still holding it. The tab has to be
     // reopened either way; a run that will not resume is the worse outcome.
     const squatter = dashboard();
@@ -1352,7 +1352,7 @@ describe("what the run is delivering against its assignment", () => {
     const store = new Store(":memory:");
     store.createRun({
       id: "run1", repoPath: "/tmp/x", assignment: "a", state: "EXECUTING", prdPath: null, planHash: null,
-      integrationBranch: "harness/run1/main", config: RunConfig.parse({}),
+      integrationBranch: "charrette/run1/main", config: RunConfig.parse({}),
     });
     const row = (id: string, epicId: string, title: string) => ({
       id, epicId, title, spec: "", acceptanceCriteria: [], dependsOn: [], state: "PENDING" as const,
@@ -1369,10 +1369,10 @@ describe("what the run is delivering against its assignment", () => {
       for (const st of ["READY", "WORKING", "QA", "ACCEPTED", "MERGED"] as const) store.transitionTask("run1", id, st);
     }
     const bus = new Bus(store);
-    bus.publish({ type: "git.merged", runId: "run1", taskId: "t1", branch: "harness/run1/t1", sha: "a", ts: 1 });
+    bus.publish({ type: "git.merged", runId: "run1", taskId: "t1", branch: "charrette/run1/t1", sha: "a", ts: 1 });
     if (withVerdict) {
       bus.publish({ type: "run.intent_verdict", runId: "run1", verdict: "FAIL", gaps: ["ingestion is absent", "nothing schedules the worker"], unchecked: [], summary: "s", ts: 2 });
-      bus.publish({ type: "git.merged", runId: "run1", taskId: "intent-fix-1-1", branch: "harness/run1/f", sha: "b", ts: 3 });
+      bus.publish({ type: "git.merged", runId: "run1", taskId: "intent-fix-1-1", branch: "charrette/run1/f", sha: "b", ts: 3 });
     }
     return store;
   }

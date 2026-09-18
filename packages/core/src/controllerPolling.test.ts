@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { RunConfig } from "@harness/shared";
-import type { HarnessEvent } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
+import type { CharretteEvent } from "@charrette/shared";
 import { Bus } from "./bus.js";
 import { GitHubAdapter } from "./github.js";
 import type { AgentPool, AgentResult, AgentSpec } from "./pool.js";
@@ -22,7 +22,7 @@ afterEach(() => {
 });
 
 function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-poll-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-poll-"));
   made.push(dir, `${dir}-wt`);
   const run = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "ignore" });
   run("init", "-b", "main");
@@ -31,7 +31,7 @@ function repo(): string {
   writeFileSync(path.join(dir, "README.md"), "start\n");
   run("add", "-A");
   run("commit", "-m", "first");
-  const bare = mkdtempSync(path.join(tmpdir(), "harness-poll-remote-"));
+  const bare = mkdtempSync(path.join(tmpdir(), "charrette-poll-remote-"));
   made.push(bare);
   execFileSync("git", ["init", "--bare", "-b", "main"], { cwd: bare, stdio: "ignore" });
   run("remote", "add", "origin", bare);
@@ -124,7 +124,7 @@ function gh(over: { pulls?: Record<string, unknown>; checks?: Record<string, unk
 function build(opts: { repoPath: string; pool: AgentPool; github?: GitHubAdapter; gates?: Partial<GateHandler> }) {
   const store = new Store(":memory:");
   const bus = new Bus(store);
-  const events: HarnessEvent[] = [];
+  const events: CharretteEvent[] = [];
   bus.subscribe(({ event }) => void events.push(event));
   const gates: GateHandler = {
     async resolvePlanGate() {
@@ -246,7 +246,7 @@ describe("a budget stop inside the stages that catch everything", () => {
 
     // Not reported as "production validation did not complete" — that would read
     // as a broken deploy rather than a run that ran out of money.
-    const logs = events.filter((e): e is HarnessEvent & { text: string } => e.type === "agent.log");
+    const logs = events.filter((e): e is CharretteEvent & { text: string } => e.type === "agent.log");
     expect(logs.some((e) => /production validation did not complete/.test(e.text))).toBe(false);
   });
 

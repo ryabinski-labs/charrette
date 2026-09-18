@@ -1,32 +1,33 @@
 import { rmSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { statePaths } from "@charrette/shared";
 
 /**
  * Where a repo's live dashboard is, so a command that did not start it can
  * still point at it.
  *
- * `harness status` prints what the run did; the dashboard shows it happening.
+ * `charrette status` prints what the run did; the dashboard shows it happening.
  * The URL was only ever printed in the banner of the `run`/`resume` that
  * started the server, so an operator in a second terminal — or one whose
  * scrollback has moved on, which after a multi-hour run is everyone — had no
  * way back to it short of guessing the port, and the port is not the hard part:
  * the auth token in the fragment is random per process.
  *
- * The file lives in `.harness/`, which is gitignored (the run database is
+ * The file lives in `.charrette/`, which is gitignored (the run database is
  * already there) and holds this run's bearer token, so it is written 0600. It
  * is a cache, not state: a stale one is discovered by asking the port, and
  * nothing reads it but the line below.
  */
 const FILE = "dashboard.json";
 
-const linkPath = (repoPath: string): string => path.join(repoPath, ".harness", FILE);
+const linkPath = (repoPath: string): string => path.join(statePaths(repoPath).dir, FILE);
 
 /** Record a dashboard this process is serving. */
 export function recordDashboard(repoPath: string, url: string): void {
   try {
     writeFileSync(linkPath(repoPath), `${JSON.stringify({ url, pid: process.pid })}\n`, { mode: 0o600 });
   } catch {
-    // A repo whose .harness/ is unwritable has bigger problems than a missing
+    // A repo whose .charrette/ is unwritable has bigger problems than a missing
     // convenience link, and none of them are this function's to report.
   }
 }

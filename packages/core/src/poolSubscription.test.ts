@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { RunConfig } from "@harness/shared";
-import type { HarnessEvent } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
+import type { CharretteEvent } from "@charrette/shared";
 
 const { queryMock, reapUnderMock } = vi.hoisted(() => ({ queryMock: vi.fn(), reapUnderMock: vi.fn() }));
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({ query: queryMock }));
@@ -55,7 +55,7 @@ function scripts(...runs: Message[][]): void {
 
 let store: Store;
 let bus: Bus;
-let events: HarnessEvent[];
+let events: CharretteEvent[];
 let pool: AgentPool;
 
 const SPEC: AgentSpec = {
@@ -85,7 +85,7 @@ beforeEach(() => {
     state: "CREATED",
     prdPath: null,
     planHash: null,
-    integrationBranch: "harness/run1/main",
+    integrationBranch: "charrette/run1/main",
     config: RunConfig.parse({}),
   });
   bus = new Bus(store);
@@ -108,7 +108,7 @@ describe("the account this run spends", () => {
     expect(envs()[0]).toMatchObject({ CLAUDE_CODE_OAUTH_TOKEN: "oat-work" });
   });
 
-  it("beats the shell the harness was started from", async () => {
+  it("beats the shell the charrette was started from", async () => {
     // The whole point of a switch: the operator's own login is what the run is
     // getting away from, and an overlay that lost to the inherited environment
     // would keep spending the exhausted account while the log said otherwise.

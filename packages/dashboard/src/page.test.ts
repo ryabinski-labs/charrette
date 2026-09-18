@@ -15,7 +15,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { PRICES } from "@harness/core";
+import { PRICES } from "@charrette/core";
 import { MODEL_CHOICES, PAGE_HTML } from "./page.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- the page is untyped JS. */
@@ -33,7 +33,7 @@ function task(over: Partial<Record<string, Any>> = {}): Any {
 
 function run(over: Partial<Record<string, Any>> = {}): Any {
   return {
-    id: "r1", repoPath: "/repo", integrationBranch: "harness/r1/main",
+    id: "r1", repoPath: "/repo", integrationBranch: "charrette/r1/main",
     createdAt: NOW - 3 * 3600_000, state: "EXECUTING", githubRepo: "acme/app",
     assignment: "Build the thing.", spentUsd: 1, sessions: [],
     config: {
@@ -421,7 +421,7 @@ describe("what is running now", () => {
     expect($("#nowcount")!.textContent).toBe("");
   });
 
-  it("does not claim the harness is waiting on you between two agents", async () => {
+  it("does not claim the charrette is waiting on you between two agents", async () => {
     // The worker has ended, QA has not started, and the task is plainly still
     // in progress — the gap every handover leaves in the sessions table.
     const page = mount(state({
@@ -457,7 +457,7 @@ describe("what is running now", () => {
     }));
     await page.refresh();
 
-    expect($("#now")!.textContent).toContain("the harness is waiting on you, on git, or between tasks");
+    expect($("#now")!.textContent).toContain("the charrette is waiting on you, on git, or between tasks");
     expect($("#nowcount")!.textContent).toBe("idle");
   });
 
@@ -827,7 +827,7 @@ describe("the subscription banner", () => {
 
   it("says the run is on quota rather than at a pit stop", async () => {
     // Regression: `notify` hardcoded the pit-stop label, so the tab read
-    // "harness · pit stop" while the run was parked on a spent subscription —
+    // "charrette · pit stop" while the run was parked on a spent subscription —
     // the one thing an operator glancing at a tab strip would act on
     // differently.
     const page = mount(state({ subscriptionGate: gate() }));
@@ -997,7 +997,7 @@ describe("a run that has stopped", () => {
     await page.refresh();
 
     expect(($("#paused") as HTMLElement).style.display).toBe("block");
-    expect($("#paused-detail code")!.textContent).toBe("harness resume r1");
+    expect($("#paused-detail code")!.textContent).toBe("charrette resume r1");
     expect($("#paused-detail")!.textContent).toContain("still in their worktrees");
   });
 });
@@ -1387,7 +1387,7 @@ describe("hiding a group of tasks", () => {
  *
  * Both were real rather than pedantic: the panel counts are the readouts the
  * panels exist for, the task id under a card is how the operator names that
- * task to `harness probe`, and none of the page's content sat inside a
+ * task to `charrette probe`, and none of the page's content sat inside a
  * landmark, so a screen reader had nothing to jump to.
  */
 describe("what a screen reader and a contrast checker get", () => {

@@ -1,4 +1,4 @@
-import { PlannedTask } from "@harness/shared";
+import { PlannedTask } from "@charrette/shared";
 
 /**
  * Whether this plan builds the pipeline that will judge it — read off the plan,
@@ -66,11 +66,11 @@ const COVERAGE_FLOOR =
   /\b(coverage|covered lines|cov)\b[^.\n]{0,80}?(\d{2,3}\s?%|\bthreshold\b|\bfloor\b|\bminimum\b|\bat least\b|\bfails? (?:the )?(?:build|ci|check)\b|\bbelow\b|\bgate\b)|(\d{2,3}\s?%)[^.\n]{0,40}\bcoverage\b|--cov-fail-under|\bfail[-_ ]under\b|coverageThreshold|check-coverage|\bcodecov\b|\bjacoco\b.{0,40}\b(?:limit|rule)\b|\bsonar\b.{0,40}\bquality gate\b/i;
 
 /**
- * The floors this harness asks a plan to enforce, and where they come from.
+ * The floors this charrette asks a plan to enforce, and where they come from.
  *
  * 80% on the lines a change touches is the number Codecov's default patch
  * status and SonarQube's "clean as you code" both land on, and it is the one
- * that matters most here: a harness run is almost entirely new code, so patch
+ * that matters most here: a charrette run is almost entirely new code, so patch
  * coverage and project coverage are nearly the same measurement on the first
  * run and diverge into "the old parts rot" on every one after.
  *

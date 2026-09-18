@@ -13,11 +13,11 @@ afterEach(async () => {
   for (const s of servers.splice(0)) await new Promise((resolve) => s.close(resolve));
 });
 
-/** A repo with the `.harness/` directory the run would have made. */
+/** A repo with the `.charrette/` directory the run would have made. */
 function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-link-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-link-"));
   made.push(dir);
-  mkdirSync(path.join(dir, ".harness"));
+  mkdirSync(path.join(dir, ".charrette"));
   return dir;
 }
 
@@ -44,13 +44,13 @@ describe("recording where the dashboard is", () => {
     const dir = repo();
     const { url } = await fakeDashboard();
     recordDashboard(dir, url);
-    expect(JSON.parse(readFileSync(path.join(dir, ".harness", "dashboard.json"), "utf8")).url).toBe(url);
+    expect(JSON.parse(readFileSync(path.join(dir, ".charrette", "dashboard.json"), "utf8")).url).toBe(url);
   });
 
-  it("says nothing when .harness/ cannot be written to", () => {
+  it("says nothing when .charrette/ cannot be written to", () => {
     // A read-only checkout, a full disk. The link is a convenience; refusing to
     // start a run over it would be the wrong trade.
-    const dir = mkdtempSync(path.join(tmpdir(), "harness-nolink-"));
+    const dir = mkdtempSync(path.join(tmpdir(), "charrette-nolink-"));
     made.push(dir);
     expect(() => recordDashboard(dir, "http://127.0.0.1:4777/#x")).not.toThrow();
   });
@@ -59,7 +59,7 @@ describe("recording where the dashboard is", () => {
     const dir = repo();
     recordDashboard(dir, "http://127.0.0.1:4777/#x");
     clearDashboard(dir);
-    expect(existsSync(path.join(dir, ".harness", "dashboard.json"))).toBe(false);
+    expect(existsSync(path.join(dir, ".charrette", "dashboard.json"))).toBe(false);
     expect(() => clearDashboard(dir)).not.toThrow();
   });
 });
@@ -79,13 +79,13 @@ describe("coming back to the tab the operator already has open", () => {
     // Half-written by a process that was killed mid-`resume`. A resume must
     // still start; it just takes a fresh port and a fresh token.
     const dir = repo();
-    writeFileSync(path.join(dir, ".harness", "dashboard.json"), "{not json");
+    writeFileSync(path.join(dir, ".charrette", "dashboard.json"), "{not json");
     expect(recordedDashboard(dir)).toBeNull();
   });
 
   it("has no opinion about a record with no url in it", () => {
     const dir = repo();
-    writeFileSync(path.join(dir, ".harness", "dashboard.json"), "{}\n");
+    writeFileSync(path.join(dir, ".charrette", "dashboard.json"), "{}\n");
     expect(recordedDashboard(dir)).toBeNull();
   });
 
@@ -114,7 +114,7 @@ describe("finding a dashboard that is actually up", () => {
 
   it("returns nothing for a record with no url in it", async () => {
     const dir = repo();
-    writeFileSync(path.join(dir, ".harness", "dashboard.json"), "{}\n");
+    writeFileSync(path.join(dir, ".charrette", "dashboard.json"), "{}\n");
     expect(await liveDashboardUrl(dir)).toBeNull();
   });
 
@@ -127,7 +127,7 @@ describe("finding a dashboard that is actually up", () => {
     for (const s of servers.splice(0)) await new Promise((resolve) => s.close(resolve));
 
     expect(await liveDashboardUrl(dir)).toBeNull();
-    expect(existsSync(path.join(dir, ".harness", "dashboard.json"))).toBe(false);
+    expect(existsSync(path.join(dir, ".charrette", "dashboard.json"))).toBe(false);
   });
 
   it("returns nothing when the server is up but rejects the recorded token", async () => {
@@ -150,7 +150,7 @@ describe("finding a dashboard that is actually up", () => {
  */
 describe("a link whose process is gone", () => {
   const write = (dir: string, record: unknown) =>
-    writeFileSync(path.join(dir, ".harness", "dashboard.json"), `${JSON.stringify(record)}\n`);
+    writeFileSync(path.join(dir, ".charrette", "dashboard.json"), `${JSON.stringify(record)}\n`);
 
   /** A pid nothing can be running under: reaped, and never reissued this fast. */
   async function deadPid(): Promise<number> {
@@ -171,7 +171,7 @@ describe("a link whose process is gone", () => {
     // Never asked. The point is that a dead writer is answered without a socket.
     expect(asked).toEqual([]);
     // And the stale file is gone, so nothing reads it again.
-    expect(existsSync(path.join(dir, ".harness", "dashboard.json"))).toBe(false);
+    expect(existsSync(path.join(dir, ".charrette", "dashboard.json"))).toBe(false);
   });
 
   it("still asks when the writer is alive", async () => {
@@ -187,7 +187,7 @@ describe("a link whose process is gone", () => {
   it("asks when the file records no pid at all", async () => {
     const dir = repo();
     const { url, asked } = await fakeDashboard();
-    // Written by a harness from before the pid was recorded. Still a perfectly
+    // Written by a charrette from before the pid was recorded. Still a perfectly
     // good link, and the request is what settles it.
     write(dir, { url });
     expect(await liveDashboardUrl(dir)).toBe(url);

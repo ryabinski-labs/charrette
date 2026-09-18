@@ -3,8 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { RunConfig } from "@harness/shared";
-import type { HarnessEvent } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
+import type { CharretteEvent } from "@charrette/shared";
 import { Bus } from "./bus.js";
 import { GitHubAdapter } from "./github.js";
 import type { AgentPool, AgentResult, AgentSpec } from "./pool.js";
@@ -19,7 +19,7 @@ afterEach(() => {
 });
 
 function repo(remote = true): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-last-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-last-"));
   made.push(dir, `${dir}-wt`);
   const run = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "ignore" });
   run("init", "-b", "main");
@@ -29,7 +29,7 @@ function repo(remote = true): string {
   run("add", "-A");
   run("commit", "-m", "first");
   if (remote) {
-    const bare = mkdtempSync(path.join(tmpdir(), "harness-last-remote-"));
+    const bare = mkdtempSync(path.join(tmpdir(), "charrette-last-remote-"));
     made.push(bare);
     execFileSync("git", ["init", "--bare", "-b", "main"], { cwd: bare, stdio: "ignore" });
     run("remote", "add", "origin", bare);
@@ -123,7 +123,7 @@ function gh(over: { pulls?: Record<string, unknown>; checks?: Record<string, unk
 function build(opts: { repoPath: string; pool: AgentPool; github?: GitHubAdapter; gates?: Partial<GateHandler> }) {
   const store = new Store(":memory:");
   const bus = new Bus(store);
-  const events: HarnessEvent[] = [];
+  const events: CharretteEvent[] = [];
   bus.subscribe(({ event }) => void events.push(event));
   const gates: GateHandler = {
     async resolvePlanGate() {
@@ -189,7 +189,7 @@ describe("picking up a run that is already verifying", () => {
     const runId = await controller.startRun("build a thing", RunConfig.parse({ ...BASE, prodUrl: "https://app.example.com", deployTimeoutMinutes: 1 }));
 
     expect(store.getRun(runId)!.state).toBe("DONE");
-    const file = path.join(dir, ".harness", "reports", `${runId}.html`);
+    const file = path.join(dir, ".charrette", "reports", `${runId}.html`);
     expect(existsSync(file)).toBe(true);
     const html = readFileSync(file, "utf8");
     expect(html).toContain("<title>");
@@ -205,8 +205,8 @@ describe("picking up a run that is already verifying", () => {
   it("does not fail a finished run over a report it could not write", async () => {
     const dir = repo();
     // A file where the reports directory needs to be: `mkdirSync` cannot win.
-    mkdirSync(path.join(dir, ".harness"), { recursive: true });
-    writeFileSync(path.join(dir, ".harness", "reports"), "not a directory");
+    mkdirSync(path.join(dir, ".charrette"), { recursive: true });
+    writeFileSync(path.join(dir, ".charrette", "reports"), "not a directory");
     const { adapter } = gh({ pulls: MERGED_PR, checks: GREEN_DEPLOY });
     const { pool } = rolePool({
       planner: planner(["task-a"]), worker, qa: () => QA_PASS, validator: () => INTENT_PASS,
@@ -349,7 +349,7 @@ describe("the wall-clock gate on top of feedback already pending", () => {
   });
 });
 
-describe("a merged task the harness has no commit sha for", () => {
+describe("a merged task the charrette has no commit sha for", () => {
   it("still says it merged, without inventing a commit", async () => {
     const dir = repo();
     const { adapter } = gh();

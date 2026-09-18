@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { RunConfig } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
 import { describe, expect, it } from "vitest";
 import { Bus } from "./bus.js";
 import type { GitHubAdapter } from "./github.js";
@@ -37,11 +37,11 @@ const DAG =
 const gitIn = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "ignore" });
 
 function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-criteria-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-criteria-"));
   writeFileSync(path.join(dir, "README.md"), "# fixture\n");
   gitIn(dir, "init", "-b", "main");
-  gitIn(dir, "config", "user.email", "harness@example.com");
-  gitIn(dir, "config", "user.name", "harness");
+  gitIn(dir, "config", "user.email", "charrette@example.com");
+  gitIn(dir, "config", "user.name", "charrette");
   gitIn(dir, "add", "-A");
   gitIn(dir, "commit", "-m", "init");
   return dir;
@@ -88,7 +88,7 @@ function poolAmendingDuringWorker(amend: (spec: AgentSpec) => void) {
 
 describe("criteria amended mid-iteration", () => {
   it("reach the QA session that grades the work, not just the database", async () => {
-    // The whole point of `harness criteria` on a live run: the operator moves
+    // The whole point of `charrette criteria` on a live run: the operator moves
     // the bar because the bar was wrong, and the very next grading uses it.
     // Reading the task row once at the top of the iteration and briefing QA
     // from that snapshot means the amendment lands in the database and QA

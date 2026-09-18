@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { RunConfig } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
 import { describe, expect, it } from "vitest";
 import { Store } from "./store.js";
 
@@ -24,8 +24,8 @@ const SONNET = "claude-sonnet-5";
 
 /** A store on disk, so it can be closed and reopened the way a resume does. */
 function onDisk(): { dbPath: string; cleanup: () => void } {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-frozen-"));
-  return { dbPath: path.join(dir, "harness.db"), cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-frozen-"));
+  return { dbPath: path.join(dir, "charrette.db"), cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 /** Writes a run whose stored config has had `models.workerLight` removed. */
@@ -38,7 +38,7 @@ function runFromBeforeTheLightTier(dbPath: string, models: Record<string, string
     state: "PLANNING",
     prdPath: null,
     planHash: null,
-    integrationBranch: "harness/run-old",
+    integrationBranch: "charrette/run-old",
     config: RunConfig.parse({ models }),
   });
   const row = store.db.prepare("SELECT config FROM runs WHERE id = ?").get("run-old") as { config: string };
@@ -99,7 +99,7 @@ describe("a run created before the light tier existed", () => {
       state: "PLANNING",
       prdPath: null,
       planHash: null,
-      integrationBranch: "harness/run-new",
+      integrationBranch: "charrette/run-new",
       config: RunConfig.parse({ models: { workerLight: HAIKU } }),
     });
     store.db.close();
@@ -166,7 +166,7 @@ describe("a run created today", () => {
       state: "PLANNING",
       prdPath: null,
       planHash: null,
-      integrationBranch: "harness/run-today",
+      integrationBranch: "charrette/run-today",
       config: RunConfig.parse({}),
     });
 
@@ -202,7 +202,7 @@ function runFromBeforeTheReviewerPin(dbPath: string, reviewer: string | null = O
     state: "PLANNING",
     prdPath: null,
     planHash: null,
-    integrationBranch: "harness/run-pre-pin",
+    integrationBranch: "charrette/run-pre-pin",
     config: RunConfig.parse({}),
   });
   // Written behind the schema's back, because the schema is what now refuses it
@@ -241,7 +241,7 @@ describe("a run created before the reviewer was pinned to Google", () => {
       state: "PLANNING",
       prdPath: null,
       planHash: null,
-      integrationBranch: "harness/run-pre-pin",
+      integrationBranch: "charrette/run-pre-pin",
       config: RunConfig.parse({ models: { worker: "gpt-5.6-terra", demo: HAIKU } }),
     });
     const row = store0.db.prepare("SELECT config FROM runs WHERE id = ?").get("run-pre-pin") as { config: string };
@@ -285,7 +285,7 @@ describe("a run created before the reviewer was pinned to Google", () => {
       state: "PLANNING",
       prdPath: null,
       planHash: null,
-      integrationBranch: "harness/run-corrupt",
+      integrationBranch: "charrette/run-corrupt",
       config: RunConfig.parse({}),
     });
     store0.db.prepare("UPDATE runs SET config = ? WHERE id = ?").run("{not json", "run-corrupt");
@@ -315,7 +315,7 @@ describe("a run created before the reviewer was pinned to Google", () => {
     // actually hits. `gemini-3.6-flash` and today's default are the same vendor,
     // so a run frozen on 3.6 kept it through every resume and the only way onto
     // the current reviewer was to retype `--model reviewer=…` on every resume
-    // line for the rest of that run's life. A plain `harness resume` picks it up
+    // line for the rest of that run's life. A plain `charrette resume` picks it up
     // now — which is the whole point of the migration, and was true of the
     // Anthropic→Google move only by accident of the vendor changing too.
     const { dbPath, cleanup } = onDisk();
@@ -361,7 +361,7 @@ function runFromBeforeTheWorkerTiers(dbPath: string, models: Record<string, stri
     state: "PLANNING",
     prdPath: null,
     planHash: null,
-    integrationBranch: "harness/run-pre-rungs",
+    integrationBranch: "charrette/run-pre-rungs",
     config: RunConfig.parse({ models }),
   });
   const row = store.db.prepare("SELECT config FROM runs WHERE id = ?").get("run-pre-rungs") as { config: string };
@@ -436,7 +436,7 @@ describe("a run created before the interface and heavy rungs existed", () => {
       state: "PLANNING",
       prdPath: null,
       planHash: null,
-      integrationBranch: "harness/run-no-models",
+      integrationBranch: "charrette/run-no-models",
       config: RunConfig.parse({}),
     });
     raw.db.prepare("UPDATE runs SET config = ? WHERE id = ?").run(JSON.stringify({ budget: { runCapUsd: 1 } }), "run-no-models");
@@ -460,7 +460,7 @@ describe("a run created before the interface and heavy rungs existed", () => {
       state: "PLANNING",
       prdPath: null,
       planHash: null,
-      integrationBranch: "harness/run-today-rungs",
+      integrationBranch: "charrette/run-today-rungs",
       config: RunConfig.parse({}),
     });
 

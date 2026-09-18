@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build and install the local `harness` CLI.
+# Build and install the local `charrette` CLI.
 #
 # `pnpm build` alone doesn't touch pnpm-lock.yaml, but it also doesn't
 # catch when pnpm-workspace.yaml (overrides, etc.) has drifted from what's
@@ -20,4 +20,4 @@ if ! git diff --quiet -- pnpm-lock.yaml; then
   echo
 fi
 
-echo "harness installed: $(harness --version 2>/dev/null || readlink "$HOME/.local/bin/harness")"
+echo "charrette installed: $(charrette --version 2>/dev/null || readlink "$HOME/.local/bin/charrette")"

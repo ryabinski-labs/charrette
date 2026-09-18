@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { seedWorktreeDeps } from "./deps.js";
 
 function dir(): string {
-  return mkdtempSync(path.join(tmpdir(), "harness-deps-"));
+  return mkdtempSync(path.join(tmpdir(), "charrette-deps-"));
 }
 
 /** A package-lock.json with no dependencies: `npm ci` runs and finishes in a second. */
@@ -125,7 +125,7 @@ describe("worktree dependency seeding", () => {
    * group is already gone by the time the SIGKILL follow-up fires five seconds
    * later, and `process.kill` answers that with ESRCH. That throw happens on a
    * bare timer with no promise attached to it, so letting it escape would take
-   * the whole harness process down long after the install it came from was
+   * the whole charrette process down long after the install it came from was
    * reported and forgotten — the worst possible shape for a crash.
    */
   it("swallows the follow-up kill when the polite signal already worked", async () => {

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import { Brief, IntakeQuestion, RunConfig } from "@harness/shared";
+import { Brief, IntakeQuestion, RunConfig } from "@charrette/shared";
 import { Bus } from "./bus.js";
 import type { IssueRead } from "./github.js";
 import { AgentPool } from "./pool.js";
@@ -92,8 +92,8 @@ export interface IntakeRequest {
   readIssue?: (number: number, slug?: string) => Promise<IssueRead | null>;
 }
 
-const ASK_TOOL = "mcp__harness_intake__ask_user";
-const READ_ISSUE_TOOL = "mcp__harness_intake__read_issue";
+const ASK_TOOL = "mcp__charrette_intake__ask_user";
+const READ_ISSUE_TOOL = "mcp__charrette_intake__read_issue";
 
 /**
  * Pull an issue number, and the repo it belongs to, out of however the operator
@@ -260,8 +260,8 @@ export async function runIntake(pool: AgentPool, bus: Bus, req: IntakeRequest): 
       tools: ["Read", "Glob", "Grep"],
       allowedTools: ["Read", "Glob", "Grep", ASK_TOOL, ...(readIssue ? [READ_ISSUE_TOOL] : [])],
       mcpServers: {
-        harness_intake: createSdkMcpServer({
-          name: "harness_intake",
+        charrette_intake: createSdkMcpServer({
+          name: "charrette_intake",
           tools: readIssue ? [askUser, readIssue] : [askUser],
         }),
       },

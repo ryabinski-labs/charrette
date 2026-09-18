@@ -394,7 +394,7 @@ describe("a claim about a command", () => {
   const green = () => ({ ok: true, output: "" });
   const red = (output: string) => () => ({ ok: false, output });
 
-  it("survives when the harness runs it again and agrees", () => {
+  it("survives when the charrette runs it again and agrees", () => {
     const checks = checkCommands([{ command: "pnpm test", shows: "the suite is green" }], green);
 
     expect(checks[0]).toMatchObject({ ok: true, verified: true, fault: "" });
@@ -414,7 +414,7 @@ describe("a claim about a command", () => {
   });
 
   /**
-   * The harness would rather report a claim as unverified than cause the thing
+   * The charrette would rather report a claim as unverified than cause the thing
    * it was trying to confirm — a second POST is a second booking.
    */
   it("refuses to repeat anything whose second run is not the same as its first", () => {
@@ -432,7 +432,7 @@ describe("a claim about a command", () => {
    * The migration tools are how a repository changes its data; a SQL client is
    * how a person does the same thing by hand, and it says none of their names.
    * It matters more since the completion probe started asking this function
-   * whether the harness may run a planner's command — a probe is not re-run
+   * whether the charrette may run a planner's command — a probe is not re-run
    * once, it is re-run on every QA iteration until the task passes.
    */
   it("refuses a statement that writes to the database, however it was spelled", () => {

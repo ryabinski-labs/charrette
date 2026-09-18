@@ -1,9 +1,9 @@
-import { gating, type RunSpec, type ScenarioPriority, type SpecScenario } from "@harness/shared";
+import { gating, type RunSpec, type ScenarioPriority, type SpecScenario } from "@charrette/shared";
 
 /**
  * Whether the merged work does what the specification said it would.
  *
- * The gate this file decides is the first one in the harness that is not an
+ * The gate this file decides is the first one in the charrette that is not an
  * agent's opinion. Every other check on the way out — QA's verdict, the intent
  * check, the pit-stop reviewers — is a model reading a diff and forming a view,
  * and the failure mode they share is agreeing with the code because they
@@ -37,7 +37,7 @@ export interface SuiteRun {
  * was proven either way" — got spelled as the first. A specification with no
  * gating scenario, or whose every gating scenario is blocked on a question
  * nobody answered, returned `passed: true`, and the one caller tested exactly
- * that field: waf de2cb7aa carried four blocked P0 scenarios through the gate
+ * that field: rust-service de2cb7aa carried four blocked P0 scenarios through the gate
  * that way. A caller handed this type cannot confuse the cases without saying
  * so in its own code.
  */
@@ -73,7 +73,7 @@ export interface AcceptanceVerdict {
 const OUTPUT_TAIL = 4000;
 
 /**
- * A failing line, in the vocabularies the runners this harness meets actually
+ * A failing line, in the vocabularies the runners this charrette meets actually
  * use.
  *
  * Deliberately a list of markers rather than one clever pattern: vitest writes
@@ -159,7 +159,7 @@ export function acceptanceVerdict(spec: RunSpec, run: SuiteRun, requireExecution
   // this gate has no opinion, which the caller can tell apart from a green suite
   // because it is spelled differently. Blocked scenarios are named so that the
   // caller can put the question behind them to the operator: a P0 nobody could
-  // run because nobody answered is the harness's question, not its pass.
+  // run because nobody answered is the charrette's question, not its pass.
   if (!scenarios.length) {
     return {
       verdict: "no-opinion",
@@ -251,11 +251,11 @@ export function blockingQuestionsFor(spec: RunSpec, blocked: Iterable<string>): 
  *
  * Here rather than in the controller because the interesting cases are all
  * shapes of failure that are awkward to produce on purpose — a suite the
- * harness killed, a runner that died on a signal with no exit code — and each
+ * charrette killed, a runner that died on a signal with no exit code — and each
  * of them means something different to the verdict above.
  */
 export function suiteRunFrom(err: { stdout?: string; stderr?: string; message?: string; code?: number; killed?: boolean }, timeoutMinutes: number): SuiteRun {
-  // A suite the harness killed produced no verdict at all. Reporting its
+  // A suite the charrette killed produced no verdict at all. Reporting its
   // partial output as "these scenarios failed" would name whichever ones
   // happened to run first, which is a statement about ordering.
   if (err.killed) return { exitCode: 1, output: "", error: `the scenario suite did not finish inside ${timeoutMinutes} minutes` };

@@ -4,11 +4,11 @@ import { Store } from "./store.js";
  * Why a run produced what it produced.
  *
  * Working out why run 40da9337 delivered a product that could not move money
- * took an hour of ad-hoc SQL against `.harness/harness.db`: counting
+ * took an hour of ad-hoc SQL against `.charrette/charrette.db`: counting
  * `intake.question` against `intake.answered`, reading acceptance criteria,
  * pulling the one `run.intent_verdict`, grouping errored-session spend by cause.
  * Every one of those is a fixed query. None was reachable from the CLI —
- * `harness status` answers "where is it and what has it cost", which is a
+ * `charrette status` answers "where is it and what has it cost", which is a
  * different question from "why is this what I got".
  *
  * The answer, that time, was a question the operator was asked and never
@@ -32,7 +32,7 @@ export interface Postmortem {
   /** Total wall-clock the run spent waiting on the operator, in hours. */
   blockedHours: number;
   gates: number;
-  /** Which harness build each session ran under, earliest first. */
+  /** Which charrette build each session ran under, earliest first. */
   builds: { build: string; sessions: number; first: number; last: number }[];
 }
 
@@ -253,9 +253,9 @@ function stamp(ts: number): string {
 }
 
 /**
- * Which harness ran this. One line when the answer is one build, and a table
+ * Which charrette ran this. One line when the answer is one build, and a table
  * when it is not — a run whose sessions carry two builds did not run one
- * harness, and every finding above it has to be read per-build.
+ * charrette, and every finding above it has to be read per-build.
  */
 function renderBuilds(builds: Postmortem["builds"]): string[] {
   if (!builds.length) return [];
@@ -263,13 +263,13 @@ function renderBuilds(builds: Postmortem["builds"]): string[] {
     const only = builds[0]!;
     return [
       only.build
-        ? `Ran under harness ${only.build} — all ${only.sessions} session(s).`
-        : `The harness did not record its build for these ${only.sessions} session(s): the run predates the stamp, so which fixes it ran cannot be read off this record.`,
+        ? `Ran under charrette ${only.build} — all ${only.sessions} session(s).`
+        : `The charrette did not record its build for these ${only.sessions} session(s): the run predates the stamp, so which fixes it ran cannot be read off this record.`,
       "",
     ];
   }
   return [
-    `This run spanned ${builds.length} harness builds. A fix reaches a session only if it was in the`,
+    `This run spanned ${builds.length} charrette builds. A fix reaches a session only if it was in the`,
     "build that session started under — the process loads its build once and cannot reload it:",
     ...builds.map(
       (b) => `  ${(b.build || "(not recorded)").padEnd(20)} ${String(b.sessions).padStart(4)} session(s)   ${stamp(b.first)} → ${stamp(b.last)}`

@@ -3,14 +3,14 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { RunConfig } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
 
 /**
  * The `read_issue` half of intake.
  *
  * An operator's opening line is very often nothing but a link. Before this the
  * intake agent had Read, Glob and Grep and no way to reach GitHub, so it did the
- * only thing left: asked the operator to paste the issue back at the harness
+ * only thing left: asked the operator to paste the issue back at the charrette
  * that files issues for a living. These tests cover the tool that closed that,
  * and — just as much — the cases where it comes back empty, because an agent
  * that is handed a blank specification writes a brief for the wrong product.
@@ -231,8 +231,8 @@ describe("whether the tool is offered at all", () => {
       "Read",
       "Glob",
       "Grep",
-      "mcp__harness_intake__ask_user",
-      "mcp__harness_intake__read_issue",
+      "mcp__charrette_intake__ask_user",
+      "mcp__charrette_intake__read_issue",
     ]);
     const server = createSdkMcpServerMock.mock.calls[0]![0] as { tools: { name: string }[] };
     expect(server.tools.map((t) => t.name)).toEqual(["ask_user", "read_issue"]);
@@ -249,7 +249,7 @@ describe("whether the tool is offered at all", () => {
 
     await runIntake(pool, bus, request());
 
-    expect(specs[0]!.allowedTools).toEqual(["Read", "Glob", "Grep", "mcp__harness_intake__ask_user"]);
+    expect(specs[0]!.allowedTools).toEqual(["Read", "Glob", "Grep", "mcp__charrette_intake__ask_user"]);
     const server = createSdkMcpServerMock.mock.calls[0]![0] as { tools: { name: string }[] };
     expect(server.tools.map((t) => t.name)).toEqual(["ask_user"]);
     expect(specs[0]!.systemPrompt).not.toContain("read_issue");
@@ -259,7 +259,7 @@ describe("whether the tool is offered at all", () => {
 /**
  * The wiring, end to end: an operator types a link, and the issue comes back
  * from the same token the run files its own issues with. Everything above this
- * point stubs the reader — this is the test that would have caught the harness
+ * point stubs the reader — this is the test that would have caught the charrette
  * shipping a `read_issue` tool that reached nothing.
  */
 describe("the reader the controller hands intake", () => {
@@ -269,13 +269,13 @@ describe("the reader the controller hands intake", () => {
   });
 
   function repo(): string {
-    const dir = mkdtempSync(path.join(tmpdir(), "harness-intake-github-"));
+    const dir = mkdtempSync(path.join(tmpdir(), "charrette-intake-github-"));
     made.push(dir, `${dir}-wt`);
     writeFileSync(path.join(dir, "README.md"), "# fixture\n");
     for (const args of [
       ["init", "-b", "main"],
-      ["config", "user.email", "harness@example.com"],
-      ["config", "user.name", "harness"],
+      ["config", "user.email", "charrette@example.com"],
+      ["config", "user.name", "charrette"],
       ["add", "-A"],
       ["commit", "-m", "init"],
     ]) {
@@ -365,6 +365,6 @@ describe("the reader the controller hands intake", () => {
       )
     ).rejects.toThrow("that is all this test needed");
 
-    expect(specs[0]!.allowedTools).not.toContain("mcp__harness_intake__read_issue");
+    expect(specs[0]!.allowedTools).not.toContain("mcp__charrette_intake__read_issue");
   }, 30_000);
 });

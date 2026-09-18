@@ -5,7 +5,7 @@ import type { ScannedFile } from "./darkSwitches.js";
 /**
  * How much of what a run wrote is a record of what it did not build.
  *
- * waf's `docs/KNOWN-GAPS.md` is 118.6 KB across 27 sections; its `HANDOVER.md`
+ * rust-service's `docs/KNOWN-GAPS.md` is 118.6 KB across 27 sections; its `HANDOVER.md`
  * is another 68 KB; its operator UI ships a card reading "Out of scope for v1".
  * None of it is dishonest, and that is the difficulty — every unbuilt thing was
  * reframed as a scoping decision at the moment it went unbuilt, and
@@ -44,7 +44,7 @@ describe("measuring what a run wrote about what it did not build", () => {
   });
 
   /**
-   * waf's disclosure was spread across a gaps file, a handover and a card in
+   * rust-service's disclosure was spread across a gaps file, a handover and a card in
    * the product itself, and only one of those is a file recognisable by name.
    */
   it("counts lines that record something as undone, wherever they are", () => {

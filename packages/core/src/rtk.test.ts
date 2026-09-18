@@ -67,7 +67,7 @@ describe("rtkBashRewriter", () => {
 describe("rtkHooks", () => {
   it("is off without an rtk on PATH, and off on demand", () => {
     expect(rtkHooks({ PATH: "/definitely/not/a/dir" })).toBeUndefined();
-    expect(rtkHooks({ HARNESS_RTK: "off" }, async () => "{}")).toBeUndefined();
+    expect(rtkHooks({ CHARRETTE_RTK: "off" }, async () => "{}")).toBeUndefined();
   });
 
   it("hooks Bash when a runner exists", () => {
@@ -82,7 +82,7 @@ describe("rtkCommandRewriter — the same deal for transports with no SDK hook",
     // rtk-ful when the operator switched it off, just because they take a
     // different code path to the same shell.
     expect(rtkCommandRewriter({ PATH: "/definitely/not/a/dir" })).toBeUndefined();
-    expect(rtkCommandRewriter({ HARNESS_RTK: "off" }, async () => "{}")).toBeUndefined();
+    expect(rtkCommandRewriter({ CHARRETTE_RTK: "off" }, async () => "{}")).toBeUndefined();
   });
 
   it("returns rtk's rewrite for a command it knows", async () => {

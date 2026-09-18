@@ -1,4 +1,4 @@
-import { RunConfig } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
 import { describe, expect, it } from "vitest";
 import { Bus } from "./bus.js";
 import { runIntake, type IntakeRequest } from "./intake.js";

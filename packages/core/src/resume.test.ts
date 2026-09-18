@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { RunConfig } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
 import { describe, expect, it } from "vitest";
 import { Bus } from "./bus.js";
 import type { GitHubAdapter } from "./github.js";
@@ -26,11 +26,11 @@ const DAG =
 const gitIn = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "ignore" });
 
 function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-resume-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-resume-"));
   writeFileSync(path.join(dir, "README.md"), "# fixture\n");
   gitIn(dir, "init", "-b", "main");
-  gitIn(dir, "config", "user.email", "harness@example.com");
-  gitIn(dir, "config", "user.name", "harness");
+  gitIn(dir, "config", "user.email", "charrette@example.com");
+  gitIn(dir, "config", "user.name", "charrette");
   gitIn(dir, "add", "-A");
   gitIn(dir, "commit", "-m", "init");
   return dir;
@@ -107,7 +107,7 @@ async function parkedRun() {
 describe("surviving agent crashes", () => {
   it("parks the task when the QA agent keeps crashing, and finishes the rest of the run", async () => {
     // The QA pool.run used to be the one agent call with no catch around it: a
-    // dead QA process killed the whole harness and froze the run in EXECUTING.
+    // dead QA process killed the whole charrette and froze the run in EXECUTING.
     const repoPath = repo();
     const store = new Store(":memory:");
     const bus = new Bus(store);
@@ -245,9 +245,9 @@ describe("resuming a finished run", () => {
     });
   });
 
-  it("requeues tasks a dead harness process left mid-flight instead of cancelling them", async () => {
-    // The sendant shape: the QA agent's process died mid-verdict, the whole
-    // harness went down with it, and the run froze in EXECUTING with the task
+  it("requeues tasks a dead charrette process left mid-flight instead of cancelling them", async () => {
+    // The mail-app shape: the QA agent's process died mid-verdict, the whole
+    // charrette went down with it, and the run froze in EXECUTING with the task
     // in QA — where the scheduler used to cancel it as "unreachable" despite a
     // worktree full of finished, checks-green work.
     const { repoPath, store, bus, runId } = await parkedRun();
@@ -296,7 +296,7 @@ describe("resuming a run whose planning phase failed", () => {
 
   it("plans again instead of making the operator start over", async () => {
     // Run f338b5c8: three planner attempts died on the account's usage limit,
-    // the run ended `harness: fatal`, and `harness resume` said there was
+    // the run ended `charrette: fatal`, and `charrette resume` said there was
     // nothing to resume — so the only way on was a new run and the whole intake
     // conversation a second time.
     const { repoPath, store, bus, runId } = await failedPlanning();
@@ -341,7 +341,7 @@ describe("resuming a run whose planning phase failed", () => {
 
 /**
  * Run bc691359: a task passed QA, its merge into the integration branch was
- * refused by a dirty worktree rather than a conflict, and the harness process
+ * refused by a dirty worktree rather than a conflict, and the charrette process
  * ended while the operator was being asked about it — leaving the task ACCEPTED.
  *
  * Nothing dispatches an ACCEPTED task, so the resumed run found it neither
@@ -349,9 +349,9 @@ describe("resuming a run whose planning phase failed", () => {
  * tried to cancel it. That is not a legal move from ACCEPTED, and the throw did
  * not park the task — it killed the run, sixty merged tasks and all:
  *
- *     harness: fatal — task m1-exit-evidence: ACCEPTED -> CANCELLED
+ *     charrette: fatal — task m1-exit-evidence: ACCEPTED -> CANCELLED
  */
-describe("a task left accepted by a harness process that died", () => {
+describe("a task left accepted by a charrette process that died", () => {
   it("requeues it on resume instead of sweeping it away, and its work merges", async () => {
     const { repoPath, store, bus, runId } = await parkedRun();
     // Exactly the state the dead process left behind: QA had passed the work,
@@ -361,7 +361,7 @@ describe("a task left accepted by a harness process that died", () => {
     store.transitionTask(runId, "task-a", "QA", "revived for the fixture");
     store.transitionTask(runId, "task-a", "ACCEPTED", "QA passed; the process died before the merge");
     // And the run itself is mid-execution, which is where a killed process
-    // leaves it — `harness resume` reported exactly this: "[EXECUTING]".
+    // leaves it — `charrette resume` reported exactly this: "[EXECUTING]".
     store.db.prepare("UPDATE runs SET state = 'EXECUTING' WHERE id = ?").run(runId);
 
     const { pool, workerPrompts } = healedPool();
@@ -379,9 +379,9 @@ describe("a task left accepted by a harness process that died", () => {
   });
 });
 
-describe("two harness processes on one run", () => {
+describe("two charrette processes on one run", () => {
   /**
-   * Run bc691359 was found with two `harness resume bc691359` processes alive at
+   * Run bc691359 was found with two `charrette resume bc691359` processes alive at
    * once, started an hour and fifty-four minutes apart. The second one's requeue
    * sweeper — which opens `execute` on the premise that "this controller is the
    * only runner, so nothing can actually be WORKING" — moved a task the first
@@ -399,7 +399,7 @@ describe("two harness processes on one run", () => {
     const bus = new Bus(store);
     let refusal: Error | null = null;
     let planning = 0;
-    // The second harness arrives mid-task, which is the only moment the damage
+    // The second charrette arrives mid-task, which is the only moment the damage
     // is possible: the first controller is between WORKING and QA.
     const pool = {
       async run(spec: AgentSpec): Promise<AgentResult> {
@@ -426,7 +426,7 @@ describe("two harness processes on one run", () => {
 
     expect(refusal).not.toBeNull();
     expect(refusal!.name).toBe("RunLocked");
-    expect(refusal!.message).toContain("already being driven by harness pid");
+    expect(refusal!.message).toContain("already being driven by charrette pid");
     // The first run is untouched: both tasks went the whole way, which is what
     // the second one's sweeper took away when nothing stopped it.
     expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");

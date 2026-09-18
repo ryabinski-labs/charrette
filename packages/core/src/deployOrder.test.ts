@@ -2,20 +2,20 @@ import { describe, expect, it } from "vitest";
 import { declaredResources, pathMatches, pushTrigger, renderDeployOrder, scanDeployOrder, withoutComments } from "./deployOrder.js";
 
 /**
- * The files that actually took dns-project's console down, trimmed to the shape
+ * The files that actually took the DNS service's console down, trimmed to the shape
  * that matters. Commit af60742 changed both `infra/aws/dynamodb/main.tf` and
  * `control-plane/internal/store/dynamostore.go`; PR #243 merged on
  * 2026-08-17T00:02:36Z with ten green checks; `deploy-web.yml` built and
- * rolled the image on that merge, against a `dns-project-sessions` table the run
+ * rolled the image on that merge, against a `dns-service-sessions` table the run
  * had already confirmed did not exist.
  */
 const TERRAFORM = `resource "aws_dynamodb_table" "control_plane" {
-  name         = "dns-project-control-plane"
+  name         = "dns-service-control-plane"
   billing_mode = "PAY_PER_REQUEST"
 }
 
 resource "aws_dynamodb_table" "sessions" {
-  name         = "dns-project-sessions"
+  name         = "dns-service-sessions"
   billing_mode = "PAY_PER_REQUEST"
 
   ttl {
@@ -39,7 +39,7 @@ on:
 jobs:
   api:
     steps:
-      - run: kubectl rollout status deploy/dns-project-api
+      - run: kubectl rollout status deploy/dns-service-api
 `;
 
 /**
@@ -252,7 +252,7 @@ describe("a merge that deploys ahead of its own prerequisite", () => {
   });
 
   it("does not name a workflow that only builds and tests on the merge", () => {
-    // Measured against forty commits each of dns-project, billing-app and waf, the
+    // Measured against forty commits each of dns-service, billing-app and rust-service, the
     // rule that asked only "does something run on the merge?" fired on all
     // twenty commits that touched a .tf file, because every repo's ci.yml runs
     // on push to main with no paths filter. Tests do not go live.
@@ -261,7 +261,7 @@ describe("a merge that deploys ahead of its own prerequisite", () => {
   });
 
   it("does not read a comment as a deploy, or as an apply that excuses one", () => {
-    // dns-project's ci.yml carries the line `# unit-tested with doctl+dig faked.`,
+    // dns-service's ci.yml carries the line `# unit-tested with doctl+dig faked.`,
     // which named it the deployer. The same read in reverse is worse: a note
     // saying the team runs `terraform apply` by hand satisfies the
     // merge-applies-it test and switches the gate off on the one repo whose
@@ -274,7 +274,7 @@ describe("a merge that deploys ahead of its own prerequisite", () => {
   });
 
   it("names source rather than a README when both ship", () => {
-    // Against dns-project's real history this reported a `.coveragerc`, a README
+    // Against dns-service's real history this reported a `.coveragerc`, a README
     // and a `_test.go` on three of five true findings. All of them do ship on
     // the merge, so the finding was sound — it just read like a false one.
     const docsFirst = [

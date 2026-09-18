@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { RunConfig } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
 import { describe, expect, it } from "vitest";
 import { Bus } from "./bus.js";
 import { GitHubAdapter, isNoCommitsError } from "./github.js";
@@ -21,15 +21,15 @@ const DAG =
 
 const gitIn = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "ignore" });
 
-/** A repo on branch `release`, with a bare origin the harness can actually push to. */
+/** A repo on branch `release`, with a bare origin the charrette can actually push to. */
 function repoWithOrigin(): { repo: string; origin: string } {
-  const origin = mkdtempSync(path.join(tmpdir(), "harness-origin-"));
+  const origin = mkdtempSync(path.join(tmpdir(), "charrette-origin-"));
   gitIn(origin, "init", "--bare", "-b", "release");
-  const repo = mkdtempSync(path.join(tmpdir(), "harness-integrate-"));
+  const repo = mkdtempSync(path.join(tmpdir(), "charrette-integrate-"));
   writeFileSync(path.join(repo, "README.md"), "# fixture\n");
   gitIn(repo, "init", "-b", "release");
-  gitIn(repo, "config", "user.email", "harness@example.com");
-  gitIn(repo, "config", "user.name", "harness");
+  gitIn(repo, "config", "user.email", "charrette@example.com");
+  gitIn(repo, "config", "user.name", "charrette");
   gitIn(repo, "add", "-A");
   gitIn(repo, "commit", "-m", "init");
   gitIn(repo, "remote", "add", "origin", origin);
@@ -178,7 +178,7 @@ describe("a task branch that carries nothing", () => {
     expect(store.getTask(runId, "task-a")!.state).not.toBe("MERGED");
     // Nothing was merged, so there is no diff and no PR to open.
     expect(prs).toEqual([]);
-    expect(logs.join("\n")).toMatch(/nothing to review: harness\/.*\/task-a changes no file against harness\/.*\/main \(0 commits\)/);
+    expect(logs.join("\n")).toMatch(/nothing to review: charrette\/.*\/task-a changes no file against charrette\/.*\/main \(0 commits\)/);
   });
 
   it("goes back to the worker with the question only the worker can answer", async () => {
@@ -229,7 +229,7 @@ describe("opening the component PR", () => {
     const { adapter, prs } = fakeGitHub(() => ({ number: 7, url: "https://example.invalid/pr/7" }));
     const { store, runId } = await build(adapter, true, undefined, "per-task");
 
-    expect(prs).toEqual([{ head: `harness/${runId}/task-a`, base: "release" }]);
+    expect(prs).toEqual([{ head: `charrette/${runId}/task-a`, base: "release" }]);
     expect(store.getTask(runId, "task-a")!.prNumber).toBe(7);
     expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
   });
@@ -240,7 +240,7 @@ describe("opening the component PR", () => {
     const { adapter, prs, prBodies } = fakeGitHub(() => ({ number: 9, url: "u" }));
     const { store, runId } = await build(adapter);
 
-    expect(prs).toEqual([{ head: `harness/${runId}/main`, base: "release" }]);
+    expect(prs).toEqual([{ head: `charrette/${runId}/main`, base: "release" }]);
     expect(store.getTask(runId, "task-a")!.prNumber).toBe(9);
     // The reviewer sees what shipped and what the validator thought of it.
     expect(prBodies[0]).toContain("- A (QA iterations:");
@@ -409,7 +409,7 @@ describe("what the run says it produced", () => {
   }, 30_000);
 
   it("says why no pull request exists when nothing was merged", async () => {
-    // The reported symptom: billing-app and sendant each parked their one running
+    // The reported symptom: billing-app and mail-app each parked their one running
     // task, cancelled every dependent, and flipped to PR_REVIEW. `openRunPr`
     // returns null on `!merged.length` without publishing anything, so the event
     // feed showed a run that finished and produced no pull request and no reason.
@@ -427,7 +427,7 @@ describe("what the run says it produced", () => {
     // One task the operator has to deal with, and two that never became reachable —
     // the second only transitively, through the first.
     store.insertTasks(runId, [], [
-      { id: "b", epicId: "epic-e", title: "B", spec: "", acceptanceCriteria: [], dependsOn: [], state: "NEEDS_HUMAN", branch: "harness/x/b", worktreePath: null, githubIssueNumber: 12, prNumber: null, qaIterations: 3, respawns: 0, assignedSkills: [], errorSummary: "QA rejected it 3 times (the cap): still no tests", touchedPaths: [], completionProbe: "", estimatedSize: "M" },
+      { id: "b", epicId: "epic-e", title: "B", spec: "", acceptanceCriteria: [], dependsOn: [], state: "NEEDS_HUMAN", branch: "charrette/x/b", worktreePath: null, githubIssueNumber: 12, prNumber: null, qaIterations: 3, respawns: 0, assignedSkills: [], errorSummary: "QA rejected it 3 times (the cap): still no tests", touchedPaths: [], completionProbe: "", estimatedSize: "M" },
       { id: "c", epicId: "epic-e", title: "C", spec: "", acceptanceCriteria: [], dependsOn: ["b"], state: "CANCELLED", branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [], completionProbe: "", estimatedSize: "M" },
       { id: "d", epicId: "epic-e", title: "D", spec: "", acceptanceCriteria: [], dependsOn: ["c"], state: "CANCELLED", branch: null, worktreePath: null, githubIssueNumber: null, prNumber: null, qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [], completionProbe: "", estimatedSize: "M" },
     ]);
@@ -435,7 +435,7 @@ describe("what the run says it produced", () => {
     expect(out.line).toBe("no pull requests opened; 1 task needs you; 2 never started, blocked behind them; intent check passed");
     // "1 task needs you" on its own is not actionable: which one, why, and where.
     expect(out.parked).toEqual([
-      { taskId: "b", title: "B", issue: 12, branch: "harness/x/b", why: "QA rejected it 3 times (the cap): still no tests", blocking: ["c", "d"] },
+      { taskId: "b", title: "B", issue: 12, branch: "charrette/x/b", why: "QA rejected it 3 times (the cap): still no tests", blocking: ["c", "d"] },
     ]);
   });
 
@@ -516,7 +516,7 @@ describe("closing the cycle in production", () => {
   });
 
   it("stops at the pull request while the human has not merged", async () => {
-    // No merge commit: the boundary the harness does not cross. Not a failure.
+    // No merge commit: the boundary the charrette does not cross. Not a failure.
     const { adapter } = fakeGitHub(() => ({ number: 7, url: "u" }), { state: "passing", failing: [], total: 2 }, { sha: null, deploy: null });
     const { store, runId } = await build(adapter, true, undefined, "single", undefined, 20, { prodUrl: "https://example.invalid" });
 
@@ -549,7 +549,7 @@ describe("validating intent before the PRs", () => {
     const out = controller.outcome(runId);
     expect(out.intent).toEqual({ verdict: "FAIL", summary: "half a feature", gaps: ["the toggle is never wired to the call screen"], unchecked: [] });
     expect(out.line).toContain("intent check found 1 gap");
-    // With the hold off, a FAIL does not block the PRs — the harness never
+    // With the hold off, a FAIL does not block the PRs — the charrette never
     // merges, and the human review the PRs exist for is where the gap list
     // belongs. With it on (the default) the run holds instead; see
     // closingProof.test.ts.
@@ -590,14 +590,14 @@ describe("resuming to open the missing PRs", () => {
 
     // Parked rather than "in review": the publish failed, and `greenGate` now
     // says so instead of reading the missing PR number as nothing to publish.
-    // That is what makes the run resumable at all — `harness resume` offers any
+    // That is what makes the run resumable at all — `charrette resume` offers any
     // state but ABORTED/DONE/FAILED, and PR_REVIEW is the one that needs
     // `hasRecoverableWork` to argue its way back in.
     expect(store.getRun(runId)!.state).toBe("PAUSED");
     expect(controller.hasRecoverableWork(runId)).toBe(false);
     await controller.resume(runId);
 
-    expect(prs).toEqual([{ head: `harness/${runId}/task-a`, base: "release" }]);
+    expect(prs).toEqual([{ head: `charrette/${runId}/task-a`, base: "release" }]);
     expect(store.getTask(runId, "task-a")!.prNumber).toBe(42);
     expect(store.getRun(runId)!.config.baseBranch).toBe("release");
     expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
@@ -628,7 +628,7 @@ describe("regrouping per-task PRs into the rollup", () => {
     expect(res!.pr.number).toBe(99);
     expect(res!.closed).toEqual([7]);
     expect(closedPrs).toEqual([7]);
-    expect(prs).toEqual([{ head: `harness/${runId}/main`, base: "release" }]);
+    expect(prs).toEqual([{ head: `charrette/${runId}/main`, base: "release" }]);
     expect(store.getTask(runId, "task-a")!.prNumber).toBe(99);
     // Future resumes publish the same way instead of reopening per-task PRs.
     expect(store.getRun(runId)!.config.prMode).toBe("single");
@@ -672,7 +672,7 @@ describe("telling GitHub's 422s apart", () => {
   const noCommits = {
     status: 422,
     message: "Validation Failed",
-    response: { data: { errors: [{ message: "No commits between harness/x/main and harness/x/task-a" }] } },
+    response: { data: { errors: [{ message: "No commits between charrette/x/main and charrette/x/task-a" }] } },
   };
 
   it("recognises an empty diff from the errors array", () => {

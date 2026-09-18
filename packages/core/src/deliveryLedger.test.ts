@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { TaskState } from "@harness/shared";
+import type { TaskState } from "@charrette/shared";
 import { deliveryLedger, reachOf, type LedgerInput, type LedgerTask } from "./deliveryLedger.js";
 import type { DarkSwitch } from "./darkSwitches.js";
 
@@ -39,7 +39,7 @@ const secret = (over: Partial<DarkSwitch> = {}): DarkSwitch => ({
 });
 
 describe("how far the run's work actually travelled", () => {
-  it("stops at the boundary the harness does not cross", () => {
+  it("stops at the boundary the charrette does not cross", () => {
     expect(reachOf({ merged: false, deploy: { state: "passing", failing: [] }, prod: null })).toBe("not-merged");
   });
 

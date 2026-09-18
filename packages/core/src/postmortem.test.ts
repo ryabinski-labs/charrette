@@ -1,4 +1,4 @@
-import { RunConfig } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
 import { describe, expect, it } from "vitest";
 import { Bus } from "./bus.js";
 import { postmortem, renderPostmortem } from "./postmortem.js";
@@ -6,7 +6,7 @@ import { Store, type TaskRow } from "./store.js";
 
 /**
  * Working out why run 40da9337 delivered a product that could not move money
- * took an hour of ad-hoc SQL against its `.harness/harness.db`. Every query was
+ * took an hour of ad-hoc SQL against its `.charrette/charrette.db`. Every query was
  * fixed; none was reachable from the CLI. The answer — a question the operator
  * was asked and never answered — was two lines of it.
  *
@@ -26,7 +26,7 @@ function run(id = "run-1") {
     state: "CREATED",
     prdPath: null,
     planHash: null,
-    integrationBranch: `harness/${id}/main`,
+    integrationBranch: `charrette/${id}/main`,
     config: RunConfig.parse({}),
   });
   return { store, bus };
@@ -250,7 +250,7 @@ describe("why a run produced what it produced", () => {
     expect(text).not.toContain("could pass without");
     expect(text).not.toContain("Spend by how");
     expect(text).not.toContain("The finished run");
-    expect(text).not.toContain("Ran under harness");
+    expect(text).not.toContain("Ran under charrette");
     expect(text).toContain("0 gate(s), 0h waiting on you.");
   });
 
@@ -263,7 +263,7 @@ describe("why a run produced what it produced", () => {
       state: "CREATED",
       prdPath: null,
       planHash: null,
-      integrationBranch: "harness/run-1/main",
+      integrationBranch: "charrette/run-1/main",
       config: RunConfig.parse({}),
     });
 
@@ -281,18 +281,18 @@ describe("why a run produced what it produced", () => {
 });
 
 /**
- * Which harness ran this. Establishing that run 40da9337 never used the
+ * Which charrette ran this. Establishing that run 40da9337 never used the
  * per-worktree isolation fix took an hour of comparing `git log` against process
- * start times in `.harness/harness.log`; the run's own record could not say.
+ * start times in `.charrette/charrette.log`; the run's own record could not say.
  */
-describe("which harness build the run used", () => {
+describe("which charrette build the run used", () => {
   it("names the one build in a single line when there was only one", () => {
     const { store } = run();
     built(store, "s1", "0.0.1@7453d60", 1);
     built(store, "s2", "0.0.1@7453d60", 2);
 
     expect(postmortem(store, "run-1").builds).toEqual([{ build: "0.0.1@7453d60", sessions: 2, first: 1, last: 2 }]);
-    expect(renderPostmortem(postmortem(store, "run-1"))).toContain("Ran under harness 0.0.1@7453d60 — all 2 session(s).");
+    expect(renderPostmortem(postmortem(store, "run-1"))).toContain("Ran under charrette 0.0.1@7453d60 — all 2 session(s).");
   });
 
   it("refuses to guess for a run recorded before the build was stamped", () => {
@@ -301,13 +301,13 @@ describe("which harness build the run used", () => {
 
     const text = renderPostmortem(postmortem(store, "run-1"));
     expect(text).toContain("the run predates the stamp");
-    expect(text).not.toContain("Ran under harness");
+    expect(text).not.toContain("Ran under charrette");
   });
 
   it("shows the split, earliest first, when a fix landed mid-run", () => {
     // 40da9337's shape: the process started at 11:47 and carried the run past a
     // 14:33 commit it could not load. Two builds here means the two halves of a
-    // run like that are visible instead of being read as one harness.
+    // run like that are visible instead of being read as one charrette.
     const { store } = run();
     built(store, "s1", "0.0.1@62fb7b0", Date.UTC(2026, 7, 2, 11, 47));
     built(store, "s2", "0.0.1@62fb7b0", Date.UTC(2026, 7, 2, 12, 30));
@@ -319,13 +319,13 @@ describe("which harness build the run used", () => {
       ["0.0.1@7453d60", 1],
     ]);
     const text = renderPostmortem(p);
-    expect(text).toContain("This run spanned 2 harness builds.");
+    expect(text).toContain("This run spanned 2 charrette builds.");
     expect(text).toContain("the process loads its build once and cannot reload it");
     expect(text).toContain("0.0.1@62fb7b0           2 session(s)   2026-08-02 11:47 → 2026-08-02 12:30");
     expect(text).toContain("0.0.1@7453d60           1 session(s)   2026-08-02 22:48 → 2026-08-02 22:48");
   });
 
-  it("labels the unstamped half of a run that was resumed under a newer harness", () => {
+  it("labels the unstamped half of a run that was resumed under a newer charrette", () => {
     const { store } = run();
     session(store, "s1", "done", 5);
     built(store, "s2", "0.0.1@7453d60", 9);

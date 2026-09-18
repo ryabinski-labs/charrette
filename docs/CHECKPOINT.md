@@ -121,13 +121,13 @@ the pool keeps its own default rather than crashing on an older run.
 ## Both transports, one of them further
 
 The push sits above the transport split in `pool.ts`, so the same message
-reaches an SDK session and a harness-run tool loop alike. What happens to the
+reaches an SDK session and a charrette-run tool loop alike. What happens to the
 answer differs:
 
 - **Anthropic** (`query()`): the SDK owns its transcript. A checkpoint buys the
   record and the questions. The digest stays in the conversation as ordinary
-  narration, where it is still worth having — but the harness cannot act on it.
-- **OpenAI and Google** (`toolLoop.ts`): the harness holds the transcript, so
+  narration, where it is still worth having — but the charrette cannot act on it.
+- **OpenAI and Google** (`toolLoop.ts`): the charrette holds the transcript, so
   the digest can *become* it. `compact.fold` replaces the earlier assistant
   narration and tool output with the agent's own account of it.
 
@@ -158,7 +158,7 @@ what it would replace.
 - `every` — turns between checkpoints. `0` turns them off. At twenty, a worker
   pays four checkpoints, under 4% of its turn budget. Lower it to steer harder
   on a run you are watching.
-- `fold` — replace the older transcript with the digest. Only the harness-run
+- `fold` — replace the older transcript with the digest. Only the charrette-run
   tool loop can honour this; on Anthropic it is not reachable.
 
 ## What the operator sees
@@ -172,7 +172,7 @@ asking row when there are questions and a status row when there are none.
 The dashboard is not the only place a run is watched, so each question also goes
 out as its own `agent.log` line. The CLI renders `agent.log` and prints its first
 line only — without this an operator at a terminal would watch
-`<harness-checkpoint>` scroll past and never learn what was asked, which is the
+`<charrette-checkpoint>` scroll past and never learn what was asked, which is the
 one thing a checkpoint is for. One event for the dashboard, one line per question
 for the terminal.
 

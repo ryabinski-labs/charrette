@@ -21,7 +21,7 @@ import {
  */
 
 describe("the demo agent", () => {
-  const system = demoSystemPrompt("/repo/.harness/r1/pitstops/1", "/repo-wt/r1/__integration__", "\ntoolbelt", "\nskills");
+  const system = demoSystemPrompt("/repo/.charrette/r1/pitstops/1", "/repo-wt/r1/__integration__", "\ntoolbelt", "\nskills");
 
   it("is told to run the thing, not to read it", () => {
     expect(system).toContain("START the half-built product");
@@ -38,7 +38,7 @@ describe("the demo agent", () => {
   it("is told which checkout is the product, because the evidence path is in another one", () => {
     // Pit stop 33 of run bc691359: the demo was cwd'd into the integration
     // worktree and told to write its captures to
-    // `<repoPath>/.harness/<runId>/pitstops/33`. That path is inside the
+    // `<repoPath>/.charrette/<runId>/pitstops/33`. That path is inside the
     // operator's own checkout, which was parked on `main` — four crates and a
     // whole `ui/` behind the integration branch. The agent read the artifacts
     // path as "the repo", explored it, and reported the control plane, the k8s
@@ -53,7 +53,7 @@ describe("the demo agent", () => {
   });
 
   it("is given somewhere to put the evidence, and told to leave the tree alone", () => {
-    expect(system).toContain("/repo/.harness/r1/pitstops/1");
+    expect(system).toContain("/repo/.charrette/r1/pitstops/1");
     expect(system).toContain("Do not modify the repository");
     expect(system).toContain("the operator's diff is not yours to touch");
   });

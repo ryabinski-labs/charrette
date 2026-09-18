@@ -1,4 +1,4 @@
-import type { PitStopEvery, TaskState } from "@harness/shared";
+import type { PitStopEvery, TaskState } from "@charrette/shared";
 import type { ArtifactClaim, CommandClaim, CoverageReading } from "./evidence.js";
 
 /**
@@ -122,7 +122,7 @@ export interface DemoReport {
   plannedJourneys: string[];
   journeys: { name: string; result: "worked" | "broken" | "not-reachable"; evidence: string }[];
   /**
-   * What the harness made of the two lists above. Derived, never agent-authored
+   * What the charrette made of the two lists above. Derived, never agent-authored
    * — an agent that grades its own thoroughness grades it "thorough".
    */
   coverage: CoverageReading;
@@ -137,13 +137,13 @@ export interface DemoReport {
    * Files written under the pit stop's artifact directory, each with the claim
    * it backs. A file without a claim is not evidence — the operator who opened
    * a bare `01-marketing-home-desktop.png` could not say what it was for — and
-   * neither is a file the harness inspected and found blank. Both are struck
+   * neither is a file the charrette inspected and found blank. Both are struck
    * before this is rendered; see evidence.ts.
    */
   artifacts: ArtifactClaim[];
   /**
    * Commands the demo offered as proof, each with what passing it settles. The
-   * harness runs every repeatable one again before the operator sees it; the
+   * charrette runs every repeatable one again before the operator sees it; the
    * ones that fail, and the ones that cannot safely be repeated, are moved to
    * `couldNotReach`. See evidence.ts — this is the same rule as `artifacts`,
    * applied to the claims that are not files.
@@ -153,7 +153,7 @@ export interface DemoReport {
 }
 
 /**
- * A demo report before the harness has scored it.
+ * A demo report before the charrette has scored it.
  *
  * The shape the agent actually returns, and the shape the evidence gate strikes
  * claims out of. `coverage` is attached last, from what survived — see
@@ -194,7 +194,7 @@ export interface PitStop {
   reason: string;
   /**
    * Null when the stop was opened without running the product — the one that
-   * `harness resume` opens on a parked run. That stop exists to show the
+   * `charrette resume` opens on a parked run. That stop exists to show the
    * operator the queue and let them change it, and charging them for a demo
    * and four reviewers before they have decided whether to spend anything at
    * all is how a checkpoint becomes a thing people route around.
@@ -260,7 +260,7 @@ export interface PitStop {
  *
  * `redirect` attaches their words to every task that has not run yet;
  * `replan` sends the remaining work back to the planner with those words and
- * the built tree as context; `stop` parks the run for `harness resume`.
+ * the built tree as context; `stop` parks the run for `charrette resume`.
  */
 export interface PitStopDecision {
   action: "continue" | "redirect" | "replan" | "stop";
@@ -282,7 +282,7 @@ const VERDICT_MARK: Record<ReviewReport["verdict"], string> = {
 /**
  * Render the pit stop as markdown.
  *
- * Ordered by what the operator has to decide with, not by what the harness
+ * Ordered by what the operator has to decide with, not by what the charrette
  * found first: whether the thing runs, then what the lenses think is wrong,
  * then what it cost, then what is about to be built — because "stop before you
  * build X" is only sayable by someone who has been shown X.
@@ -408,9 +408,9 @@ export function renderPitStop(stop: Omit<PitStop, "markdown">): string {
   if (stop.parked.length) {
     list("Parked, waiting on you", stop.parked, "nothing");
     // Anything written here reaches a parked task, but only when it starts
-    // again — and only `harness resume` starts it. Saying so is the difference
+    // again — and only `charrette resume` starts it. Saying so is the difference
     // between an operator who reopens them and one who assumes this did.
-    lines.push("These do not restart on their own: `harness resume` asks about each one, and anything you write here is waiting for them when it does.", "");
+    lines.push("These do not restart on their own: `charrette resume` asks about each one, and anything you write here is waiting for them when it does.", "");
   }
   list("Not built yet, in this order", stop.upcoming, "nothing — this is the whole plan");
   if (stop.cancelled.length) {
@@ -418,7 +418,7 @@ export function renderPitStop(stop: Omit<PitStop, "markdown">): string {
     // The one sentence that would have saved run 6fe4ba37. `resume` alone puts
     // none of this back; only re-planning does, and an operator who does not
     // know that reads a short queue as "nearly done" rather than "gutted".
-    lines.push("`harness resume` does not bring these back. Re-planning at a pit stop is what queues this work again — say `replan` and describe what you still want.", "");
+    lines.push("`charrette resume` does not bring these back. Re-planning at a pit stop is what queues this work again — say `replan` and describe what you still want.", "");
   }
 
   if (demo && (demo.artifacts.length || demo.commands.length)) {
@@ -428,9 +428,9 @@ export function renderPitStop(stop: Omit<PitStop, "markdown">): string {
     if (demo.artifacts.length) lines.push(...demo.artifacts.map((a) => `- \`${a.file}\` — ${a.shows}`), "");
     if (demo.commands.length) {
       // Everything printed here was run twice: once by the demo agent and once
-      // by the harness. A claim that survived only the first is not in this
+      // by the charrette. A claim that survived only the first is not in this
       // list — it is under what the pit stop could not check.
-      lines.push("Re-run by the harness and confirmed:", "", ...demo.commands.map((c) => `- \`${c.command}\` — ${c.shows}`), "");
+      lines.push("Re-run by the charrette and confirmed:", "", ...demo.commands.map((c) => `- \`${c.command}\` — ${c.shows}`), "");
     }
     lines.push(`All of it: ${stop.artifactsDir}`, "");
   }

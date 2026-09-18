@@ -1,6 +1,6 @@
 import { createInterface } from "node:readline/promises";
-import type { IntakeUi } from "@harness/core";
-import type { IntakeQuestion } from "@harness/shared";
+import type { IntakeUi } from "@charrette/core";
+import type { IntakeQuestion } from "@charrette/shared";
 
 /** The slice of readline this needs — narrowed so tests can supply a script. */
 export interface Prompter {
@@ -107,7 +107,7 @@ export class TerminalChat implements IntakeUi {
 
   /** Read the opening assignment. Blank line ends a multi-line paragraph. */
   async promptSeed(withIntake = true): Promise<string> {
-    process.stdout.write(`\n${bold("What should the harness build?")}\n`);
+    process.stdout.write(`\n${bold("What should the charrette build?")}\n`);
     process.stdout.write(
       dim(
         withIntake

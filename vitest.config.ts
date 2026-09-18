@@ -37,7 +37,7 @@ export default defineConfig({
     /**
      * Point cross-package imports at source, not `dist/`.
      *
-     * Left alone, `@harness/shared` resolves through pnpm's workspace symlink
+     * Left alone, `@charrette/shared` resolves through pnpm's workspace symlink
      * to `packages/shared/dist/index.js`. The tests still pass — but the
      * coverage map credits the build artifact, so `shared/src/config.ts` read
      * as 0% covered while `skillsInjection.test.ts` was exercising every
@@ -45,10 +45,10 @@ export default defineConfig({
      * ship changes to, and drops the build step from the test job.
      */
     alias: {
-      "@harness/shared": pkg("shared"),
-      "@harness/core": pkg("core"),
-      "@harness/dashboard": pkg("dashboard"),
-      "@harness/skills-mcp": pkg("skills-mcp"),
+      "@charrette/shared": pkg("shared"),
+      "@charrette/core": pkg("core"),
+      "@charrette/dashboard": pkg("dashboard"),
+      "@charrette/skills-mcp": pkg("skills-mcp"),
     },
   },
   test: {

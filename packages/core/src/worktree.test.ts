@@ -7,7 +7,7 @@ import { WorktreeManager, ensureIgnored } from "./git.js";
 
 /**
  * Against real repositories. Worktrees, merges and conflict detection are the
- * one part of the harness where git's own behaviour *is* the behaviour under
+ * one part of the charrette where git's own behaviour *is* the behaviour under
  * test — a stubbed git would only prove that the stub agrees with itself, and
  * every bug this code has had (canonical paths on macOS, a wedged MERGE_HEAD,
  * a branch already checked out) came from git doing something the stub would
@@ -17,7 +17,7 @@ import { WorktreeManager, ensureIgnored } from "./git.js";
 const made: string[] = [];
 
 function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-wt-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-wt-"));
   made.push(dir, `${dir}-wt`);
   const run = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
   run("init", "-b", "main");
@@ -41,47 +41,47 @@ afterEach(() => {
   for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-describe("keeping .harness out of the operator's commits", () => {
+describe("keeping .charrette out of the operator's commits", () => {
   it("adds the entry and reports that it did", () => {
     const dir = repo();
 
-    expect(ensureIgnored(dir, ".harness/")).toBe(true);
-    expect(readFileSync(path.join(dir, ".gitignore"), "utf8")).toBe(".harness/\n");
+    expect(ensureIgnored(dir, ".charrette/")).toBe(true);
+    expect(readFileSync(path.join(dir, ".gitignore"), "utf8")).toBe(".charrette/\n");
   });
 
   it("says nothing when git already ignores it", () => {
     const dir = repo();
-    ensureIgnored(dir, ".harness/");
+    ensureIgnored(dir, ".charrette/");
 
-    expect(ensureIgnored(dir, ".harness/")).toBe(false);
+    expect(ensureIgnored(dir, ".charrette/")).toBe(false);
   });
 
   it("starts a new line when the existing file does not end in one", () => {
     const dir = repo();
     writeFileSync(path.join(dir, ".gitignore"), "node_modules");
 
-    ensureIgnored(dir, ".harness/");
+    ensureIgnored(dir, ".charrette/");
 
-    expect(readFileSync(path.join(dir, ".gitignore"), "utf8")).toBe("node_modules\n.harness/\n");
+    expect(readFileSync(path.join(dir, ".gitignore"), "utf8")).toBe("node_modules\n.charrette/\n");
   });
 
   /**
    * The operator's business, not a reason to refuse to start the run: the
-   * harness has somewhere to put its state either way.
+   * charrette has somewhere to put its state either way.
    */
   it("gives up quietly on a .gitignore it cannot write", () => {
     const dir = repo();
     // A directory where the file should be: appendFileSync throws EISDIR.
     mkdirSync(path.join(dir, ".gitignore"));
 
-    expect(ensureIgnored(dir, ".harness/")).toBe(false);
+    expect(ensureIgnored(dir, ".charrette/")).toBe(false);
   });
 
   it("gives up quietly outside a repository, where it cannot reason at all", () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "harness-nogit-"));
+    const dir = mkdtempSync(path.join(tmpdir(), "charrette-nogit-"));
     made.push(dir);
 
-    expect(ensureIgnored(dir, ".harness/")).toBe(false);
+    expect(ensureIgnored(dir, ".charrette/")).toBe(false);
     expect(existsSync(path.join(dir, ".gitignore"))).toBe(false);
   });
 });
@@ -95,7 +95,7 @@ describe("worktrees", () => {
     const info = await wt.ensureWorktree("run1", "task1");
 
     expect(info.created).toBe(true);
-    expect(info.branch).toBe("harness/run1/task1");
+    expect(info.branch).toBe("charrette/run1/task1");
     expect(existsSync(path.join(info.path, "README.md"))).toBe(true);
   });
 
@@ -147,9 +147,9 @@ describe("worktrees", () => {
     const dir = repo();
     const wt = new WorktreeManager(dir);
 
-    expect(await wt.ensureIntegrationBranch("run1")).toBe("harness/run1/main");
-    expect(await wt.ensureIntegrationBranch("run1")).toBe("harness/run1/main");
-    expect(sha(dir, "harness/run1/main")).toBe(sha(dir, "main"));
+    expect(await wt.ensureIntegrationBranch("run1")).toBe("charrette/run1/main");
+    expect(await wt.ensureIntegrationBranch("run1")).toBe("charrette/run1/main");
+    expect(sha(dir, "charrette/run1/main")).toBe(sha(dir, "main"));
   });
 });
 
@@ -212,7 +212,7 @@ describe("what a task branch actually carries", () => {
 
     const delta = await wt.taskBranchDelta("run1", "task1");
     expect(delta.files).toEqual([]);
-    expect(delta.landed).toBe(sha(dir, "harness/run1/main"));
+    expect(delta.landed).toBe(sha(dir, "charrette/run1/main"));
   });
 
   /**
@@ -267,12 +267,12 @@ describe("what a task branch actually carries", () => {
     const wt = new WorktreeManager(dir);
     await wt.ensureIntegrationBranch("run1");
     await wt.ensureWorktree("run1", "task1");
-    const before = sha(dir, "harness/run1/main");
+    const before = sha(dir, "charrette/run1/main");
 
     const merge = await wt.mergeTaskBranch("run1", "task1");
 
     expect(merge).toEqual({ ok: false, empty: true });
-    expect(sha(dir, "harness/run1/main")).toBe(before);
+    expect(sha(dir, "charrette/run1/main")).toBe(before);
   });
 
   it("still merges a branch that has something on it", async () => {
@@ -285,7 +285,7 @@ describe("what a task branch actually carries", () => {
     const merge = await wt.mergeTaskBranch("run1", "task1");
 
     expect(merge.ok).toBe(true);
-    expect(sha(dir, "harness/run1/main")).toBe((merge as { sha: string }).sha);
+    expect(sha(dir, "charrette/run1/main")).toBe((merge as { sha: string }).sha);
   });
 
   /**
@@ -385,7 +385,7 @@ describe("watching the operator's own checkout", () => {
   });
 
   it("says nothing at all when the path is not a repository", async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "harness-notrepo-"));
+    const dir = mkdtempSync(path.join(tmpdir(), "charrette-notrepo-"));
     made.push(dir);
 
     expect(await new WorktreeManager(dir).primaryHead()).toBe("");
@@ -399,7 +399,7 @@ describe("measuring the base a task is judged against", () => {
     await wt.ensureIntegrationBranch("run1");
     const first = sha(dir);
     commit(dir, "later.txt", "second\n", "second commit");
-    execFileSync("git", ["branch", "-f", "harness/run1/main", "HEAD"], { cwd: dir, stdio: "ignore" });
+    execFileSync("git", ["branch", "-f", "charrette/run1/main", "HEAD"], { cwd: dir, stdio: "ignore" });
     const second = sha(dir);
 
     const atFirst = await wt.withBaselineWorktree("run1", first, async (p) => existsSync(path.join(p, "later.txt")));
@@ -473,7 +473,7 @@ describe("catching a task branch up with what has merged since", () => {
     const task = path.join(wt.worktreeRoot(), "run1", "task1");
     commit(task, "mine.txt", "task work\n", "task work");
     // Another task merged meanwhile, touching a different file.
-    execFileSync("git", ["checkout", "harness/run1/main"], { cwd: dir, stdio: "ignore" });
+    execFileSync("git", ["checkout", "charrette/run1/main"], { cwd: dir, stdio: "ignore" });
     commit(dir, "theirs.txt", "other work\n", "other work");
 
     await expect(wt.catchUpTaskBranch("run1", "task1")).resolves.toEqual({ ok: true });
@@ -485,7 +485,7 @@ describe("catching a task branch up with what has merged since", () => {
     const wt = await taskOn(dir);
     const task = path.join(wt.worktreeRoot(), "run1", "task1");
     commit(task, "shared.txt", "the task's version\n", "task work");
-    execFileSync("git", ["checkout", "harness/run1/main"], { cwd: dir, stdio: "ignore" });
+    execFileSync("git", ["checkout", "charrette/run1/main"], { cwd: dir, stdio: "ignore" });
     commit(dir, "shared.txt", "the other task's version\n", "other work");
 
     const result = await wt.catchUpTaskBranch("run1", "task1");
@@ -505,7 +505,7 @@ describe("catching a task branch up with what has merged since", () => {
     const dir = repo();
     const wt = await taskOn(dir);
     const task = path.join(wt.worktreeRoot(), "run1", "task1");
-    execFileSync("git", ["checkout", "harness/run1/main"], { cwd: dir, stdio: "ignore" });
+    execFileSync("git", ["checkout", "charrette/run1/main"], { cwd: dir, stdio: "ignore" });
     commit(dir, "incoming.txt", "from the other task\n", "other work");
     // Uncommitted local changes to the very file the merge wants to write.
     writeFileSync(path.join(task, "incoming.txt"), "dirty, uncommitted\n");

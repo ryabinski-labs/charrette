@@ -1,4 +1,4 @@
-import { providerFor } from "@harness/shared";
+import { providerFor } from "@charrette/shared";
 import { toolsFor, unsupportedTools, type LocalTool, type ToolContext } from "./agentTools.js";
 import { parseCheckpoint } from "./checkpoint.js";
 import { budgetFor, compact, fold } from "./compact.js";
@@ -11,8 +11,8 @@ import { rtkCommandRewriter } from "./rtk.js";
  * The Claude Agent SDK runs this loop inside its own process: it asks the
  * model, executes the tool calls, feeds the results back, and stops when the
  * model answers without asking for a tool. OpenAI and Google sell the model
- * turn and nothing else, so the harness runs the loop itself — and, running it
- * itself, it is the harness that decides which tools exist and what happens
+ * turn and nothing else, so the charrette runs the loop itself — and, running it
+ * itself, it is the charrette that decides which tools exist and what happens
  * before a command reaches a shell (agentTools.ts).
  *
  * It yields the same message shapes `query()` yields, so `AgentPool.run` never
@@ -77,7 +77,7 @@ export function unsupportedSpec(spec: ToolLoopSpec): string | null {
   }
   const missing = unsupportedTools(spec);
   if (missing.length) {
-    return `the harness tool loop has no implementation for ${missing.join(", ")}`;
+    return `the charrette tool loop has no implementation for ${missing.join(", ")}`;
   }
   return null;
 }
@@ -107,7 +107,7 @@ function sdkUsage(u: Usage) {
  * what the SDK does at its own ceiling — see the wrap-up message in pool.ts.
  */
 const OUT_OF_TURNS =
-  "[HARNESS] You have reached this session's turn limit. Stop calling tools and give your final answer now, in exactly the output format you were asked for.";
+  "[CHARRETTE] You have reached this session's turn limit. Stop calling tools and give your final answer now, in exactly the output format you were asked for.";
 
 export async function* toolLoop(opts: ToolLoopOptions): AsyncGenerator<Record<string, unknown>> {
   const { spec, prompts, signal } = opts;
@@ -155,7 +155,7 @@ export async function* toolLoop(opts: ToolLoopOptions): AsyncGenerator<Record<st
     const note = result.exhausted
       ? `compacted ${result.saved} characters of older tool output and the transcript is STILL over the ${budget}-character budget — the next request may be refused`
       : `compacted ${result.saved} characters of older tool output to stay inside the ${budget}-character context budget`;
-    return { type: "harness_note", session_id: sessionId, text: note };
+    return { type: "charrette_note", session_id: sessionId, text: note };
   };
 
   for (let prompt = await prompts.next(); prompt !== null; prompt = await prompts.next()) {
@@ -188,7 +188,7 @@ export async function* toolLoop(opts: ToolLoopOptions): AsyncGenerator<Record<st
       messages.push({ role: "assistant", text: turn.text, toolCalls: turn.toolCalls, signature: turn.signature });
 
       // The agent just wrote an account of its own work, so the material that
-      // account was derived from can go. This is the only place the harness
+      // account was derived from can go. This is the only place the charrette
       // gets to compact by understanding rather than by deletion — see
       // `fold` in compact.ts — and it happens after the assistant message is
       // appended so that the digest itself sits in the protected tail and is
@@ -200,7 +200,7 @@ export async function* toolLoop(opts: ToolLoopOptions): AsyncGenerator<Record<st
           if (folded.saved > 0) {
             messages.splice(0, messages.length, ...folded.messages);
             yield {
-              type: "harness_note",
+              type: "charrette_note",
               session_id: sessionId,
               text: `folded ${folded.saved} characters of earlier narration and tool output into the agent's own checkpoint digest`,
             };

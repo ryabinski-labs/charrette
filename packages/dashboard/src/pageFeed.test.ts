@@ -25,19 +25,19 @@ suite("the skills.forged feed line", () => {
     const describeEv = extractDescribe();
     const [kind, who, text] = describeEv({
       type: "skills.forged", runId: "r1", taskId: "task-a", name: "log-rotation",
-      sha256: "abc", path: "/repo/.harness/skills/log-rotation/SKILL.md",
+      sha256: "abc", path: "/repo/.charrette/skills/log-rotation/SKILL.md",
       action: "created", tokensApprox: 412, ts: 1,
     });
     expect(kind).toBe("tool");
     expect(who).toBe("task-a");
-    expect(text).toBe("created skill “log-rotation” (~412 tokens) — /repo/.harness/skills/log-rotation/SKILL.md");
+    expect(text).toBe("created skill “log-rotation” (~412 tokens) — /repo/.charrette/skills/log-rotation/SKILL.md");
   });
 
   it("says extended when the forge grew an earlier skill", () => {
     const describeEv = extractDescribe();
     const [, , text] = describeEv({
       type: "skills.forged", runId: "r1", taskId: "task-b", name: "log-rotation",
-      sha256: "def", path: "/repo/.harness/skills/log-rotation/SKILL.md",
+      sha256: "def", path: "/repo/.charrette/skills/log-rotation/SKILL.md",
       action: "extended", tokensApprox: 890, ts: 2,
     });
     expect(text).toContain("extended skill “log-rotation” (~890 tokens)");
@@ -105,7 +105,7 @@ suite("the run.merge_status feed line", () => {
 suite("the run.ci_retry feed line", () => {
   // Driving the real page showed this event falling through to the default
   // case and printing the bare type "run.ci_retry" — the least useful possible
-  // rendering of "the harness is ruling out a flake before spending money".
+  // rendering of "the charrette is ruling out a flake before spending money".
   it("says the failed checks were re-run when they were", () => {
     const describeEv = extractDescribe();
     const [kind, who, text] = describeEv({

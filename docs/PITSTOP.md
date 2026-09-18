@@ -29,7 +29,7 @@ read-only copy of the run database and four SQL queries.
 
 ## The gap
 
-The harness has exactly two human checkpoints:
+The charrette has exactly two human checkpoints:
 
 | Gate | When | What the operator sees |
 | --- | --- | --- |
@@ -37,9 +37,9 @@ The harness has exactly two human checkpoints:
 | Task gate | When one task is stuck | That task's failure |
 | — | **While the run is building** | **nothing** |
 
-There is no point at which the harness says *"here is what you have now — is this
+There is no point at which the charrette says *"here is what you have now — is this
 what you wanted?"* while there is still budget to change course. Every signal the
-harness produces mid-run is either a per-task escalation (too narrow to see the
+charrette produces mid-run is either a per-task escalation (too narrow to see the
 product in) or a line in a log (too fast to read).
 
 The plan gate is the wrong place to catch this: it fires before a single line
@@ -49,7 +49,7 @@ report is also the wrong place: the money is spent.
 ## Target user and job
 
 The operator running a multi-hour, multi-hundred-dollar run on their own machine.
-Their job is not to supervise tasks — the harness does that. It is to answer one
+Their job is not to supervise tasks — the charrette does that. It is to answer one
 question periodically: **is this still the thing I wanted?** Today they can only
 answer it at the start, from a plan, or at the end, from a diff.
 
@@ -69,7 +69,7 @@ answer it at the start, from a plan, or at the end, from a diff.
 
 - Not a replacement for the plan gate or the task gate.
 - Not a per-task review. A pit stop is about the product, not the increment.
-- Not automatic redirection *without a record*. The harness now decides for
+- Not automatic redirection *without a record*. The charrette now decides for
   itself by default — `pitStop.decidedBy` names the skill that answers, and
   `"operator"` restores the original — but every decision is written into the
   pit stop's own `REPORT.md` and carried on `run.pitstop_resolved` with who made
@@ -79,7 +79,7 @@ answer it at the start, from a plan, or at the end, from a diff.
 
 ## Trigger
 
-Configured per run in `harness.config.json`:
+Configured per run in `charrette.config.json`:
 
 ```json
 {
@@ -153,7 +153,7 @@ Until it opens, the request costs nothing and **Cancel** is free. That is what
 lets asking be a low-stakes click rather than a commitment. Asking twice replaces
 the question rather than queueing a second stop.
 
-### The one that is not a trigger: `harness resume`
+### The one that is not a trigger: `charrette resume`
 
 A run parked at a pit stop opens one more when it is resumed, before it dispatches
 anything. It is not on the table above because nothing about the run causes it —
@@ -181,7 +181,7 @@ Two things make it different from every other stop:
   that nothing was run, so it cannot be misread as "it still works".
 - **The operator always answers it**, whatever `pitStop.decidedBy` names. That
   setting bounds how long a run waits on an absent human; someone who has just
-  typed `harness resume` is not absent.
+  typed `charrette resume` is not absent.
 
 `{"pitStop": {"every": "never"}}` switches it off with all the others.
 
@@ -190,7 +190,7 @@ cancelled for, and says plainly that `resume` alone does not bring them back.
 Work that silently left the plan is exactly what an operator deciding "is this
 still going to build what I asked for?" has to be shown.
 
-## What the harness shows
+## What the charrette shows
 
 A pit stop dispatches a **demo agent** — a QA-role session with the toolbelt and
 the `visual-qa-agent` skill — against the integration branch, told to:
@@ -213,7 +213,7 @@ a homepage with nothing attached saying what it was for. The demo agent had even
 admitted the blank capture, four paragraphs into its summary. Nothing between it
 and the operator ever opened the files.
 
-So the harness opens them (`evidence.ts`). Every artifact the demo agent lists is
+So the charrette opens them (`evidence.ts`). Every artifact the demo agent lists is
 read before the report renders, and one that is not there, is empty, is an image
 of a single flat colour, or arrives with no claim attached is **not evidence**.
 When a retake could fix it, the demo session is resumed — the product it started
@@ -243,7 +243,7 @@ or transcripts of the product actually running, not a description of it.
 *Acceptance:* the gate payload contains at least one artifact produced by executing
 the merged code; when the demo agent could not start the product, the payload says
 so in its first line rather than showing nothing. Every artifact it lists has been
-opened by the harness and carries the claim it backs; a blank capture, a file that
+opened by the charrette and carries the claim it backs; a blank capture, a file that
 was never written, or one offered without a claim is struck from the evidence and
 reported as something the pit stop did not check.
 
@@ -260,7 +260,7 @@ only tasks that have not started, and records the reason on the run.
 
 **S4 — Stop while I think.** As an operator, I can end the run at a pit stop and
 resume it later.
-*Acceptance:* the run reaches a state `harness resume` picks up; no worktree or
+*Acceptance:* the run reaches a state `charrette resume` picks up; no worktree or
 branch is discarded.
 
 **S4a — A skill stops only when it has to.** As an operator, when the decider
@@ -281,10 +281,10 @@ two reasonable options" are not categories.
 
 **S5 — Choose the cadence.** As an operator, I set the interval before the run and
 change it on resume.
-*Acceptance:* `pitStop.every` is read from `harness.config.json` at run start and
+*Acceptance:* `pitStop.every` is read from `charrette.config.json` at run start and
 re-read on resume, like `deterministicChecks` and `qaMaxTurns` already are.
 
-**S6 — Never learn it at the end.** As an operator, if the harness has recorded a
+**S6 — Never learn it at the end.** As an operator, if the charrette has recorded a
 FAIL verdict, I have seen it at a pit stop before the run closes.
 *Acceptance:* a recorded intent FAIL opens a pit stop at the next boundary
 regardless of the configured interval.
@@ -313,7 +313,7 @@ honest, accurate findings that arrived too late to act on; that is the defect.
   same failure as the log lines. Mitigation: epic default, never mid-task, and the
   payload leads with what changed rather than restating the run.
 - **Blocking on a human who has gone to bed.** Mitigation: a pit stop is a gate
-  like any other — the run parks and `harness resume` picks it up, and the wall
+  like any other — the run parks and `charrette resume` picks it up, and the wall
   clock credit that already exists for task gates applies here too.
 
 ## Open questions, answered
@@ -334,8 +334,8 @@ touch the source" is not a mechanism, and the diff the operator eventually
 reviews is not the demo's to edit.
 
 **3. Where do the artifacts live?**
-`.harness/<runId>/pitstops/<n>/`, holding `REPORT.md` (what the operator read),
-`pitstop.json` (the whole payload) and whatever the demo captured. `.harness/`
+`.charrette/<runId>/pitstops/<n>/`, holding `REPORT.md` (what the operator read),
+`pitstop.json` (the whole payload) and whatever the demo captured. `.charrette/`
 is already in the target repo's `.gitignore`, so none of it reaches a commit.
 
 ## What was built

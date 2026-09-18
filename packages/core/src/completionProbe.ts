@@ -1,7 +1,7 @@
 import { repeatable } from "./evidence.js";
 
 /**
- * A task's own definition of done, as one command the harness runs.
+ * A task's own definition of done, as one command the charrette runs.
  *
  * The probe exists for the criterion that cannot be written as prose without
  * losing its meaning. "The unenforced claim is removed from the pricing
@@ -12,10 +12,10 @@ import { repeatable } from "./evidence.js";
  * half-satisfied reading.
  *
  * It is written by the planner, which makes it the one command in this system
- * an agent hands the harness to run with nothing in between — and the harness
+ * an agent hands the charrette to run with nothing in between — and the charrette
  * runs it in the worktree, once per QA iteration, until the task passes. So the
  * question it has to survive is not merely "is this safe once?" but "may the
- * harness run this again?", which is the question `repeatable` already answers
+ * charrette run this again?", which is the question `repeatable` already answers
  * for the commands a demo agent offers as evidence. It is asked here rather
  * than asked a second, slightly different way: two guards answering the same
  * question is how they come to disagree, which is why the shell lexer these

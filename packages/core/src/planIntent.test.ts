@@ -1,7 +1,7 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { RunConfig } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
 import { describe, expect, it } from "vitest";
 import { Bus } from "./bus.js";
 import { GitHubAdapter } from "./github.js";
@@ -72,12 +72,12 @@ const PASS = '```json\n{"verdict":"PASS","summary":"every clause has a task"}\n`
  * check answers. Rejecting keeps the run inside the planning loop, which is
  * where the feedback under test goes.
  */
-function harness(
+function charrette(
   validator: string | (() => AgentResult),
   approve: boolean | ((nth: number) => boolean) = false,
   dag: string | ((nth: number) => string) = REAL_DAG
 ) {
-  const repo = mkdtempSync(path.join(tmpdir(), "harness-plan-intent-"));
+  const repo = mkdtempSync(path.join(tmpdir(), "charrette-plan-intent-"));
   const store = new Store(":memory:");
   const bus = new Bus(store);
   const summaries: string[] = [];
@@ -127,12 +127,12 @@ function harness(
  * Run 40da9337 spent $773.55 and 37 hours building a plan that could not have
  * satisfied its assignment. The mismatch was legible in the plan text: "all the
  * integrations" against a criterion asking for "an interface and a deterministic
- * mock". The harness asked exactly this question — at INTEGRATING, of the merged
+ * mock". The charrette asked exactly this question — at INTEGRATING, of the merged
  * result, once everything was already paid for.
  */
 describe("asking whether the plan could deliver the assignment", () => {
   it("puts the shortfall in front of the operator before they approve", async () => {
-    const { controller, summaries } = harness(FAIL);
+    const { controller, summaries } = charrette(FAIL);
     await controller
       .startRun("fully implement this product, including all the integrations", RunConfig.parse({}))
       .catch(() => undefined);
@@ -147,7 +147,7 @@ describe("asking whether the plan could deliver the assignment", () => {
   it("sends the shortfall back to the planner when the operator rejects", async () => {
     // The operator may reject for their own reason; the finding still has to
     // reach the planner, or the re-plan reproduces the same gap.
-    const { controller, specs } = harness(FAIL);
+    const { controller, specs } = charrette(FAIL);
     await controller.startRun("fully implement this, including all the integrations", RunConfig.parse({})).catch(() => undefined);
 
     const replan = specs.filter((s) => s.role === "planner").at(-1)!;
@@ -166,7 +166,7 @@ describe("asking whether the plan could deliver the assignment", () => {
     // Two rounds and then nothing the planner phase can use, so the rejecting
     // gate above does not loop forever.
     const script = [DOCS, REAL_DAG, DOCS, second];
-    const { controller, specs } = harness(FAIL, false, (nth) => script[nth] ?? "");
+    const { controller, specs } = charrette(FAIL, false, (nth) => script[nth] ?? "");
 
     await controller.startRun("build a thing", RunConfig.parse({})).catch(() => undefined);
 
@@ -185,7 +185,7 @@ describe("asking whether the plan could deliver the assignment", () => {
     // read: nothing downstream un-files it.
     const second = dagOf("ledger-service", "payout-worker");
     const script = [DOCS, REAL_DAG, DOCS, second];
-    const { controller, issued } = harness(
+    const { controller, issued } = charrette(
       FAIL,
       // Reject the first plan, take the second, so the run reaches the filing
       // step with a table holding both.
@@ -202,14 +202,14 @@ describe("asking whether the plan could deliver the assignment", () => {
   }, 30_000);
 
   it("says nothing when the plan covers the assignment", async () => {
-    const { controller, summaries } = harness(PASS, true);
+    const { controller, summaries } = charrette(PASS, true);
     await controller.startRun("build a thing", RunConfig.parse({})).catch(() => undefined);
 
     expect(summaries[0]).not.toContain("What this plan would not deliver");
   }, 30_000);
 
   it("records the verdict so a postmortem can ask whether it was heeded", async () => {
-    const { controller, store } = harness(FAIL);
+    const { controller, store } = charrette(FAIL);
     await controller.startRun("build a thing", RunConfig.parse({})).catch(() => undefined);
 
     const row = store.db.prepare("SELECT payload FROM events WHERE type = 'run.plan_intent_verdict'").get() as { payload: string };
@@ -224,7 +224,7 @@ describe("asking whether the plan could deliver the assignment", () => {
    */
   it("reads an UNKNOWN answer as a FAIL over what went unchecked", async () => {
     const unknown = "```json\n" + JSON.stringify({ verdict: "UNKNOWN", summary: "ran out", unchecked: ["whether ach is real"] }) + "\n```";
-    const { controller, store, summaries } = harness(unknown);
+    const { controller, store, summaries } = charrette(unknown);
     await controller.startRun("build a thing", RunConfig.parse({})).catch(() => undefined);
 
     const row = store.db.prepare("SELECT payload FROM events WHERE type = 'run.plan_intent_verdict'").get() as { payload: string };
@@ -233,7 +233,7 @@ describe("asking whether the plan could deliver the assignment", () => {
   }, 30_000);
 
   it("spends nothing when the operator has turned it off", async () => {
-    const { controller, specs, summaries } = harness(FAIL, true);
+    const { controller, specs, summaries } = charrette(FAIL, true);
     await controller.startRun("build a thing", RunConfig.parse({ planIntentCheck: false })).catch(() => undefined);
 
     expect(specs.some((s) => s.role === "validator")).toBe(false);
@@ -243,7 +243,7 @@ describe("asking whether the plan could deliver the assignment", () => {
   it("says the check did not happen rather than implying it passed", async () => {
     // An unparseable verdict must not read as silence-means-fine: the operator
     // would take an unchecked plan for a checked one.
-    const { controller, summaries } = harness(() => {
+    const { controller, summaries } = charrette(() => {
       throw new Error("session died");
     }, true);
     await controller.startRun("build a thing", RunConfig.parse({})).catch(() => undefined);
@@ -252,7 +252,7 @@ describe("asking whether the plan could deliver the assignment", () => {
   }, 30_000);
 
   it("reads a FAIL carrying no gaps as nothing to show", async () => {
-    const { controller, summaries } = harness('```json\n{"verdict":"FAIL","summary":"vague misgivings","gaps":[]}\n```', true);
+    const { controller, summaries } = charrette('```json\n{"verdict":"FAIL","summary":"vague misgivings","gaps":[]}\n```', true);
     await controller.startRun("build a thing", RunConfig.parse({})).catch(() => undefined);
 
     expect(summaries[0]).not.toContain("What this plan would not deliver");
@@ -287,7 +287,7 @@ describe("flagging the criteria no worker will be allowed to satisfy", () => {
     "\n```";
 
   it("flags the criterion even with the model check turned off, spending nothing", async () => {
-    const { controller, specs, summaries } = harness(FAIL, true, INFRA_DAG);
+    const { controller, specs, summaries } = charrette(FAIL, true, INFRA_DAG);
     await controller.startRun("benchmark it", RunConfig.parse({ planIntentCheck: false })).catch(() => undefined);
 
     expect(specs.some((s) => s.role === "validator")).toBe(false);
@@ -297,7 +297,7 @@ describe("flagging the criteria no worker will be allowed to satisfy", () => {
   }, 30_000);
 
   it("keeps the flag when the model check passes — the two halves answer different questions", async () => {
-    const { controller, summaries } = harness(PASS, true, INFRA_DAG);
+    const { controller, summaries } = charrette(PASS, true, INFRA_DAG);
     await controller.startRun("benchmark it", RunConfig.parse({})).catch(() => undefined);
 
     expect(summaries[0]).toContain("`terraform destroy`");
@@ -312,7 +312,7 @@ describe("flagging the criteria no worker will be allowed to satisfy", () => {
     const logs: string[] = [];
     const bus = new Bus(store);
     bus.subscribe(({ event }) => void (event.type === "agent.log" && logs.push((event as { text: string }).text)));
-    const repo2 = mkdtempSync(path.join(tmpdir(), "harness-plan-intent-"));
+    const repo2 = mkdtempSync(path.join(tmpdir(), "charrette-plan-intent-"));
     let planning = 0;
     const agents = {
       async run(spec: AgentSpec): Promise<AgentResult> {
@@ -336,7 +336,7 @@ describe("flagging the criteria no worker will be allowed to satisfy", () => {
   }, 30_000);
 
   it("keeps the flag when the model check dies — the finding never depended on it", async () => {
-    const { controller, summaries } = harness(() => {
+    const { controller, summaries } = charrette(() => {
       throw new Error("session died");
     }, true, INFRA_DAG);
     await controller.startRun("benchmark it", RunConfig.parse({})).catch(() => undefined);
@@ -346,7 +346,7 @@ describe("flagging the criteria no worker will be allowed to satisfy", () => {
   }, 30_000);
 
   it("lists the denied command alongside the model's own gaps", async () => {
-    const { controller, summaries } = harness(FAIL, true, INFRA_DAG);
+    const { controller, summaries } = charrette(FAIL, true, INFRA_DAG);
     await controller.startRun("benchmark it", RunConfig.parse({})).catch(() => undefined);
 
     expect(summaries[0]).toContain("`terraform destroy`");

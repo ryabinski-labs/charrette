@@ -7,11 +7,11 @@
  * prompt's fault or the repo's fault, and nothing about it is fixed by trying
  * again a second later.
  *
- * Read as an ordinary error it is the most expensive failure the harness has,
+ * Read as an ordinary error it is the most expensive failure the charrette has,
  * because it arrives everywhere simultaneously and instantly: in the run that
  * motivated this, the planner spent all three of its attempts inside one second
  * against a wall that had nothing to do with the plan, the run ended
- * `harness: fatal`, and the intake conversation the operator had already sat
+ * `charrette: fatal`, and the intake conversation the operator had already sat
  * through went with it. A limit is not a verdict on the work. It is a wait.
  *
  * This module answers the two questions the pool needs to wait it out: is this
@@ -32,7 +32,7 @@ export interface UsageLimit {
 
 /**
  * The shapes the limit arrives in. Deliberately narrow: this is matched against
- * error text that also carries the harness's own walls — `error_max_turns`, the
+ * error text that also carries the charrette's own walls — `error_max_turns`, the
  * per-message output ceiling, the operator's budget cap — and treating one of
  * those as a quota limit would park a session for hours over something a retry
  * fixes in seconds. Every one of those says "ceiling", "cap" or "maximum";
@@ -46,10 +46,10 @@ const LIMIT_PHRASES = [
   // "Your limit will reset at 3pm (America/New_York)"
   /\blimit will reset\b/i,
   /**
-   * The same wall on the harness's own transport, which speaks HTTP rather than
+   * The same wall on the charrette's own transport, which speaks HTTP rather than
    * English. `post` in providerClients.ts formats every non-OK vendor reply as
    * "<provider> API <status> <statusText>: <body>", so a 429 is matchable on
-   * the envelope the harness itself wrote.
+   * the envelope the charrette itself wrote.
    *
    * The envelope, and not the body, is deliberate. Google's 429 body says "You
    * exceeded your current quota" and OpenAI's says "Rate limit reached", and

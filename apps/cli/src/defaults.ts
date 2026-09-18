@@ -3,10 +3,31 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
-import { SUBPROJECT_DIRS, scanCiChecks, type CiCheck, type SkippedStep } from "@harness/core";
-import { DEFAULT_CHECK_TIMEOUT_MINUTES, DeliveryConfig, LiveConfig, SpecConfig, PitStopConfig, PlanGateConfig, SubscriptionConfig, TaskGateConfig } from "@harness/shared";
+import { SUBPROJECT_DIRS, scanCiChecks, type CiCheck, type SkippedStep } from "@charrette/core";
+import { DEFAULT_CHECK_TIMEOUT_MINUTES, DeliveryConfig, LiveConfig, SpecConfig, PitStopConfig, PlanGateConfig, SubscriptionConfig, TaskGateConfig } from "@charrette/shared";
 
-export const CONFIG_FILENAME = "harness.config.json";
+export const CONFIG_FILENAME = "charrette.config.json";
+/** What the per-repo config file was called before the project was renamed. */
+export const LEGACY_CONFIG_FILENAME = "harness.config.json";
+
+/**
+ * The config file this repo actually has.
+ *
+ * A repo configured before the rename keeps being read. Dropping the old name
+ * would not error — it would silently fall back to the auto-detected defaults,
+ * so a repo that had pinned its checks, its cap and its worker count would
+ * quietly run with none of them and the banner would look reasonable.
+ *
+ * The new name wins when both exist, which is what makes a migration a matter
+ * of writing the new file rather than of deleting the old one first.
+ */
+function configFile(repo: string): string | null {
+  for (const name of [CONFIG_FILENAME, LEGACY_CONFIG_FILENAME]) {
+    const candidate = path.join(repo, name);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
 
 export const DEFAULT_SKILLS_DIRS = [
   path.join(os.homedir(), ".claude", "skills"),
@@ -68,7 +89,7 @@ function packageManager(repo: string): string {
 const NODE_SCRIPTS = ["typecheck", "type-check", "lint", "test"];
 
 /**
- * Infer deterministic checks from the target repo so a bare `harness run` still
+ * Infer deterministic checks from the target repo so a bare `charrette run` still
  * gives QA a hard signal. Only conventional, non-destructive commands are
  * inferred; anything else must be passed explicitly with --check.
  */
@@ -154,19 +175,19 @@ function intent(command: string): string {
 }
 
 /**
- * Infer deterministic checks from the target repo so a bare `harness run` still
+ * Infer deterministic checks from the target repo so a bare `charrette run` still
  * gives QA a hard signal.
  *
  * The repository's own pipeline comes first, because that is the thing the
- * run's pull request will actually be graded by: a check the harness runs in a
+ * run's pull request will actually be graded by: a check the charrette runs in a
  * worktree and CI does not is a check nobody asked for, and a check CI runs and
- * the harness does not is a red pull request found by a human. Convention fills
+ * the charrette does not is a red pull request found by a human. Convention fills
  * the gaps — a `cargo test` for a repo whose CI only lints — but never
  * duplicates a tool and verb CI already covers, since running `cargo test` and
  * `cargo test --workspace --all-features --locked` in the same worktree pays
  * twice for one answer.
  *
- * Nothing here asks whether the machine can run what it names. `harness init`
+ * Nothing here asks whether the machine can run what it names. `charrette init`
  * does, by running them; see `verifyChecks`.
  */
 export function detectChecks(repo: string): DetectedChecks {
@@ -239,7 +260,7 @@ export function verifyChecks(
     opts.onStart?.(command);
     let { reason, ms } = attempt(repo, command, timeoutMs);
     // A second look, because one sample is not evidence about a suite that
-    // binds ports, starts containers or races the machine it is sharing. waf's
+    // binds ports, starts containers or races the machine it is sharing. rust-service's
     // `cargo test --workspace --all-features` passed in 304s, failed in 454s
     // during an init run alongside a worker in the same repo, and passed again
     // in 430s afterwards — slower and red, which is what contention looks like.
@@ -316,7 +337,7 @@ const DIAGNOSIS = [
  * hundreds of lines further down, past every test that passed. Reporting the
  * opening line told the operator a check had been dropped and nothing at all
  * about why, which is the one thing they need to decide whether to fix it or
- * leave it out: `cargo test --workspace --all-features` was dropped from waf's
+ * leave it out: `cargo test --workspace --all-features` was dropped from rust-service's
  * config with the reason `running 6 tests`.
  *
  * So the first line that reads as a diagnosis wins, and the opening line is
@@ -336,7 +357,7 @@ function failureLine(text: string): string {
 }
 
 /**
- * `harness.config.json` at the repo root: per-repo defaults, committable so a
+ * `charrette.config.json` at the repo root: per-repo defaults, committable so a
  * team shares them. Mirrors RunConfig, plus `dashboard`. Strict on purpose —
  * a typo should fail loudly rather than silently do nothing.
  */
@@ -370,7 +391,7 @@ export const FileConfig = z
         // The rest of the roles, which this list simply never caught up with:
         // `RunConfig` routes ten and the file accepted five, and because this
         // schema is strict the other five were not ignored but rejected —
-        // `models.reviewer` in a harness.config.json failed the whole file.
+        // `models.reviewer` in a charrette.config.json failed the whole file.
         advisor: z.string().optional(),
         prod: z.string().optional(),
         demo: z.string().optional(),
@@ -417,7 +438,7 @@ export const FileConfig = z
      *   }
      *
      * Unlike everything else here, changes to this reach a run that has already
-     * started: `harness resume --account work` is the whole point of the
+     * started: `charrette resume --account work` is the whole point of the
      * feature, and a subscription frozen at run creation could not be swapped.
      */
     subscription: SubscriptionConfig.partial().optional(),
@@ -511,7 +532,7 @@ function gh(cwd: string, args: string[]): string | undefined {
 const githubCache = new Map<string, ResolvedGitHub>();
 
 /**
- * Where the harness gets its GitHub credentials, in order: the environment, then
+ * Where the charrette gets its GitHub credentials, in order: the environment, then
  * the already-authenticated `gh` CLI. Most machines have `gh` logged in, and
  * requiring GITHUB_TOKEN on top of that is the difference between a run that
  * opens PRs and one that silently does not.
@@ -521,7 +542,7 @@ const githubCache = new Map<string, ResolvedGitHub>();
  */
 export function resolveGitHub(repo: string, configuredSlug: string | undefined): ResolvedGitHub {
   const envToken = process.env.GITHUB_TOKEN || undefined;
-  const envSlug = process.env.HARNESS_GITHUB_REPO || undefined;
+  const envSlug = process.env.CHARRETTE_GITHUB_REPO || undefined;
   // Keyed on the environment too: `gh auth token` is a subprocess worth caching,
   // but a caller that changes the environment must not get a stale answer back.
   const cacheKey = [repo, configuredSlug, envToken ? "env-token" : "", envSlug].join(" ");
@@ -539,7 +560,7 @@ export function resolveGitHub(repo: string, configuredSlug: string | undefined):
     source = "off — no GitHub remote found for this repo";
   } else {
     const tokenFrom = envToken ? "GITHUB_TOKEN" : "gh cli";
-    const slugFrom = envSlug ? "HARNESS_GITHUB_REPO" : configuredSlug ? CONFIG_FILENAME : "gh cli";
+    const slugFrom = envSlug ? "CHARRETTE_GITHUB_REPO" : configuredSlug ? CONFIG_FILENAME : "gh cli";
     source = tokenFrom === slugFrom ? tokenFrom : `${tokenFrom} + ${slugFrom}`;
   }
   const resolved: ResolvedGitHub = { token, slug: token && slug ? slug : undefined, source };
@@ -548,8 +569,8 @@ export function resolveGitHub(repo: string, configuredSlug: string | undefined):
 }
 
 export function loadFileConfig(repo: string): { config: FileConfig; path: string | null } {
-  const file = path.join(repo, CONFIG_FILENAME);
-  if (!existsSync(file)) return { config: {}, path: null };
+  const file = configFile(repo);
+  if (!file) return { config: {}, path: null };
   let raw: unknown;
   try {
     raw = JSON.parse(readFileSync(file, "utf8"));

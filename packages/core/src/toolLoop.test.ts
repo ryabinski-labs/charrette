@@ -86,7 +86,7 @@ describe("keeping a long session inside the context window", () => {
       toolLoop({ spec, prompts: prompts("go"), signal, client, toolsOverride: bigTool(60_000), contextBudget: 100_000 })
     );
 
-    const notes = messages.filter((m) => m.type === "harness_note");
+    const notes = messages.filter((m) => m.type === "charrette_note");
     expect(notes.length).toBeGreaterThan(0);
     expect(notes[0]).toMatchObject({ text: expect.stringMatching(/compacted \d+ characters of older tool output/) });
   });
@@ -97,7 +97,7 @@ describe("keeping a long session inside the context window", () => {
       toolLoop({ spec, prompts: prompts("go"), signal, client, toolsOverride: bigTool(60_000), contextBudget: 1_000 })
     );
 
-    const notes = messages.filter((m) => m.type === "harness_note") as { text: string }[];
+    const notes = messages.filter((m) => m.type === "charrette_note") as { text: string }[];
     expect(notes.some((n) => /STILL over the 1000-character budget/.test(n.text))).toBe(true);
   });
 
@@ -125,16 +125,16 @@ describe("keeping a long session inside the context window", () => {
       })
     );
 
-    expect(messages.some((m) => m.type === "harness_note")).toBe(true);
+    expect(messages.some((m) => m.type === "charrette_note")).toBe(true);
     expect(messages[messages.length - 1]).toMatchObject({ type: "result", subtype: "error_max_turns" });
     const wrapUp = seen[seen.length - 1]!.messages;
     expect(wrapUp.filter((m) => m.role === "user").map((m) => (m as { text: string }).text)).toContain(
-      "[HARNESS] You have reached this session's turn limit. Stop calling tools and give your final answer now, in exactly the output format you were asked for."
+      "[CHARRETTE] You have reached this session's turn limit. Stop calling tools and give your final answer now, in exactly the output format you were asked for."
     );
   });
 });
 
-describe("the loop the harness runs for non-Anthropic providers", () => {
+describe("the loop the charrette runs for non-Anthropic providers", () => {
   it("yields the message shapes pool.ts already knows how to read", async () => {
     const { client } = scriptedClient([say("all done")]);
     const messages = await collect(toolLoop({ spec, prompts: prompts("go"), signal, client, toolsOverride: noTools }));
@@ -298,7 +298,7 @@ describe("specs this transport cannot honour", () => {
     // intake asks the operator questions through an SDK-only tool. Without it
     // the agent would invent the answers instead of asking — which is the
     // failure that shipped fakes in run 40da9337.
-    expect(unsupportedSpec({ ...spec, mcpServers: { harness_intake: {} } })).toContain("in-process MCP tools");
+    expect(unsupportedSpec({ ...spec, mcpServers: { charrette_intake: {} } })).toContain("in-process MCP tools");
   });
 
   it("ignores an empty mcpServers object", () => {
@@ -325,7 +325,7 @@ describe("building the client from the environment", () => {
         spec: { ...spec, model: "gpt-5.6-terra" },
         prompts: prompts("go"),
         signal,
-        env: { OPENAI_API_KEY: "sk", HARNESS_RTK: "off" },
+        env: { OPENAI_API_KEY: "sk", CHARRETTE_RTK: "off" },
         fetchImpl,
         toolsOverride: noTools,
       })
@@ -336,7 +336,7 @@ describe("building the client from the environment", () => {
   it("derives its tools from the spec when none are injected", async () => {
     const { client, seen } = scriptedClient([say("done")]);
     await collect(
-      toolLoop({ spec: { ...spec, tools: ["Read", "Glob"] }, prompts: prompts("go"), signal, client, env: { HARNESS_RTK: "off" } })
+      toolLoop({ spec: { ...spec, tools: ["Read", "Glob"] }, prompts: prompts("go"), signal, client, env: { CHARRETTE_RTK: "off" } })
     );
     expect(seen[0]!.tools.map((t) => t.name)).toEqual(["Read", "Glob"]);
   });
@@ -353,7 +353,7 @@ describe("folding the transcript into the agent's own checkpoint digest", () => 
   ];
 
   const digestTurn = (state: string): ProviderTurn => ({
-    text: `<harness-checkpoint>\nSTATE: ${state}\n</harness-checkpoint>`,
+    text: `<charrette-checkpoint>\nSTATE: ${state}\n</charrette-checkpoint>`,
     toolCalls: [{ id: "next", name: "Bash", input: {} }],
     usage,
   });
@@ -402,7 +402,7 @@ describe("folding the transcript into the agent's own checkpoint digest", () => 
     const messages = await collect(
       toolLoop({ spec, prompts: prompts("go"), signal, client, toolsOverride: bigTool(20_000), contextBudget: 1_000_000, foldOnCheckpoint: true })
     );
-    const notes = messages.filter((m) => m.type === "harness_note");
+    const notes = messages.filter((m) => m.type === "charrette_note");
     expect(notes.some((n) => /folded \d+ characters .* checkpoint digest/.test(String(n.text)))).toBe(true);
   });
 

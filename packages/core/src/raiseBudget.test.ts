@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { RunConfig } from "@harness/shared";
-import type { HarnessEvent } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
+import type { CharretteEvent } from "@charrette/shared";
 import { Bus } from "./bus.js";
 import { GitHubAdapter } from "./github.js";
 import type { AgentPool } from "./pool.js";
@@ -17,7 +17,7 @@ import { Store } from "./store.js";
 function build() {
   const store = new Store(":memory:");
   const bus = new Bus(store);
-  const events: HarnessEvent[] = [];
+  const events: CharretteEvent[] = [];
   bus.subscribe(({ event }) => void events.push(event));
   const gates: GateHandler = {
     async resolvePlanGate() {
@@ -39,7 +39,7 @@ function makeRun(store: Store, id = "run1", budget: Partial<RunConfig["budget"]>
     state: "EXECUTING",
     prdPath: null,
     planHash: null,
-    integrationBranch: `harness/${id}/main`,
+    integrationBranch: `charrette/${id}/main`,
     config: RunConfig.parse({ budget: { runCapUsd: 30, ...budget } }),
   });
 }

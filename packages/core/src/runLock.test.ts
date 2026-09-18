@@ -6,7 +6,7 @@ import { acquireRunLock, lockPathFor, pidAlive, RunLocked, runLockHolder } from 
 
 const dir = () => mkdtempSync(path.join(tmpdir(), "runlock-"));
 
-/** A holder file written by hand, standing in for another harness process. */
+/** A holder file written by hand, standing in for another charrette process. */
 function plant(stateDir: string, runId: string, pid: number, startedAt = Date.now()): string {
   const p = lockPathFor(stateDir, runId);
   mkdirSync(path.dirname(p), { recursive: true });
@@ -25,7 +25,7 @@ describe("run lock", () => {
   });
 
   /**
-   * The bug this whole module exists for. Run bc691359 had two `harness resume`
+   * The bug this whole module exists for. Run bc691359 had two `charrette resume`
    * processes on it; the second one's requeue sweeper moved a task the first was
    * still working from WORKING to READY, and the first one's WORKING -> QA then
    * threw InvalidTransition and parked committed, finished work as NEEDS_HUMAN.
@@ -46,7 +46,7 @@ describe("run lock", () => {
       err = e;
     }
     const message = (err as Error).message;
-    expect(message).toContain("already being driven by harness pid 47427");
+    expect(message).toContain("already being driven by charrette pid 47427");
     expect(message).toContain("kill -INT 47427");
     // The recycled-pid escape hatch has to name the file, or the operator has
     // nothing to act on but a number.
@@ -54,7 +54,7 @@ describe("run lock", () => {
   });
 
   /**
-   * A harness that was SIGKILLed, or went down with its machine, never runs a
+   * A charrette that was SIGKILLed, or went down with its machine, never runs a
    * `finally`. Its lock file outlives it — and must not outlive it as a refusal,
    * or every hard kill would need a manual `rm` before the run could be resumed.
    */
@@ -192,7 +192,7 @@ describe("run lock", () => {
     } catch (e) {
       message = (e as Error).message;
     }
-    expect(message).toContain("harness pid 47427 (started");
+    expect(message).toContain("charrette pid 47427 (started");
     expect(message).not.toContain(` on ${hostname()}`);
   });
 

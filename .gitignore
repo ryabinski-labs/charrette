@@ -3,6 +3,11 @@ dist/
 *.log
 .env
 .env.*
+# Run state. Both names are ignored on purpose: `statePaths` still reads a
+# pre-rename `.harness/` when that is the only one a repo has, so a checkout
+# can legitimately hold either — and both hold run databases, agent
+# transcripts, demo screenshots and QA evidence from real runs.
+.charrette/
 .harness/
 *.db
 *.db-wal

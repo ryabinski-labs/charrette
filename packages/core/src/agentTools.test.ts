@@ -38,7 +38,7 @@ const recordingExec = (log: string[], stdout = "ok"): ExecFn => {
 };
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "harness-tools-"));
+  dir = mkdtempSync(join(tmpdir(), "charrette-tools-"));
   ran = [];
   ctx = { cwd: dir, env: {}, signal: new AbortController().signal, exec: recordingExec(ran) };
 });

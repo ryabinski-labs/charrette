@@ -1,4 +1,4 @@
-import { PlannedTask } from "@harness/shared";
+import { PlannedTask } from "@charrette/shared";
 
 /**
  * Which integrations this plan intends to build for real, and which it intends

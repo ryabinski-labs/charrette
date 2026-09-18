@@ -35,7 +35,7 @@ describe("crashlog", () => {
   let exitCodes: number[];
 
   beforeEach(() => {
-    stateDir = mkdtempSync(path.join(tmpdir(), "harness-crashlog-"));
+    stateDir = mkdtempSync(path.join(tmpdir(), "charrette-crashlog-"));
     stderr = [];
     exitCodes = [];
     vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
@@ -52,11 +52,11 @@ describe("crashlog", () => {
     vi.restoreAllMocks();
   });
 
-  const logFile = () => path.join(stateDir, "harness.log");
+  const logFile = () => path.join(stateDir, "charrette.log");
 
-  it("writes the reason to harness.log once the state dir is known", async () => {
+  it("writes the reason to charrette.log once the state dir is known", async () => {
     const { armCrashLog, recordFatal } = await freshCrashLog();
-    armCrashLog(stateDir);
+    armCrashLog(logFile());
 
     recordFatal(new Error("the pool died"));
 
@@ -66,7 +66,7 @@ describe("crashlog", () => {
     expect(written).toContain(`pid=${process.pid}`);
     expect(written.endsWith("\n")).toBe(true);
     // The operator watching the terminal gets the message, without the stack.
-    expect(stderr.join("")).toBe("\nharness: fatal — the pool died\n");
+    expect(stderr.join("")).toBe("\ncharrette: fatal — the pool died\n");
   });
 
   it("shows the whole message when the message is deliberately several lines", async () => {
@@ -74,7 +74,7 @@ describe("crashlog", () => {
     // gives the operator the heading and none of the reasons — which is what
     // happened: "that run configuration cannot be used:" and nothing under it.
     const { armCrashLog, recordFatal } = await freshCrashLog();
-    armCrashLog(stateDir);
+    armCrashLog(logFile());
 
     recordFatal(new Error("that run configuration cannot be used:\n  models: qa is below the floor\n  budget: must be positive"));
 
@@ -105,7 +105,7 @@ describe("crashlog", () => {
 
   it("records something thrown that is not an Error", async () => {
     const { armCrashLog, recordFatal } = await freshCrashLog();
-    armCrashLog(stateDir);
+    armCrashLog(logFile());
 
     recordFatal("a bare string rejection");
 
@@ -114,7 +114,7 @@ describe("crashlog", () => {
 
   it("records an Error carrying no stack", async () => {
     const { armCrashLog, recordFatal } = await freshCrashLog();
-    armCrashLog(stateDir);
+    armCrashLog(logFile());
     const e = new Error("stackless");
     e.stack = undefined;
 
@@ -125,7 +125,7 @@ describe("crashlog", () => {
 
   it("logs the first reason only — a throw inside an exit handler must not overwrite the cause", async () => {
     const { armCrashLog, recordFatal } = await freshCrashLog();
-    armCrashLog(stateDir);
+    armCrashLog(logFile());
 
     recordFatal(new Error("the real cause"));
     recordFatal(new Error("the consequence"));
@@ -148,7 +148,7 @@ describe("crashlog", () => {
   it("logs and exits 1 on an uncaught exception", async () => {
     const { armCrashLog, installCrashLog } = await freshCrashLog();
     const handlers = captureHandlers();
-    armCrashLog(stateDir);
+    armCrashLog(logFile());
     installCrashLog();
 
     handlers.get("uncaughtException")!(new Error("unhandled throw") as never);
@@ -160,7 +160,7 @@ describe("crashlog", () => {
   it("logs and exits 1 on an unhandled rejection", async () => {
     const { armCrashLog, installCrashLog } = await freshCrashLog();
     const handlers = captureHandlers();
-    armCrashLog(stateDir);
+    armCrashLog(logFile());
     installCrashLog();
 
     handlers.get("unhandledRejection")!(new Error("nobody caught this") as never);
@@ -174,7 +174,7 @@ describe("crashlog", () => {
   it("still exits 1 on a rejection that arrives after the reason was already recorded", async () => {
     const { armCrashLog, installCrashLog, recordFatal } = await freshCrashLog();
     const handlers = captureHandlers();
-    armCrashLog(stateDir);
+    armCrashLog(logFile());
     installCrashLog();
     recordFatal(new Error("the first cause"));
 
@@ -191,7 +191,7 @@ describe("crashlog", () => {
   ])("records %s as an operator stop, not a crash, and exits %i", async (signal, code) => {
     const { armCrashLog, installCrashLog } = await freshCrashLog();
     const handlers = captureHandlers();
-    armCrashLog(stateDir);
+    armCrashLog(logFile());
     installCrashLog();
 
     handlers.get(signal)!(undefined as never);
@@ -199,7 +199,7 @@ describe("crashlog", () => {
     const written = readFileSync(logFile(), "utf8");
     expect(written).toContain(`signal ${signal}`);
     expect(written).toContain("not a crash");
-    expect(written).toContain("harness resume");
+    expect(written).toContain("charrette resume");
     // 128+n, so a supervisor can tell a Ctrl-C'd run from a clean exit.
     expect(exitCodes).toEqual([code]);
   });
@@ -207,7 +207,7 @@ describe("crashlog", () => {
   it("exits on a signal that arrives after a crash was already recorded, without relabelling it", async () => {
     const { armCrashLog, installCrashLog, recordFatal } = await freshCrashLog();
     const handlers = captureHandlers();
-    armCrashLog(stateDir);
+    armCrashLog(logFile());
     installCrashLog();
     recordFatal(new Error("crashed first"));
 
@@ -220,19 +220,19 @@ describe("crashlog", () => {
   });
 
   /**
-   * The refusal a second `harness resume` gets. It is several lines, all of
+   * The refusal a second `charrette resume` gets. It is several lines, all of
    * them instructions, and calling it "fatal" would describe a crash that did
    * not happen — the process stopped because the run was already taken.
    */
   it("records a run already held as a refusal, not a crash, and keeps every line", async () => {
     const { armCrashLog, recordRefusal } = await freshCrashLog();
-    armCrashLog(stateDir);
-    const e = new Error("run bc691359 is already being driven by harness pid 47427\nStop the other one first:  kill -INT 47427");
+    armCrashLog(logFile());
+    const e = new Error("run bc691359 is already being driven by charrette pid 47427\nStop the other one first:  kill -INT 47427");
     e.name = "RunLocked";
 
     recordRefusal(e);
 
-    expect(stderr.join("")).toContain("harness: refused —");
+    expect(stderr.join("")).toContain("charrette: refused —");
     expect(stderr.join("")).toContain("kill -INT 47427");
     const written = readFileSync(logFile(), "utf8");
     expect(written).toContain("refused run bc691359 is already being driven");
@@ -242,7 +242,7 @@ describe("crashlog", () => {
 
   it("keeps the first reason when a refusal follows a crash", async () => {
     const { armCrashLog, recordFatal, recordRefusal } = await freshCrashLog();
-    armCrashLog(stateDir);
+    armCrashLog(logFile());
     recordFatal(new Error("crashed first"));
 
     recordRefusal(new Error("and then the lock said no"));
@@ -250,15 +250,15 @@ describe("crashlog", () => {
     expect(readFileSync(logFile(), "utf8")).not.toContain("and then the lock said no");
   });
 
-  it("is safe to arm more than once — the last state dir wins", async () => {
+  it("is safe to arm more than once — the last log armed wins", async () => {
     const { armCrashLog, recordFatal } = await freshCrashLog();
-    const second = mkdtempSync(path.join(tmpdir(), "harness-crashlog-2-"));
-    armCrashLog(stateDir);
-    armCrashLog(second);
+    const second = mkdtempSync(path.join(tmpdir(), "charrette-crashlog-2-"));
+    armCrashLog(logFile());
+    armCrashLog(path.join(second, "charrette.log"));
 
     recordFatal(new Error("late"));
 
     expect(existsSync(logFile())).toBe(false);
-    expect(readFileSync(path.join(second, "harness.log"), "utf8")).toContain("late");
+    expect(readFileSync(path.join(second, "charrette.log"), "utf8")).toContain("late");
   });
 });

@@ -1,10 +1,10 @@
-# PRD — Multi-Agent Development Harness (working name: "Harness")
+# PRD — Charrette (multi-agent development orchestrator)
 
 | | |
 |---|---|
 | **Status** | v1.0 — critical-challenger review applied (continuous integration fix, v0.0 walking-skeleton phase, v0.1 minimal confinement, PERF-5/§11.6 reconciliation, SSE auth implementation note, cost figures marked as estimates) |
 | **Date** | 2026-07-31 |
-| **Owner** | cigan |
+| **Owner** | Yoni Ryabinski |
 | **Target** | Open-source release |
 | **Stack decisions** | Claude Agent SDK (TypeScript/Node) · local web dashboard · human gates at PRD approval + PR merge · GitHub Issues + PRs · skills-discovery via stdio MCP · git-worktree isolation · budget caps + live meter |
 
@@ -12,7 +12,7 @@
 
 ## 1. Executive Summary
 
-Harness turns a one-paragraph assignment into reviewed, tested pull requests. An orchestrator agent (top-tier Claude model) interviews the assignment into a PRD and an epic/task breakdown filed as GitHub Issues. After the human approves the plan, a fleet of parallel Claude Sonnet worker agents implements components in isolated git worktrees, each armed with locally-discovered skills (SKILL.md files matched per-task by a stdio MCP server). Dedicated QA agents test each component adversarially and iterate with workers until acceptance criteria pass. An integrator merges branches and opens one PR per component, linked to its issue. The human merges — the harness never does. Throughout, a localhost web dashboard streams live agent activity, a task board, and token/cost meters with hard budget caps.
+Charrette turns a one-paragraph assignment into reviewed, tested pull requests. An orchestrator agent (top-tier Claude model) interviews the assignment into a PRD and an epic/task breakdown filed as GitHub Issues. After the human approves the plan, a fleet of parallel Claude Sonnet worker agents implements components in isolated git worktrees, each armed with locally-discovered skills (SKILL.md files matched per-task by a stdio MCP server). Dedicated QA agents test each component adversarially and iterate with workers until acceptance criteria pass. An integrator merges branches and opens one PR per component, linked to its issue. The human merges — the charrette never does. Throughout, a localhost web dashboard streams live agent activity, a task board, and token/cost meters with hard budget caps.
 
 The product is a local-first, single-user tool in v1, built to be open-sourced: TypeScript monorepo, Claude Agent SDK core, SQLite state, no cloud dependency beyond the Anthropic and GitHub APIs.
 
@@ -33,7 +33,7 @@ Teams bolt these together manually today: they prompt for a plan, paste it back,
 
 **Assignment in → reviewed PRs out, with a human at exactly two decision points.** The orchestrator behaves like a competent tech-lead: it writes the plan, staffs it with specialist workers, routes each worker the playbooks that make it good at its task, holds QA to acceptance criteria, and reports progress on a board you can glance at — while spending your money like it's its own.
 
-Long-term, Harness becomes the reference open-source implementation of "software team as agent topology" on the Claude Agent SDK: pluggable skills, pluggable QA policies, inspectable state, and a run ledger that makes agent-built software auditable.
+Long-term, Charrette becomes the reference open-source implementation of "software team as agent topology" on the Claude Agent SDK: pluggable skills, pluggable QA policies, inspectable state, and a run ledger that makes agent-built software auditable.
 
 ## 3. Target Personas
 
@@ -45,7 +45,7 @@ Long-term, Harness becomes the reference open-source implementation of "software
 
 ## 4. Competitive Landscape & Differentiators
 
-| Tool | What it is | What it lacks vs Harness |
+| Tool | What it is | What it lacks vs Charrette |
 |---|---|---|
 | Claude Code (solo + Agent tool/teams) | Interactive agent with subagent fan-out | No durable plan artifact, no persistent run state across restarts, no fleet dashboard, no budget caps, QA is ad-hoc |
 | GitHub Copilot coding agent | Issue → PR agent in GitHub's cloud | One agent per issue, no local skills, no orchestrated decomposition, closed runtime |
@@ -80,7 +80,7 @@ Assignment ──► PLANNING (orchestrator agent: PRD + epic/task DAG, issues d
                     ▼
               INTEGRATING (all tasks terminal; final merges/PRs draining)
              ┌──────▼──────┐
-             │  GATE 2     │  human reviews & merges PRs on GitHub — never the harness
+             │  GATE 2     │  human reviews & merges PRs on GitHub — never the charrette
              └─────────────┘
 ```
 
@@ -93,8 +93,8 @@ Cross-cutting: pause/resume/abort from the dashboard at any time; budget caps pa
 
 ### Epic A — Assignment intake & planning
 
-- **US-1** As an operator, I submit an assignment (free text + target repo path) via CLI or dashboard and a run is created. *AC: `harness run "<assignment>"` creates a Run in state `PLANNING`; dashboard shows it within 2s.*
-- **US-2** As an operator, I get a generated PRD (markdown, committed to a run branch) plus an epic/task breakdown with dependencies and acceptance criteria per task. *AC: PRD file exists in repo on `harness/<runId>/main`; every task has ≥1 testable acceptance criterion, a `dependsOn` list, and estimated size; the DAG validates (no cycles, no dangling refs).*
+- **US-1** As an operator, I submit an assignment (free text + target repo path) via CLI or dashboard and a run is created. *AC: `charrette run "<assignment>"` creates a Run in state `PLANNING`; dashboard shows it within 2s.*
+- **US-2** As an operator, I get a generated PRD (markdown, committed to a run branch) plus an epic/task breakdown with dependencies and acceptance criteria per task. *AC: PRD file exists in repo on `charrette/<runId>/main`; every task has ≥1 testable acceptance criterion, a `dependsOn` list, and estimated size; the DAG validates (no cycles, no dangling refs).*
 - **US-3** As an operator, I see drafted GitHub issues before anything is filed. *AC: zero GitHub writes occur before Gate 1 approval.*
 
 ### Epic B — Gate 1: plan approval
@@ -104,7 +104,7 @@ Cross-cutting: pause/resume/abort from the dashboard at any time; budget caps pa
 
 ### Epic C — Task execution & skills
 
-- **US-6** As an operator, ready tasks run in parallel up to a configured limit, each in its own worktree + branch. *AC: `maxParallelWorkers` respected; no two workers share a worktree; branches named `harness/<runId>/<taskId>`.*
+- **US-6** As an operator, ready tasks run in parallel up to a configured limit, each in its own worktree + branch. *AC: `maxParallelWorkers` respected; no two workers share a worktree; branches named `charrette/<runId>/<taskId>`.*
 - **US-7** As an operator, each worker is briefed with the task spec, acceptance criteria, the plan's conventions doc, and matched skills. *AC: skills-discovery MCP queried per task; matched skills appear in the worker system prompt (full text ≤1.5k tokens, else by-reference per PERF-4); injection audit-logged with skill hash (SEC-14/15).*
 - **US-8** As an operator, workers commit incrementally so progress survives crashes. *AC: killing a worker mid-task and resuming loses at most the work since its last commit; recovery cost ≤30% of task cost-to-date (PERF-8).*
 
@@ -117,7 +117,7 @@ Cross-cutting: pause/resume/abort from the dashboard at any time; budget caps pa
 ### Epic E — Integration & PRs
 
 - **US-12** As an operator, accepted branches merge serially into the run branch with the full test suite after each merge. *AC: a merge that breaks the suite triggers the conflict/repair flow, never lands silently.*
-- **US-13** As an operator, each component ships as a PR linked to its issue. *AC: PR body references the issue and the run; re-running after a crash never duplicates issues or PRs (idempotency markers, ADR-7); the harness has no code path that merges PRs (SEC-17).*
+- **US-13** As an operator, each component ships as a PR linked to its issue. *AC: PR body references the issue and the run; re-running after a crash never duplicates issues or PRs (idempotency markers, ADR-7); the charrette has no code path that merges PRs (SEC-17).*
 - **US-13a** As an operator, a run is not complete until something the repository owns has built and tested the merged branch, with a coverage floor the build fails under. Every other check in this system runs in a per-task worktree that the merged tree never was. *AC: the plan gate reports a plan with no CI task and a plan with no enforced coverage floor, on every plan and not only when the brief asked (`ciScan`); the planner is instructed to emit a pipeline task whose criteria name the floor as a number — 80% of the lines a change touches, 75% of the project — and to put one end-to-end test of the critical user path in it; a pull request whose checks come back `none` is reported as "NO CI — nothing checked the merged branch" in the run outcome and logged against the run, never omitted (a repo with no CI must not produce the same headline as a green one).*
 
 ### Epic F — Dashboard & monitoring
@@ -132,7 +132,7 @@ Cross-cutting: pause/resume/abort from the dashboard at any time; budget caps pa
 
 ### Epic H — Resilience
 
-- **US-18** As an operator, `harness resume <runId>` after any crash — including mid-integration — continues without duplicating work. *AC: completed tasks never re-execute; interrupted sessions respawn from last commit + checkpoint preamble; open gates remain open.*
+- **US-18** As an operator, `charrette resume <runId>` after any crash — including mid-integration — continues without duplicating work. *AC: completed tasks never re-execute; interrupted sessions respawn from last commit + checkpoint preamble; open gates remain open.*
 
 ## 7. MVP Phasing
 
@@ -140,7 +140,7 @@ Cross-cutting: pause/resume/abort from the dashboard at any time; budget caps pa
 
 **v0.1 (must-have, the credibility bar):** CLI (`init/run/resume/dashboard`); planner → PRD + DAG → Gate 1 (approve/reject only, no in-UI plan editing); parallel workers in worktrees; skills MCP with lexical matching over configured dirs; deterministic checks + single QA agent, 3-iteration cap; serial integrator (auto-merge attempt, human gate on conflict — no conflict agent yet); issues + linked PRs, idempotent; dashboard: board, log tails, cost meters, gate buttons, pause/resume/abort; SQLite event-sourced state + full resume; budget caps; SEC-1..5, 8..13, 16, 17; PERF-1, 3, 5, 7; **minimal Bash confinement** (macOS Seatbelt profile scoping writes to the worktree + path-canonicalization checks in file tools — the full SEC-6/7 cross-platform sandbox lands in v1.0, and until then the docs state plainly: run repos you trust).
 
-**v0.2:** in-dashboard plan editing (split/merge/reorder); semantic skill matching + trust levels (SEC-14/15 full); integrator conflict agent; model routing to Haiku for mechanical steps (PERF-6); stall detection + nudge; per-repo `harness.config.ts` QA check definitions; cost forecasting at Gate 1 ("this plan will cost ≈$X").
+**v0.2:** in-dashboard plan editing (split/merge/reorder); semantic skill matching + trust levels (SEC-14/15 full); integrator conflict agent; model routing to Haiku for mechanical steps (PERF-6); stall detection + nudge; per-repo `charrette.config.ts` QA check definitions; cost forecasting at Gate 1 ("this plan will cost ≈$X").
 
 **v1.0 (OSS launch):** OS sandboxing (Seatbelt/bubblewrap) per SEC-6/7; run replay UI from the event log; skills provenance UI; docs site, `SECURITY.md`, pinned CI, provenance publishes (SEC-18); plugin points per ADR-6; benchmark suite publishing cost-per-merged-PR on reference assignments.
 
@@ -154,15 +154,31 @@ Ruthlessly excluded until post-1.0: multi-repo, teams/RBAC, cloud/hosted mode, n
 
 ## 9. Naming
 
-"Harness" collides fatally with Harness.io (CI/CD company) — rename before OSS release. Candidates (trademark/collision check required before launch):
+**Decided: Charrette.** A charrette is an intense, deadline-bound collaborative
+work session that must produce a reviewed deliverable. The etymology is the
+product: the cart came round to collect the work whether or not you were
+finished, and students kept refining as it rolled. That is the closing-proof
+gate.
 
-1. **Ensemble** — many players, one score, one conductor; exactly the product's shape. No major dev-tool collision.
-2. **Atelier** — a master's workshop staffed by apprentices producing reviewed work. Distinctive, memorable.
-3. **Overture** — the orchestral piece *before* the show: the plan before the build. (Overture Maps exists; different domain.)
-4. **Guildhall** — where guild craftsmen coordinate work and certify quality. Evokes skills/credentialing.
-5. **Charette** — an intense, structured, deadline-bound collaborative design sprint; obscure but precise.
+The working name "Harness" was dropped before the open-source release: it
+collides with Harness.io, a CI/CD company operating in the same goods class.
 
-Rejected: Foreman (theforeman.org), Maestro (mobile.dev's testing framework), Conductor (Netflix Conductor).
+Evidence at the time of the decision (2026-09-18):
+
+| Candidate | npm | PyPI | GitHub repos | Blocking collision |
+|---|---|---|---|---|
+| **Charrette** | free | free | 129, all small | none material |
+| Guildhall | taken | taken | 142 | Guildhall School (London); SMU Guildhall |
+| Ensemble | taken | taken | 20,611 | "ensemble learning" — an unownable entity |
+| Atelier | taken | taken | 27,038 | Atelier game series (Koei Tecmo/Gust), registered in software classes |
+| Overture | taken | free | 699 | Overture Maps Foundation (Linux Foundation) |
+
+Rejected earlier: Foreman (theforeman.org), Maestro (mobile.dev's testing
+framework), Conductor (Netflix Conductor).
+
+The one-r misspelling `charette` is reserved on npm and PyPI and points at the
+canonical spelling. Both spellings should resolve; only `charrette` is used in
+documentation, package metadata and the CLI.
 
 ## 10. Product Risks
 
@@ -180,7 +196,7 @@ Rejected: Foreman (theforeman.org), Maestro (mobile.dev's testing framework), Co
 
 ### 11.1 System Overview and Component Architecture
 
-Harness is a **modular monolith**: one Node.js process (`harnessd`) hosts the orchestrator core, scheduler, agent pool, worktree manager, GitHub adapter, QA pipeline, integrator, event bus, and dashboard backend as in-process modules with typed interfaces. The skills-discovery MCP server runs as a separate stdio child process. Agents are Claude Agent SDK sessions (no separate OS processes beyond what the SDK spawns). One process means one write path to state, no distributed coordination, and trivial local install — the right trade for a single-user local tool. All modules communicate through the event bus and the state store; no module calls another's internals directly.
+Charrette is a **modular monolith**: one Node.js process (`charretted`) hosts the orchestrator core, scheduler, agent pool, worktree manager, GitHub adapter, QA pipeline, integrator, event bus, and dashboard backend as in-process modules with typed interfaces. The skills-discovery MCP server runs as a separate stdio child process. Agents are Claude Agent SDK sessions (no separate OS processes beyond what the SDK spawns). One process means one write path to state, no distributed coordination, and trivial local install — the right trade for a single-user local tool. All modules communicate through the event bus and the state store; no module calls another's internals directly.
 
 **Orchestrator Core** — owns run semantics. Drives the run state machine, invokes the planning agent (top-tier model) to produce the PRD + epic/task DAG, enforces human gates, and reacts to events (task finished, QA verdict, budget breach). Interface: `RunController` (`startRun`, `approvePlan`, `pause`, `resume`, `abort`, `resolveGate`). It is the *only* writer of run/task state transitions — everything else requests transitions through it, which makes invariants enforceable in one place.
 
@@ -190,13 +206,13 @@ Harness is a **modular monolith**: one Node.js process (`harnessd`) hosts the or
 
 **Skills-Discovery MCP Server** (`packages/skills-mcp`) — standalone stdio MCP server. Indexes SKILL.md frontmatter + body from configured dirs (`~/.claude/skills`, `~/skills`, `<repo>/.claude/skills`), builds a lexical (BM25) + embedding index, exposes `search_skills(taskDescription, k)` and `describe_skill(name)`. The orchestrator calls it once per task at dispatch time and injects the top-k matched skill contents (capped by a token budget, ~8k tokens) into the worker's system prompt. Runs out-of-process so it is independently testable and reusable from Claude Code directly.
 
-**GitHub Adapter** — the only module that talks to GitHub (Octokit REST). Creates issues (epic/task, labels, milestones), opens PRs linked to issues, posts status comments. All writes are idempotent: it searches for an existing artifact by a deterministic marker (`harness-run:<runId>/task:<taskId>` in body) before creating, so replays after a crash never duplicate issues/PRs. Interface: `ensureIssue`, `ensurePR`, `comment`, all returning canonical IDs stored on the Task.
+**GitHub Adapter** — the only module that talks to GitHub (Octokit REST). Creates issues (epic/task, labels, milestones), opens PRs linked to issues, posts status comments. All writes are idempotent: it searches for an existing artifact by a deterministic marker (`charrette-run:<runId>/task:<taskId>` in body) before creating, so replays after a crash never duplicate issues/PRs. Interface: `ensureIssue`, `ensurePR`, `comment`, all returning canonical IDs stored on the Task.
 
-**Worktree Manager** — provisions `git worktree add ../<repo>-wt/<taskId>` + branch `harness/<runId>/<taskId>` per worker; disposes worktrees on task terminal states (configurable retention for post-mortem). Serializes all mutating git commands in the main repo through a single async mutex — git's global locks are the classic corruption source with parallel worktree ops.
+**Worktree Manager** — provisions `git worktree add ../<repo>-wt/<taskId>` + branch `charrette/<runId>/<taskId>` per worker; disposes worktrees on task terminal states (configurable retention for post-mortem). Serializes all mutating git commands in the main repo through a single async mutex — git's global locks are the classic corruption source with parallel worktree ops.
 
 **QA Pipeline** — per task, after the worker reports done: runs deterministic checks first (build, lint, typecheck, existing tests) directly via child_process — no tokens spent on what a shell can decide — then spawns a QA agent (Sonnet) in the same worktree to review the diff against acceptance criteria and write/run additional tests. Emits a structured verdict: `PASS` | `FAIL(reasons[], mustFix[])`. Failure reasons are fed back verbatim into a fresh worker iteration.
 
-**Integrator** — merges task branches into the run's integration branch `harness/<runId>/main` **continuously, as each task reaches `ACCEPTED`** (not as a final phase): merge in dependency order, run the full test suite after each merge, drive conflict resolution (attempt `git merge`; on conflict spawn an integrator agent scoped to conflicted files only; cap 2 attempts then escalate to a human gate), then push and ask the GitHub Adapter to open that component's PR immediately. Continuous merging is what makes dependencies real: a task whose `dependsOn` includes A only becomes ready after A is *merged*, and its worktree branches from the integration branch that now contains A's code. Strictly serial — one merge at a time.
+**Integrator** — merges task branches into the run's integration branch `charrette/<runId>/main` **continuously, as each task reaches `ACCEPTED`** (not as a final phase): merge in dependency order, run the full test suite after each merge, drive conflict resolution (attempt `git merge`; on conflict spawn an integrator agent scoped to conflicted files only; cap 2 attempts then escalate to a human gate), then push and ask the GitHub Adapter to open that component's PR immediately. Continuous merging is what makes dependencies real: a task whose `dependsOn` includes A only becomes ready after A is *merged*, and its worktree branches from the integration branch that now contains A's code. Strictly serial — one merge at a time.
 
 **Event Bus + Persistence** — a thin in-process typed emitter backed by an **append-only `events` table in SQLite**. Every event is written to SQLite *before* being emitted in-memory (write-ahead pattern). Materialized state tables (runs, tasks, sessions, ledger) are updated in the same transaction as the event insert. This gives us: crash-consistent state, a complete audit trail, and dashboard replay for free.
 
@@ -215,19 +231,19 @@ flowchart LR
 
 ### 11.2 Run Lifecycle State Machine
 
-Run states: `CREATED → PLANNING → PLAN_REVIEW (Gate 1) → EXECUTING → INTEGRATING → PR_REVIEW (Gate 2, terminal-for-harness)`, or `INTEGRATING → BLOCKED` when the run cannot prove itself; cross-cutting: `PAUSED`, `BUDGET_HOLD`, `FAILED`, `ABORTED`.
+Run states: `CREATED → PLANNING → PLAN_REVIEW (Gate 1) → EXECUTING → INTEGRATING → PR_REVIEW (Gate 2, terminal-for-charrette)`, or `INTEGRATING → BLOCKED` when the run cannot prove itself; cross-cutting: `PAUSED`, `BUDGET_HOLD`, `FAILED`, `ABORTED`.
 
 - `CREATED → PLANNING`: user submits assignment; planner agent drafts PRD + DAG.
 - `PLANNING → PLAN_REVIEW`: PRD committed to repo branch, issues *drafted* (not yet filed). **Gate 1**: user approves/edits/rejects in dashboard. Approve → issues filed on GitHub → `EXECUTING`. Reject-with-feedback → back to `PLANNING`.
 - `EXECUTING`: scheduler dispatches ready tasks — the **walking skeleton** first, the tasks the planner marked as making the run's critical path run end to end, with every other task held behind them (and the skeleton's own blockers let through, so a spine with an unmarked dependency cannot deadlock the run); then by leverage. Per-task sub-machine below. Integration is **continuous** — the integrator merges each `ACCEPTED` branch into the run branch and opens its PR as it lands (see Integrator, §11.1) — so `INTEGRATING` as a run state means "all tasks terminal, final merges/PRs draining", not a separate phase where integration first begins.
-- `INTEGRATING → PR_REVIEW`: last PRs opened, and — with `holdUntilGreen` (the default) — only once the repo's own CI is green on the rollup PR and GitHub reports it mergeable (no conflicts, not behind its base). A red check is fix work (`ciFixRounds`), a moved base is a reconcile, and when the run has spent what it may spend on its own it holds at a pit stop or pauses with the reason on the record; `harness resume` is the grant. **Gate 2**: humans review/merge on GitHub; the harness never merges. The run is complete from the harness's perspective; a background poller updates PR merge status for the board.
-- `INTEGRATING → BLOCKED`: the task list emptied and the run could not prove the product — the acceptance suite is red or has no opinion, the intent check returned FAIL or UNKNOWN or never finished, the critical path did not work when an agent drove it, or nothing merged so there is no pull request to review. The **live-exercise gate** is the last of those and the only one that is not a reading of the code: an agent gets a clean checkout of the merged tree, finds how the repository documents starting itself, starts it, and drives the critical path the specification named from the brief before any code existed (issue #116). A broken step becomes a fix task; a path that stays broken holds the run. With `holdUntilProven` (the default) no pull request opens and the run does not enter `PR_REVIEW`; the unmet list goes on the transition, the closing line, the notification and a `run.closing_proof` event. A run ends when the product is proven, not when the scheduler runs dry (issue #115). `harness resume` re-enters the gates from `BLOCKED`.
+- `INTEGRATING → PR_REVIEW`: last PRs opened, and — with `holdUntilGreen` (the default) — only once the repo's own CI is green on the rollup PR and GitHub reports it mergeable (no conflicts, not behind its base). A red check is fix work (`ciFixRounds`), a moved base is a reconcile, and when the run has spent what it may spend on its own it holds at a pit stop or pauses with the reason on the record; `charrette resume` is the grant. **Gate 2**: humans review/merge on GitHub; the charrette never merges. The run is complete from the charrette's perspective; a background poller updates PR merge status for the board.
+- `INTEGRATING → BLOCKED`: the task list emptied and the run could not prove the product — the acceptance suite is red or has no opinion, the intent check returned FAIL or UNKNOWN or never finished, the critical path did not work when an agent drove it, or nothing merged so there is no pull request to review. The **live-exercise gate** is the last of those and the only one that is not a reading of the code: an agent gets a clean checkout of the merged tree, finds how the repository documents starting itself, starts it, and drives the critical path the specification named from the brief before any code existed (issue #116). A broken step becomes a fix task; a path that stays broken holds the run. With `holdUntilProven` (the default) no pull request opens and the run does not enter `PR_REVIEW`; the unmet list goes on the transition, the closing line, the notification and a `run.closing_proof` event. A run ends when the product is proven, not when the scheduler runs dry (issue #115). `charrette resume` re-enters the gates from `BLOCKED`.
 - Any state → `PAUSED` (user) or `BUDGET_HOLD` (cap hit): in-flight agent turns finish (SDK interrupt after a 60s grace), no new dispatch. Resume returns to the prior state.
 - `FAILED` only when the run cannot proceed without restructuring (e.g., planner cannot produce a valid DAG after retries); individual task failure does *not* fail the run — it parks the task in `NEEDS_HUMAN` and continues independent branches of the DAG.
 
 Task sub-machine: `PENDING → READY → WORKING → QA → (QA_FAILED → WORKING)* → ACCEPTED → MERGED`, failure exits `NEEDS_HUMAN` (from iteration-cap, worker crash-cap, or merge-conflict escalation) and `CANCELLED`.
 
-**Resume semantics (survives orchestrator restart).** All transitions are event-sourced writes committed transactionally before any side effect proceeds. On startup, `harnessd` loads runs not in a terminal state, rebuilds scheduler state from the tasks table, and reconciles: (a) sessions marked `RUNNING` with no live process are marked `INTERRUPTED`; their tasks revert to `READY` (the worktree is kept; the respawned worker gets a "resume: here is prior progress" preamble built from the session's last checkpoint commit — workers are instructed to commit incrementally, so work is rarely lost); (b) GitHub side effects are re-run through idempotent `ensure*` calls; (c) gates that were open remain open. Agent SDK sessions themselves are not resumable across process death and are treated as disposable — durable truth lives in git commits + SQLite, never in agent memory.
+**Resume semantics (survives orchestrator restart).** All transitions are event-sourced writes committed transactionally before any side effect proceeds. On startup, `charretted` loads runs not in a terminal state, rebuilds scheduler state from the tasks table, and reconciles: (a) sessions marked `RUNNING` with no live process are marked `INTERRUPTED`; their tasks revert to `READY` (the worktree is kept; the respawned worker gets a "resume: here is prior progress" preamble built from the session's last checkpoint commit — workers are instructed to commit incrementally, so work is rarely lost); (b) GitHub side effects are re-run through idempotent `ensure*` calls; (c) gates that were open remain open. Agent SDK sessions themselves are not resumable across process death and are treated as disposable — durable truth lives in git commits + SQLite, never in agent memory.
 
 ### 11.3 Data Model (SQLite, key fields)
 
@@ -258,16 +274,16 @@ The planner must emit tasks with explicit `dependsOn` edges; the orchestrator va
 - **Merge conflicts**: integrator agent attempt (scoped to conflict hunks), max 2 attempts, full test suite must pass post-resolution; else `integration-conflict` gate — the human resolves in the worktree and clicks resume.
 - **API rate limits / 529 overload**: Agent SDK retries handle transient cases; on sustained 429/529 the pool applies global exponential backoff with jitter and halves effective parallelism until a 10-min clean window, emitting `run.throttled` so the dashboard explains the slowdown. Budget checks run *before* each turn, so backoff never bypasses caps.
 - **Budget breach**: the run's single budget cap trips at the next turn boundary → `BUDGET_HOLD`, everything quiesces, user (or a delegated skill) raises the cap or parks the run. The cap can also be raised proactively, before it is ever reached, from the dashboard header or the CLI's live `budget run <usd>` stdin command.
-- **Partial resume**: because task state, branches, worktrees, issues, and PRs are all idempotently keyed, `harness resume <runId>` after any crash — including mid-integration — reconciles and continues; completed tasks are never re-executed.
+- **Partial resume**: because task state, branches, worktrees, issues, and PRs are all idempotently keyed, `charrette resume <runId>` after any crash — including mid-integration — reconciles and continues; completed tasks are never re-executed.
 
 ### 11.7 Key Decisions (ADR summaries)
 
 - **ADR-1: SQLite (better-sqlite3, WAL) as the only store** over Postgres or JSON files. Drivers: zero-install local tool, single writer, transactional event log + state in one commit. Costs: no multi-process writers (fine — modular monolith), migrations needed (use a lightweight migrator). Reversal trigger: multi-user/server deployment.
 - **ADR-2: Modular monolith** over per-agent worker processes. Drivers: shared state simplicity, one process to supervise, SDK already isolates agent execution. Cost: a hard crash takes down all sessions — mitigated by resume semantics being first-class (§11.2). Reversal trigger: need for OS-level sandboxing per worker (then: spawn workers as child processes speaking a thin IPC protocol; interfaces already permit this since the pool is the only session owner).
 - **ADR-3: SSE over WebSocket** (§11.4).
-- **ADR-4: pnpm monorepo**: `packages/core` (orchestrator, scheduler, pool, integrator, QA, adapters), `packages/skills-mcp`, `packages/dashboard` (frontend), `packages/shared` (event/type contracts, zod schemas), `apps/cli` (`harness` binary: `init`, `run`, `resume`, `dashboard`). Shared zod schemas are the contract between backend and frontend and validate every event payload.
+- **ADR-4: pnpm monorepo**: `packages/core` (orchestrator, scheduler, pool, integrator, QA, adapters), `packages/skills-mcp`, `packages/dashboard` (frontend), `packages/shared` (event/type contracts, zod schemas), `apps/cli` (`charrette` binary: `init`, `run`, `resume`, `dashboard`). Shared zod schemas are the contract between backend and frontend and validate every event payload.
 - **ADR-5: git + GitHub as artifact source of truth; SQLite as coordination truth.** No code content in the DB; the DB stores refs (shas, branch names, issue/PR numbers). Makes state small, resumable, and human-inspectable with plain git.
-- **ADR-6: Plugin points, narrow on purpose**: (a) skills dirs are configurable; (b) QA deterministic checks defined in `harness.config.ts` per repo; (c) model/role mapping configurable; (d) MCP servers can be attached per role. Not pluggable in v1: VCS (git only), forge (GitHub only), agent runtime (Claude Agent SDK only) — abstraction there would triple interface surface for zero current users.
+- **ADR-6: Plugin points, narrow on purpose**: (a) skills dirs are configurable; (b) QA deterministic checks defined in `charrette.config.ts` per repo; (c) model/role mapping configurable; (d) MCP servers can be attached per role. Not pluggable in v1: VCS (git only), forge (GitHub only), agent runtime (Claude Agent SDK only) — abstraction there would triple interface surface for zero current users.
 - **ADR-7: Idempotency-marker pattern for all external writes** (GitHub body markers, deterministic branch names) instead of a distributed-transaction outbox. Simpler, observable, and sufficient at this scale.
 
 ### 11.8 Top Architecture Risks
@@ -276,7 +292,7 @@ The planner must emit tasks with explicit `dependsOn` edges; the orchestrator va
 2. **Planner emits a bad decomposition** (wrong granularity, hidden coupling) — everything downstream inherits it. Mitigations: DAG validation, Gate 1 with *editable* plan (user can split/merge/reorder tasks in the dashboard before approval), touched-paths annotations, small-task guidance in the planner prompt.
 3. **Parallel workers make globally inconsistent choices** (duplicate utilities, divergent conventions). Mitigations: planner emits a shared "conventions + interfaces" doc injected into every worker prompt; integrator runs full suite per merge; accept residual risk in v1 and surface it to Gate 2 reviewers.
 4. **Git worktree edge cases** (locks, dirty states, orphaned worktrees after crashes). Mitigations: serialized main-repo ops, `worktree prune` + reconcile on startup, worktrees live outside the repo dir.
-5. **SQLite event-log growth / SSE replay cost on long runs.** Mitigations: delta coalescing, per-turn rollups, `harness gc` compaction of terminal runs; ceiling is comfortably high for single-user scale.
+5. **SQLite event-log growth / SSE replay cost on long runs.** Mitigations: delta coalescing, per-turn rollups, `charrette gc` compaction of terminal runs; ceiling is comfortably high for single-user scale.
 6. **Anthropic API instability mid-run** stalls a 2-hour run. Mitigations: global backoff + parallelism shedding, `BUDGET_HOLD`-style quiesce rather than failure, resume-from-anywhere semantics so users can simply retry later.
 
 ---
@@ -285,7 +301,7 @@ The planner must emit tasks with explicit `dependsOn` edges; the orchestrator va
 
 ### 12.1 Threat Model (STRIDE-lite)
 
-**Actors.** (a) The *operator* — the human running the harness; trusted, and the only source of approvals. (b) *Agents* (orchestrator, workers, QA, integrator) — semi-trusted: they act in good faith but are steerable by anything in their context window. (c) *Repo and internet content* — files in the target repo, issue/PR text, dependency READMEs/docs, package install scripts; untrusted input. (d) *Skill authors* — SKILL.md files are executable instruction content; trust varies by origin. (e) *Local network / browser* — any page the operator's browser loads can attempt requests toward the dashboard; hostile. (f) *OSS ecosystem* — contributors to and consumers of this project; supply-chain relevant.
+**Actors.** (a) The *operator* — the human running the charrette; trusted, and the only source of approvals. (b) *Agents* (orchestrator, workers, QA, integrator) — semi-trusted: they act in good faith but are steerable by anything in their context window. (c) *Repo and internet content* — files in the target repo, issue/PR text, dependency READMEs/docs, package install scripts; untrusted input. (d) *Skill authors* — SKILL.md files are executable instruction content; trust varies by origin. (e) *Local network / browser* — any page the operator's browser loads can attempt requests toward the dashboard; hostile. (f) *OSS ecosystem* — contributors to and consumers of this project; supply-chain relevant.
 
 **Assets.** Anthropic API key (spend + account); GitHub token (write access to repos, issues, PRs); project `.env` secrets inside the target repo; integrity of the target repo and of opened PRs; the operator's host filesystem; run budget (money); integrity of the human gates (PRD approval, pause/abort) and of the audit trail.
 
@@ -293,7 +309,7 @@ The planner must emit tasks with explicit `dependsOn` edges; the orchestrator va
 1. **Content → model context.** Everything an agent reads (repo files, issue text, dep docs, skills) crosses from *data* to *potential instructions*. This is the defining boundary of the system and it cannot be fully closed — only constrained in blast radius.
 2. **Agent → host.** Tool calls (Bash, file I/O) cross from model output to real side effects.
 3. **Worktree → rest of filesystem.** Each worker's writable universe must end at its worktree.
-4. **Harness → GitHub.** Outbound writes (branches, PRs, issues) are the primary exfiltration channel — PRs are public-ish, durable, and expected output, making them the perfect cover.
+4. **Charrette → GitHub.** Outbound writes (branches, PRs, issues) are the primary exfiltration channel — PRs are public-ish, durable, and expected output, making them the perfect cover.
 5. **Browser → dashboard.** Localhost is not a security boundary against a browser: DNS rebinding and CSRF let a remote page drive `127.0.0.1` endpoints.
 6. **Skills index → orchestrator prompt.** The MCP server converts local files into injected instructions for *every* matched worker — a one-to-many amplifier.
 7. **Us → the world.** Released OSS: our npm package, CI, and release pipeline are targets.
@@ -303,17 +319,17 @@ The planner must emit tasks with explicit `dependsOn` edges; the orchestrator va
 ### 12.2 Security Requirements (v1)
 
 *Secrets & exfiltration*
-- **SEC-1** GitHub auth uses a fine-grained token scoped to the single target repo with only `contents`, `issues`, `pull_requests` write. Harness preflight queries token scope and refuses to start on classic PATs or org-wide grants. *Test:* start with over-scoped token → hard fail with explanation.
-- **SEC-2** The Anthropic key and GitHub token are held only by the harness process and injected into `git`/`gh` subprocess env; they never appear in any agent's context. *Test:* grep all persisted transcripts for both values → zero matches.
+- **SEC-1** GitHub auth uses a fine-grained token scoped to the single target repo with only `contents`, `issues`, `pull_requests` write. Charrette preflight queries token scope and refuses to start on classic PATs or org-wide grants. *Test:* start with over-scoped token → hard fail with explanation.
+- **SEC-2** The Anthropic key and GitHub token are held only by the charrette process and injected into `git`/`gh` subprocess env; they never appear in any agent's context. *Test:* grep all persisted transcripts for both values → zero matches.
 - **SEC-3** A single redaction filter (known credential formats + exact values of all secrets loaded at startup, including target-repo `.env` values) wraps every sink: logs, SSE events, PR/issue bodies, commit messages, branch names, audit log. *Test:* seed a canary secret; confirm `[REDACTED]` in every sink.
 - **SEC-4** Files matching a secret-pattern denylist (`.env*`, `*.pem`, `id_*`, cloud credential paths) are unreadable via agent file tools and excluded from diffs fed to agents, unless the operator opts in per-run. *Test:* worker `Read(".env")` → structured denial + audit entry.
-- **SEC-5** Git pushes are allowed only to the configured remote, only to branches matching `harness/<run-id>/*`; force-push, branch deletion, and pushes to the default branch are blocked in the harness (not by prompt). *Test:* attempt each → denied.
+- **SEC-5** Git pushes are allowed only to the configured remote, only to branches matching `charrette/<run-id>/*`; force-push, branch deletion, and pushes to the default branch are blocked in the charrette (not by prompt). *Test:* attempt each → denied.
 
 *Agent confinement*
 - **SEC-6** Worker/QA Bash executes inside an OS sandbox (Seatbelt on macOS, bubblewrap/container on Linux): filesystem limited to the agent's worktree plus declared caches; network egress limited to a configurable allowlist (`api.anthropic.com`, `github.com`, package registries). *Test:* `cat ~/.ssh/id_rsa` and `curl https://attacker.example` both fail inside the sandbox.
 - **SEC-7** File tools canonicalize paths (symlinks resolved) and reject any target outside the agent's worktree. *Test:* symlink-escape and `../` traversal fixtures → denied.
-- **SEC-8** Tool allowlists per agent class (§12.3) are enforced by the harness permission layer; prompts are UX, not enforcement. *Test:* each class invokes one denied tool → structured denial + audit record.
-- **SEC-9** Budget caps and per-agent turn limits are enforced harness-side; breach pauses all agents within 10 s and requires dashboard resume. *Test:* low-cap run halts and resumes only after approval.
+- **SEC-8** Tool allowlists per agent class (§12.3) are enforced by the charrette permission layer; prompts are UX, not enforcement. *Test:* each class invokes one denied tool → structured denial + audit record.
+- **SEC-9** Budget caps and per-agent turn limits are enforced charrette-side; breach pauses all agents within 10 s and requires dashboard resume. *Test:* low-cap run halts and resumes only after approval.
 
 *Dashboard*
 - **SEC-10** Backend binds `127.0.0.1` only; binding elsewhere requires an explicit flag and refuses to start without auth enabled.
@@ -323,11 +339,11 @@ The planner must emit tasks with explicit `dependsOn` edges; the orchestrator va
 
 *Skills*
 - **SEC-14** The skills index records provenance per skill: path, SHA-256, trust level (`trusted` = operator-registered; `untrusted` = discovered). Only `trusted` skills are injected by default; untrusted require per-run opt-in. Hash mismatch at injection time (file changed since indexing) → skip and warn. *Test:* modify an indexed SKILL.md → not injected, warning surfaced.
-- **SEC-15** Injected skill text is wrapped in labeled delimiters stating it is advisory content that cannot alter harness policy or tool permissions; the MCP server is read-only (no exec, no write tools). Every injection (skill, hash, target agent) is audit-logged.
+- **SEC-15** Injected skill text is wrapped in labeled delimiters stating it is advisory content that cannot alter charrette policy or tool permissions; the MCP server is read-only (no exec, no write tools). Every injection (skill, hash, target agent) is audit-logged.
 
 *Audit & supply chain*
 - **SEC-16** Append-only JSONL audit log: every tool call (agent, tool, redacted arg summary, outcome), every permission denial, every GitHub write, every approval. *Test:* scripted run replay shows 100% coverage of side-effectful actions.
-- **SEC-17** The harness contains no code path invoking merge APIs; docs instruct enabling branch protection. *Test:* CI static check asserts no merge endpoint usage.
+- **SEC-17** The charrette contains no code path invoking merge APIs; docs instruct enabling branch protection. *Test:* CI static check asserts no merge endpoint usage.
 - **SEC-18** OSS hygiene: committed lockfile, GitHub Actions pinned to commit SHAs, npm publish with provenance from CI only, no `postinstall` scripts in our packages, `SECURITY.md` with private disclosure channel, dependency audit gate failing CI on known-exploited vulns.
 
 ### 12.3 Agent Permission Model
@@ -335,13 +351,13 @@ The planner must emit tasks with explicit `dependsOn` edges; the orchestrator va
 | Agent | Allowed | Denied without escalation |
 |---|---|---|
 | **Orchestrator** | GitHub issue create/read, PRD write, skills-discovery MCP (read), spawn/stop agents, read target repo | Bash, file writes to repo code, any push |
-| **Worker** | Read/Edit/Write inside own worktree, sandboxed Bash (build/test), commit + push to `harness/<run-id>/*` | Reads outside worktree, network beyond allowlist, GitHub API, secret-pattern files |
+| **Worker** | Read/Edit/Write inside own worktree, sandboxed Bash (build/test), commit + push to `charrette/<run-id>/*` | Reads outside worktree, network beyond allowlist, GitHub API, secret-pattern files |
 | **QA** | Read-only across worktrees, sandboxed Bash (test execution), issue comments | Any file write, any push |
 | **Integrator** | Merge worktree branches locally, resolve conflicts, push run branches, open PRs | Merge PRs, push to default branch, delete branches |
 
-**Escalation:** any denied action surfaces as a dashboard approval card (agent, action, exact args, rationale); the human grants once or per-run. Denials are never silently retried; three denials of the same action pauses the agent. No agent may modify harness config, permission settings, or the skills registry — ever, including via escalation.
+**Escalation:** any denied action surfaces as a dashboard approval card (agent, action, exact args, rationale); the human grants once or per-run. Denials are never silently retried; three denials of the same action pauses the agent. No agent may modify charrette config, permission settings, or the skills registry — ever, including via escalation.
 
-Note: QA agents must commit the tests they write (US-10), so the "read-only" row applies to reviewing *other* worktrees; within its assigned task worktree QA may write only under `tests/` paths declared in `harness.config.ts`.
+Note: QA agents must commit the tests they write (US-10), so the "read-only" row applies to reviewing *other* worktrees; within its assigned task worktree QA may write only under `tests/` paths declared in `charrette.config.ts`.
 
 ### 12.4 Explicitly Out of Scope for v1
 
@@ -359,7 +375,7 @@ Note: QA agents must commit the tests they write (US-10), so the "read-only" row
 | 2 | Malicious or tampered SKILL.md injects instructions into every matched worker | **High** — one-to-many amplifier, local file write is a low bar | SEC-14/15 (provenance, hashing, trust levels, delimited injection, audit) |
 | 3 | DNS rebinding / CSRF forges approval or resume on the dashboard, bypassing the human gate | **High** — drive-by web page defeats the system's core control | SEC-10/11/12/13 (loopback bind, header token, Origin+Host checks, artifact hashing) |
 | 4 | Sandbox escape via target-repo toolchain (npm postinstall, test runners) reaches host FS/credentials | **High** — arbitrary code execution is inherent to building software | SEC-6/7 (OS sandbox, path canonicalization), scoped tokens (SEC-1) cap blast radius |
-| 5 | Compromise of the harness's own OSS release pipeline ships a backdoor to all users | **High** (likelihood lower, impact ecosystem-wide) | SEC-18 (pinned actions, provenance publishes, no install scripts, disclosure process) |
+| 5 | Compromise of the charrette's own OSS release pipeline ships a backdoor to all users | **High** (likelihood lower, impact ecosystem-wide) | SEC-18 (pinned actions, provenance publishes, no install scripts, disclosure process) |
 
 **Posture summary:** v1 security rests on three load-bearing walls — secrets never enter model context, side effects are mechanically confined (sandbox + push scoping + tool allowlists), and every human gate is authenticated, origin-checked, and hash-bound. Prompt injection is assumed to *succeed* at the persuasion layer; the design makes success unprofitable.
 

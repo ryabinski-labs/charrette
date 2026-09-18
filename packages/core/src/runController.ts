@@ -21,8 +21,9 @@ import {
   hasCriticalPath,
   providerFor,
   validatePlanDag,
-} from "@harness/shared";
-import { indexSkills, matchSkills, verifyHash, type IndexedSkill } from "@harness/skills-mcp";
+  statePaths,
+} from "@charrette/shared";
+import { indexSkills, matchSkills, verifyHash, type IndexedSkill } from "@charrette/skills-mcp";
 import { pinsInPlay, unresolvedRoleSkills } from "./skillPins.js";
 import { Bus } from "./bus.js";
 import { BudgetExceeded } from "./budget.js";
@@ -223,7 +224,7 @@ function pendingRow(t: PlannedTask): Omit<TaskRow, "runId" | "unverified" | "sce
 
 /**
  * Extra query terms per role, appended to the task text before skill matching.
- * The harness is opinionated here: a QA session should reach for QA/testing/
+ * The charrette is opinionated here: a QA session should reach for QA/testing/
  * security playbooks even when the task spec never says the word "test", and a
  * worker should match only on what the task itself is about. Skills stay
  * generic — a legal-review or branding skill reaches a worker whenever the
@@ -397,7 +398,7 @@ const MERGEABILITY_SETTLE_MINUTES = 0.5;
 const EMPTY_DELIVERY_ATTEMPTS = 4;
 
 /**
- * Empty deliveries the harness forgives because it caused them.
+ * Empty deliveries the charrette forgives because it caused them.
  *
  * A worker told to redirect a long command and poll for it — which is what the
  * background-shell denial recommends — can finish its turn while the command is
@@ -427,7 +428,7 @@ const EVIDENCE_REASK_TURNS = 12;
  * The validator's judgment of the merged whole against the operator's intent.
  *
  * Three answers. UNKNOWN is the one a validator under a turn budget needs and
- * did not have: waf de2cb7aa's closing verdict was a PASS whose gaps read "Not
+ * did not have: rust-service de2cb7aa's closing verdict was a PASS whose gaps read "Not
  * independently verified given turn budget", and nothing downstream reads gaps
  * on a PASS. `unchecked` is where that sentence belongs.
  */
@@ -623,7 +624,7 @@ function shellQuote(s: string): string {
  * to try a different kind of answer.
  *
  * The way out is named explicitly rather than implied. By the third round the
- * useful move is usually not a better answer but a different bar, and `harness
+ * useful move is usually not a better answer but a different bar, and `charrette
  * probe` is the command for that — logged until now only into `agent.log`,
  * where nobody looking at a gate is looking.
  */
@@ -638,8 +639,8 @@ function repeatNote(repeats: number, taskId: string, runId: string, probe: strin
       ? `\n\nIf another answer will not change the outcome, the bar itself may be what is wrong. This task is held to:\n` +
         `  ${probe}\n` +
         `To change it — a run in flight picks it up on the next iteration:\n` +
-        `  harness probe ${taskId} ${shellQuote(probe)} --run ${runId} --why '...'\n` +
-        `  harness probe ${taskId} --clear --run ${runId} --why '...'`
+        `  charrette probe ${taskId} ${shellQuote(probe)} --run ${runId} --why '...'\n` +
+        `  charrette probe ${taskId} --clear --run ${runId} --why '...'`
       : "")
   );
 }
@@ -682,7 +683,7 @@ function stopsTheRun(e: unknown): e is RunStop {
  */
 export class RunPaused extends Error {
   constructor(public runId: string) {
-    super(`paused by the operator — pick it up with: harness resume ${runId}`);
+    super(`paused by the operator — pick it up with: charrette resume ${runId}`);
   }
 }
 
@@ -780,7 +781,7 @@ export interface GateHandler {
    * rest of the window, or `park` to stop here and resume later.
    *
    * Optional: a handler without it keeps going and leaves the alert on the
-   * event log, which is the right default for a harness nobody is watching —
+   * event log, which is the right default for a charrette nobody is watching —
    * parking a run that has no operator to un-park it turns a warning into an
    * outage.
    */
@@ -918,7 +919,7 @@ const PlanGateDecisionJson = z.object({
  * What the budget decider said about a cap that was reached.
  *
  * `capUsd` is checked against the spend and the bound by the caller rather than
- * here: a figure that is too low or too high is a decision the harness declines
+ * here: a figure that is too low or too high is a decision the charrette declines
  * to act on, and saying which is more useful in the log than a parse error.
  */
 const BudgetDecisionJson = z.object({
@@ -1135,7 +1136,7 @@ export class RunController {
       budgetCheck: () => this.checkStops(runId),
       // Matched on the seed — the only text that exists this early.
       skillsBlock: skillsBlock(this.selectSkills(indexSkills(run.config.skillsDirs), "intake", seed, run.config)),
-      // The seed is very often "implement <issue link>". The harness holds a
+      // The seed is very often "implement <issue link>". The charrette holds a
       // token that can fetch it; before this the intake agent could not, and
       // asked the operator to paste an issue back at the tool that files them.
       readIssue: this.github.enabled ? this.github.readIssue.bind(this.github) : undefined,
@@ -1144,7 +1145,7 @@ export class RunController {
     const assignment = run.config.delivery.mode === "production"
       ? `${seed}\n\nIntake clarifications (the original PRD remains binding):\n${briefToAssignment(brief)}`
       : briefToAssignment(brief);
-    const dir = path.join(this.repoPath, ".harness", runId);
+    const dir = path.join(statePaths(this.repoPath).dir, runId);
     mkdirSync(dir, { recursive: true });
     writeFileSync(path.join(dir, "BRIEF.md"), `${assignment}\n`);
     this.store.setRunAssignment(runId, assignment);
@@ -1156,7 +1157,7 @@ export class RunController {
     // The reason is the only sentence anybody reads about how a run got here.
     // Run beb799c5 arrived in PLANNING on "brief agreed" having lost its whole
     // specification to an abort thirty seconds earlier, and every later reader —
-    // the dashboard, `harness status`, the watcher, me — took the state at its
+    // the dashboard, `charrette status`, the watcher, me — took the state at its
     // word. A run without an acceptance gate is a materially different run and
     // the state machine now says so.
     this.store.transitionRun(runId, "PLANNING", gated ? "brief agreed" : "brief agreed; no acceptance gate");
@@ -1169,11 +1170,11 @@ export class RunController {
    * The integration branch rather than a scratch directory: task branches are
    * cut from it, so a specification committed here is inherited by every worker
    * in the run and ships in the pull request — which is what makes the tests a
-   * deliverable rather than a harness artifact that evaporates when the run
+   * deliverable rather than a charrette artifact that evaporates when the run
    * ends.
    *
    * Never throws. A run whose specification could not be written is a run
-   * without this gate, which is exactly the run every harness before this one
+   * without this gate, which is exactly the run every charrette before this one
    * was; failing intake over it would trade a working run for no run.
    *
    * Returns whether the run comes out of here with an acceptance gate. A run
@@ -1431,7 +1432,7 @@ export class RunController {
 
   async resume(runId: string, intake?: IntakeUi): Promise<void> {
     // Before `pruneAndReconcile`, not after: pruning walks the worktrees of a
-    // run another harness may be working in, and booking and reopening both
+    // run another charrette may be working in, and booking and reopening both
     // move task states. Every one of those is the interference the lock exists
     // to stop, and all three happen before `drive` would have taken it.
     const unlock = this.lockRun(runId);
@@ -1517,7 +1518,7 @@ export class RunController {
    * everything the operator already paid for — the intake conversation, the
    * brief it became, the run's identity and config — and the only way to spend
    * it was, until now, to not fail. Run f338b5c8 hit its account's usage limit
-   * three planner attempts in a row, ended `harness: fatal`, and `harness
+   * three planner attempts in a row, ended `charrette: fatal`, and `charrette
    * resume` answered "No run to resume", leaving the operator to start over and
    * answer every intake question again.
    *
@@ -1542,7 +1543,7 @@ export class RunController {
    * red its pull request had since become — a nightly re-run, a job somebody
    * re-ran by hand, or a pass the run should never have believed. Run de2cb7aa
    * moved to PR_REVIEW at 18:08:29Z on "CI green" over #527; `test` re-ran and
-   * failed at 18:33:27Z on the same commit; and `harness resume` had nothing
+   * failed at 18:33:27Z on the same commit; and `charrette resume` had nothing
    * to resume, because the only thing it consulted was the record.
    *
    * Only a run in review, with an open pull request, is asked about: a merged
@@ -1778,7 +1779,7 @@ export class RunController {
   private async drive(runId: string, intake?: IntakeUi): Promise<void> {
     // Nothing below this line is safe to run twice at once. The requeue sweeper
     // in `execute` states the assumption outright — "this controller is the only
-    // runner" — and until run bc691359 was found with two `harness resume`
+    // runner" — and until run bc691359 was found with two `charrette resume`
     // processes on it, nothing checked. See runLock.ts for what that cost.
     //
     // Here rather than at the two call sites because `startRun` and `resume` are
@@ -1818,14 +1819,14 @@ export class RunController {
    *
    * A repository with nowhere to write a lock file is not a reason to refuse to
    * drive a run — it only means this process cannot prove it is alone. Refusing
-   * is reserved for the one case the lock exists to catch: another harness,
+   * is reserved for the one case the lock exists to catch: another charrette,
    * alive, already driving this run.
    */
   private lockRun(runId: string): () => void {
     if (this.locks.has(runId)) return () => {};
     let lock: RunLock;
     try {
-      lock = acquireRunLock(path.join(this.repoPath, ".harness"), runId);
+      lock = acquireRunLock(statePaths(this.repoPath).dir, runId);
     } catch (e) {
       if (e instanceof Error && e.name === "RunLocked") throw e;
       return () => {};
@@ -1833,7 +1834,7 @@ export class RunController {
     this.locks.set(runId, lock);
     // Only now is it true that any session still marked "running" is a dead
     // process's leftover rather than somebody's live work. This used to run in
-    // the constructor, where it was a guess — and a second `harness resume`
+    // the constructor, where it was a guess — and a second `charrette resume`
     // built a controller before it was turned away, settling the sessions of
     // the process that was still using them.
     this.store.sweepDeadSessions();
@@ -2180,7 +2181,7 @@ export class RunController {
   /**
    * The page a person reads once the run is over.
    *
-   * Written here rather than left to `harness report`, because the moment a run
+   * Written here rather than left to `charrette report`, because the moment a run
    * reaches DONE is the last moment anyone is looking. Everything the report
    * needs is legible now and decays from here: the integration branch gets
    * pruned, the base branch moves on, and the diff that says which switches the
@@ -2210,7 +2211,7 @@ export class RunController {
   /**
    * Ask whether the plan could deliver the assignment, before anyone builds it.
    *
-   * The harness already asks this question — at INTEGRATING, of the merged
+   * The charrette already asks this question — at INTEGRATING, of the merged
    * result, which is the most expensive moment it could possibly be asked. Run
    * 40da9337's answer arrived after 37 hours and $773.55, and every gap in it
    * was legible in the plan: seven vendor categories whose acceptance criteria
@@ -2242,7 +2243,7 @@ export class RunController {
     }
     const deniedGaps = denied.map(
       (d) =>
-        `Task ${d.taskId}'s criterion names ${d.what}, which every agent session is denied — the harness produces reviewed configuration and never provisions. If satisfying it needs that command to actually run, no worker can ever pass it and the task will spend its attempts and escalate; rewrite it as a hand-off the operator executes. If it only asks for a document that names the command, it is satisfiable as written — say which reading this is. Criterion: "${d.criterion.slice(0, 300)}"`
+        `Task ${d.taskId}'s criterion names ${d.what}, which every agent session is denied — the charrette produces reviewed configuration and never provisions. If satisfying it needs that command to actually run, no worker can ever pass it and the task will spend its attempts and escalate; rewrite it as a hand-off the operator executes. If it only asks for a document that names the command, it is satisfiable as written — say which reading this is. Criterion: "${d.criterion.slice(0, 300)}"`
     );
     if (denied.length) {
       this.bus.publish({
@@ -2475,7 +2476,7 @@ export class RunController {
    * One verdict out of a validator session, whatever shape it answered in.
    *
    * A PASS carrying gaps is the case: two verdicts in one object, and until now
-   * the harness kept the wrong one — the PASS opened the pull requests and the
+   * the charrette kept the wrong one — the PASS opened the pull requests and the
    * gaps went where nothing reads them. The session is resumed and asked to
    * choose. If it will not, or cannot be resumed, the cautious reading wins:
    * UNKNOWN, with the gaps as what was not settled. That is the only reading
@@ -2507,13 +2508,13 @@ export class RunController {
   /**
    * Turn a failing intent verdict into work.
    *
-   * The verdict was the most valuable thing the harness produced and the only
+   * The verdict was the most valuable thing the charrette produced and the only
    * one it did nothing with: run 40da9337 spent $774, merged all 36 tasks, and
    * shipped a FAIL saying the disbursement worker, the webhook outbox, the
    * funding poller and reconciliation were all built, all tested, and scheduled
    * nowhere. Every one of those gaps is a task — small, concrete, and stated
    * against a tree that already exists. Leaving them for the human meant the
-   * cheapest fixes in the run were the ones the harness declined to make.
+   * cheapest fixes in the run were the ones the charrette declined to make.
    *
    * The gaps are chained rather than run in parallel. They are usually the same
    * omission seen from different angles — four of the seven above were "wire
@@ -2553,7 +2554,7 @@ export class RunController {
       dependsOn: i === 0 ? [] : [`intent-fix-${round}-${i}`],
       touchedPaths: [],
       // The validator reports a gap in prose; it is not asked for a command,
-      // and inventing one here would be the harness guessing at a check it has
+      // and inventing one here would be the charrette guessing at a check it has
       // no basis for.
       completionProbe: "",
       skeleton: false,
@@ -2597,7 +2598,7 @@ export class RunController {
   /**
    * Run the specification's scenarios against everything the run merged.
    *
-   * The first gate in this harness that is not an agent's opinion. Every other
+   * The first gate in this charrette that is not an agent's opinion. Every other
    * check on the way out — QA's verdict, the intent check, the pit-stop
    * reviewers — is a model reading a diff and forming a view, and they share a
    * failure mode: agreeing with the code because they misread the requirement
@@ -2711,11 +2712,11 @@ export class RunController {
         epicId: SPEC_FIX_EPIC.id,
         title: "Make the acceptance suite runnable and readable",
         spec:
-          `The run's acceptance suite is red and its output named no scenario. The harness cannot tell which promise broke, so nothing else can be queued until it can.\n\n` +
+          `The run's acceptance suite is red and its output named no scenario. The charrette cannot tell which promise broke, so nothing else can be queued until it can.\n\n` +
           `The verdict: ${verdict.line}\n` +
-          `The command the harness ran, from the repository root: \`${spec.commands.all.trim() || "(none — the specification named no command)"}\`\n\n` +
+          `The command the charrette ran, from the repository root: \`${spec.commands.all.trim() || "(none — the specification named no command)"}\`\n\n` +
           `What it printed (tail):\n\`\`\`\n${verdict.output || "(no output)"}\n\`\`\`\n\n` +
-          `Make that command run to completion and print a result per scenario, with the scenario id (e.g. \`${gating(spec)[0]!.id}\`) verbatim in each test's name, in the shape the repository's own runner uses. Fix what stops the suite from running — a missing dependency, a compile error, a fixture the repository no longer has, a wrong command in \`${spec.artifactPath || "the specification"}\` — not the assertions: a scenario edited to fit the implementation proves nothing, and that is the one failure this phase exists to prevent. If a scenario then fails for a real reason, leave it failing; the harness queues that separately, by name.`,
+          `Make that command run to completion and print a result per scenario, with the scenario id (e.g. \`${gating(spec)[0]!.id}\`) verbatim in each test's name, in the shape the repository's own runner uses. Fix what stops the suite from running — a missing dependency, a compile error, a fixture the repository no longer has, a wrong command in \`${spec.artifactPath || "the specification"}\` — not the assertions: a scenario edited to fit the implementation proves nothing, and that is the one failure this phase exists to prevent. If a scenario then fails for a real reason, leave it failing; the charrette queues that separately, by name.`,
         acceptanceCriteria: [
           "The acceptance suite command runs to completion and its output names every scenario it ran, by id",
           "No scenario assertion was weakened or removed to achieve that",
@@ -2892,7 +2893,7 @@ export class RunController {
         dependsOn: i === 0 ? [] : [`ci-fix-${round}-${i}`],
         touchedPaths: [],
         // The workflow's own command is in the spec; inventing a probe here
-        // would be the harness guessing at a second one.
+        // would be the charrette guessing at a second one.
         completionProbe: "",
         // Never the spine: a fix to a tree that already has one.
         skeleton: false,
@@ -2929,7 +2930,7 @@ export class RunController {
     // Nobody to ask, or nothing the run is allowed to do about it. Without the
     // hold that is the old shape — the red verdict goes into the outcome line
     // and the run reports. With it the run may not report, so it pauses with
-    // the reason on the record, and `harness resume` is the grant.
+    // the reason on the record, and `charrette resume` is the grant.
     if (!this.gates.resolvePitStop || run.config.pitStop.every === "never" || !run.config.ciFixRounds) {
       if (!hold) return "proceed";
       this.bus.publish({
@@ -2939,8 +2940,8 @@ export class RunController {
         text:
           `CI is red on #${ci.prNumber} (${ci.failing.join(", ")}) and the run may not report in review until it is green — ` +
           (run.config.ciFixRounds
-            ? `the fix rounds are spent and no pit stop can grant more here, so the run is pausing. \`harness resume\` grants another ${run.config.ciFixRounds}.`
-            : "`ciFixRounds` is 0, so the run will not fix it itself. Fix the branch, or set `holdUntilGreen: false`, then `harness resume`."),
+            ? `the fix rounds are spent and no pit stop can grant more here, so the run is pausing. \`charrette resume\` grants another ${run.config.ciFixRounds}.`
+            : "`ciFixRounds` is 0, so the run will not fix it itself. Fix the branch, or set `holdUntilGreen: false`, then `charrette resume`."),
         ts: Date.now(),
       });
       return "stop";
@@ -3005,7 +3006,7 @@ export class RunController {
    * of those is either work the run does now or a stop with its reason on the
    * record, and the only "proceed" is the green one.
    *
-   * `resumed` is the operator having typed `harness resume` at a run that
+   * `resumed` is the operator having typed `charrette resume` at a run that
    * paused here: it is the grant — another block of fix rounds, another
    * reconcile, or publishing a branch no CI will ever judge — spent on the
    * first hold this pass meets, so a resume always does something.
@@ -3083,7 +3084,7 @@ export class RunController {
         // `awaitChecks` only leaves pending on the record, or nothing at all,
         // when GitHub went unreadable. Not knowing is not green.
         if (await askAgain(`GitHub could not be read while waiting on CI for #${prNumber}`)) continue;
-        say(`GitHub could not be read while waiting on CI for #${prNumber}, and the run may not report in review until it is green — pausing; \`harness resume\` asks again`);
+        say(`GitHub could not be read while waiting on CI for #${prNumber}, and the run may not report in review until it is green — pausing; \`charrette resume\` asks again`);
         return { call: "stop", why: `${GREEN_HOLD}GitHub could not be read while waiting on CI for #${prNumber}` };
       } else if (!hold && opts.resumed) {
         return { call: "proceed" };
@@ -3092,7 +3093,7 @@ export class RunController {
       if (!hold || merge === undefined || merge === "mergeable") return { call: "proceed" };
       if (merge === null) {
         if (await askAgain(`GitHub could not say whether #${prNumber} merges into ${base}`)) continue;
-        say(`GitHub could not say whether #${prNumber} merges into ${base}, and the run may not report in review until it does — pausing; \`harness resume\` asks again`);
+        say(`GitHub could not say whether #${prNumber} merges into ${base}, and the run may not report in review until it does — pausing; \`charrette resume\` asks again`);
         return { call: "stop", why: `${GREEN_HOLD}GitHub could not say whether #${prNumber} merges into ${base}` };
       }
       if (reconciles >= MERGE_RECONCILE_ROUNDS) {
@@ -3129,7 +3130,7 @@ export class RunController {
       return { call: "proceed" };
     }
     if (!this.gates.resolvePitStop || run.config.pitStop.every === "never") {
-      say(`#${prNumber} has no CI and the run may not report in review over a branch nothing has checked — pausing; add a workflow, or \`harness resume\` to publish it anyway`);
+      say(`#${prNumber} has no CI and the run may not report in review over a branch nothing has checked — pausing; add a workflow, or \`charrette resume\` to publish it anyway`);
       return { call: "stop", why: `${GREEN_HOLD}#${prNumber} has no CI, so nothing has checked the merged branch` };
     }
     const action = await this.pitStop(runId, { reason: "the repository has no CI: nothing has built or tested the merged branch", epicIds: [] }, true);
@@ -3155,7 +3156,7 @@ export class RunController {
     if (resumed) return "granted";
     const say = (text: string) => this.bus.publish({ type: "agent.log", runId, sessionId: "integrator", text, ts: Date.now() });
     if (!this.gates.resolvePitStop || run.config.pitStop.every === "never") {
-      say(`#${prNumber} is still ${state} after ${reconciles} reconcile(s) and the run may not report in review until it merges — pausing; \`harness resume\` tries again`);
+      say(`#${prNumber} is still ${state} after ${reconciles} reconcile(s) and the run may not report in review until it merges — pausing; \`charrette resume\` tries again`);
       return "stop";
     }
     say(`#${prNumber} is still ${state} after ${reconciles} reconcile(s) — this one is yours to answer; "continue" tries another ${MERGE_RECONCILE_ROUNDS}`);
@@ -3211,7 +3212,7 @@ export class RunController {
     // or unsettled check is not ended — it is integrating — so it wears that
     // state for as long as the recheck runs, and hands PR_REVIEW back only
     // when there is nothing left to fix. Without this, an operator who ran
-    // `harness resume` watched a dashboard that said "no active runs" while
+    // `charrette resume` watched a dashboard that said "no active runs" while
     // the run it had just resumed was waiting on the repo's answer.
     this.store.transitionRun(runId, "INTEGRATING", "resumed to re-check a branch the repo had not answered green");
     const gate = await this.greenGate(runId, { resumed: true });
@@ -3318,7 +3319,7 @@ export class RunController {
     if (prNumber === undefined) return false;
 
     // Nothing to verify until a human has merged: that is the boundary the
-    // harness does not cross, and waiting here for it is not the same as
+    // charrette does not cross, and waiting here for it is not the same as
     // failing. The run simply stays where it is until the operator acts.
     const sha = await this.github.mergedSha?.(prNumber).catch(() => null);
     if (!sha) return false;
@@ -3345,7 +3346,7 @@ export class RunController {
     return await this.validateProd(runId, run.config.prodUrl);
   }
 
-  private releaseResult(runId: string, phase: import("@harness/shared").ReleaseEvidence["phase"], verdict: "passed" | "failed" | "blocked", unmet: string[] = [], sha = "", evidencePath = "", requirements: string[] = []): void {
+  private releaseResult(runId: string, phase: import("@charrette/shared").ReleaseEvidence["phase"], verdict: "passed" | "failed" | "blocked", unmet: string[] = [], sha = "", evidencePath = "", requirements: string[] = []): void {
     const run = this.store.getRun(runId)!;
     this.bus.publish({ type: "run.release_evidence", runId, releaseId: run.config.delivery.releaseId, phase, verdict,
       sha, url: run.config.prodUrl, requirements, unmet, evidencePath, ts: Date.now() });
@@ -3356,7 +3357,7 @@ export class RunController {
       ["merge", "deploy", "production"].includes(this.store.releaseEvidence(runId)?.phase ?? "");
   }
 
-  private blockRelease(runId: string, phase: import("@harness/shared").ReleaseEvidence["phase"], unmet: string[], sha = ""): false {
+  private blockRelease(runId: string, phase: import("@charrette/shared").ReleaseEvidence["phase"], unmet: string[], sha = ""): false {
     this.releaseResult(runId, phase, "blocked", unmet, sha);
     if (this.store.getRun(runId)!.state !== "BLOCKED") this.store.transitionRun(runId, "BLOCKED", unmet.join("; "));
     return false;
@@ -3466,7 +3467,7 @@ export class RunController {
       await new Promise((resolve) => setTimeout(resolve, Math.min(this.githubRetryMs, Math.max(1, deadline - Date.now()))));
       sha = await this.github.mergedSha(prNumber).catch(() => null);
     }
-    if (!sha) return this.blockRelease(runId, "merge", [`#${prNumber} has not merged; harness resume ${runId} continues delivery`]);
+    if (!sha) return this.blockRelease(runId, "merge", [`#${prNumber} has not merged; charrette resume ${runId} continues delivery`]);
     this.releaseResult(runId, "merge", "passed", [], sha);
 
     // Required deployment jobs may appear after the ordinary build is already green.
@@ -3488,7 +3489,7 @@ export class RunController {
     if (!revision.ok) return this.blockRelease(runId, "deploy", [revision.why], sha);
     this.releaseResult(runId, "deploy", "passed", [], sha);
 
-    const dir = path.join(this.repoPath, ".harness", runId, "release", sha);
+    const dir = path.join(statePaths(this.repoPath).dir, runId, "release", sha);
     mkdirSync(dir, { recursive: true });
     let output = "";
     let exitCode = 1;
@@ -3502,7 +3503,7 @@ export class RunController {
       this.activeProductionChecks.set(runId, abort);
       try {
         const result = await execFileP("sh", ["-c", spec!.release.productionCommand], {
-          cwd, env: { ...process.env, HARNESS_PROD_URL: run.config.prodUrl, HARNESS_DEPLOY_SHA: sha, HARNESS_PROD_TEST_SCOPE: run.config.delivery.productionTestScope },
+          cwd, env: { ...process.env, CHARRETTE_PROD_URL: run.config.prodUrl, CHARRETTE_DEPLOY_SHA: sha, CHARRETTE_PROD_TEST_SCOPE: run.config.delivery.productionTestScope },
           timeout: run.config.delivery.validationTimeoutMinutes * 60_000, maxBuffer: 16 * 1024 * 1024, signal: abort.signal,
         });
         output = `${result.stdout}\n${result.stderr}`;
@@ -3640,7 +3641,7 @@ export class RunController {
    * `seed` is the last answer on the record: its checks join `seen` the moment
    * a reading proves to be about the same commit, and never otherwise, so a
    * wait that starts inside a re-run's gap — a job somebody re-ran seconds
-   * before `harness resume` — is held to the head's full set too, while a
+   * before `charrette resume` — is held to the head's full set too, while a
    * head pushed since is judged on its own checks. `seen` is the one commit's:
    * a push that moves the head part-way through a wait starts it over, since
    * the new head can honestly carry fewer checks than the old.
@@ -3792,7 +3793,7 @@ export class RunController {
    *
    * The run cuts its integration branch once, at the start, and merges every
    * accepted task into it. Nothing brings the other direction back: `main` keeps
-   * moving, and on a long run the branch the harness publishes is one GitHub
+   * moving, and on a long run the branch the charrette publishes is one GitHub
    * will not merge. Every check in the run can still be green while that is
    * true, because every one of them judges this branch alone — `deterministicChecks`
    * in a worktree, QA on a task branch, the intent validator on the merged tree,
@@ -3957,7 +3958,7 @@ export class RunController {
     const prNumber = this.rollupPr(runId);
     if (prNumber === undefined) return;
     if (this.store.mergeStatus(runId)?.state === "mergeable") return;
-    // Whatever the harness last thought, a pull request a human has already
+    // Whatever the charrette last thought, a pull request a human has already
     // dealt with is not this method's business.
     const state = await (this.github.prState?.(prNumber) ?? Promise.resolve(null));
     if (state === "merged" || state === "closed") return;
@@ -4030,7 +4031,7 @@ export class RunController {
       state,
       baseBranch: run.config.baseBranch,
       // GitHub says whether it merges, never where it broke. The file list is
-      // only ever the one the harness found itself.
+      // only ever the one the charrette found itself.
       conflicts: state === "conflicting" ? local.conflicts : [],
       resolvedBy: state === "conflicting" || state === "behind" ? "none" : (local.resolvedBy as "already-current" | "merge" | "agent" | "none"),
       ts: Date.now(),
@@ -4052,7 +4053,7 @@ export class RunController {
         text:
           `#${prNumber} cannot be merged into ${run.config.baseBranch}: GitHub reports it as conflicting` +
           (local.state === "mergeable"
-            ? ` — the base moved again between the harness's own merge and the push, so this branch is already out of date. \`harness resume\` reconciles it and re-checks.`
+            ? ` — the base moved again between the charrette's own merge and the push, so this branch is already out of date. \`charrette resume\` reconciles it and re-checks.`
             : `. Nothing downstream of this pull request can happen until that is resolved.`),
         ts: Date.now(),
       });
@@ -4080,7 +4081,7 @@ export class RunController {
     // once the pull request is already open and reading as finished.
     const merge = await this.reconcileWithBase(runId, base);
 
-    // SEC-5: only the harness/<runId>/* namespace is ever pushed.
+    // SEC-5: only the charrette/<runId>/* namespace is ever pushed.
     await pushRunBranch(this.repoPath, this.wt.integrationBranch(runId));
 
     // Some of this run's work may have shipped already: an eager human can merge
@@ -4121,9 +4122,9 @@ export class RunController {
     const MAX_LISTED = 40;
     /** `- …and N more` for whatever a cap left out, or nothing when it left out nothing. */
     const andMore = (total: number, shown: number): string[] =>
-      total > shown ? [`- …and ${total - shown} more — the full list is in \`.harness/${runId}/REPORT.md\``] : [];
+      total > shown ? [`- …and ${total - shown} more — the full list is in \`.charrette/${runId}/REPORT.md\``] : [];
     const body = [
-      `${merged.length} task${merged.length === 1 ? "" : "s"} merged on the run's integration branch, one \`--no-ff\` merge commit each. Opened by harness — merge is always human.`,
+      `${merged.length} task${merged.length === 1 ? "" : "s"} merged on the run's integration branch, one \`--no-ff\` merge commit each. Opened by charrette — merge is always human.`,
       "",
       ...merged.map((t) => `- ${t.title} (QA iterations: ${t.qaIterations}${t.githubIssueNumber ? `, closes #${t.githubIssueNumber}` : ""})`),
       // The reviewer arrives with the validator's answer in hand, PASS or not —
@@ -4209,14 +4210,14 @@ export class RunController {
             ...merge.conflicts.slice(0, 20).map((f) => `- \`${f}\``),
             ...(merge.conflicts.length > 20 ? [`- …and ${merge.conflicts.length - 20} more`] : []),
             "",
-            `\`${base}\` moved while this run was working. The harness merged it into the run's`,
+            `\`${base}\` moved while this run was working. The charrette merged it into the run's`,
             "integration branch, gave an agent the conflict, and could not resolve it — so the",
             "merge was abandoned and this branch is exactly as the run left it. **It is held as a**",
             "**draft because of that**: there is no version of this pull request a reviewer can merge",
             "until the two are reconciled, and every check above judged this branch alone.",
             "",
             `To take it on by hand: \`git fetch origin ${base} && git merge origin/${base}\` in the run's`,
-            "integration worktree, then `harness resume`.",
+            "integration worktree, then `charrette resume`.",
           ]
         : []),
       ...(shipped.length
@@ -4242,7 +4243,7 @@ export class RunController {
      * edge fleet roll, and the session table's apply. The PR was flipped ready
      * anyway, because until now the only question asked here was whether the
      * tasks had stopped running. It was merged with the FAIL in its own
-     * description, and dns-project's CD shipped the application half of a change
+     * description, and the DNS service's CD shipped the application half of a change
      * whose infrastructure half was in the gap list — which is how a console
      * that had passed ten checks started answering 503 to every request.
      *
@@ -4261,7 +4262,7 @@ export class RunController {
      * exercised, because a task whose criteria are all satisfied against mocks
      * reaches it looking exactly like one that was run for real.
      *
-     * dns-project's `af60742` is what that costs. Its own commit message ends "NOT
+     * the DNS service's `af60742` is what that costs. Its own commit message ends "NOT
      * YET verified this session (turn budget ran out first)" and names both
      * halves of the outage — the live DynamoDB run it skipped, and the manifest
      * variable it talked itself out of adding. The information was there, in
@@ -4750,7 +4751,7 @@ export class RunController {
         sessionId: "advisor",
         text:
           `this task's completion probe looks wrong${why ? ` — ${why}` : ""}. It is checked before QA and no answer can make it pass. To change it:\n` +
-          `  harness probe ${taskId} ${next ? shellQuote(next) : "--clear"} --run ${runId} --why '...'`,
+          `  charrette probe ${taskId} ${next ? shellQuote(next) : "--clear"} --run ${runId} --why '...'`,
         ts: Date.now(),
       });
       return "";
@@ -4805,7 +4806,7 @@ export class RunController {
         text:
           `this task's acceptance criteria look unsatisfiable${why ? ` — ${why}` : ""}. QA grades against them and no answer can talk a worker past them.` +
           `${next.length < from.length ? ` The ${by} proposed dropping ${from.length - next.length} of them, which is not its to drop.` : ""} To change them:\n` +
-          `  harness criteria ${taskId} ${next.map(shellQuote).join(" ")} --run ${runId} --why '...'`,
+          `  charrette criteria ${taskId} ${next.map(shellQuote).join(" ")} --run ${runId} --why '...'`,
         ts: Date.now(),
       });
       return "";
@@ -4909,14 +4910,14 @@ export class RunController {
    * Kill anything still running in this run's worktrees before the run starts.
    *
    * The per-session sweep only catches what a session leaves behind while the
-   * harness is alive to notice. A harness killed by SIGTERM — or by the operator's
+   * charrette is alive to notice. A charrette killed by SIGTERM — or by the operator's
    * terminal closing, which is how most of them end — takes its sessions with it
    * and leaves their shells running: run 40da9337 was resumed with 37 of them
    * still writing to the database every later task's checks would read. So a
    * resume starts by clearing the ground it is about to work on.
    *
-   * Scoped to this run's own worktree tree, which is the harness's to clear.
-   * A second harness working a different repo is untouched.
+   * Scoped to this run's own worktree tree, which is the charrette's to clear.
+   * A second charrette working a different repo is untouched.
    */
   private async sweepOrphans(runId: string): Promise<void> {
     const root = path.join(this.wt.worktreeRoot(), runId);
@@ -4927,7 +4928,7 @@ export class RunController {
       runId,
       sessionId: "integrator",
       text:
-        `swept ${reaped.length} process${reaped.length === 1 ? "" : "es"} left over in this run's worktrees by an earlier harness process: ` +
+        `swept ${reaped.length} process${reaped.length === 1 ? "" : "es"} left over in this run's worktrees by an earlier charrette process: ` +
         reaped.map((r) => `${r.pid} ${r.command.slice(0, 60)}`).join("; "),
       ts: Date.now(),
     });
@@ -5029,7 +5030,7 @@ export class RunController {
   /**
    * Ask for a pit stop instead of waiting for one.
    *
-   * The operator watching the log has the one thing no gate in this harness can
+   * The operator watching the log has the one thing no gate in this charrette can
    * manufacture: a reason to look now. Everything else that opens a pit stop is
    * a boundary the plan crossed — an epic finished, a figure passed — and none
    * of those fire because the product started looking wrong on screen. Until
@@ -5076,7 +5077,7 @@ export class RunController {
   /**
    * Call off a requested pit stop that has not opened yet.
    *
-   * The cheapest undo in the harness, and the reason asking can be cheap: a
+   * The cheapest undo in the charrette, and the reason asking can be cheap: a
    * request that has not opened has spent nothing, so "never mind" costs
    * nothing either. Once the demo has started there is no undo here — that
    * money is spent, and the stop will open with whatever it found.
@@ -5094,7 +5095,7 @@ export class RunController {
    *
    * An operator who reads "QA rejected this three times" on issue #52 answers
    * it there — that is what the issue is for. Every one of those answers used
-   * to go nowhere, because the harness only ever wrote to GitHub. Each comment
+   * to go nowhere, because the charrette only ever wrote to GitHub. Each comment
    * is queued once, keyed by its comment id, so re-polling on every iteration
    * costs one request and never repeats itself into the prompt.
    *
@@ -5208,7 +5209,7 @@ export class RunController {
    * model it does not recognise gets the default however high the request was.
    * Run 3ae58e02 lost a phase-B attempt to exactly that and the retry told the
    * planner to write less, because nothing had said the ceiling was half what
-   * the harness believed. The run continues either way — the two-phase split
+   * the charrette believed. The run continues either way — the two-phase split
    * exists so it can — but the operator now knows which of the two it is.
    */
   private async warnOutputCeiling(runId: string): Promise<void> {
@@ -5265,7 +5266,7 @@ export class RunController {
         lastReason = this.failedAttempt(runId, attempt, result.died, lastPath, "error");
         continue;
       }
-      lastPath = this.saveAttempt(path.join(this.repoPath, ".harness", runId), `docs-${attempt}`, result.resultText);
+      lastPath = this.saveAttempt(path.join(statePaths(this.repoPath).dir, runId), `docs-${attempt}`, result.resultText);
 
       const prdMarkdown = extractSection(result.resultText, "prd");
       const conventionsMarkdown = extractSection(result.resultText, "conventions");
@@ -5371,7 +5372,7 @@ export class RunController {
         // Always keep the raw output: an unusable plan is expensive, and diagnosing
         // it from a one-line error is impossible. The first message of an attempt
         // keeps the name it has always had; continuations extend it.
-        lastPath = this.saveAttempt(path.join(this.repoPath, ".harness", runId), batch > 1 ? `dag-${attempt}-${batch}` : `dag-${attempt}`, result.resultText);
+        lastPath = this.saveAttempt(path.join(statePaths(this.repoPath).dir, runId), batch > 1 ? `dag-${attempt}-${batch}` : `dag-${attempt}`, result.resultText);
 
         const read = this.readBatch(result.resultText, lastTruncated);
         if ("reason" in read) {
@@ -5426,7 +5427,7 @@ export class RunController {
    * Both planning phases retry — a rejected plan is nearly always a shape
    * problem the next attempt fixes — but that only ever covered output the
    * planner *returned*. A session that died mid-message threw straight past the
-   * retry loop and out of `startRun`, ending the run with `harness: fatal` and
+   * retry loop and out of `startRun`, ending the run with `charrette: fatal` and
    * discarding everything the intake and PRD phases had already paid for. A
    * crash is a worse attempt than a bad plan, not a different kind of event.
    *
@@ -5488,7 +5489,7 @@ export class RunController {
 
   private persistPlan(runId: string, plan: Plan): void {
     const run = this.store.getRun(runId)!;
-    const dir = path.join(this.repoPath, ".harness", runId);
+    const dir = path.join(statePaths(this.repoPath).dir, runId);
     mkdirSync(dir, { recursive: true });
     const prdPath = path.join(dir, "PRD.md");
     writeFileSync(prdPath, plan.prdMarkdown);
@@ -5601,7 +5602,7 @@ export class RunController {
         task.id,
         task.title,
         `${task.spec}\n\n**Acceptance criteria**\n${task.acceptanceCriteria.map((c) => `- [ ] ${c}`).join("\n")}`,
-        ["harness"]
+        ["charrette"]
       );
       if (issue) {
         this.store.updateTask(runId, task.id, { githubIssueNumber: issue.number });
@@ -5630,7 +5631,7 @@ export class RunController {
     // forge to `skillsDirs` themselves indexes it once.
     const skills = indexSkills([...run.config.skillsDirs, forgeDir(this.repoPath)]);
 
-    // A task still marked in-flight here belongs to a harness process that died
+    // A task still marked in-flight here belongs to a charrette process that died
     // mid-task: this controller is the only runner, so nothing can actually be
     // WORKING or in QA when the loop starts. Requeue it — its worktree still
     // holds every committed iteration — rather than leaving a state the
@@ -5644,10 +5645,10 @@ export class RunController {
               // the merge. Saying so keeps the worker from re-deriving a task it
               // has already completed, and the loop it re-enters ends in the
               // integrate() call that was interrupted.
-              "The previous session for this task was interrupted (the harness process died) after QA accepted the work but before it merged into the integration branch. The work in this worktree is complete and already passed QA — inspect git log first, confirm it is still what the task asked for, and do not rewrite it."
-            : "The previous session for this task was interrupted (the harness process died mid-task). Inspect git log in this worktree first: earlier iterations may already contain most or all of the work — verify it and finish."
+              "The previous session for this task was interrupted (the charrette process died) after QA accepted the work but before it merged into the integration branch. The work in this worktree is complete and already passed QA — inspect git log first, confirm it is still what the task asked for, and do not rewrite it."
+            : "The previous session for this task was interrupted (the charrette process died mid-task). Inspect git log in this worktree first: earlier iterations may already contain most or all of the work — verify it and finish."
         );
-        this.store.transitionTask(runId, t.id, "READY", "requeued: the previous harness process died mid-task");
+        this.store.transitionTask(runId, t.id, "READY", "requeued: the previous charrette process died mid-task");
       }
     }
 
@@ -5857,7 +5858,7 @@ export class RunController {
     const tasks = this.store.listTasks(runId);
     const history = this.store.pitStopHistory(runId, run.createdAt);
     const number = history.count + 1;
-    const dir = path.join(this.repoPath, ".harness", runId, "pitstops", String(number));
+    const dir = path.join(statePaths(this.repoPath).dir, runId, "pitstops", String(number));
     mkdirSync(dir, { recursive: true });
 
     const byId = new Map(tasks.map((t) => [t.id, t]));
@@ -5878,7 +5879,7 @@ export class RunController {
 
     // A stop with no demo runs no agents at all, so it costs nothing and opens
     // instantly — which is the only reason it is safe to put one in front of
-    // every `harness resume`, including the resume of a run already at its cap.
+    // every `charrette resume`, including the resume of a run already at its cap.
     const demo = withDemo ? await this.runDemo(runId, run, number, dir, allMerged.join("\n") || "(nothing yet)", upcoming.join("\n"), question) : null;
     const reviewed = demo
       ? // Every lens, on a stop the operator asked for. The staging in
@@ -5969,8 +5970,8 @@ export class RunController {
       action: decision.action,
       // Not truncated. The 2000-character cap that used to be here cut the
       // decision mid-sentence, and the event is the only copy anything reads
-      // programmatically — `harness diagnose`, the dashboard, and anyone
-      // querying the store go here, not to REPORT.md. On waf-adjacent run
+      // programmatically — `charrette diagnose`, the dashboard, and anyone
+      // querying the store go here, not to REPORT.md. On rust-service-adjacent run
       // 6dfc504b it severed the third of three blocking questions a reviewer
       // had written for the operator, and a decision that reads as two
       // questions when it was three is worse than one that is obviously
@@ -6047,7 +6048,7 @@ export class RunController {
    * Read in one place and handed to both the closing pit stop and the closing
    * gate, so the operator is asked about the same list the run is then held
    * on. Every entry in `unmet` was, in the runs this exists for, a clause in a
-   * sentence that declared the run finished: waf de2cb7aa's closing line read
+   * sentence that declared the run finished: rust-service de2cb7aa's closing line read
    * "1 pull request open for review; 17 never started; CI green; intent check
    * passed" over a red acceptance suite, and ledger-app a8df0107's read "no
    * pull requests opened; intent check found 2 gaps". Published every time it
@@ -6223,7 +6224,7 @@ export class RunController {
   }
 
   /**
-   * The pit stop `harness resume` opens on a parked run, before it dispatches
+   * The pit stop `charrette resume` opens on a parked run, before it dispatches
    * anything. Returns true if the operator parked it again.
    *
    * No demo and no reviewers, so it is free and instant. That is the point: the
@@ -6235,7 +6236,7 @@ export class RunController {
    *
    * Always the operator's to answer, whatever `pitStop.decidedBy` names: a
    * skill deciding is a bound on how long a run waits for an absent human, and
-   * a human who has just typed `harness resume` is not absent.
+   * a human who has just typed `charrette resume` is not absent.
    */
   private async resumePitStop(runId: string): Promise<boolean> {
     const run = this.store.getRun(runId)!;
@@ -6268,7 +6269,7 @@ export class RunController {
    * Everything before this reads: QA judged each task inside its own worktree,
    * the acceptance suite runs the repository's own tests, the intent validator
    * is forbidden to start anything, and the production validator needs a
-   * deployed URL. So across waf and ledger-app — five runs, $4,763, 510 merged
+   * deployed URL. So across rust-service and ledger-app — five runs, $4,763, 510 merged
    * tasks — nothing ever started the product and used it, and both shipped
    * "done" having never run (issue #116).
    *
@@ -6289,7 +6290,7 @@ export class RunController {
     if (!run.config.live.enabled) return;
     // A run with no specification at all has opted out of every gate derived
     // from one — the acceptance gate returns null for exactly the same case,
-    // and holding a run here that was never specified would be the harness
+    // and holding a run here that was never specified would be the charrette
     // inventing a standard nobody agreed to. A specification that exists and
     // named no path is a different answer, and it is given below.
     if (!spec) return;
@@ -6314,7 +6315,7 @@ export class RunController {
       return;
     }
 
-    const dir = path.join(this.repoPath, ".harness", runId, "live");
+    const dir = path.join(statePaths(this.repoPath).dir, runId, "live");
     mkdirSync(dir, { recursive: true });
     const steps = spec.criticalPath.steps;
     let wtPath: string | null = null;
@@ -6606,7 +6607,7 @@ export class RunController {
   }
 
   /**
-   * How many of a demo's claimed commands the harness will repeat.
+   * How many of a demo's claimed commands the charrette will repeat.
    *
    * Each one can be a full test suite, and a demo that lists a dozen would turn
    * a checkpoint into a second CI run. Anything past the cap is reported as
@@ -6641,14 +6642,14 @@ export class RunController {
         type: "agent.log",
         runId,
         sessionId: "integrator",
-        text: `the demo claimed ${runnable.length} commands; the harness re-ran the first ${willRun.length} and reported the rest as unverified`,
+        text: `the demo claimed ${runnable.length} commands; the charrette re-ran the first ${willRun.length} and reported the rest as unverified`,
         ts: Date.now(),
       });
     }
     return checkCommands(
       claims,
       (command) => results.get(command) ?? null,
-      `the harness re-runs at most ${RunController.MAX_VERIFIED_COMMANDS} commands per pit stop, and this one was past that`
+      `the charrette re-runs at most ${RunController.MAX_VERIFIED_COMMANDS} commands per pit stop, and this one was past that`
     );
   }
 
@@ -6916,7 +6917,7 @@ export class RunController {
     const text = decision.feedback.trim();
     if (decision.action === "continue" || decision.action === "stop" || !text) return [];
     // Parked tasks are targets too. They are terminal for the scheduler, but not
-    // for the operator: `harness resume` offers each one back, and a queued note
+    // for the operator: `charrette resume` offers each one back, and a queued note
     // is waiting when it restarts. The alternative is that someone who writes
     // about the parked half of the product at a pit stop writes into nothing,
     // which is precisely the failure this whole feature exists to end.
@@ -7235,7 +7236,7 @@ export class RunController {
    * covers this", which until now dispatched the worker cold and unteachable.
    * When it fires, a read-only skillsmith session drafts a skill (or extends
    * a previously forged one, or declines), and skillForge.ts — code, not the
-   * agent — validates and installs it under `.harness/skills/`, keeping the
+   * agent — validates and installs it under `.charrette/skills/`, keeping the
    * PRD's rule that no agent writes the skills registry.
    *
    * The forged skill is pushed into the run's shared index in place, so a
@@ -7276,7 +7277,7 @@ export class RunController {
         prompt: skillsmithPrompt(task.title, task.spec, task.acceptanceCriteria, near, prior),
         cwd: this.repoPath,
         // It reads the repository to ground its claims; the draft comes back
-        // as JSON and the harness does the writing.
+        // as JSON and the charrette does the writing.
         disallowedTools: ["Write", "Edit", "NotebookEdit"],
         maxTurns: 25,
         budgetCheck: () => this.checkStops(runId),
@@ -7470,7 +7471,7 @@ export class RunController {
      * Merges handed back to the worker so far, and branches that arrived
      * carrying nothing. Read from the task rather than started at zero: these
      * are the two counters that end a loop, and as locals they were reset by
-     * every restart of the harness process — so a task repeating the identical
+     * every restart of the charrette process — so a task repeating the identical
      * failure believed each attempt was its first, forever. Written back on
      * every increment, and reset only where `qaIterations` is.
      */
@@ -7582,7 +7583,7 @@ export class RunController {
           `The operator sent feedback on this task — follow it over anything that contradicts it:\n${queuedFeedback}`;
       }
       // Sent back enough times that the next attempt runs on the top rung.
-      // Read from the task row rather than a local so a restart of the harness
+      // Read from the task row rather than a local so a restart of the charrette
       // does not forget how many times this task has already failed.
       if (task.qaIterations >= run.config.heavyTierAfterRejections) {
         escalateToHeavy(workerSession ?? taskId, `it was sent back ${task.qaIterations} time(s), which is the heavyTierAfterRejections bound`);
@@ -7740,7 +7741,7 @@ export class RunController {
       }
       if (!delta.files.length) {
         const foreign = foreignRepoPaths(task, this.repoPath);
-        // An empty branch the harness can explain from its own records, before
+        // An empty branch the charrette can explain from its own records, before
         // anything charges the task for it.
         //
         // The sweep that ends a session kills everything still running in the
@@ -7749,7 +7750,7 @@ export class RunController {
         // with that command still going. Run bc691359's `m1-live-block-witness`
         // did exactly that: `bench/scripts/m1-live-smoke.sh > log 2>&1 &`, a
         // Monitor loop, "Still building — no action needed", and the session
-        // closed `done` 49 seconds in. The harness then killed the script and
+        // closed `done` 49 seconds in. The charrette then killed the script and
         // its `docker run`, read the empty branch, and counted the fifth empty
         // delivery. Eight of those and the task parked on a question the
         // operator had no way to answer, about work that had never been allowed
@@ -8330,7 +8331,7 @@ export class RunController {
     this.bus.publish({ type: "git.merged", runId, taskId, branch: task.branch ?? "", sha: merge.sha, ts: Date.now() });
     // The PR is NOT opened here. Merging is continuous; publishing waits until
     // the whole run has been validated against the operator's intent (openPrs),
-    // so no reviewer ever sees a PR the harness has not finished judging.
+    // so no reviewer ever sees a PR the charrette has not finished judging.
     void run;
     return { ok: true };
   }
@@ -8366,7 +8367,7 @@ export class RunController {
   /**
    * Say on the task's issue what became of it, now that the task is finished with.
    *
-   * The harness filed an issue per task and then never wrote to it again. After a
+   * The charrette filed an issue per task and then never wrote to it again. After a
    * thirty-task run every issue still read as untouched — one that merged twelve
    * hours ago looked exactly like one that never started, and the only place the
    * outcome existed was a sqlite file on the operator's laptop.
@@ -8424,7 +8425,7 @@ export class RunController {
         // `park()` always records a reason, so the literal is unreachable; it is
         // there so a future path that parks without one still says something.
         /* v8 ignore next */
-        `**Parked for a human** — ${task.errorSummary || why || "the harness could not finish it"}\n\n` +
+        `**Parked for a human** — ${task.errorSummary || why || "the charrette could not finish it"}\n\n` +
           `${where} While the run is still going, a reply in this thread is picked up as guidance and the task is dispatched again.`
       );
       return;
@@ -8448,7 +8449,7 @@ export class RunController {
     if (!this.github.enabled || !task.branch) return;
     if (!base) throw new Error("the run has no base branch (detached HEAD) — nothing to open a PR against");
 
-    // SEC-5: push only harness/<runId>/* branches, never the base branch.
+    // SEC-5: push only charrette/<runId>/* branches, never the base branch.
     // Nothing is ever forced; `pushRunBranch` explains a rejection.
     await pushRunBranch(this.repoPath, task.branch);
     await pushRunBranch(this.repoPath, this.wt.integrationBranch(runId));
@@ -8462,7 +8463,7 @@ export class RunController {
       task.branch,
       base,
       task.title,
-      `Implements ${task.title}.${task.githubIssueNumber ? `\n\nCloses #${task.githubIssueNumber}` : ""}\n\nQA iterations: ${task.qaIterations}. Opened by harness — merge is always human.`
+      `Implements ${task.title}.${task.githubIssueNumber ? `\n\nCloses #${task.githubIssueNumber}` : ""}\n\nQA iterations: ${task.qaIterations}. Opened by charrette — merge is always human.`
     );
     if (!pr) {
       this.bus.publish({
@@ -8489,7 +8490,7 @@ export class RunController {
    * answers "main" there, which is the truth: the branch exists, it just has
    * nothing on it yet.
    *
-   * That distinction is worth a whole run. `harness run` in a freshly
+   * That distinction is worth a whole run. `charrette run` in a freshly
    * `git init`-ed repository recorded baseBranch "" and froze it into the
    * config; three days and 60 merged tasks later every pull request failed to
    * open with "no base branch (detached HEAD)" — about a repository that had
@@ -8521,7 +8522,7 @@ export class RunController {
    * Runs the operator has asked to stop. Held here rather than on the run row
    * because it must be readable on every message without a database round trip,
    * and because it is a request about *this process*: a pause does not outlive
-   * the harness that was asked for it, and a run picked up by `resume` is by
+   * the charrette that was asked for it, and a run picked up by `resume` is by
    * definition no longer paused.
    */
   private readonly pauseAsked = new Set<string>();
@@ -8533,7 +8534,7 @@ export class RunController {
   /**
    * Stop the run at the next message of every session, and leave it resumable.
    *
-   * Reached from the dashboard's Pause button and `harness pause`, which is why
+   * Reached from the dashboard's Pause button and `charrette pause`, which is why
    * it answers with a sentence rather than throwing: the caller is an operator
    * waiting on a line of text, not a code path that can handle an exception.
    *
@@ -8784,7 +8785,7 @@ export class RunController {
     };
     this.bus.publish({ type: "run.gate_opened", runId, gateId, kind: "subscription", payload, ts: Date.now() });
 
-    // No handler is a harness embedded somewhere with nobody to ask. It keeps
+    // No handler is a charrette embedded somewhere with nobody to ask. It keeps
     // going — the alert is on the record, and parking a run that nobody can
     // resume would turn a warning into an outage.
     const choice = (await this.gates.resolveSubscriptionGate?.(payload)) ?? { action: "continue" as const };
@@ -8809,7 +8810,7 @@ export class RunController {
       // parked, and driven past — which is a run that carries on spending the
       // exhausted subscription, having been told to stop, over a typo. As a
       // pause it stops the run and says which variable to export, and
-      // `harness resume --account` is the fix.
+      // `charrette resume --account` is the fix.
       let env: Record<string, string>;
       try {
         env = accountEnv(config, choice.account);
@@ -8864,7 +8865,7 @@ export class RunController {
   /**
    * Point one role at a different model for the rest of the run.
    *
-   * `harness resume -m worker=…` could already do this, and that is exactly the
+   * `charrette resume -m worker=…` could already do this, and that is exactly the
    * problem it leaves: re-routing meant stopping the run. The operator who
    * wants it is watching spend climb against work that is not moving, and the
    * remaining tasks — the ones that could still be made cheaper — are the ones
@@ -8873,7 +8874,7 @@ export class RunController {
    *
    * Only agents spawned after it. A session already running keeps the model it
    * was spawned on, because a model cannot be changed mid-conversation without
-   * throwing away the prompt cache that conversation is paying for — the harness
+   * throwing away the prompt cache that conversation is paying for — the charrette
    * re-routes by spawning fresh, never by switching under a live session.
    *
    * The pinned roles hold, and they hold *here* rather than at dispatch:
@@ -8896,7 +8897,7 @@ export class RunController {
     // from the click that caused it.
     //
     // Only the role being moved. Checking the whole table looks more thorough
-    // and is worse: the rest of it was validated at `harness run` and has not
+    // and is worse: the rest of it was validated at `charrette run` and has not
     // changed, so the only thing a full check can add here is a complaint about
     // a role the operator did not just touch — which is what it did the day
     // `reviewer` was pinned to Google, answering "move the worker to Haiku"
@@ -9038,7 +9039,7 @@ export class RunController {
 
   private readConventions(runId: string): string {
     try {
-      return readFileSync(path.join(this.repoPath, ".harness", runId, "CONVENTIONS.md"), "utf8");
+      return readFileSync(path.join(statePaths(this.repoPath).dir, runId, "CONVENTIONS.md"), "utf8");
     } catch {
       return "Follow the existing repository conventions.";
     }

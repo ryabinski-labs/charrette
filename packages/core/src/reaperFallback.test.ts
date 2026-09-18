@@ -142,7 +142,7 @@ describe("finding working directories without lsof", () => {
     const grandparent = 999_002;
     commandsAnswer({
       ps: psTable([
-        [process.pid, parent, "??", "node harness"],
+        [process.pid, parent, "??", "node charrette"],
         [parent, grandparent, "??", "sh"],
         [grandparent, 1, "??", "login"],
       ]),
@@ -205,7 +205,7 @@ describe("a sweep that cannot run at all", () => {
     const gone = 2_147_483_646;
     commandsAnswer({ ps: psTable([[gone, 1, "??", "npm test"]]), lsof: `p${gone}\nn/tmp/worktree\n` });
 
-    // No graceMs: the default is what every caller in the harness actually
+    // No graceMs: the default is what every caller in the charrette actually
     // gets, and it is the one number here nobody passes explicitly.
     const started = Date.now();
     await expect(reapUnder("/tmp/worktree")).resolves.toEqual([

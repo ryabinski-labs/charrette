@@ -5,7 +5,7 @@ import { ReleaseVerification } from "./delivery.js";
  * The run's executable specification: what was promised, and the scenario that
  * would catch it if the promise were broken.
  *
- * Every gate in this harness before now judged prose against prose. The
+ * Every gate in this charrette before now judged prose against prose. The
  * planner's acceptance criteria are sentences, QA reads a diff and decides
  * whether the sentences are satisfied, and the intent check reads the merged
  * whole and decides whether it matches the assignment. All three are the same
@@ -18,12 +18,12 @@ import { ReleaseVerification } from "./delivery.js";
  * and — unlike `completionProbe`, which is one command a planner thought of —
  * it comes from a systematic pass over the brief before anyone is paid to build
  * anything. The skill that derives it is `prd-to-tdd`; this is the shape the
- * harness keeps, and the vocabulary the plan, QA, the acceptance gate and the
+ * charrette keeps, and the vocabulary the plan, QA, the acceptance gate and the
  * completion report all speak.
  *
  * Parsed from the spec agent's JSON rather than from the artifact's YAML. The
  * artifact is the skill's format and the skill owns it; re-implementing its
- * schema here would give the harness a second opinion about what a scenario is,
+ * schema here would give the charrette a second opinion about what a scenario is,
  * and the two would drift.
  */
 
@@ -75,7 +75,7 @@ export type SpecScenario = z.infer<typeof SpecScenario>;
  * interrupted one question into "real vendor accounts, sandbox adapters, or
  * fakes only?" and resumed straight past it. `prd-to-tdd` refuses to invent an
  * oracle for exactly that kind of gap and records it instead — which makes its
- * open questions and the harness's intake questions the same object, asked at
+ * open questions and the charrette's intake questions the same object, asked at
  * the same moment, of the same person.
  */
 export const SpecOpenQuestion = z.object({
@@ -107,7 +107,7 @@ export type SpecCommands = z.infer<typeof SpecCommands>;
 
 /**
  * The shortest sequence a real user performs that makes the product worth
- * having. ledger-app: connect a Stripe account, ingest, produce a return. waf:
+ * having. ledger-app: connect a Stripe account, ingest, produce a return. rust-service:
  * install on a cluster, send an attack, get a 403.
  *
  * Named at intake, from the brief, before any code exists — for the same

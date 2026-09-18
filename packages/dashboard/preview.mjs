@@ -1,12 +1,12 @@
-// Throwaway visual-QA harness: seeds a store with a realistic event stream and
+// Throwaway visual-QA charrette: seeds a store with a realistic event stream and
 // serves the dashboard so the layout can be inspected in a browser.
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { Bus, Store } from "@harness/core";
+import { Bus, Store } from "@charrette/core";
 import { Dashboard } from "./dist/index.js";
 
-const dir = mkdtempSync(path.join(tmpdir(), "harness-preview-"));
+const dir = mkdtempSync(path.join(tmpdir(), "charrette-preview-"));
 const store = new Store(path.join(dir, "h.db"));
 const bus = new Bus(store);
 const runId = "313e2512";
@@ -23,7 +23,7 @@ store.createRun({
   state: "CREATED",
   prdPath: null,
   planHash: null,
-  integrationBranch: `harness/${runId}/main`,
+  integrationBranch: `charrette/${runId}/main`,
   config: {
     maxParallelWorkers: 1, qaIterationCap: 3, workerRespawnCap: 3, taskWallClockMinutes: 45,
     models: { intake: "claude-opus-5", planner: "claude-opus-5", worker: "claude-sonnet-5", qa: "claude-sonnet-5", integrator: "claude-sonnet-5" },
@@ -71,20 +71,20 @@ store.insertTasks(
   runId,
   [{ id: "limiter", title: "Rate limiter" }],
   [
-    { id: "token-bucket", epicId: "limiter", title: "Token-bucket store with per-user keys", spec: "An in-process token bucket keyed on request.user.id, refilled from a monotonic clock so a system clock change cannot hand out free requests.", acceptanceCriteria: ["Refill is driven by process.hrtime, not Date.now", "Two concurrent requests cannot both spend the last token", "Keys are evicted once idle for longer than the window"], dependsOn: [], state: "MERGED", branch: `harness/${runId}/token-bucket`, worktreePath: null, githubIssueNumber: 41, prNumber: 118, qaIterations: 1, respawns: 0, assignedSkills: [{ name: "testing-node", sha256: "a".repeat(64), mode: "full" }], errorSummary: null },
-    { id: "fastify-plugin", epicId: "limiter", title: "Fastify plugin wiring the limiter into the request lifecycle", spec: "", acceptanceCriteria: [], dependsOn: ["token-bucket"], state: "WORKING", branch: `harness/${runId}/fastify-plugin`, worktreePath: null, githubIssueNumber: 42, prNumber: null, qaIterations: 2, respawns: 0, assignedSkills: [], errorSummary: null },
-    { id: "metrics", epicId: "limiter", title: "Counter for throttled requests", spec: "Increment a per-route counter whenever the limiter rejects a request, exposed on the existing /metrics endpoint.", acceptanceCriteria: ["The counter carries the route as a label", "No allocation on the hot path when the request is allowed"], dependsOn: ["token-bucket"], state: "ACCEPTED", branch: `harness/${runId}/metrics`, worktreePath: null, githubIssueNumber: 45, prNumber: 119, qaIterations: 1, respawns: 0, assignedSkills: [], errorSummary: null },
-    { id: "429-response", epicId: "limiter", title: "429 response with Retry-After header", spec: "", acceptanceCriteria: [], dependsOn: ["fastify-plugin"], state: "PENDING", branch: null, worktreePath: null, githubIssueNumber: 43, prNumber: null, qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null },
-    { id: "docs", epicId: "limiter", title: "Document the limits in the API reference", spec: "", acceptanceCriteria: [], dependsOn: ["429-response"], state: "NEEDS_HUMAN", branch: null, worktreePath: null, githubIssueNumber: 44, prNumber: null, qaIterations: 3, respawns: 1, assignedSkills: [], errorSummary: "QA iteration cap: the reference page has no section for per-endpoint limits and the worker kept inventing one." },
+    { id: "token-bucket", epicId: "limiter", title: "Token-bucket store with per-user keys", spec: "An in-process token bucket keyed on request.user.id, refilled from a monotonic clock so a system clock change cannot hand out free requests.", acceptanceCriteria: ["Refill is driven by process.hrtime, not Date.now", "Two concurrent requests cannot both spend the last token", "Keys are evicted once idle for longer than the window"], dependsOn: [], state: "MERGED", branch: `charrette/${runId}/token-bucket`, worktreePath: null, githubIssueNumber: 41, prNumber: 118, qaIterations: 1, respawns: 0, assignedSkills: [{ name: "testing-node", sha256: "a".repeat(64), mode: "full" }], errorSummary: null, touchedPaths: [], estimatedSize: "M" },
+    { id: "fastify-plugin", epicId: "limiter", title: "Fastify plugin wiring the limiter into the request lifecycle", spec: "", acceptanceCriteria: [], dependsOn: ["token-bucket"], state: "WORKING", branch: `charrette/${runId}/fastify-plugin`, worktreePath: null, githubIssueNumber: 42, prNumber: null, qaIterations: 2, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [], estimatedSize: "M" },
+    { id: "metrics", epicId: "limiter", title: "Counter for throttled requests", spec: "Increment a per-route counter whenever the limiter rejects a request, exposed on the existing /metrics endpoint.", acceptanceCriteria: ["The counter carries the route as a label", "No allocation on the hot path when the request is allowed"], dependsOn: ["token-bucket"], state: "ACCEPTED", branch: `charrette/${runId}/metrics`, worktreePath: null, githubIssueNumber: 45, prNumber: 119, qaIterations: 1, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [], estimatedSize: "M" },
+    { id: "429-response", epicId: "limiter", title: "429 response with Retry-After header", spec: "", acceptanceCriteria: [], dependsOn: ["fastify-plugin"], state: "PENDING", branch: null, worktreePath: null, githubIssueNumber: 43, prNumber: null, qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [], estimatedSize: "M" },
+    { id: "docs", epicId: "limiter", title: "Document the limits in the API reference", spec: "", acceptanceCriteria: [], dependsOn: ["429-response"], state: "NEEDS_HUMAN", branch: null, worktreePath: null, githubIssueNumber: 44, prNumber: null, qaIterations: 3, respawns: 1, assignedSkills: [], errorSummary: "QA iteration cap: the reference page has no section for per-endpoint limits and the worker kept inventing one.", touchedPaths: [], estimatedSize: "M" },
   ]
 );
 store.transitionRun(runId, "PLAN_REVIEW");
 store.transitionRun(runId, "EXECUTING", "plan approved");
 bus.publish({ type: "github.issue_created", runId, taskId: "token-bucket", issueNumber: 41, url: "", ts: at(2) });
-bus.publish({ type: "git.worktree_created", runId, taskId: "token-bucket", path: "", branch: `harness/${runId}/token-bucket`, ts: at(1) });
+bus.publish({ type: "git.worktree_created", runId, taskId: "token-bucket", path: "", branch: `charrette/${runId}/token-bucket`, ts: at(1) });
 bus.publish({ type: "skills.injected", runId, taskId: "token-bucket", skills: [{ name: "testing-node", sha256: "a".repeat(64), mode: "full" }], ts: at(1) });
 bus.publish({ type: "task.qa_verdict", runId, taskId: "token-bucket", verdict: "PASS", iteration: 1, detail: { verdict: "PASS", notes: "Bucket refill is monotonic-clock based and the concurrency test passes." }, ts: at(30) });
-bus.publish({ type: "git.merged", runId, taskId: "token-bucket", branch: `harness/${runId}/token-bucket`, sha: "9f31c0aa77", ts: at(2) });
+bus.publish({ type: "git.merged", runId, taskId: "token-bucket", branch: `charrette/${runId}/token-bucket`, sha: "9f31c0aa77", ts: at(2) });
 bus.publish({ type: "github.pr_opened", runId, taskId: "token-bucket", prNumber: 118, url: "", ts: at(1) });
 
 bus.publish({ type: "agent.spawned", runId, taskId: "fastify-plugin", sessionId: worker, role: "worker", model: "claude-sonnet-5", ts: at(2) });
@@ -115,6 +115,26 @@ if (process.env.GATE) {
     "- [token-bucket] Token-bucket store with per-user keys (deps: none)\n- [fastify-plugin] Fastify plugin wiring the limiter (deps: token-bucket)\n- [429-response] 429 response with Retry-After header (deps: fastify-plugin)\n- [docs] Document the limits in the API reference (deps: 429-response)"
   );
 }
+// How fast the fake worker emits. The default reads like a real run; a shorter
+// tick is for recording, where four seconds of an unchanging feed is dead air.
+const TICK = Number(process.env.TICK ?? 4000);
+
+// It used to republish one identical Bash line forever, which filled the feed
+// with a wall of the same command and told a reader nothing about what the
+// panel actually looks like in use. A worker reads, edits, runs and reports;
+// the preview should too, so the layout is judged against realistic variety.
+const LOOP = [
+  ["Read", { file_path: `${repo}/src/plugins/limiter.ts` }],
+  ["Bash", { command: "pnpm vitest run test/rate-limit.test.ts" }],
+  ["Edit", { file_path: `${repo}/src/plugins/limiter.ts` }],
+  ["Grep", { pattern: "onRequest", path: `${repo}/src` }],
+  ["Bash", { command: "pnpm tsc --noEmit" }],
+  ["Write", { file_path: `${repo}/test/retry-after.test.ts` }],
+  ["Bash", { command: "git commit -m 'limiter: register before routes'" }],
+];
+let n = 0;
 setInterval(() => {
-  bus.publish({ type: "agent.tool_use", runId, taskId: "fastify-plugin", sessionId: worker, tool: "Bash", summary: JSON.stringify({ command: "pnpm vitest run --reporter dot" }), ts: Date.now() });
-}, 4000);
+  const [tool, args] = LOOP[n % LOOP.length];
+  n += 1;
+  bus.publish({ type: "agent.tool_use", runId, taskId: "fastify-plugin", sessionId: worker, tool, summary: JSON.stringify(args), ts: Date.now() });
+}, TICK);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatBuild, harnessBuild } from "./build.js";
+import { formatBuild, charretteBuild } from "./build.js";
 
 describe("formatBuild", () => {
   it("names the version and the commit that produced it", () => {
@@ -20,12 +20,12 @@ describe("formatBuild", () => {
   });
 });
 
-describe("harnessBuild", () => {
+describe("charretteBuild", () => {
   it("reports this process's own build, and reports the same one twice", () => {
-    const first = harnessBuild();
+    const first = charretteBuild();
     // Resolved once on purpose: Node loaded this build at process start and
     // cannot load another, so a second answer would be a bug, not a refresh.
-    expect(harnessBuild()).toBe(first);
+    expect(charretteBuild()).toBe(first);
     expect(first).toMatch(/^\d+\.\d+\.\d+(@[0-9a-f]{7}\+?)?$/);
   });
 });

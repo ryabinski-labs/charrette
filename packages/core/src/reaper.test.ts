@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { processesUnder, reapUnder, toolingMarkers } from "./reaper.js";
 
 function dir(name: string): string {
-  return realpathSync(mkdtempSync(path.join(tmpdir(), `harness-${name}-`)));
+  return realpathSync(mkdtempSync(path.join(tmpdir(), `charrette-${name}-`)));
 }
 
 const started: number[] = [];
@@ -125,7 +125,7 @@ describe("orphan reaper", () => {
   });
 
   it("does not throw on a path that does not exist", async () => {
-    expect(await reapUnder(path.join(tmpdir(), "harness-does-not-exist-9d3f"), { graceMs: 50 })).toEqual([]);
+    expect(await reapUnder(path.join(tmpdir(), "charrette-does-not-exist-9d3f"), { graceMs: 50 })).toEqual([]);
   });
 });
 

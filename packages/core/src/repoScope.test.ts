@@ -12,7 +12,7 @@ import { foreignRepoPaths, validatePlanScope } from "./repoScope.js";
  * `/tmp` and gets switched off. Half these cases exist to hold that line.
  */
 
-const REPO = "/Users/dev/projects/api-service-new-ui";
+const REPO = "/Users/dev/projects/web-client";
 const task = (over: Partial<{ id: string; spec: string; acceptanceCriteria: string[]; touchedPaths: string[] }> = {}) => ({
   id: "task-a",
   spec: "do the thing",
@@ -23,8 +23,8 @@ const task = (over: Partial<{ id: string; spec: string; acceptanceCriteria: stri
 
 describe("a task written against a sibling checkout", () => {
   it("is found from the spec, named as the repository rather than the file", () => {
-    const t = task({ spec: "In `/Users/dev/projects/api-service-new-api/`, add the api-service_delivery_log table." });
-    expect(foreignRepoPaths(t, REPO)).toEqual(["/Users/dev/projects/api-service-new-api"]);
+    const t = task({ spec: "In `/Users/dev/projects/api-service/`, add the delivery_log table." });
+    expect(foreignRepoPaths(t, REPO)).toEqual(["/Users/dev/projects/api-service"]);
   });
 
   it("is found through a `~` path, the way the planner actually wrote it", () => {
@@ -36,11 +36,11 @@ describe("a task written against a sibling checkout", () => {
 
   it("reports the repository once however many of its files are named", () => {
     const t = task({
-      spec: "Edit /Users/dev/projects/api-service-new-api/template.yaml",
-      acceptanceCriteria: ["/Users/dev/projects/api-service-new-api/app/config.json has the key"],
-      touchedPaths: ["/Users/dev/projects/api-service-new-api/tests/test_delivery_log_table.py"],
+      spec: "Edit /Users/dev/projects/api-service/template.yaml",
+      acceptanceCriteria: ["/Users/dev/projects/api-service/app/config.json has the key"],
+      touchedPaths: ["/Users/dev/projects/api-service/tests/test_delivery_log_table.py"],
     });
-    expect(foreignRepoPaths(t, REPO)).toEqual(["/Users/dev/projects/api-service-new-api"]);
+    expect(foreignRepoPaths(t, REPO)).toEqual(["/Users/dev/projects/api-service"]);
   });
 
   it("reads criteria and touchedPaths, not only the spec", () => {
@@ -53,12 +53,12 @@ describe("a task written against a sibling checkout", () => {
 
 describe("what is deliberately not a scope error", () => {
   it("ignores paths inside the run's own repository", () => {
-    const t = task({ spec: "Edit /Users/dev/projects/api-service-new-ui/src/libs/plan.js and add a test." });
+    const t = task({ spec: "Edit /Users/dev/projects/web-client/src/libs/plan.js and add a test." });
     expect(foreignRepoPaths(t, REPO)).toEqual([]);
   });
 
   it("ignores the repository root itself", () => {
-    expect(foreignRepoPaths(task({ spec: "Work in /Users/dev/projects/api-service-new-ui" }), REPO)).toEqual([]);
+    expect(foreignRepoPaths(task({ spec: "Work in /Users/dev/projects/web-client" }), REPO)).toEqual([]);
   });
 
   it("ignores routes, system paths and anything else outside the sibling set", () => {
@@ -88,10 +88,10 @@ describe("what is deliberately not a scope error", () => {
 
 describe("validatePlanScope", () => {
   it("says which repository the run owns and what to do instead", () => {
-    const errors = validatePlanScope([task({ id: "api-delivery-table-infra", spec: "In `/Users/dev/projects/api-service-new-api/`, add the table." })], REPO);
+    const errors = validatePlanScope([task({ id: "api-delivery-table-infra", spec: "In `/Users/dev/projects/api-service/`, add the table." })], REPO);
     expect(errors).toHaveLength(1);
-    expect(errors[0]).toContain("task api-delivery-table-infra is written against api-service-new-api");
-    expect(errors[0]).toContain("api-service-new-ui");
+    expect(errors[0]).toContain("task api-delivery-table-infra is written against api-service");
+    expect(errors[0]).toContain("web-client");
     expect(errors[0]).toContain("separate run");
   });
 

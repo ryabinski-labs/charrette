@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { RunConfig } from "@harness/shared";
-import type { HarnessEvent } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
+import type { CharretteEvent } from "@charrette/shared";
 import { Bus } from "./bus.js";
 import { GitHubAdapter } from "./github.js";
 import type { AgentPool, AgentResult, AgentSpec } from "./pool.js";
@@ -24,7 +24,7 @@ afterEach(() => {
 });
 
 function repo(remote = false): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-count-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-count-"));
   made.push(dir, `${dir}-wt`);
   const run = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "ignore" });
   run("init", "-b", "main");
@@ -34,7 +34,7 @@ function repo(remote = false): string {
   run("add", "-A");
   run("commit", "-m", "first");
   if (remote) {
-    const bare = mkdtempSync(path.join(tmpdir(), "harness-count-remote-"));
+    const bare = mkdtempSync(path.join(tmpdir(), "charrette-count-remote-"));
     made.push(bare);
     execFileSync("git", ["init", "--bare", "-b", "main"], { cwd: bare, stdio: "ignore" });
     run("remote", "add", "origin", bare);
@@ -89,7 +89,7 @@ function rolePool(answers: Partial<Record<string, Answer>>) {
 function build(opts: { repoPath: string; pool: AgentPool; github?: GitHubAdapter; gates?: Partial<GateHandler> }) {
   const store = new Store(":memory:");
   const bus = new Bus(store);
-  const events: HarnessEvent[] = [];
+  const events: CharretteEvent[] = [];
   bus.subscribe(({ event }) => void events.push(event));
   const gates: GateHandler = {
     async resolvePlanGate() {
@@ -105,7 +105,7 @@ function build(opts: { repoPath: string; pool: AgentPool; github?: GitHubAdapter
 }
 
 const worker = (spec: AgentSpec, nth: number) => (commitInWorktree(spec.cwd, `w-${path.basename(spec.cwd)}-${nth}.txt`), "did the work");
-const logs = (events: HarnessEvent[]) => events.filter((e): e is HarnessEvent & { text: string } => e.type === "agent.log").map((e) => e.text);
+const logs = (events: CharretteEvent[]) => events.filter((e): e is CharretteEvent & { text: string } => e.type === "agent.log").map((e) => e.text);
 const BASE = { deterministicChecks: [] as string[], waitForChecks: false };
 
 const planner = (ids: string[]) => (s: AgentSpec) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS : dagJson(ids));
@@ -291,7 +291,7 @@ describe("reading an issue thread the adapter cannot serve", () => {
 
     await controller.startRun("build a thing", RunConfig.parse({ ...BASE, workerRespawnCap: 3 }));
 
-    const feedback = events.filter((e): e is HarnessEvent & { text: string } => e.type === "task.feedback");
+    const feedback = events.filter((e): e is CharretteEvent & { text: string } => e.type === "task.feedback");
     expect(feedback.some((e) => /2 new comments on issue #/.test(e.text))).toBe(true);
   });
 });

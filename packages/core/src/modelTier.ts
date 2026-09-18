@@ -1,9 +1,9 @@
-import { UI_WHEN, type PlannedTask } from "@harness/shared";
+import { UI_WHEN, type PlannedTask } from "@charrette/shared";
 
 /**
  * Which worker model a task is dispatched on.
  *
- * The saving that matters in this harness is the worker: it writes every line
+ * The saving that matters in this charrette is the worker: it writes every line
  * of code, it runs at the highest turn ceiling of any role, and one recorded run
  * spent $65 across seventeen worker sessions against $14 across eight QA ones.
  * A third of the worker bill is the largest number on the table.
@@ -86,7 +86,7 @@ const RISKY =
   "webhook\\w*|rate limit\\w*|quota|throttl\\w+|secret\\w*|encrypt\\w+|decrypt\\w+|" +
   "crypto\\w*|signing|signature|certificate|tls|ssl|cors|csrf|xss|injection|" +
   "security|vulnerab\\w+|pii|gdpr|hipaa|pci|compliance|audit log|" +
-  // Infrastructure. The harness will not apply it anyway (infraGuard.ts), and a
+  // Infrastructure. The charrette will not apply it anyway (infraGuard.ts), and a
   // cheap model writing IaC it cannot run is the worst of both.
   // `infra` bare as well as spelled out, and the Terraform file extensions:
   // the vocabulary that gives this away is usually in the *path* rather than
@@ -107,7 +107,7 @@ const RISKY_RE = new RegExp(RISKY, "i");
 const UI_RE = new RegExp(UI_WHEN, "i");
 
 /**
- * A fix task the harness wrote itself, and which round it belongs to.
+ * A fix task the charrette wrote itself, and which round it belongs to.
  *
  * `queueCiFixes`, `queueScenarioFixes` and `queueIntentFixes` all name their
  * tasks `<kind>-fix-<round>-<n>`. The round is the one field on a task that
@@ -136,7 +136,7 @@ export interface TierDecision {
 
 /**
  * The fields the rule reads. Narrower than PlannedTask so tests can be honest.
- * `id` is optional because only the harness's own fix tasks carry a meaning in
+ * `id` is optional because only the charrette's own fix tasks carry a meaning in
  * theirs; a planner's `task-a` says nothing and is read as nothing.
  */
 type Nominee = Pick<
@@ -200,7 +200,7 @@ export function taskTier(task: Nominee, maxPaths = LIGHT_TIER_MAX_PATHS): TierDe
     return std(`it touches ${task.touchedPaths.length} paths, over the light-tier limit of ${maxPaths}`);
   }
   // A probe is a shell command that exits zero exactly when the task is done,
-  // and the worker is forbidden to edit it. It is the only check in the harness
+  // and the worker is forbidden to edit it. It is the only check in the charrette
   // that a cheap model cannot talk its way past.
   if (!task.completionProbe.trim()) {
     return std("it has no completion probe, so nothing but an agent's opinion would judge it done");

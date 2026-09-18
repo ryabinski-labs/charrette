@@ -76,8 +76,8 @@ export interface Checkpoint {
 }
 
 /** The tag the digest is wrapped in, lowercase; matching is case-insensitive. */
-const OPEN = "<harness-checkpoint>";
-const CLOSE = "</harness-checkpoint>";
+const OPEN = "<charrette-checkpoint>";
+const CLOSE = "</charrette-checkpoint>";
 
 /**
  * Is a checkpoint due on this turn?
@@ -104,7 +104,7 @@ export function checkpointDue(turn: number, every: number, wrapUpAt: number): bo
  */
 export function checkpointPrompt(turn: number, every: number): string {
   return [
-    `[HARNESS] Checkpoint at turn ${turn}. This is a routine cadence, not a change of assignment — it fires every ${every} turns.`,
+    `[CHARRETTE] Checkpoint at turn ${turn}. This is a routine cadence, not a change of assignment — it fires every ${every} turns.`,
     "",
     "Two things, then carry straight on with what you were doing.",
     "",

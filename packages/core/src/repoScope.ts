@@ -1,6 +1,6 @@
 import os from "node:os";
 import path from "node:path";
-import type { PlannedTask } from "@harness/shared";
+import type { PlannedTask } from "@charrette/shared";
 
 /**
  * Whether a task the planner wrote is about the repository the run owns.
@@ -10,11 +10,11 @@ import type { PlannedTask } from "@harness/shared";
  * whose spec says "in ~/Documents/projects/other-repo, add …" therefore cannot
  * be finished by this run at all — and nothing downstream can tell you that.
  *
- * Run 7ef8fb4d is the whole argument. Its repo was `api-service-new-ui`; task
- * `api-delivery-table-infra` opened with "In `~/Documents/projects/api-service-new-api/`,
- * add the api-service_delivery_log DynamoDB table". The worker did the only
+ * Run 7ef8fb4d is the whole argument. Its repo was `web-client`; task
+ * `api-delivery-table-infra` opened with "In `~/Documents/projects/api-service/`,
+ * add the delivery_log DynamoDB table". The worker did the only
  * sensible thing available to it — nested a worktree of the *other* repo inside
- * its own and committed the full implementation there — and the harness, which
+ * its own and committed the full implementation there — and the charrette, which
  * measures deliveries against its own repo, reported an empty branch five times
  * and parked the task telling whoever read it to go looking for a lost commit.
  * The work was never lost. It was never in scope.

@@ -68,7 +68,7 @@ describe("ensurePR after the branch outlived its PR", () => {
     // was recomputed correctly every pass and thrown away every pass, so the
     // merge shipped #335-#423 without closing one of their issues.
     const { adapter, calls } = stubbed({
-      list: [{ state: "open", number: 334, html_url: "u334", body: "- one (closes #333)\n\n<!-- harness-run:r/pr-run -->" }],
+      list: [{ state: "open", number: 334, html_url: "u334", body: "- one (closes #333)\n\n<!-- charrette-run:r/pr-run -->" }],
     });
     const pr = await adapter.ensurePR("r", "run", "head", "main", "t", "- one (closes #333)\n- two (closes #421)");
     expect(pr).toEqual({ number: 334, url: "u334" });
@@ -76,7 +76,7 @@ describe("ensurePR after the branch outlived its PR", () => {
     expect(calls.updated).toHaveLength(1);
     expect(calls.updated[0]!.pull_number).toBe(334);
     expect(calls.updated[0]!.body).toContain("closes #421");
-    expect(calls.updated[0]!.body).toContain("<!-- harness-run:r/pr-run -->");
+    expect(calls.updated[0]!.body).toContain("<!-- charrette-run:r/pr-run -->");
   });
 
   it("still returns the open PR when GitHub refuses the body write", async () => {
@@ -86,7 +86,7 @@ describe("ensurePR after the branch outlived its PR", () => {
     // body or a lost write scope must not cost the caller all of that, and the
     // next INTEGRATING pass rewrites the body anyway.
     const { adapter, calls } = stubbed({
-      list: [{ state: "open", number: 334, html_url: "u334", body: "old\n\n<!-- harness-run:r/pr-run -->" }],
+      list: [{ state: "open", number: 334, html_url: "u334", body: "old\n\n<!-- charrette-run:r/pr-run -->" }],
       updateError: err422("body is too long (maximum is 65536 characters)"),
     });
     const pr = await adapter.ensurePR("r", "run", "head", "main", "t", "new");
@@ -96,7 +96,7 @@ describe("ensurePR after the branch outlived its PR", () => {
 
   it("writes nothing when the recomputed body is the one already there", async () => {
     const { adapter, calls } = stubbed({
-      list: [{ state: "open", number: 334, html_url: "u334", body: "same\n\n<!-- harness-run:r/pr-run -->" }],
+      list: [{ state: "open", number: 334, html_url: "u334", body: "same\n\n<!-- charrette-run:r/pr-run -->" }],
     });
     await adapter.ensurePR("r", "run", "head", "main", "t", "same");
     expect(calls.updated).toHaveLength(0);
@@ -141,7 +141,7 @@ describe("markPrReady", () => {
     const { adapter, calls } = stubbed({ get: { state: "open", draft: true, node_id: "NODE" } });
     expect(await adapter.markPrReady("r", "run", 7, "final title", "final body")).toBe(true);
     expect(calls.updated[0]!.body).toContain("final body");
-    expect(calls.updated[0]!.body).toContain("<!-- harness-run:r/pr-run -->");
+    expect(calls.updated[0]!.body).toContain("<!-- charrette-run:r/pr-run -->");
     expect(calls.graphql).toEqual([{ id: "NODE" }]);
   });
 
@@ -191,24 +191,24 @@ function issueStub(overrides: { comments?: { body: string }[]; state?: string })
 }
 
 describe("commenting the outcome onto an issue", () => {
-  it("writes the status once and marks it so the harness never reads it back as operator guidance", async () => {
+  it("writes the status once and marks it so the charrette never reads it back as operator guidance", async () => {
     const { adapter, calls } = issueStub({});
     expect(await adapter.commentOnIssue(7, "run/task/MERGED", "Done")).toBe(true);
     expect(calls.comments[0]!.body).toContain("Done");
-    expect(calls.comments[0]!.body).toContain("<!-- harness-status:run/task/MERGED -->");
+    expect(calls.comments[0]!.body).toContain("<!-- charrette-status:run/task/MERGED -->");
     // The read half filters on this marker; without it the run takes its own
     // status update as an answer and hands it to the next worker.
-    expect(calls.comments[0]!.body).toContain("<!-- harness-comment -->");
+    expect(calls.comments[0]!.body).toContain("<!-- charrette-comment -->");
   });
 
   it("stays silent on a replay that reaches the same state again", async () => {
-    const { adapter, calls } = issueStub({ comments: [{ body: "Done\n\n<!-- harness-status:run/task/MERGED -->" }] });
+    const { adapter, calls } = issueStub({ comments: [{ body: "Done\n\n<!-- charrette-status:run/task/MERGED -->" }] });
     expect(await adapter.commentOnIssue(7, "run/task/MERGED", "Done")).toBe(false);
     expect(calls.comments).toHaveLength(0);
   });
 
   it("still speaks for a different state on the same task", async () => {
-    const { adapter, calls } = issueStub({ comments: [{ body: "Parked\n\n<!-- harness-status:run/task/NEEDS_HUMAN -->" }] });
+    const { adapter, calls } = issueStub({ comments: [{ body: "Parked\n\n<!-- charrette-status:run/task/NEEDS_HUMAN -->" }] });
     expect(await adapter.commentOnIssue(7, "run/task/MERGED", "Done")).toBe(true);
     expect(calls.comments).toHaveLength(1);
   });
@@ -260,7 +260,7 @@ describe("a body GitHub will not take", () => {
     expect(cut.length).toBeLessThanOrEqual(MAX_PR_BODY);
     // The top survives — it is where the task list and its closing refs live.
     expect(cut).toContain("- criterion 0");
-    expect(cut).toContain(".harness/a8df0107/REPORT.md");
+    expect(cut).toContain(".charrette/a8df0107/REPORT.md");
     // Never mid-item: a half-written criterion reads as a finding.
     expect(cut.split("\n").filter((l) => l.startsWith("- criterion")).every((l) => /^- criterion \d+$/.test(l))).toBe(true);
   });
@@ -300,7 +300,7 @@ describe("a body GitHub will not take", () => {
     expect(calls.created).toHaveLength(1);
     // The marker is appended after the fit, and still has to fit.
     expect(calls.created[0]!.body!.length).toBeLessThanOrEqual(MAX_PR_BODY);
-    expect(calls.created[0]!.body).toContain("<!-- harness-run:r/pr-run -->");
+    expect(calls.created[0]!.body).toContain("<!-- charrette-run:r/pr-run -->");
   });
 
   it("opens the retry as the draft it was asked for, not as a ready pull request", async () => {

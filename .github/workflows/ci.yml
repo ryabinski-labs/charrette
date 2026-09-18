@@ -12,26 +12,28 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only, and nothing here needs more. A fork's pull request gets a token
+# that cannot write to this repository even if something in the build tries.
 permissions:
   contents: read
 
 jobs:
   verify:
     name: build, test @ 100% coverage
-    # Any self-hosted runner in the org, on purpose. The old `github-runner`
-    # label claimed to keep this off the special-purpose hosts (api-service-mx1,
-    # mobile) — it never did, because those carry that label too; the ephemeral
-    # pool simply picked jobs up first. When the pool went offline the job
-    # landed on the mail host and, at ~5x the wall clock, failed a suite in
-    # which every test passed. So: run anywhere, and make the suite survive the
-    # slowest machine that will take it (see `maxWorkers` in vitest.config.ts).
-    runs-on: [self-hosted, Linux, X64]
-    # Ample for a dedicated runner (~2m30s end to end) and for a busy shared one
-    # taking four times that.
+    # GitHub-hosted, deliberately. This job ran on the org's self-hosted
+    # runners while the repository was private. On a public repository that is
+    # an open door: `pull_request` builds code from forks, so anyone could have
+    # run anything on the org's own machines by opening a PR. Hosted runners
+    # are disposable, free for public repositories, and are what a contributor
+    # can reproduce.
+    runs-on: ubuntu-latest
+    # Ample: the suite is ~3 minutes, and this leaves room for a slow install.
     timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       # No `version:` on purpose — the action reads `packageManager` from
       # package.json, so CI and every developer machine run the same pnpm.
@@ -43,8 +45,8 @@ jobs:
       - uses: pnpm/action-setup@v6
 
       # Node 24: `node:sqlite` (packages/core/src/store.ts) is only available
-      # unflagged from 23.4 on, and the store is not an optional part of the
-      # suite — every runController test builds one.
+      # unflagged from 22.13 and 23.4 on, and the store is not an optional part
+      # of the suite — every runController test builds one.
       # `cache: pnpm` is set explicitly and must stay that way: from v6 on, the
       # action's *automatic* caching only ever triggers for npm, so dropping
       # this line would silently lose the store cache rather than error.

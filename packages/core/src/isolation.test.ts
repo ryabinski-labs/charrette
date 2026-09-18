@@ -14,8 +14,8 @@ import {
 
 /**
  * Measured while this was being written: `podman compose ls` on the machine
- * that ran agentdraft's da8325bd still listed `harness-pitstop-9-117d` and
- * `harness-usage-endpoint-grace-field-117d` running, hours after the run
+ * that ran agentdraft's da8325bd still listed `charrette-pitstop-9-117d` and
+ * `charrette-usage-endpoint-grace-field-117d` running, hours after the run
  * finished — plus a third stack from a different repository's run. Agents are
  * told to tear down what they start; the ones that die, run out of turns, or
  * are killed by the budget gate never get to.
@@ -38,14 +38,14 @@ describe("giving the machine back", () => {
   };
 
   it("brings down the stacks that are up, with their volumes, so nothing is inherited", async () => {
-    const { calls, exec } = runtime(["podman"], ["harness-a-0001", "harness-b-0001"]);
+    const { calls, exec } = runtime(["podman"], ["charrette-a-0001", "charrette-b-0001"]);
 
-    expect(await composeDown(["harness-a-0001", "harness-b-0001"], exec)).toEqual(["podman:harness-a-0001", "podman:harness-b-0001"]);
+    expect(await composeDown(["charrette-a-0001", "charrette-b-0001"], exec)).toEqual(["podman:charrette-a-0001", "podman:charrette-b-0001"]);
     // Both runtimes are asked what is up — a machine can have either, or both
     // holding different stacks — but only what is actually running comes down.
     expect(calls.filter((c) => c.includes("down"))).toEqual([
-      ["podman", "compose", "-p", "harness-a-0001", "down", "-v", "--remove-orphans"],
-      ["podman", "compose", "-p", "harness-b-0001", "down", "-v", "--remove-orphans"],
+      ["podman", "compose", "-p", "charrette-a-0001", "down", "-v", "--remove-orphans"],
+      ["podman", "compose", "-p", "charrette-b-0001", "down", "-v", "--remove-orphans"],
     ]);
   });
 
@@ -58,13 +58,13 @@ describe("giving the machine back", () => {
   it("issues no teardown at all when none of this run's stacks are up", async () => {
     const { calls, exec } = runtime(["podman", "docker"], ["somebody-elses-stack"]);
 
-    expect(await composeDown(["harness-a-0001", "harness-b-0001"], exec)).toEqual([]);
+    expect(await composeDown(["charrette-a-0001", "charrette-b-0001"], exec)).toEqual([]);
     expect(calls.every((c) => c[2] === "ls")).toBe(true);
   });
 
   it("never touches a stack this run does not own", async () => {
     const mine = taskIsolation("run1", "task-a").composeProject;
-    const { calls, exec } = runtime(["podman"], [mine, "harness-someone-else-9999", "operators-own-db"]);
+    const { calls, exec } = runtime(["podman"], [mine, "charrette-someone-else-9999", "operators-own-db"]);
 
     expect(await composeDown([mine], exec)).toEqual([`podman:${mine}`]);
     const downed = calls.filter((c) => c.includes("down")).map((c) => c[3]);
@@ -72,9 +72,9 @@ describe("giving the machine back", () => {
   });
 
   it("falls through to the runtime that is actually installed", async () => {
-    const { calls, exec } = runtime(["docker"], ["harness-a-0001"]);
+    const { calls, exec } = runtime(["docker"], ["charrette-a-0001"]);
 
-    expect(await composeDown(["harness-a-0001"], exec)).toEqual(["docker:harness-a-0001"]);
+    expect(await composeDown(["charrette-a-0001"], exec)).toEqual(["docker:charrette-a-0001"]);
     expect(calls.map((c) => c[0])).toEqual(["podman", "docker", "docker"]);
   });
 
@@ -85,7 +85,7 @@ describe("giving the machine back", () => {
   it("says nothing and throws nothing when no runtime is installed", async () => {
     const { calls, exec } = runtime([]);
 
-    await expect(composeDown(["harness-a-0001"], exec)).resolves.toEqual([]);
+    await expect(composeDown(["charrette-a-0001"], exec)).resolves.toEqual([]);
     expect(calls.every((c) => c[2] === "ls")).toBe(true);
   });
 
@@ -97,9 +97,9 @@ describe("giving the machine back", () => {
    * minutes of a run discovering there was nothing to sweep.
    */
   it("waits a moment on the question and a long time on the teardown", async () => {
-    const { calls, waits, exec } = runtime(["podman"], ["harness-a-0001"]);
+    const { calls, waits, exec } = runtime(["podman"], ["charrette-a-0001"]);
 
-    await composeDown(["harness-a-0001"], exec);
+    await composeDown(["charrette-a-0001"], exec);
 
     const byCall = calls.map((c, i) => [c[0], c[2], waits[i]]);
     expect(byCall).toEqual([
@@ -113,7 +113,7 @@ describe("giving the machine back", () => {
   });
 
   it("asks nothing when there are no projects to sweep", async () => {
-    const { calls, exec } = runtime(["podman"], ["harness-a-0001"]);
+    const { calls, exec } = runtime(["podman"], ["charrette-a-0001"]);
 
     expect(await composeDown([], exec)).toEqual([]);
     expect(calls).toEqual([]);
@@ -122,15 +122,15 @@ describe("giving the machine back", () => {
   it("reads project names out of a real listing, header and all", () => {
     const listing = [
       "NAME                                    STATUS       CONFIG FILES",
-      "harness-pitstop-9-117d                  running(3)   /a/docker-compose.yml,/b/compose.override.yml",
-      "harness-seed-and-demo-script-f735       running(3)   /c/docker-compose.yml",
+      "charrette-pitstop-9-117d                  running(3)   /a/docker-compose.yml,/b/compose.override.yml",
+      "charrette-seed-and-demo-script-f735       running(3)   /c/docker-compose.yml",
       // Blank and whitespace-only lines are what the runtime actually prints
       // around the table, and neither of them names a project.
       "   ",
       "",
     ].join("\n");
 
-    expect(composeProjectNames(listing)).toEqual(["harness-pitstop-9-117d", "harness-seed-and-demo-script-f735"]);
+    expect(composeProjectNames(listing)).toEqual(["charrette-pitstop-9-117d", "charrette-seed-and-demo-script-f735"]);
   });
 });
 
@@ -182,8 +182,8 @@ describe("per-task isolation", () => {
     const iso = taskIsolation("run-1", "api");
     expect(isolationEnv(iso)).toEqual({
       COMPOSE_PROJECT_NAME: iso.composeProject,
-      HARNESS_PORT_BASE: String(iso.portBase),
-      HARNESS_PORT_END: String(iso.portEnd),
+      CHARRETTE_PORT_BASE: String(iso.portBase),
+      CHARRETTE_PORT_END: String(iso.portEnd),
     });
   });
 

@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { RunConfig } from "@harness/shared";
-import type { HarnessEvent } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
+import type { CharretteEvent } from "@charrette/shared";
 import { Bus } from "./bus.js";
 import { GitHubAdapter } from "./github.js";
 import type { PitStop } from "./pitstop.js";
@@ -15,7 +15,7 @@ import { Store } from "./store.js";
 /**
  * The pit stop the operator asks for.
  *
- * Every other stop in this harness fires because the plan crossed a boundary —
+ * Every other stop in this charrette fires because the plan crossed a boundary —
  * an epic finished, a figure was passed — and none of those happen because the
  * product started looking wrong on screen. This is the one an operator watching
  * the log can call, and the three things that make it different from the
@@ -31,7 +31,7 @@ afterEach(() => {
 });
 
 function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-summon-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-summon-"));
   made.push(dir, `${dir}-wt`);
   const git = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "ignore" });
   git("init", "-b", "main");
@@ -121,14 +121,14 @@ const PM_ANSWER =
 interface Built {
   controller: RunController;
   store: Store;
-  events: HarnessEvent[];
+  events: CharretteEvent[];
   stops: PitStop[];
 }
 
 function build(repoPath: string, pool: AgentPool): Built {
   const store = new Store(":memory:");
   const bus = new Bus(store);
-  const events: HarnessEvent[] = [];
+  const events: CharretteEvent[] = [];
   const stops: PitStop[] = [];
   bus.subscribe(({ event }) => void events.push(event));
   const gates: GateHandler = {
@@ -337,7 +337,7 @@ describe("asking while a stop is already running", () => {
     const { events, store, runId, asked, specs, stops } = await askedMidDemo();
 
     expect(asked).toMatch(/^pit stop requested/);
-    const opened = events.filter((e) => e.type === "run.pitstop_opened") as (HarnessEvent & {
+    const opened = events.filter((e) => e.type === "run.pitstop_opened") as (CharretteEvent & {
       summoned: boolean;
       askedAt: number;
     })[];
@@ -376,7 +376,7 @@ describe("the guards on asking", () => {
     const { controller, store } = bare();
     store.createRun({
       id: "r1", repoPath: "/repo", assignment: "a", state: "EXECUTING",
-      prdPath: null, planHash: null, integrationBranch: "harness/r1", config: RunConfig.parse({}),
+      prdPath: null, planHash: null, integrationBranch: "charrette/r1", config: RunConfig.parse({}),
     });
     expect(controller.requestPitStop("r1", "   ")).toBe("write the question the pit stop should answer");
     expect(store.pendingPitStopRequest("r1")).toBeNull();
@@ -386,7 +386,7 @@ describe("the guards on asking", () => {
     const { controller, store } = bare();
     store.createRun({
       id: "r1", repoPath: "/repo", assignment: "a", state: "PR_REVIEW",
-      prdPath: null, planHash: null, integrationBranch: "harness/r1", config: RunConfig.parse({}),
+      prdPath: null, planHash: null, integrationBranch: "charrette/r1", config: RunConfig.parse({}),
     });
     expect(controller.requestPitStop("r1", "how did it go?")).toContain("PR_REVIEW");
   });
@@ -396,7 +396,7 @@ describe("the guards on asking", () => {
   });
 
   /**
-   * A run started without a pit stop gate — `harness run --no-dashboard` — has
+   * A run started without a pit stop gate — `charrette run --no-dashboard` — has
    * nowhere to show the stop. Saying so is better than opening one into a void.
    */
   it("refuses when there is nowhere to show the stop", () => {
@@ -420,7 +420,7 @@ describe("the guards on asking", () => {
     );
     store.createRun({
       id: "r1", repoPath: "/repo", assignment: "a", state: "EXECUTING",
-      prdPath: null, planHash: null, integrationBranch: "harness/r1", config: RunConfig.parse({}),
+      prdPath: null, planHash: null, integrationBranch: "charrette/r1", config: RunConfig.parse({}),
     });
     expect(controller.requestPitStop("r1", "why is there no login page?")).toBe("this run has nobody to show a pit stop to");
   });
@@ -429,7 +429,7 @@ describe("the guards on asking", () => {
     const { controller, store } = bare();
     store.createRun({
       id: "r1", repoPath: "/repo", assignment: "a", state: "EXECUTING",
-      prdPath: null, planHash: null, integrationBranch: "harness/r1", config: RunConfig.parse({}),
+      prdPath: null, planHash: null, integrationBranch: "charrette/r1", config: RunConfig.parse({}),
     });
     controller.requestPitStop("r1", "first");
     expect(controller.requestPitStop("r1", "second")).toMatch(/^your question replaced/);
@@ -440,7 +440,7 @@ describe("the guards on asking", () => {
     const { controller, store } = bare();
     store.createRun({
       id: "r1", repoPath: "/repo", assignment: "a", state: "EXECUTING",
-      prdPath: null, planHash: null, integrationBranch: "harness/r1", config: RunConfig.parse({}),
+      prdPath: null, planHash: null, integrationBranch: "charrette/r1", config: RunConfig.parse({}),
     });
     expect(controller.cancelPitStop("r1")).toBe("nothing to cancel — no pit stop is waiting to open");
     controller.requestPitStop("r1", "never mind in a moment");
@@ -455,7 +455,7 @@ describe("re-routing a role while the run is going", () => {
     const built = build(repo(), pool);
     built.store.createRun({
       id: "r1", repoPath: "/repo", assignment: "a", state: "EXECUTING",
-      prdPath: null, planHash: null, integrationBranch: "harness/r1", config: RunConfig.parse({ models }),
+      prdPath: null, planHash: null, integrationBranch: "charrette/r1", config: RunConfig.parse({ models }),
     });
     return built;
   };
@@ -469,7 +469,7 @@ describe("re-routing a role while the run is going", () => {
   });
 
   /**
-   * The judging floor holds here exactly as it does at `harness run`, and for
+   * The judging floor holds here exactly as it does at `charrette run`, and for
    * the same reason: `patchRunConfig` re-parses the whole config, so this door
    * is not a second, weaker door.
    */
@@ -498,7 +498,7 @@ describe("re-routing a role while the run is going", () => {
   });
 
   /**
-   * A live session keeps the model it was spawned on — the harness re-routes by
+   * A live session keeps the model it was spawned on — the charrette re-routes by
    * spawning fresh, never by switching under a conversation whose prompt cache
    * is what makes it affordable. Saying which task keeps the old model is the
    * one sentence that teaches this without a paragraph.

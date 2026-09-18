@@ -6,7 +6,7 @@ import { MAX_NESTING, invocation, segments, stripHeredocBodies, unquote } from "
 /**
  * Keep a task's commits on the task's branch.
  *
- * Every task runs in a git worktree of its own, and the whole of the harness
+ * Every task runs in a git worktree of its own, and the whole of the charrette
  * downstream of a worker assumes that: the deterministic checks read that tree,
  * QA reviews that branch's diff, the integrator merges that branch, and the
  * ledger reports what that branch delivered. An agent that writes to a
@@ -74,7 +74,7 @@ export interface OutsideWrite {
  *
  * A worktree reached through a symlink has two true absolute paths, and an
  * agent gets the second one for free: `git rev-parse --show-toplevel` answers
- * with the canonical form while the session's cwd is the form the harness
+ * with the canonical form while the session's cwd is the form the charrette
  * recorded. Comparing them as strings refuses the task's own commits, and a
  * task that cannot commit delivers the empty branch this guard exists to
  * prevent. macOS makes it the default case — /tmp and /var are symlinks into

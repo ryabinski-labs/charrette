@@ -3,7 +3,7 @@ import type { ScannedFile } from "./darkSwitches.js";
 /**
  * How much of what a run wrote is a record of what it did not build.
  *
- * waf's `docs/KNOWN-GAPS.md` is 118.6 KB across 27 sections, opening with
+ * rust-service's `docs/KNOWN-GAPS.md` is 118.6 KB across 27 sections, opening with
  * "Everything listed here was, at the time each entry was written, deliberately
  * left out of that run's budget". `docs/HANDOVER.md` is another 68 KB. The
  * operator UI ships a card reading "Out of scope for v1 — Network-layer
@@ -28,7 +28,7 @@ import type { ScannedFile } from "./darkSwitches.js";
  *
  * Deliberately wider than the dark-switch scanner's `scannable`, which answers
  * "can this file declare a switch" and therefore excludes markdown — every
- * file this module exists to measure. waf's disclosure lived in a gaps file, a
+ * file this module exists to measure. rust-service's disclosure lived in a gaps file, a
  * handover, and a card in a React component, and a filter that reads only one
  * of the three measures a third of the problem.
  */
@@ -43,7 +43,7 @@ const LEDGER_FILE = /(^|\/)(known[-_ ]?gaps?|gaps?|limitations|not[-_ ]?implemen
  * A heading or bullet that records something as deliberately not done.
  *
  * Counted per line rather than per file so that a gap section inside an
- * ordinary README is caught too — waf's was spread across a gaps file, a
+ * ordinary README is caught too — rust-service's was spread across a gaps file, a
  * handover, and a card in the product itself, and only one of those is a file
  * this would recognise by name.
  */
@@ -87,7 +87,7 @@ export function gapLedger(changed: ScannedFile[]): GapLedger {
  * deliverable.
  *
  * 16 KB is roughly four thousand words: a thorough, honest account of what a
- * run left for next time. waf's was seven times that, and its own intent
+ * run left for next time. rust-service's was seven times that, and its own intent
  * verdict described the core deliverable as not working "though this is
  * honestly disclosed rather than hidden". The threshold is where the second
  * sentence stops being a mitigation.

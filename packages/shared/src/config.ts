@@ -3,7 +3,7 @@ import { DeliveryConfig } from "./delivery.js";
 import { routingViolations } from "./providers.js";
 
 /**
- * How long a single deterministic check may run before the harness kills it.
+ * How long a single deterministic check may run before the charrette kills it.
  *
  * Ten minutes was hardcoded in the runner, and a repository whose suite honestly
  * takes longer than that could never be green: run bc691359's `cargo test
@@ -36,7 +36,7 @@ export const ModelRoutingShape = z.object({
   intake: z.string().default("claude-opus-5"),
   /**
    * Drafts the PRD and cuts it into the DAG. Every worker session in the run is
-   * downstream of this one reading, and the two runs this harness has lost the
+   * downstream of this one reading, and the two runs this charrette has lost the
    * most money on (40da9337, f338b5c8) both went wrong here — a plan that
    * under-recognised the work, built anyway. The most expensive place to be
    * wrong, so the most capable model: Fable, at twice Opus's rate for a
@@ -128,7 +128,7 @@ export const ModelRoutingShape = z.object({
    * Drafts the operator's answer when a task escalates (Gate: task-escalation).
    *
    * Stays on Sonnet, and the reason is worth writing down because this role
-   * *looks* like the cheapest thing in the harness: it writes one short answer,
+   * *looks* like the cheapest thing in the charrette: it writes one short answer,
    * and a human or a skill reads it before anything acts on it. What that
    * framing misses is that the answer decides which hypothesis gets attention.
    * Run f338b5c8 spent nine rounds and about $80 on a single task whose probe
@@ -175,7 +175,7 @@ export const ModelRoutingShape = z.object({
   /**
    * Re-asks a finished session for output it already produced but did not format.
    *
-   * The only role in the harness that is genuinely mechanical, and the reason is
+   * The only role in the charrette that is genuinely mechanical, and the reason is
    * structural rather than a judgment about how hard the work is: it runs with
    * `maxTurns: 2` against a *resumed* session, and its entire instruction is to
    * restate a conclusion someone else already reached without revisiting it.
@@ -209,7 +209,7 @@ export const ModelRoutingShape = z.object({
   reviewer: z.string().default("gemini-3.8-flash"),
   /**
    * Decides what the run does next at a pit stop, having read the demo and
-   * every reviewer. It is the only agent in the harness whose output redirects
+   * every reviewer. It is the only agent in the charrette whose output redirects
    * or re-plans the remaining work on its own, so it is the last place to save
    * money: Fable, for the same reason the planner is.
    */
@@ -240,7 +240,7 @@ export const ModelRoutingShape = z.object({
  * Enforced here, where the config is parsed, rather than where the role is
  * dispatched. A run whose `prod` validator is misrouted would otherwise be
  * discovered by the validator itself, after every worker had been paid for;
- * this refuses at `harness run`, before the first agent spawns.
+ * this refuses at `charrette run`, before the first agent spawns.
  *
  * This used to say that the stored config of an existing run could not trip it,
  * because nothing violating it could ever have been written. Pinning `reviewer`
@@ -296,7 +296,7 @@ export const PitStopConfig = z.object({
     .max(4)
     .default(["product-manager", "critical-challenger", "qa-agent", "ui-ux-cx-engineer"]),
   /**
-   * How many lenses read the demo before the harness decides whether the rest
+   * How many lenses read the demo before the charrette decides whether the rest
    * are worth paying for. `0` runs them all, every time, which is what this used
    * to do unconditionally.
    *
@@ -378,8 +378,8 @@ export const CheckpointConfig = z.object({
    * Replace the older transcript with the agent's own digest, rather than only
    * recording it.
    *
-   * Only the harness-run tool loop can honour this — OpenAI and Google sell the
-   * turn and nothing else, so the harness holds those transcripts and can swap
+   * Only the charrette-run tool loop can honour this — OpenAI and Google sell the
+   * turn and nothing else, so the charrette holds those transcripts and can swap
    * material out of them. Anthropic sessions run inside the SDK, which compacts
    * its own; there a checkpoint still buys the record and the questions, and
    * this flag is simply not reachable.
@@ -448,10 +448,10 @@ export const Budget = z.object({
  * second config directory that account is logged into. An `ANTHROPIC_API_KEY`
  * here is legal too and means "stop spending the plan, start spending money".
  *
- * A value written as `$NAME` or `${NAME}` is read from the harness's own
+ * A value written as `$NAME` or `${NAME}` is read from the charrette's own
  * environment when the session is spawned, never from this file. That is not a
  * convenience: this file lives in the repository, and a subscription token
- * committed to it is a subscription token published. The harness refuses a
+ * committed to it is a subscription token published. The charrette refuses a
  * reference it cannot resolve rather than spawning a session with an empty
  * credential, which fails later and less clearly.
  */
@@ -467,7 +467,7 @@ export type SubscriptionAccount = z.infer<typeof SubscriptionAccount>;
  * Watch how much of the account's plan the run has left, and stop before it is
  * gone (`docs/OPERATIONS.md`, "Subscription limits").
  *
- * The harness already survives a limit it has *hit*: every session in flight
+ * The charrette already survives a limit it has *hit*: every session in flight
  * dies at once, `usageLimit.ts` reads the dying words, and the pool sleeps until
  * the window reopens. That is the right answer for the five-hour window, which
  * reopens while the operator is at lunch. It is the wrong answer for the weekly
@@ -480,7 +480,7 @@ export type SubscriptionAccount = z.infer<typeof SubscriptionAccount>;
  * and asks — exactly as the budget cap does, and for the same reason: the work
  * in flight has already been paid for.
  *
- * The readings come from the account's own plan metering, not from the harness's
+ * The readings come from the account's own plan metering, not from the charrette's
  * ledger. `budget.runCapUsd` counts what this run spent; this counts what the
  * *account* has spent, on every machine and every session, which is the number
  * the wall is actually made of.
@@ -518,7 +518,7 @@ export const SubscriptionConfig = z.object({
    * account the operator's own `claude` is logged into, which is what every run
    * before this feature used and what a run with no `accounts` keeps using.
    *
-   * Set by the gate when the operator switches, and by `harness resume
+   * Set by the gate when the operator switches, and by `charrette resume
    * --account <name>`. Unlike the repo path, this is deliberately not frozen at
    * creation: a subscription is a thing a run can run out of, so being able to
    * change it mid-run is the entire point.
@@ -628,7 +628,7 @@ export const TaskGateConfig = z.object({
    * So the decider may narrow the probe once, on the record
    * (`task.probe_amended`), and after that the task's definition of done is
    * settled as far as any agent is concerned. `0` restores the probe as
-   * unamendable; the operator's own `harness probe` is never bounded.
+   * unamendable; the operator's own `charrette probe` is never bounded.
    */
   probeAmendments: z.number().int().min(0).max(5).default(1),
   /**
@@ -648,7 +648,7 @@ export const TaskGateConfig = z.object({
    * of the two, so it is bounded harder in the prompt than in the number: the
    * amendment must resolve a contradiction, never lower a bar, and it lands on
    * the record as `task.criteria_amended` with the decider's name on it. `0`
-   * restores the criteria as unamendable; the operator's own `harness criteria`
+   * restores the criteria as unamendable; the operator's own `charrette criteria`
    * is never bounded.
    */
   criteriaAmendments: z.number().int().min(0).max(5).default(1),
@@ -716,7 +716,7 @@ export const UI_WHEN =
  * The live-exercise gate: something starts the product and uses it before the
  * run may report itself finished.
  *
- * Across waf and ledger-app — five runs, $4,763, 510 merged tasks, a month of
+ * Across rust-service and ledger-app — five runs, $4,763, 510 merged tasks, a month of
  * wall clock — the number of times any agent started the product and used it
  * was zero, and it was zero by design: the intent validator is forbidden to
  * (that work costs more context than it has) and the production validator is
@@ -875,7 +875,7 @@ export const RunConfig = z.object({
    * A quota window closing is not a fault in the work: every session in flight
    * dies at once with "You've hit your session limit · resets 8:20pm", and the
    * only remedy is time. Read as an ordinary error it ends runs — three planner
-   * attempts inside one second, `harness: fatal`, and an intake conversation the
+   * attempts inside one second, `charrette: fatal`, and an intake conversation the
    * operator sat through thrown away with it.
    *
    * Six hours covers a five-hour window reached at its very start, with slack
@@ -899,7 +899,7 @@ export const RunConfig = z.object({
    * On by default, at every epic boundary. The two runs that motivated this
    * both produced accurate findings — a broken endpoint seam, a $721 tree
    * nobody could describe — that arrived only after the money was spent, and
-   * the harness had no checkpoint between "approve this plan" and "here is the
+   * the charrette had no checkpoint between "approve this plan" and "here is the
    * diff". `{"pitStop":{"every":"never"}}` restores that.
    */
   pitStop: PitStopConfig.default({}),
@@ -933,7 +933,7 @@ export const RunConfig = z.object({
    * used to be a note in the log. Run 40da9337 merged 36 tasks, opened its pull
    * requests, and reported success carrying a FAIL that said none of the workers
    * that move money were scheduled to run anywhere outside a test — seven gaps,
-   * every one of them a task the harness could have written.
+   * every one of them a task the charrette could have written.
    *
    * One round by default: the gaps are small, concrete and derived from a tree
    * that already exists, so a second pass rarely finds what the first could not,
@@ -979,7 +979,7 @@ export const RunConfig = z.object({
   intake: IntakeConfig.default({}),
   skillsDirs: z.array(z.string()).default([]),
   /**
-   * Let the harness write a skill for itself when a task matches nothing.
+   * Let the charrette write a skill for itself when a task matches nothing.
    *
    * The trigger is precise: a task about to dispatch whose worker selection —
    * routed, standing and scored together — came back empty. That is the case
@@ -987,14 +987,14 @@ export const RunConfig = z.object({
    * answer is "your collection has nothing for this", and the worker goes in
    * cold. When it fires, a `skillsmith` session reads the repository, drafts a
    * playbook for that class of task (or extends one it forged earlier, or
-   * declines), and the harness — not the agent — installs it under
-   * `<repo>/.harness/skills/`.
+   * declines), and the charrette — not the agent — installs it under
+   * `<repo>/.charrette/skills/`.
    *
    * Two lines the design does not cross. The skillsmith never writes files:
-   * it emits a draft and the harness validates and installs it, so the PRD's
+   * it emits a draft and the charrette validates and installs it, so the PRD's
    * rule that no agent modifies the skills registry stays true — the
    * operator's `skillsDirs` are never touched, and the forge directory is
-   * harness state, beside the run database. And forged skills carry the same
+   * charrette state, beside the run database. And forged skills carry the same
    * provenance discipline as everything else: frontmatter naming the run and
    * task that forged them, a `skills.forged` event with the birth hash, and
    * the same hash-verify-at-injection as operator skills (SEC-14/15).
@@ -1004,7 +1004,7 @@ export const RunConfig = z.object({
    * is a standing decision to reuse model-authored guidance, which memory.ts
    * deliberately refuses for *facts*; a playbook is advisory and wrapped as
    * such, but an operator who shares that caution sets `enabled: false`, and
-   * the files themselves are plain markdown in `.harness/skills/`, theirs to
+   * the files themselves are plain markdown in `.charrette/skills/`, theirs to
    * read, edit or delete.
    *
    * `maxPerRun` bounds what forging may spend: each forge is one bounded
@@ -1074,8 +1074,8 @@ export const RunConfig = z.object({
       // architecture vocabulary, and that rule alone fills all four slots — so
       // the one skill that knows the actual answer would be the one dropped.
       {
-        when: "\\b(dns|dns-project|nameservers?|name server|cname|txt record|mx record|zone file|subdomain|apex domain|custom domain|cert-?manager|clusterissuer|dns-?01|let'?s encrypt|route ?53)\\b",
-        skills: ["dns-project-iac-engineer"],
+        when: "\\b(dns|nameservers?|name server|cname|txt record|mx record|zone file|subdomain|apex domain|custom domain|cert-?manager|clusterissuer|dns-?01|let'?s encrypt|route ?53)\\b",
+        skills: ["dns-iac-engineer"],
       },
       {
         when: "\\b(greenfield|from scratch|scaffold\\w*|boilerplate|new (project|service|application)|tech(nology)? stack|stack (choice|selection)|dynamodb|magic[- ]link|webauthn|passwordless|serverless|lambda|cloudfront|api gateway)\\b",
@@ -1153,7 +1153,7 @@ export const RunConfig = z.object({
   prMode: z.enum(["single", "per-task"]).default("single"),
   deterministicChecks: z.array(z.string()).default([]),
   /**
-   * How long any one deterministic check may run before the harness kills it.
+   * How long any one deterministic check may run before the charrette kills it.
    *
    * This was hardcoded at ten minutes, which is a ceiling on the repository
    * rather than on the check: a suite that honestly takes longer can never be
@@ -1201,7 +1201,7 @@ export const RunConfig = z.object({
    * conflicting or behind its base. Rounds spent, it holds at a pit stop where
    * the decider (`pitStop.decidedBy`, or you) can grant another `ciFixRounds`
    * or stop the run; a repo with no pit stops pauses with the reason on the
-   * record, and `harness resume` is the grant. Off restores the older shape:
+   * record, and `charrette resume` is the grant. Off restores the older shape:
    * the rounds are spent, the failure goes into the outcome line, and the run
    * reports in review over a branch the repo has rejected.
    */
@@ -1217,7 +1217,7 @@ export const RunConfig = z.object({
    * FAIL, not UNKNOWN, not a check that never finished), and something merged
    * so there is a pull request to review. Anything short of that, once the
    * fix rounds are spent, parks the run in BLOCKED with the unmet list on the
-   * record, and `harness resume` re-enters the gates once the operator has
+   * record, and `charrette resume` re-enters the gates once the operator has
    * acted. Off restores the shape both runs in issue #115 closed with: every
    * one of those is a clause in the outcome line, and the run reports in
    * review over it.
@@ -1225,7 +1225,7 @@ export const RunConfig = z.object({
   holdUntilProven: z.boolean().default(true),
   /**
    * The live URL this repo deploys to. Set it and a run does not end at the
-   * pull request: once a human merges, the harness follows the deploy and sends
+   * pull request: once a human merges, the charrette follows the deploy and sends
    * an agent to check the running system against the original assignment.
    *
    * Empty (the default) keeps the old behaviour — the run ends at PR_REVIEW.

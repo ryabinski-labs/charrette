@@ -6,7 +6,7 @@ export const DeliveryConfig = z.object({
   releaseId: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/).default("default"),
   merge: z.enum(["manual", "auto"]).default("manual"),
   prdSha256: z.string().default(""),
-  revisionPath: z.string().startsWith("/").default("/.well-known/harness-release"),
+  revisionPath: z.string().startsWith("/").default("/.well-known/charrette-release"),
   /** Empty means read-only. Nonempty authorizes writes only within this isolated test scope. */
   productionTestScope: z.string().default(""),
   mergeTimeoutMinutes: z.number().min(0).max(1440).default(60),

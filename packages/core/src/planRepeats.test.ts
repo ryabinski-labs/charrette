@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { pathsRepeat, planRepeats, planRepeatsNote, subjectWords, titleRepeats } from "./planRepeats.js";
 
 /**
- * Every case here is spelled the way run 6fe4ba37 (waf) spelled it. That run
+ * Every case here is spelled the way run 6fe4ba37 (rust-service) spelled it. That run
  * merged `seclang ast types` twice under two ids, planned and merged the
  * multipart, JSON and XML body parsers twice each, and then paid a further task
  * to consolidate the duplicates it had made. All of it was legible in the task

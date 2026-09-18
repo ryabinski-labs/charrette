@@ -1,16 +1,19 @@
 {
-  "name": "harness-monorepo",
+  "name": "charrette-monorepo",
   "private": true,
   "version": "0.0.1",
-  "description": "Multi-agent development harness: assignment in, reviewed PRs out",
+  "description": "Multi-agent development orchestrator: a PRD in, reviewed pull requests out",
   "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/ryabinski-labs/charrette.git" },
+  "homepage": "https://github.com/ryabinski-labs/charrette#readme",
+  "bugs": { "url": "https://github.com/ryabinski-labs/charrette/issues" },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13"
   },
   "packageManager": "pnpm@11.22.0",
   "scripts": {
     "build": "pnpm -r build",
-    "link-cli": "mkdir -p \"$HOME/.local/bin\" && ln -sf \"$PWD/apps/cli/dist/main.js\" \"$HOME/.local/bin/harness\" && echo \"linked $HOME/.local/bin/harness -> $PWD/apps/cli/dist/main.js\"",
+    "link-cli": "mkdir -p \"$HOME/.local/bin\" && ln -sf \"$PWD/apps/cli/dist/main.js\" \"$HOME/.local/bin/charrette\" && echo \"linked $HOME/.local/bin/charrette -> $PWD/apps/cli/dist/main.js\"",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",

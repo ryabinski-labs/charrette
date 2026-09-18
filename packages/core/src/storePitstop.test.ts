@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RunConfig } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
 import { Store } from "./store.js";
 
 /**
@@ -17,7 +17,7 @@ function store(): Store {
     state: "CREATED",
     prdPath: null,
     planHash: null,
-    integrationBranch: "harness/run1",
+    integrationBranch: "charrette/run1",
     config: RunConfig.parse({}),
   });
   return s;
@@ -43,7 +43,7 @@ const opened = (
     epicIds: over.epicIds ?? [],
     mergedCount: over.mergedCount ?? 0,
     spentUsd: over.spentUsd ?? 0,
-    artifactsDir: "/repo/.harness/run1/pitstops/1",
+    artifactsDir: "/repo/.charrette/run1/pitstops/1",
     demoStarted: true,
     summoned: over.summoned ?? false,
     askedAt: over.askedAt ?? 0,
@@ -66,7 +66,7 @@ describe("mergedTaskIds", () => {
   it("lists what landed, in the order it landed", () => {
     const s = store();
     for (const taskId of ["task-b", "task-a"]) {
-      s.appendEvent({ type: "git.merged", runId: "run1", taskId, branch: `harness/${taskId}`, sha: "abc", ts: 1 });
+      s.appendEvent({ type: "git.merged", runId: "run1", taskId, branch: `charrette/${taskId}`, sha: "abc", ts: 1 });
     }
 
     expect(s.mergedTaskIds("run1")).toEqual(["task-b", "task-a"]);

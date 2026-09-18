@@ -25,7 +25,7 @@ async function runMain(): Promise<void> {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
-describe("the harness binary", () => {
+describe("the charrette binary", () => {
   beforeEach(() => {
     buildProgramMock.mockClear();
     parseAsyncMock.mockReset();
@@ -57,7 +57,7 @@ describe("the harness binary", () => {
   });
 
   it("reads .env before the command tree runs", async () => {
-    // `harness run` checks the vendor keys while resolving its config. A key
+    // `charrette run` checks the vendor keys while resolving its config. A key
     // loaded after that check is a key that was not there when it mattered —
     // which for the Gemini reviewer means the run refuses to start.
     parseAsyncMock.mockResolvedValue(undefined);
@@ -78,10 +78,10 @@ describe("the harness binary", () => {
     expect(process.exit).toHaveBeenCalledWith(1);
   });
 
-  it("reports a run already held by another harness as a refusal, not a crash", async () => {
+  it("reports a run already held by another charrette as a refusal, not a crash", async () => {
     // Same exit code — nothing the operator asked for happened — but "fatal"
     // would describe a crash, and this process stopped on purpose.
-    const taken = new Error("run bc691359 is already being driven by harness pid 47427");
+    const taken = new Error("run bc691359 is already being driven by charrette pid 47427");
     taken.name = "RunLocked";
     parseAsyncMock.mockRejectedValue(taken);
 

@@ -1,7 +1,7 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { RunConfig } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
 import { describe, expect, it } from "vitest";
 import { Bus } from "./bus.js";
 import { GitHubAdapter } from "./github.js";
@@ -35,8 +35,8 @@ const V2 = dag(["scaffold-next-app", "db-core-schema", "auth-supabase"]);
  * two planner sessions — the PRD and conventions, then the DAG — which is why
  * the pool alternates.
  */
-function harness() {
-  const repo = mkdtempSync(path.join(tmpdir(), "harness-replan-supersedes-"));
+function charrette() {
+  const repo = mkdtempSync(path.join(tmpdir(), "charrette-replan-supersedes-"));
   const store = new Store(":memory:");
   const bus = new Bus(store);
   const plans = [DOCS, V1, DOCS, V2];
@@ -64,7 +64,7 @@ function harness() {
 }
 
 const run = async () => {
-  const { controller, store } = harness();
+  const { controller, store } = charrette();
   await controller.startRun("build the platform", RunConfig.parse({ planIntentCheck: false })).catch(() => undefined);
   const runId = (store.db.prepare("SELECT id FROM runs").get() as { id: string }).id;
   return { store, runId, tasks: store.listTasks(runId) };
@@ -106,7 +106,7 @@ describe("re-planning at the plan gate", () => {
 
   it("cancels nothing on a first plan", async () => {
     // The same code path runs when there is no previous plan; it must be inert.
-    const repo = mkdtempSync(path.join(tmpdir(), "harness-replan-first-"));
+    const repo = mkdtempSync(path.join(tmpdir(), "charrette-replan-first-"));
     const store = new Store(":memory:");
     const bus = new Bus(store);
     const plans = [DOCS, V1];

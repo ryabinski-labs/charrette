@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { RunConfig } from "@harness/shared";
-import type { HarnessEvent, IntakeQuestion } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
+import type { CharretteEvent, IntakeQuestion } from "@charrette/shared";
 
 const { seedWorktreeDepsMock } = vi.hoisted(() => ({ seedWorktreeDepsMock: vi.fn(async () => [] as unknown[]) }));
 vi.mock("./deps.js", () => ({ seedWorktreeDeps: seedWorktreeDepsMock }));
@@ -31,7 +31,7 @@ afterEach(() => {
 });
 
 function repo(withRemote = true): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-gh-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-gh-"));
   made.push(dir, `${dir}-wt`);
   const run = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
   run("init", "-b", "main");
@@ -41,7 +41,7 @@ function repo(withRemote = true): string {
   run("add", "-A");
   run("commit", "-m", "first");
   if (withRemote) {
-    const remote = mkdtempSync(path.join(tmpdir(), "harness-gh-remote-"));
+    const remote = mkdtempSync(path.join(tmpdir(), "charrette-gh-remote-"));
     made.push(remote);
     execFileSync("git", ["init", "--bare", "-b", "main"], { cwd: remote, stdio: "ignore" });
     run("remote", "add", "origin", remote);
@@ -158,7 +158,7 @@ const dagJson = (ids: string[] = ["task-a"]) =>
 function build(opts: { repoPath: string; pool: AgentPool; github?: GitHubAdapter; gates?: Partial<GateHandler> }) {
   const store = new Store(":memory:");
   const bus = new Bus(store);
-  const events: HarnessEvent[] = [];
+  const events: CharretteEvent[] = [];
   bus.subscribe(({ event }) => void events.push(event));
   const gates: GateHandler = {
     async resolvePlanGate() {
@@ -210,7 +210,7 @@ describe("the intake conversation", () => {
     expect(store.getRun(runId)!.assignment).toContain("add rate limiting keyed on the API key");
     expect(specs.find((s) => s.role === "planner")!.prompt).toContain("add rate limiting keyed on the API key");
     expect(events.some((e) => e.type === "intake.brief_ready")).toBe(true);
-    expect(events.filter((e): e is HarnessEvent & { to?: string } => e.type === "run.state_changed").map((e) => e.to)).toContain("INTAKE");
+    expect(events.filter((e): e is CharretteEvent & { to?: string } => e.type === "run.state_changed").map((e) => e.to)).toContain("INTAKE");
   });
 });
 
@@ -231,7 +231,7 @@ describe("what a run says on its issues", () => {
     await controller.startRun("build a thing", RunConfig.parse({ deterministicChecks: [], workerRespawnCap: 1, waitForChecks: false }));
 
     const bodies = gh.comments.map((c) => c.body);
-    expect(bodies.some((b) => /\*\*Done\*\* — merged into `harness\//.test(b))).toBe(true);
+    expect(bodies.some((b) => /\*\*Done\*\* — merged into `charrette\//.test(b))).toBe(true);
     expect(bodies.some((b) => /\*\*Parked for a human\*\*/.test(b))).toBe(true);
     // A parked task's thread is left open: a reply in it is picked up as guidance.
     expect(gh.closed).toEqual([]);
@@ -294,7 +294,7 @@ describe("an operator answering in the issue thread", () => {
 
     expect(
       events.some(
-        (e): e is HarnessEvent & { text: string; delivery?: string } =>
+        (e): e is CharretteEvent & { text: string; delivery?: string } =>
           e.type === "task.feedback" && /1 new comment on issue #/.test((e as { text: string }).text)
       )
     ).toBe(true);
@@ -361,7 +361,7 @@ describe("pull requests per task", () => {
 
     expect(store.getTask(runId, "task-a")!.prNumber).toBeNull();
     expect(
-      events.some((e): e is HarnessEvent & { text: string } => e.type === "agent.log" && /no pull request opened/.test((e as { text: string }).text))
+      events.some((e): e is CharretteEvent & { text: string } => e.type === "agent.log" && /no pull request opened/.test((e as { text: string }).text))
     ).toBe(true);
   });
 
@@ -434,7 +434,7 @@ describe("regrouping per-task pull requests", () => {
     const { controller, store } = build({ repoPath: dir, pool });
     store.createRun({
       id: "run1", repoPath: dir, assignment: "a", state: "CREATED", prdPath: null, planHash: null,
-      integrationBranch: "harness/run1/main", config: RunConfig.parse({}),
+      integrationBranch: "charrette/run1/main", config: RunConfig.parse({}),
     });
 
     await expect(controller.regroupPrs("run1")).rejects.toThrow("GitHub is not configured");
@@ -536,7 +536,7 @@ describe("recoverable work on a finished run", () => {
     const { controller, store } = build({ repoPath: dir, pool });
     store.createRun({
       id: "run1", repoPath: dir, assignment: "a", state: "CREATED", prdPath: null, planHash: null,
-      integrationBranch: "harness/run1/main", config: RunConfig.parse({}),
+      integrationBranch: "charrette/run1/main", config: RunConfig.parse({}),
     });
 
     expect(controller.hasRecoverableWork("run1")).toBe(false);

@@ -1,0 +1,24 @@
+# Ownership for the areas where a second pair of eyes is required on top of
+# green checks. Everything else merges on checks alone — see MAINTAINERS.md.
+
+# Default owner for anything not matched below.
+*                           @ryabinski-labs
+
+# Release, CI and supply chain.
+/.github/                   @ryabinski-labs
+/build.sh                   @ryabinski-labs
+/pnpm-lock.yaml             @ryabinski-labs
+/package.json               @ryabinski-labs
+
+# Security policy and governance.
+/SECURITY.md                @ryabinski-labs
+/LICENSE                    @ryabinski-labs
+/MAINTAINERS.md             @ryabinski-labs
+/CODE_OF_CONDUCT.md         @ryabinski-labs
+
+# The boundaries SECURITY.md claims the project holds.
+/packages/core/src/isolation.ts      @ryabinski-labs
+/packages/core/src/infraGuard.ts     @ryabinski-labs
+/packages/core/src/worktreeGuard.ts  @ryabinski-labs
+/packages/core/src/runLock.ts        @ryabinski-labs
+/packages/dashboard/src/index.ts     @ryabinski-labs

@@ -14,7 +14,7 @@ export const RunState = z.enum([
   // own state rather than PR_REVIEW with a sad reason string, because the two
   // are different requests of the operator. PR_REVIEW asks them to review;
   // this asks them for help, and it must read that way on the dashboard, in
-  // `harness status` and in the notification. waf de2cb7aa and ledger-app
+  // `charrette status` and in the notification. rust-service de2cb7aa and ledger-app
   // a8df0107 both reported themselves in review over a red acceptance suite
   // (issue #115); this is the state they should have landed in.
   "BLOCKED",
@@ -120,7 +120,7 @@ export const RUN_TRANSITIONS: Record<RunState, RunState[]> = {
   // to PR_REVIEW: the gates it failed are the gates it has to pass.
   BLOCKED: ["PLANNING", "EXECUTING", "INTEGRATING", "VERIFYING", "ABORTED"],
   // A run stays in VERIFYING while the deploy is red or production disagrees:
-  // both are states the operator has to act on, and neither is the harness's to
+  // both are states the operator has to act on, and neither is the charrette's to
   // guess at. `resume` re-enters verification, so fixing the deploy and running
   // it again is what moves the run on — no new run, no lost history.
   VERIFYING: ["DONE", "BLOCKED", "EXECUTING", "PAUSED", "BUDGET_HOLD", "LIMIT_HOLD", "FAILED", "ABORTED"],
@@ -148,7 +148,7 @@ export const TASK_TRANSITIONS: Record<TaskState, TaskState[]> = {
   // before any worker starts; that parks like any other crash.
   READY: ["WORKING", "NEEDS_HUMAN", "CANCELLED"],
   // WORKING/QA/QA_FAILED -> READY: a task found mid-flight when no agent can be
-  // running it (the previous harness process died) is requeued, not abandoned.
+  // running it (the previous charrette process died) is requeued, not abandoned.
   // WORKING -> ACCEPTED: the pre-QA gate found the branch already contained in
   // the integration branch. Nothing is being claimed about a review here — the
   // door exists because the work has demonstrably landed, and the alternative

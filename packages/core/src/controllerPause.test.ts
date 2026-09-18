@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { RunConfig } from "@harness/shared";
-import type { HarnessEvent } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
+import type { CharretteEvent } from "@charrette/shared";
 import { Bus } from "./bus.js";
 import { GitHubAdapter } from "./github.js";
 import type { AgentPool, AgentResult, AgentSpec } from "./pool.js";
@@ -28,7 +28,7 @@ afterEach(() => {
 });
 
 function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-pause-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-pause-"));
   made.push(dir, `${dir}-wt`);
   const run = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
   run("init", "-b", "main");
@@ -87,7 +87,7 @@ function pool(answers: Partial<Record<string, Answer>>): AgentPool {
 function build(repoPath: string, agents: AgentPool) {
   const store = new Store(":memory:");
   const bus = new Bus(store);
-  const events: HarnessEvent[] = [];
+  const events: CharretteEvent[] = [];
   bus.subscribe(({ event }) => void events.push(event));
   const gates: GateHandler = {
     async resolvePlanGate() {

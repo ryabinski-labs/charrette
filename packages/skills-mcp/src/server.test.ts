@@ -69,7 +69,7 @@ describe("skills MCP server", () => {
   it("connects a stdio transport and registers both tools", async () => {
     const tools = await bootServer([]);
 
-    expect(McpServerMock).toHaveBeenCalledWith({ name: "harness-skills-discovery", version: "0.0.1" });
+    expect(McpServerMock).toHaveBeenCalledWith({ name: "charrette-skills-discovery", version: "0.0.1" });
     expect(StdioServerTransportMock).toHaveBeenCalledOnce();
     expect(connectMock).toHaveBeenCalledWith({ kind: "stdio" });
     expect([...tools.keys()].sort()).toEqual(["describe_skill", "search_skills"]);

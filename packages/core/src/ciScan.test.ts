@@ -1,4 +1,4 @@
-import { PlannedTask } from "@harness/shared";
+import { PlannedTask } from "@charrette/shared";
 import { describe, expect, it } from "vitest";
 import { PATCH_COVERAGE_FLOOR, renderCi, scanCi } from "./ciScan.js";
 

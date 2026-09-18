@@ -1,0 +1,41 @@
+name: Bug report
+description: Something behaved differently from what the docs say it does.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please run `charrette postmortem` first and paste what it says. It
+        answers most of what would otherwise be asked back — including which
+        build each session ran under, which is the single most common cause of
+        confusing run behavior.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what happened, and what you expected instead.
+    validations: { required: true }
+  - type: textarea
+    id: postmortem
+    attributes:
+      label: Postmortem output
+      description: Output of `charrette postmortem`. Redact paths or repo names if sensitive.
+      render: text
+  - type: textarea
+    id: banner
+    attributes:
+      label: Startup banner
+      description: The resolved defaults printed before anything is spent.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `charrette version`.
+    validations: { required: true }
+  - type: input
+    id: runtime
+    attributes:
+      label: Node and pnpm versions
+      placeholder: "node v22.13.0, pnpm 11.22.0"
+    validations: { required: true }

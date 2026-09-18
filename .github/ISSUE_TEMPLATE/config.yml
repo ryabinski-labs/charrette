@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or idea
+    url: https://github.com/ryabinski-labs/charrette/discussions
+    about: Questions, ideas and "is this supposed to work like this?" go here.
+  - name: Security vulnerability
+    url: https://github.com/ryabinski-labs/charrette/security/advisories/new
+    about: Report privately. Please do not open a public issue.

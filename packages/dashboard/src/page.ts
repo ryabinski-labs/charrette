@@ -11,7 +11,7 @@
  * Rendering rule: every dynamic string reaches the DOM through textContent, never
  * innerHTML — agent output and repository contents are untrusted input here.
  */
-import { PINNED_ROLES } from "@harness/shared";
+import { PINNED_ROLES } from "@charrette/shared";
 
 /**
  * What the model dropdowns offer.
@@ -45,7 +45,7 @@ export const PAGE_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Harness</title>
+<title>Charrette</title>
 <!-- Inline, so the browser never requests /favicon.ico and logs a 404 into the
      one console an operator might open to find out why a run stalled. -->
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230b0d10'/%3E%3Cpath d='M4 4v8M12 4v8M4 8h8' stroke='%237aa2f7' stroke-width='2' fill='none'/%3E%3C/svg%3E">
@@ -318,7 +318,7 @@ export const PAGE_HTML = `<!doctype html>
   .task .title { font-size:.87rem; min-width:0; overflow-wrap:anywhere; }
   .task .top .pill { flex:none; }
   /* Same reason: the task id here is how the operator names the task to
-     \`harness probe\`, and it measured 3.25:1 on the card. */
+     \`charrette probe\`, and it measured 3.25:1 on the card. */
   .task .sub { color:var(--dim); font-size:.72rem; margin-top:.2rem; display:flex; gap:.6rem; flex-wrap:wrap;
                font-family:var(--mono); min-width:0; }
   .task .sub span { overflow-wrap:anywhere; }
@@ -509,7 +509,7 @@ export const PAGE_HTML = `<!doctype html>
 </head>
 <body>
 <header>
-  <h1><span class="mark">harness</span><span class="repo" id="repo">&hellip;</span></h1>
+  <h1><span class="mark">charrette</span><span class="repo" id="repo">&hellip;</span></h1>
   <span id="runpills"></span>
   <button id="notify" class="ghost" aria-pressed="false" onclick="toggleNotify()">Notify me</button>
   <!-- Shown only while there is one run still working. Two clicks, because the
@@ -857,7 +857,7 @@ function describe(ev) {
       return ["state", "intake", "brief agreed (" + ev.decisions + " decisions): " + clip(ev.goal, 120)];
     // The operator's own actions, said back to them in the feed. Without these
     // the log shows a bare run.pitstop_requested — which is the default case
-    // below, and reads as a harness internal rather than as the thing they just
+    // below, and reads as a charrette internal rather than as the thing they just
     // clicked and are now waiting on.
     case "run.pitstop_requested":
       return ["state", "pitstop", "you asked for a pit stop: " + clip(ev.question, 160) +
@@ -886,7 +886,7 @@ function describe(ev) {
     case "git.merge_conflict":
       return ["bad", ev.taskId, "merge conflict: " + ev.files.join(", ")];
     /* Ruling a flake out before spending a fix task on it. Falling through
-       to the default printed the bare type while the harness quietly re-ran
+       to the default printed the bare type while the charrette quietly re-ran
        jobs — a feed gap exactly where the operator wonders what it is doing. */
     case "run.ci_retry":
       return ["git", "integrator", ev.reran
@@ -1032,7 +1032,7 @@ function renderHeader() {
   $("repo").textContent = name || "no repository";
   // Several repos can be running at once on adjacent ports; the tab title is how
   // the operator tells those tabs apart without opening them.
-  if (!titleOverride) document.title = name ? name + " \\u00b7 Harness" : "Harness";
+  if (!titleOverride) document.title = name ? name + " \\u00b7 Charrette" : "Charrette";
   const pills = $("runpills");
   pills.textContent = "";
   let spent = 0, cap = 0, running = 0;
@@ -1260,7 +1260,7 @@ function renderNow() {
      * A session row is written when the agent starts and closed when it ends,
      * so every handover — worker to QA, QA back to worker, one task to the
      * next — has a gap with a task plainly in progress and nobody reported on
-     * it. Saying "the harness is waiting on you" there sends the operator
+     * it. Saying "the charrette is waiting on you" there sends the operator
      * hunting for a gate that does not exist, while the feed scrolls past.
      *
      * So name the gap, and time it: a handover is a second or two, and one
@@ -1285,7 +1285,7 @@ function renderNow() {
     /*
      * Say which tasks, when the answer is known.
      *
-     * "The harness is waiting on you, on git, or between tasks" offers three
+     * "The charrette is waiting on you, on git, or between tasks" offers three
      * possibilities to the operator's first question, and the store has
      * already settled it: a parked task carries the reason it stopped and the
      * button that revives it. On run 7ef8fb4d that sentence sat at the top of
@@ -1305,7 +1305,7 @@ function renderNow() {
     }
     $("nowcount").textContent = busy.length ? "between agents" : "idle";
     box.append(el("div", "empty", !busy.length
-      ? "No agent is running \\u2014 the harness is waiting on you, on git, or between tasks."
+      ? "No agent is running \\u2014 the charrette is waiting on you, on git, or between tasks."
       : waited > 90_000
       ? "Nothing has been running on " + busy.join(", ") + " for " + dur(waited) +
         ", which is longer than a handover takes \\u2014 worth a look at the feed."
@@ -1662,7 +1662,7 @@ function renderPaused() {
   $("paused").style.display = paused.length || pauseSaid ? "block" : "none";
   // Only the stopped run gets the resume instruction. Saying it while agents
   // are still finishing their turn would be telling the operator to start a
-  // second harness against a repository this one still holds worktrees in.
+  // second charrette against a repository this one still holds worktrees in.
   $("paused-h").textContent = paused.length ? "Paused \\u2014 nothing is running" : "Stopping the run\\u2026";
   $("paused-note").style.display = paused.length ? "block" : "none";
   box.textContent = "";
@@ -1677,7 +1677,7 @@ function renderPaused() {
   for (const run of paused) {
     const p = el("p", null, null);
     p.append("Run " + run.id + " is paused. Pick it up with ");
-    p.append(el("code", null, "harness resume " + run.id));
+    p.append(el("code", null, "charrette resume " + run.id));
     p.append(" \\u2014 every commit its agents made is still in their worktrees.");
     box.append(p);
   }
@@ -2411,7 +2411,7 @@ const NOTIFY = {
 };
 
 const canNotify = typeof Notification !== "undefined";
-let notifyOn = canNotify && localStorage.getItem("harness-notify") === "on";
+let notifyOn = canNotify && localStorage.getItem("charrette-notify") === "on";
 /** Set once a run ends, so the 5s refresh cannot overwrite the tab title back. */
 let titleOverride = "";
 
@@ -2447,7 +2447,7 @@ async function toggleNotify() {
     if (granted !== "granted") { renderNotifyButton(); return; }
   }
   notifyOn = !notifyOn;
-  localStorage.setItem("harness-notify", notifyOn ? "on" : "off");
+  localStorage.setItem("charrette-notify", notifyOn ? "on" : "off");
   renderNotifyButton();
 }
 
@@ -2523,14 +2523,14 @@ function notifyTaskGates(gates) {
     const key = g.runId + "/" + g.taskId;
     if (notifiedGates.has(key)) continue;
     notifiedGates.add(key);
-    const where = repoName() || "harness";
+    const where = repoName() || "charrette";
     titleOverride = where + " \\u00b7 needs you";
     document.title = titleOverride;
     if (!notifyOn || Notification.permission !== "granted") continue;
     try {
       const note = new Notification(where + " \\u2014 a task needs you", {
         body: g.title + ": " + clip(g.why, 120) + " Answer it and the run continues.",
-        tag: "harness-gate-" + key,
+        tag: "charrette-gate-" + key,
       });
       note.onclick = () => window.focus();
     } catch (e) {}
@@ -2597,12 +2597,12 @@ async function resolvePitStop(action) {
  * would act on differently.
  */
 function notify(title, body, label) {
-  const where = repoName() || "harness";
+  const where = repoName() || "charrette";
   titleOverride = where + " \\u00b7 " + label;
   document.title = titleOverride;
   if (!notifyOn || Notification.permission !== "granted") return;
   try {
-    const note = new Notification(where + " \\u2014 " + title, { body: body, tag: "harness-" + title });
+    const note = new Notification(where + " \\u2014 " + title, { body: body, tag: "charrette-" + title });
     note.onclick = () => window.focus();
   } catch (e) {}
 }
@@ -2614,14 +2614,14 @@ function notifyRunState(ev) {
   // Without this the page announces a plan gate you approved an hour ago, and does
   // it again each time the connection drops.
   if (ev.ts < openedAt) return;
-  const where = repoName() || "harness";
+  const where = repoName() || "charrette";
   titleOverride = where + " \\u00b7 " + n[0];
   document.title = titleOverride;
   if (!notifyOn || Notification.permission !== "granted") return;
   try {
     // Tagged per run and state so a reconnect that replays the event re-uses the
     // same notification instead of stacking a second copy of it.
-    const note = new Notification(where + " \\u2014 run " + n[0], { body: n[1], tag: "harness-" + ev.runId + "-" + ev.to });
+    const note = new Notification(where + " \\u2014 run " + n[0], { body: n[1], tag: "charrette-" + ev.runId + "-" + ev.to });
     note.onclick = () => { window.focus(); note.close(); };
   } catch (e) {
     // Some browsers only allow notifications from a service worker; the tab title
@@ -2642,16 +2642,16 @@ async function refreshState() {
   try {
     res = await fetch("/api/state", { headers });
   } catch (e) {
-    apiError = "can't reach the harness \\u2014 did the process exit? retrying\\u2026";
+    apiError = "can't reach the charrette \\u2014 did the process exit? retrying\\u2026";
     renderNow();
     return;
   }
   if (!res.ok) {
-    // Only a 401/403 is an auth problem; anything else is the harness hiccuping
+    // Only a 401/403 is an auth problem; anything else is the charrette hiccuping
     // and calling it "auth failed" sends the operator hunting for the wrong bug.
     apiError = res.status === 401 || res.status === 403
       ? "auth failed \\u2014 reopen the URL printed by the CLI"
-      : "the harness answered HTTP " + res.status + " \\u2014 retrying\\u2026";
+      : "the charrette answered HTTP " + res.status + " \\u2014 retrying\\u2026";
     renderNow();
     return;
   }
@@ -2776,7 +2776,7 @@ async function resolveGate(approved) {
     $("gate-feedback").value = "";
     await refresh();
   } catch (e) {
-    error.textContent = "Could not reach the harness. Your feedback is saved here; reconnect and try again.";
+    error.textContent = "Could not reach the charrette. Your feedback is saved here; reconnect and try again.";
   } finally {
     buttons.forEach((b) => { b.disabled = false; });
   }

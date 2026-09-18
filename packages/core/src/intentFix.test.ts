@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { RunConfig } from "@harness/shared";
-import type { HarnessEvent } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
+import type { CharretteEvent } from "@charrette/shared";
 import { Bus } from "./bus.js";
 import { GitHubAdapter } from "./github.js";
 import type { PitStop } from "./pitstop.js";
@@ -13,12 +13,12 @@ import { RunController, type GateHandler } from "./runController.js";
 import { Store } from "./store.js";
 
 /**
- * What the harness does with a failing intent verdict.
+ * What the charrette does with a failing intent verdict.
  *
  * Run 40da9337 merged 36 tasks, spent $774, opened its pull requests and
  * reported success — carrying a validator verdict that said none of the workers
  * which actually move money were scheduled to run anywhere outside a test. Seven
- * gaps, every one of them a task the harness knew how to write, and the verdict
+ * gaps, every one of them a task the charrette knew how to write, and the verdict
  * was a line in a log. These tests are that line becoming work.
  */
 
@@ -28,7 +28,7 @@ afterEach(() => {
 });
 
 function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-intentfix-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-intentfix-"));
   made.push(dir, `${dir}-wt`);
   const run = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "ignore" });
   run("init", "-b", "main");
@@ -98,7 +98,7 @@ const BASE = { deterministicChecks: [] as string[], waitForChecks: false, maxPar
 function build(opts: { repoPath: string; pool: AgentPool }) {
   const store = new Store(":memory:");
   const bus = new Bus(store);
-  const events: HarnessEvent[] = [];
+  const events: CharretteEvent[] = [];
   const stops: PitStop[] = [];
   bus.subscribe(({ event }) => void events.push(event));
   const gates: GateHandler = {
@@ -117,7 +117,7 @@ function build(opts: { repoPath: string; pool: AgentPool }) {
   return { controller, store, events, stops };
 }
 
-const logs = (events: HarnessEvent[]) => events.filter((e): e is HarnessEvent & { text: string } => e.type === "agent.log").map((e) => e.text);
+const logs = (events: CharretteEvent[]) => events.filter((e): e is CharretteEvent & { text: string } => e.type === "agent.log").map((e) => e.text);
 
 describe("a failing intent verdict", () => {
   it("queues one task per gap and sends the run back to work", async () => {
@@ -138,9 +138,9 @@ describe("a failing intent verdict", () => {
   });
 
   it("closes the seven gaps run 40da9337 actually shipped", async () => {
-    // Verbatim from `billing-app/.harness/harness.db`, the one `run.intent_verdict`
+    // Verbatim from `billing-app/.charrette/charrette.db`, the one `run.intent_verdict`
     // that run produced. It is correct in every particular and it was the last
-    // thing the harness did: the run went to PR_REVIEW and stopped, and a day
+    // thing the charrette did: the run went to PR_REVIEW and stopped, and a day
     // later a separate session rediscovered the same four unscheduled workers
     // from scratch. This asserts the verdict becomes work.
     const REAL = [
@@ -214,7 +214,7 @@ describe("a failing intent verdict", () => {
 
     const runId = await controller.startRun("build a thing", RunConfig.parse(BASE));
 
-    // One round, then the run holds. A gap the harness could not close is not
+    // One round, then the run holds. A gap the charrette could not close is not
     // a clause in a closing line; with `holdUntilProven` it is the reason the
     // run is BLOCKED, and no pull request opens over it.
     expect(store.listTasks(runId).filter((t) => t.id.startsWith("intent-fix-")).length).toBe(2);

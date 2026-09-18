@@ -1,14 +1,13 @@
 import { appendFileSync } from "node:fs";
-import path from "node:path";
 
 /**
- * Why a harness process stopped.
+ * Why a charrette process stopped.
  *
  * Until this existed, it stopped without saying: the only error handling was
  * `program.parseAsync().catch(...)`, which prints one line to the terminal and
  * exits. A run that died overnight, or in a terminal since scrolled or closed,
  * left nothing behind — and `resume` could only report the consequence ("the
- * previous harness process died mid-task") while the cause was unrecoverable.
+ * previous charrette process died mid-task") while the cause was unrecoverable.
  * One run lost 1,300 agent turns across 11 such deaths with no record of a
  * single one.
  *
@@ -22,9 +21,15 @@ let logPath: string | null = null;
 /** A fatal path can be reached twice (throw inside an exit handler); log once. */
 let done = false;
 
-/** Point the log at `<stateDir>/harness.log`. Safe to call more than once. */
-export function armCrashLog(stateDir: string): void {
-  logPath = path.join(stateDir, "harness.log");
+/**
+ * Point the log at the crash log `statePaths` resolved. Takes the full path
+ * rather than a directory: a repo still on the pre-rename layout keeps the
+ * pre-rename filename too, and only the resolver knows which that is.
+ *
+ * Safe to call more than once.
+ */
+export function armCrashLog(file: string): void {
+  logPath = file;
 }
 
 /**
@@ -35,16 +40,16 @@ export function armCrashLog(stateDir: string): void {
  * its message *plus its stack*, and an operator who should not be shown a
  * stack) and the wrong one for an error whose message is deliberately several
  * lines. A config rejection listing three bad fields arrived as its own
- * heading and nothing else: "harness: fatal — that run configuration cannot be
+ * heading and nothing else: "charrette: fatal — that run configuration cannot be
  * used:" with the reasons cut off underneath.
  *
  * So the split is now by *what the text is* rather than by line count: the
  * whole message reaches the terminal, the stack only reaches the log, and the
- * log line itself is unchanged — `harness.log` is parsed elsewhere.
+ * log line itself is unchanged — `charrette.log` is parsed elsewhere.
  */
 function record(kind: string, detail: string, human = detail.split("\n")[0]!): void {
   const line = `${new Date().toISOString()} pid=${process.pid} ${kind} ${detail.replace(/\s+$/, "")}\n`;
-  process.stderr.write(`\nharness: ${kind} — ${human}\n`);
+  process.stderr.write(`\ncharrette: ${kind} — ${human}\n`);
   if (!logPath) return;
   try {
     appendFileSync(logPath, line);
@@ -73,9 +78,9 @@ export function recordFatal(e: unknown): void {
 /**
  * Log `e` as a refusal rather than a crash.
  *
- * `harness: fatal — run bc691359 is already being driven by harness pid 47427`
+ * `charrette: fatal — run bc691359 is already being driven by charrette pid 47427`
  * is the wrong word for the one case it describes. Nothing failed: a second
- * harness was told the run was taken and stopped, which is the whole feature.
+ * charrette was told the run was taken and stopped, which is the whole feature.
  * The message is several lines and every one of them is addressed to the
  * operator, so it goes to the terminal whole and to the log without a stack —
  * there is no stack worth keeping for a decision the process made on purpose.
@@ -110,7 +115,7 @@ export function installCrashLog(): void {
     process.on(signal, () => {
       if (!done) {
         done = true;
-        record("signal", `${signal} — stopped by the operator or the terminal, not a crash. In-flight agents were killed mid-task; \`harness resume\` requeues them.`);
+        record("signal", `${signal} — stopped by the operator or the terminal, not a crash. In-flight agents were killed mid-task; \`charrette resume\` requeues them.`);
       }
       process.exit(code);
     });

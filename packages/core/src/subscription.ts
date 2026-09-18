@@ -1,4 +1,4 @@
-import type { SubscriptionConfig } from "@harness/shared";
+import type { SubscriptionConfig } from "@charrette/shared";
 
 /**
  * How much of the account's plan is gone, and which subscription is spending it.
@@ -39,7 +39,7 @@ export interface SubscriptionReading {
  * not one or names no window.
  *
  * Typed as `unknown` and narrowed here rather than against the SDK's exported
- * type: this is the harness's boundary with a message shape it does not own,
+ * type: this is the charrette's boundary with a message shape it does not own,
  * and the same normalisation has to serve the tool-loop transport, which emits
  * nothing of the sort today and may tomorrow.
  */
@@ -201,7 +201,7 @@ export function alternatives(config: SubscriptionConfig): string[] {
 
 /**
  * The environment overlay that points a session at a named account, with `$VAR`
- * references resolved from the harness's own environment.
+ * references resolved from the charrette's own environment.
  *
  * Throws rather than spawning a session with a blank credential. A missing token
  * would otherwise fall back to the ambient login — the account this switch
@@ -250,7 +250,7 @@ export class SubscriptionPaused extends Error {
   constructor(public summary: string, public runId?: string) {
     super(
       `paused on subscription usage: ${summary}` +
-        (runId ? ` — run parked. Pick it up with: harness resume ${runId} --account <name>, or once the window resets` : "")
+        (runId ? ` — run parked. Pick it up with: charrette resume ${runId} --account <name>, or once the window resets` : "")
     );
   }
 }

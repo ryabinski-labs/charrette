@@ -10,7 +10,7 @@ import { withoutComments } from "./deployOrder.js";
  * nowhere but GitHub, after the pull request is already open — which is the
  * expensive end of the run. Run bc691359 is what that costs. Its CI ran
  * `build`, `fmt`, `clippy`, `test`, `coverage`, `patch-coverage` and `fuzz`,
- * plus `cargo deny` and `cargo audit` in a second workflow; the harness ran two
+ * plus `cargo deny` and `cargo audit` in a second workflow; the charrette ran two
  * of those nine, merged 30-odd tasks that were green against the two, and the
  * formatting and licence failures were found by a human reading the pull
  * request. Both were one line of `cargo` away from being caught in the worktree
@@ -32,7 +32,7 @@ import { withoutComments } from "./deployOrder.js";
  *   - only workflows that judge a pull request, because those are the ones
  *     whose verdict blocks the merge;
  *   - only steps whose script is a single command, after `set -e` and friends
- *     are discarded. A multi-line `run:` is a shell program — WAF's `fmt` step
+ *     are discarded. A multi-line `run:` is a shell program — rust-service's `fmt` step
  *     builds a package list with `cargo metadata` and `jq` before it formats —
  *     and deciding that an arbitrary shell program is side-effect-free is not a
  *     thing this can do correctly, so it does not try;
@@ -190,7 +190,7 @@ const WRITES_BUILD_INPUTS = [
  * workflow every check it had: `npm ci` is not a liftable verb, so it is
  * dropped, and dropping it used to refuse `npm run lint` and `npm test` behind
  * it. A repository whose CI is checkout / setup-node / install / lint / test —
- * which is most of them — came out of `harness init` with no checks at all.
+ * which is most of them — came out of `charrette init` with no checks at all.
  */
 const DEPENDENCY_INSTALL = [
   /^(?:npm|yarn|pnpm|bun)\s+(?:ci|install|i|add)\b/,

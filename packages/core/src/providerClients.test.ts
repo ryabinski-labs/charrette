@@ -458,7 +458,7 @@ describe("choosing a client", () => {
   });
 
   it("refuses Anthropic, which belongs on the SDK transport", () => {
-    expect(() => clientFor("anthropic", { ANTHROPIC_API_KEY: "sk" })).toThrow("does not use the harness tool loop");
+    expect(() => clientFor("anthropic", { ANTHROPIC_API_KEY: "sk" })).toThrow("does not use the charrette tool loop");
   });
 
   it("defaults to the process environment and the global fetch", () => {

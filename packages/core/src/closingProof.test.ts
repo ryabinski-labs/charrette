@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { RunConfig, type HarnessEvent, type IntakeQuestion } from "@harness/shared";
+import { RunConfig, type CharretteEvent, type IntakeQuestion } from "@charrette/shared";
 import { Bus } from "./bus.js";
 import { BudgetExceeded } from "./budget.js";
 import { GitHubAdapter } from "./github.js";
@@ -16,7 +16,7 @@ import { Store } from "./store.js";
 /**
  * A run ends when the product is proven, not when the scheduler runs dry.
  *
- * waf de2cb7aa and ledger-app a8df0107 (issue #115) both reached PR_REVIEW
+ * rust-service de2cb7aa and ledger-app a8df0107 (issue #115) both reached PR_REVIEW
  * within the hour of their own acceptance gate saying "27 gating scenario(s)
  * are unproven" and "9 gating scenario(s) are unproven". Every gate that could
  * have said otherwise was advisory, and every one of them was overridden,
@@ -33,7 +33,7 @@ afterEach(() => {
 });
 
 function repo(remote = false): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-proof-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-proof-"));
   made.push(dir, `${dir}-wt`);
   const run = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "ignore" });
   run("init", "-b", "main");
@@ -43,7 +43,7 @@ function repo(remote = false): string {
   run("add", "-A");
   run("commit", "-m", "first");
   if (remote) {
-    const bare = mkdtempSync(path.join(tmpdir(), "harness-proof-remote-"));
+    const bare = mkdtempSync(path.join(tmpdir(), "charrette-proof-remote-"));
     made.push(bare);
     execFileSync("git", ["init", "--bare", "-b", "main"], { cwd: bare, stdio: "ignore" });
     run("remote", "add", "origin", bare);
@@ -129,7 +129,7 @@ function rolePool(answers: Partial<Record<string, Answer>>, bill = 0) {
 function build(opts: { repoPath: string; pool: AgentPool; github?: GitHubAdapter; gates?: Partial<GateHandler> }) {
   const store = new Store(":memory:");
   const bus = new Bus(store);
-  const events: HarnessEvent[] = [];
+  const events: CharretteEvent[] = [];
   bus.subscribe(({ event }) => void events.push(event));
   const gates: GateHandler = {
     async resolvePlanGate() {
@@ -159,11 +159,11 @@ function operator(answer = "use the Stripe sandbox"): IntakeUi & { asked: Intake
 
 const worker = (spec: AgentSpec, nth: number) => (commit(spec.cwd, `w-${path.basename(spec.cwd)}-${nth}.txt`), "did the work");
 const planner = (s: AgentSpec) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS : dag([{ id: "task-a", scenarioIds: ["SC-001"] }]));
-const logs = (events: HarnessEvent[]) => events.filter((e): e is HarnessEvent & { text: string } => e.type === "agent.log").map((e) => e.text);
-const proofs = (events: HarnessEvent[]) => events.filter((e): e is Extract<HarnessEvent, { type: "run.closing_proof" }> => e.type === "run.closing_proof");
-const verdicts = (events: HarnessEvent[]) => events.filter((e): e is Extract<HarnessEvent, { type: "run.intent_verdict" }> => e.type === "run.intent_verdict");
-const transitions = (events: HarnessEvent[]) =>
-  events.filter((e): e is Extract<HarnessEvent, { type: "run.state_changed" }> => e.type === "run.state_changed").map((e) => `${e.from}->${e.to}`);
+const logs = (events: CharretteEvent[]) => events.filter((e): e is CharretteEvent & { text: string } => e.type === "agent.log").map((e) => e.text);
+const proofs = (events: CharretteEvent[]) => events.filter((e): e is Extract<CharretteEvent, { type: "run.closing_proof" }> => e.type === "run.closing_proof");
+const verdicts = (events: CharretteEvent[]) => events.filter((e): e is Extract<CharretteEvent, { type: "run.intent_verdict" }> => e.type === "run.intent_verdict");
+const transitions = (events: CharretteEvent[]) =>
+  events.filter((e): e is Extract<CharretteEvent, { type: "run.state_changed" }> => e.type === "run.state_changed").map((e) => `${e.from}->${e.to}`);
 
 /** Everything a specified run needs answered, with `all` pointed at `allCommand`. */
 const specified = (allCommand: string, answers: Partial<Record<string, Answer>> = {}) => ({
@@ -258,9 +258,9 @@ describe("the acceptance gate's three answers", () => {
   });
 
   /**
-   * waf carried four blocked P0 scenarios — the staged-promotion requirement,
+   * rust-service carried four blocked P0 scenarios — the staged-promotion requirement,
    * a PRD Must-have — through the gate as a pass. A gating scenario blocked on
-   * an unanswered question is the harness's question to the operator, and it
+   * an unanswered question is the charrette's question to the operator, and it
    * is asked in the operator's terms rather than by scenario id.
    */
   it("names the question behind a gating scenario nobody could run", async () => {
@@ -333,7 +333,7 @@ describe("the acceptance gate's three answers", () => {
    */
   it("re-enters the gates when a blocked run is resumed, and reports in review once they pass", async () => {
     const dir = repo();
-    const flag = path.join(mkdtempSync(path.join(tmpdir(), "harness-proof-flag-")), "green");
+    const flag = path.join(mkdtempSync(path.join(tmpdir(), "charrette-proof-flag-")), "green");
     made.push(path.dirname(flag));
     const { pool } = rolePool(specified(`sh -c 'test -f "${flag}"'`));
     const { controller, store, events } = build({ repoPath: dir, pool });
@@ -360,8 +360,8 @@ describe("the intent check's third answer", () => {
   const roles = (validator: Answer) => ({ planner: (s: AgentSpec) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS : dag()), worker, qa: () => QA_PASS, validator });
 
   /**
-   * waf de2cb7aa's closing verdict: PASS, with gaps reading "Not independently
-   * verified given turn budget". Two verdicts in one object, and the harness
+   * rust-service de2cb7aa's closing verdict: PASS, with gaps reading "Not independently
+   * verified given turn budget". Two verdicts in one object, and the charrette
    * kept the one that opens pull requests. Now the session is asked to choose.
    */
   it("sends a PASS that lists gaps back to the session, and keeps the FAIL it chooses", async () => {
@@ -373,7 +373,7 @@ describe("the intent check's third answer", () => {
 
     const asks = specs.filter((s) => s.role === "validator");
     expect(asks[1]!.resume).toBe(asks[0] && "sdk" + (specs.indexOf(asks[0]) + 1));
-    expect(asks[1]!.prompt).toContain("That is two verdicts, and the harness cannot keep both");
+    expect(asks[1]!.prompt).toContain("That is two verdicts, and the charrette cannot keep both");
     expect(asks[1]!.prompt).toContain("- the poller is never scheduled");
     expect(logs(events)).toContainEqual(expect.stringContaining("answered PASS and listed 1 gap(s) — two verdicts"));
     // The FAIL became work, the work merged, and the third read passed.
@@ -865,7 +865,7 @@ describe("the closing pit stop", () => {
 
 describe("requirements nothing is building any more", () => {
   /**
-   * waf cancelled 177 tasks and carried none of their requirements anywhere.
+   * rust-service cancelled 177 tasks and carried none of their requirements anywhere.
    * A run whose task list empties over a promise nobody decided about now
    * holds, and says which promise (issue #120).
    */
@@ -1202,7 +1202,7 @@ describe("requirements nothing is building any more", () => {
 
 describe("what a run has written about what it did not build", () => {
   /**
-   * waf's gaps file reached 118.6 KB and its own intent verdict offered
+   * rust-service's gaps file reached 118.6 KB and its own intent verdict offered
    * "though this is honestly disclosed rather than hidden" as mitigation for a
    * core deliverable that did not work. The operator was shown it after the
    * run; the only decision available — buy the work, or accept the gaps —
@@ -1213,7 +1213,7 @@ describe("what a run has written about what it did not build", () => {
     const stops: PitStop[] = [];
     const { pool } = rolePool(
       specified("exit 0", {
-        // The worker writes the run's own gaps file, as waf's did.
+        // The worker writes the run's own gaps file, as rust-service's did.
         worker: (spec: AgentSpec, nth: number) => {
           writeFileSync(path.join(spec.cwd, "KNOWN-GAPS.md"), `# Known gaps\n\n${"Everything here was deliberately left out of this run's budget. ".repeat(400)}`);
           return worker(spec, nth);

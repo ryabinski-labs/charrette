@@ -18,7 +18,7 @@ import type { Store } from "./store.js";
  * categories of useful fact ("the tests need Postgres on 5432") and is worth it
  * until there is a measurement saying otherwise.
  *
- * The database already lives at `<repo>/.harness/harness.db`, so these rows are
+ * The database already lives at `<repo>/.charrette/charrette.db`, so these rows are
  * scoped to one repository by construction — there is no repo key here because
  * there is no way for two repositories to share a table.
  */

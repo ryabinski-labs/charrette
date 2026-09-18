@@ -19,7 +19,7 @@ import { git } from "./git.js";
  *
  * The obvious alternative is to parse the code and follow imports and calls.
  * Measured on four brownfield repositories (folio, agentdraft,
- * alaskaroadtrip-business, vectraseo — 3,000-odd commits between them), taking
+ * trip-app-business, seo-app — 3,000-odd commits between them), taking
  * each commit as a task, 40% of its files as what a planner would have named,
  * and asking which pairs of tasks would have been correctly held apart:
  *
@@ -81,7 +81,7 @@ const WIDEN_BY = 3;
  *
  * Stated as a fraction of the repository rather than as a rank, because rank
  * does not survive a change of scale: "the top 1%" was the rule that measured
- * best on the four large repositories, and on the harness's own 199-file
+ * best on the four large repositories, and on the charrette's own 199-file
  * repository it named one file and let `docs/OPERATIONS.md` — which ships with
  * 51% of the tree — through to attach itself to every task in the run. At 30%
  * both repositories are read the same way, for 64.0% of real conflicts caught
@@ -102,7 +102,7 @@ const HUB_MIN_FILES = 20;
  * all — it is being described. Some histories cannot tell files apart: a young
  * project where every commit is a whole vertical slice has genuinely shipped
  * most of its files with most of its other files, and "what does this one
- * usually arrive with" has no answer. The harness's own repository is one — 55
+ * usually arrive with" has no answer. The charrette's own repository is one — 55
  * commits, 8 files each, and 19.6% of the tree over the hub line, against 0.3%
  * to 1.6% for the four established repositories measured. The separation is not
  * subtle, and on the wrong side of it every suggestion was noise.
@@ -164,7 +164,7 @@ export function emptyCoChange(): CoChangeIndex {
  *
  * Never throws. A repository with no commits, no git, or a history too short to
  * generalise from returns an index that widens nothing, which is exactly the
- * behaviour the harness had before this existed — the run continues on the
+ * behaviour the charrette had before this existed — the run continues on the
  * planner's declared paths alone.
  */
 export async function coChangeIndex(repoPath: string): Promise<CoChangeIndex> {

@@ -53,8 +53,8 @@ export const PlannedTask = z.object({
    * Whether this task is part of the walking skeleton: the thinnest vertical
    * slice that makes the run's critical path run end to end, however crude.
    *
-   * waf built 13 crates, an operator UI, a marketing site, a fuzz workspace, a
-   * benchmark harness, a parity suite, a Helm chart and 56,491 lines of
+   * rust-service built 13 crates, an operator UI, a marketing site, a fuzz workspace, a
+   * benchmark charrette, a parity suite, a Helm chart and 56,491 lines of
    * documentation before anything installed it on a cluster and watched it
    * block a request — and then spent its closing budget on Dockerfile build
    * contexts and golden-file drift, which is what breadth costs once you own
@@ -172,7 +172,7 @@ export const QaVerdict = z.discriminatedUnion("verdict", [
      * read by nobody. So an honest QA agent doing exactly as instructed produced
      * something indistinguishable from a clean pass.
      *
-     * That is not hypothetical. dns-project's `af60742` shipped with its own commit
+     * That is not hypothetical. The DNS service's `af60742` shipped with its own commit
      * message ending "NOT YET verified this session (turn budget ran out
      * first)", naming the live DynamoDB run it had skipped and the manifest
      * variable it had not added. Both were the outage. The disclosure was

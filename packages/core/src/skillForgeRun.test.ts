@@ -3,8 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { RunConfig } from "@harness/shared";
-import type { HarnessEvent } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
+import type { CharretteEvent } from "@charrette/shared";
 import { BudgetExceeded } from "./budget.js";
 import { Bus } from "./bus.js";
 import { GitHubAdapter } from "./github.js";
@@ -28,7 +28,7 @@ afterEach(() => {
 });
 
 function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-forge-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-forge-"));
   made.push(dir, `${dir}-wt`);
   const run = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
   run("init", "-b", "main");
@@ -94,7 +94,7 @@ const worker = (spec: AgentSpec) => {
 function build(repoPath: string, pool: AgentPool) {
   const store = new Store(":memory:");
   const bus = new Bus(store);
-  const events: HarnessEvent[] = [];
+  const events: CharretteEvent[] = [];
   bus.subscribe(({ event }) => void events.push(event));
   const gates: GateHandler = {
     async resolvePlanGate() {
@@ -108,10 +108,10 @@ function build(repoPath: string, pool: AgentPool) {
   return { controller, store, events };
 }
 
-const logs = (events: HarnessEvent[]) =>
-  events.filter((e): e is HarnessEvent & { text: string } => e.type === "agent.log").map((e) => e.text);
-const forgedEvents = (events: HarnessEvent[]) =>
-  events.filter((e): e is HarnessEvent & { name: string; action: string; path: string } => e.type === "skills.forged");
+const logs = (events: CharretteEvent[]) =>
+  events.filter((e): e is CharretteEvent & { text: string } => e.type === "agent.log").map((e) => e.text);
+const forgedEvents = (events: CharretteEvent[]) =>
+  events.filter((e): e is CharretteEvent & { name: string; action: string; path: string } => e.type === "skills.forged");
 
 const CREATE =
   '```json\n{"action":"create","name":"Log Rotation","description":"rotating and truncating stale log files","body":"Rotate carefully, with dates."}\n```';
@@ -144,8 +144,8 @@ describe("forging a skill for a task nothing matches", () => {
     expect(forgedEvents(events)).toMatchObject([{ name: "log-rotation", action: "created", taskId: "task-a" }]);
     const assigned = store.getTask(runId, "task-a")!.assignedSkills;
     expect(assigned.find((s) => s.name === "log-rotation" && s.role === "worker")!.mode).toBe("full");
-    const file = readFileSync(path.join(dir, ".harness", "skills", "log-rotation", "SKILL.md"), "utf8");
-    expect(file).toContain(`forged-by: harness run ${runId}, task task-a`);
+    const file = readFileSync(path.join(dir, ".charrette", "skills", "log-rotation", "SKILL.md"), "utf8");
+    expect(file).toContain(`forged-by: charrette run ${runId}, task task-a`);
   });
 
   it("does not forge when the collection already covers the task", async () => {
@@ -232,9 +232,9 @@ describe("forging a skill for a task nothing matches", () => {
 
   it("extends a skill it forged in an earlier run instead of fragmenting the topic", async () => {
     const dir = repo();
-    const forgePath = path.join(dir, ".harness", "skills", "release-notes", "SKILL.md");
+    const forgePath = path.join(dir, ".charrette", "skills", "release-notes", "SKILL.md");
     mkdirSync(path.dirname(forgePath), { recursive: true });
-    writeFileSync(forgePath, "---\nname: release-notes\ndescription: writing releases\nforged-by: harness run r0, task t0\n---\nOld wisdom.");
+    writeFileSync(forgePath, "---\nname: release-notes\ndescription: writing releases\nforged-by: charrette run r0, task t0\n---\nOld wisdom.");
     const { pool, specs } = fakePool({
       planner: (s) => (s.prompt.includes("PRD") ? dagJson() : DOCS),
       skillsmith: (s) => {

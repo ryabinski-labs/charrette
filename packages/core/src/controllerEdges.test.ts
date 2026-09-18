@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { RunConfig } from "@harness/shared";
-import type { HarnessEvent } from "@harness/shared";
+import { RunConfig } from "@charrette/shared";
+import type { CharretteEvent } from "@charrette/shared";
 import { Bus } from "./bus.js";
 import { GitHubAdapter } from "./github.js";
 import type { AgentPool, AgentResult, AgentSpec } from "./pool.js";
@@ -25,7 +25,7 @@ afterEach(() => {
 });
 
 function repo(opts: { remote?: boolean; detached?: boolean } = {}): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "harness-edge-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-edge-"));
   made.push(dir, `${dir}-wt`);
   const run = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
   run("init", "-b", "main");
@@ -35,7 +35,7 @@ function repo(opts: { remote?: boolean; detached?: boolean } = {}): string {
   run("add", "-A");
   run("commit", "-m", "first");
   if (opts.remote) {
-    const remote = mkdtempSync(path.join(tmpdir(), "harness-edge-remote-"));
+    const remote = mkdtempSync(path.join(tmpdir(), "charrette-edge-remote-"));
     made.push(remote);
     execFileSync("git", ["init", "--bare", "-b", "main"], { cwd: remote, stdio: "ignore" });
     run("remote", "add", "origin", remote);
@@ -132,7 +132,7 @@ function fakeGithub(over: Record<string, unknown> = {}) {
 function build(opts: { repoPath: string; pool: AgentPool; github?: GitHubAdapter; gates?: Partial<GateHandler> }) {
   const store = new Store(":memory:");
   const bus = new Bus(store);
-  const events: HarnessEvent[] = [];
+  const events: CharretteEvent[] = [];
   bus.subscribe(({ event }) => void events.push(event));
   const gates: GateHandler = {
     async resolvePlanGate() {
@@ -148,7 +148,7 @@ function build(opts: { repoPath: string; pool: AgentPool; github?: GitHubAdapter
 }
 
 const worker = (spec: AgentSpec, nth: number) => (commitInWorktree(spec.cwd, `w-${path.basename(spec.cwd)}-${nth}.txt`), "did the work");
-const logs = (events: HarnessEvent[]) => events.filter((e): e is HarnessEvent & { text: string } => e.type === "agent.log").map((e) => e.text);
+const logs = (events: CharretteEvent[]) => events.filter((e): e is CharretteEvent & { text: string } => e.type === "agent.log").map((e) => e.text);
 
 // The forge is off because the budget cases below are calibrated in sessions:
 // a skillsmith session for these skill-less tasks would move each breach off
@@ -290,7 +290,7 @@ describe("following a merge that has not happened yet", () => {
 
     const runId = await controller.startRun("build a thing", RunConfig.parse({ ...BASE, prodUrl: "https://app.example.com" }));
 
-    // Merging is the boundary the harness does not cross; waiting is not failing.
+    // Merging is the boundary the charrette does not cross; waiting is not failing.
     expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
     expect(store.prodVerdict(runId)).toBeNull();
     expect(controller.awaitingVerification(runId)).toBe(true);
@@ -382,7 +382,7 @@ describe("the pull request's title and body", () => {
     const { controller } = build({ repoPath: dir, pool, github: adapter });
 
     // The gap is a fixture for the singular wording, not work to do: without
-    // this the harness queues a task to close it and the counts stop being one.
+    // this the charrette queues a task to close it and the counts stop being one.
     await controller.startRun("add rate limiting to the API\nand nothing else", RunConfig.parse({ ...UNHELD, intentFixRounds: 0 }));
 
     expect(created[0]!.title).toContain("add rate limiting to the API");
@@ -396,7 +396,7 @@ describe("the pull request's title and body", () => {
    * description — the NetworkPolicy, the CloudFront CSP, the edge fleet roll,
    * and the session table nobody had applied — and was flipped ready anyway,
    * because the only question asked here was whether the tasks had stopped.
-   * It was merged with the FAIL still in the body, dns-project's CD shipped the
+   * It was merged with the FAIL still in the body, the DNS service's CD shipped the
    * application half of it, and the console answered 503 to every request.
    *
    * A verdict a reviewer has to notice is not a control. A draft is one.
@@ -434,7 +434,7 @@ describe("the pull request's title and body", () => {
    * arrives at it looking exactly like one that was run for real — so a run can
    * pass every gate here and still have shipped something nobody ran.
    *
-   * dns-project's af60742 is what that costs. Its own commit message ends "NOT YET
+   * the DNS service's af60742 is what that costs. Its own commit message ends "NOT YET
    * verified this session (turn budget ran out first)" and names both halves of
    * the outage that followed. The disclosure was written; nothing read it.
    */
@@ -462,7 +462,7 @@ describe("the pull request's title and body", () => {
     await controller.startRun("move session revocation to its own table", RunConfig.parse({ ...UNHELD, intentFixRounds: 0 }));
 
     // The intent check PASSED. The hold comes from the unverified list alone —
-    // if it did not, this run would ship exactly the way dns-project's did.
+    // if it did not, this run would ship exactly the way the DNS service's did.
     expect(created[0]!.draft).toBe(true);
     expect(flippedReady).toBe(false);
     expect(created[0]!.body).toMatch(/Passed but \*\*not verified\*\* — 1 criterion/);
@@ -495,7 +495,7 @@ describe("the pull request's title and body", () => {
   it("reports an intent check that reached no verdict as one that reached no verdict", async () => {
     // ledger-app a8df0107's validator was denied Bash, said so in prose, and
     // ended `done` having cost $2.58 and concluded nothing. That is honest
-    // behaviour from the agent; what the harness lacked was anywhere to put
+    // behaviour from the agent; what the charrette lacked was anywhere to put
     // "could not tell", so the parse error became a log line and the run went
     // on quoting an earlier pass's verdict at a tree nobody had read. The run
     // closed with "intent check found 2 gaps" — one of which it had merged a
@@ -678,7 +678,7 @@ describe("the pull request's title and body", () => {
   });
 });
 
-describe("what the issue comment says when the harness knows less", () => {
+describe("what the issue comment says when the charrette knows less", () => {
   it("names no branch for a task that parked before it ever had one", async () => {
     const dir = repo({ remote: true });
     const { adapter, comments } = fakeGithub();
@@ -711,7 +711,7 @@ describe("counting things the operator reads", () => {
     const { controller, store, events } = build({ repoPath: dir, pool });
     store.createRun({
       id: "run1", repoPath: dir, assignment: "a", state: "CREATED", prdPath: null, planHash: null,
-      integrationBranch: "harness/run1/main", config: RunConfig.parse({}),
+      integrationBranch: "charrette/run1/main", config: RunConfig.parse({}),
     });
     for (const to of ["PLANNING", "PLAN_REVIEW", "EXECUTING", "BUDGET_HOLD"] as const) store.transitionRun("run1", to);
     const reaper = await import("./reaper.js");
