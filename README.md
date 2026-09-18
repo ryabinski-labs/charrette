@@ -17,7 +17,11 @@ against your assignment, holds them to acceptance criteria, and stops at exactly
 two decision points that are yours — approve the plan, and merge the pull
 request. It never merges for you.
 
-![The Charrette dashboard: live agent activity, task board, intent tracking and a cost meter](./docs/images/dashboard.png)
+![The Charrette dashboard, with the plan gate approved and workers building](./docs/images/demo.gif)
+
+*Approving the plan, then agents working the task DAG. The problem it solves: one
+agent session plans nothing you can review, builds serially, and grades its own
+homework. The feed, task board, intent tracker and cost meter are live.*
 
 ## At a glance
 

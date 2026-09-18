@@ -115,6 +115,26 @@ if (process.env.GATE) {
     "- [token-bucket] Token-bucket store with per-user keys (deps: none)\n- [fastify-plugin] Fastify plugin wiring the limiter (deps: token-bucket)\n- [429-response] 429 response with Retry-After header (deps: fastify-plugin)\n- [docs] Document the limits in the API reference (deps: 429-response)"
   );
 }
+// How fast the fake worker emits. The default reads like a real run; a shorter
+// tick is for recording, where four seconds of an unchanging feed is dead air.
+const TICK = Number(process.env.TICK ?? 4000);
+
+// It used to republish one identical Bash line forever, which filled the feed
+// with a wall of the same command and told a reader nothing about what the
+// panel actually looks like in use. A worker reads, edits, runs and reports;
+// the preview should too, so the layout is judged against realistic variety.
+const LOOP = [
+  ["Read", { file_path: `${repo}/src/plugins/limiter.ts` }],
+  ["Bash", { command: "pnpm vitest run test/rate-limit.test.ts" }],
+  ["Edit", { file_path: `${repo}/src/plugins/limiter.ts` }],
+  ["Grep", { pattern: "onRequest", path: `${repo}/src` }],
+  ["Bash", { command: "pnpm tsc --noEmit" }],
+  ["Write", { file_path: `${repo}/test/retry-after.test.ts` }],
+  ["Bash", { command: "git commit -m 'limiter: register before routes'" }],
+];
+let n = 0;
 setInterval(() => {
-  bus.publish({ type: "agent.tool_use", runId, taskId: "fastify-plugin", sessionId: worker, tool: "Bash", summary: JSON.stringify({ command: "pnpm vitest run --reporter dot" }), ts: Date.now() });
-}, 4000);
+  const [tool, args] = LOOP[n % LOOP.length];
+  n += 1;
+  bus.publish({ type: "agent.tool_use", runId, taskId: "fastify-plugin", sessionId: worker, tool, summary: JSON.stringify(args), ts: Date.now() });
+}, TICK);
