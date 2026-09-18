@@ -1,6 +1,24 @@
 {
   "name": "@charrette/skills-mcp",
   "version": "0.0.1",
+  "description": "MCP server that exposes local skills to Charrette agents",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ryabinski-labs/charrette.git",
+    "directory": "packages/skills-mcp"
+  },
+  "homepage": "https://github.com/ryabinski-labs/charrette#readme",
+  "bugs": {
+    "url": "https://github.com/ryabinski-labs/charrette/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.*"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
