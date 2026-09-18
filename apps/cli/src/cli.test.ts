@@ -72,7 +72,15 @@ const h = vi.hoisted(() => {
     BridgedIntakeMock: vi.fn(function (this: { wrapped: unknown }, wrapped: unknown) {
       this.wrapped = wrapped;
     }),
-    StoreMock: vi.fn(() => storeMethods),
+    // `function`, not an arrow, and the same goes for every constructor mock
+    // reset below. `cli.ts` builds these with `new`, and vitest 4 constructs a
+    // mock through `Reflect.construct`, which an arrow function does not
+    // support — vitest 3 called the implementation plainly and did not care.
+    // Returning an object from a constructor replaces `this`, so what `new`
+    // yields is still exactly the factory's object.
+    StoreMock: vi.fn(function () {
+      return storeMethods;
+    }),
     BusMock: vi.fn(),
     AgentPoolMock: vi.fn(),
     GitHubAdapterMock: vi.fn(),
@@ -338,19 +346,25 @@ beforeEach(() => {
   h.dashboardMethods.start.mockResolvedValue("http://localhost:4777/#tok");
   h.dashboardMethods.stop.mockResolvedValue(undefined);
 
-  h.StoreMock.mockReset().mockImplementation(() => h.storeMethods);
-  h.BusMock.mockReset().mockImplementation(() => ({
-    subscribe: (fn: (e: { event: Record<string, unknown> }) => void) => void h.subscribers.push(fn),
-  }));
+  h.StoreMock.mockReset().mockImplementation(function () {
+    return h.storeMethods;
+  });
+  h.BusMock.mockReset().mockImplementation(function () {
+    return {
+      subscribe: (fn: (e: { event: Record<string, unknown> }) => void) => void h.subscribers.push(fn),
+    };
+  });
   h.AgentPoolMock.mockReset();
   h.githubMethods.enabled = false;
   h.githubMethods.mergedSha.mockReset().mockResolvedValue(null);
-  h.GitHubAdapterMock.mockReset().mockImplementation(() => h.githubMethods);
-  h.RunControllerMock.mockReset().mockImplementation((...args: unknown[]) => {
+  h.GitHubAdapterMock.mockReset().mockImplementation(function () {
+    return h.githubMethods;
+  });
+  h.RunControllerMock.mockReset().mockImplementation(function (...args: unknown[]) {
     h.controllerArgs.push(args);
     return h.controllerMethods;
   });
-  h.DashboardMock.mockReset().mockImplementation((...args: unknown[]) => {
+  h.DashboardMock.mockReset().mockImplementation(function (...args: unknown[]) {
     h.dashboardArgs.push(args);
     return h.dashboardMethods;
   });
@@ -378,6 +392,12 @@ beforeEach(() => {
   h.writeFileSyncMock.mockReset();
   h.createInterfaceMock.mockReset();
   h.notifyDoneMock.mockReset();
+  // Reset explicitly rather than leaning on `restoreAllMocks` in `afterEach`.
+  // Vitest 4 narrowed that to the spies `vi.spyOn` created; a `vi.fn` keeps
+  // whatever `mockReturnValue` a test last gave it. Left implicit, the test
+  // that pins a holding pid leaks it into the next one, which asserts that
+  // nothing holds the run — and it passed for the wrong reason before.
+  h.runLockHolderMock.mockReset().mockReturnValue(null);
   h.liveDashboardUrlMock.mockReset().mockResolvedValue(null);
   h.recordDashboardMock.mockReset();
   h.clearDashboardMock.mockReset();
@@ -386,10 +406,12 @@ beforeEach(() => {
   h.armCrashLogMock.mockReset();
   h.promptSeedMock.mockReset().mockResolvedValue("seed from the conversation");
   h.chatCloseMock.mockReset();
-  h.TerminalChatMock.mockReset().mockImplementation(() => ({
-    promptSeed: h.promptSeedMock,
-    close: h.chatCloseMock,
-  }));
+  h.TerminalChatMock.mockReset().mockImplementation(function () {
+    return {
+      promptSeed: h.promptSeedMock,
+      close: h.chatCloseMock,
+    };
+  });
 });
 
 afterEach(() => {

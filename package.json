@@ -12,7 +12,7 @@
   },
   "packageManager": "pnpm@11.22.0",
   "scripts": {
-    "build": "pnpm -r build",
+    "build": "pnpm -r build && tsc -p tsconfig.tools.json",
     "link-cli": "mkdir -p \"$HOME/.local/bin\" && ln -sf \"$PWD/apps/cli/dist/main.js\" \"$HOME/.local/bin/charrette\" && echo \"linked $HOME/.local/bin/charrette -> $PWD/apps/cli/dist/main.js\"",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
@@ -22,9 +22,9 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "@vitest/coverage-v8": "^3.2.0",
+    "@vitest/coverage-v8": "^4.1.11",
     "happy-dom": "^20.11.1",
     "typescript": "^5.5.0",
-    "vitest": "^3.0.0"
+    "vitest": "^4.1.11"
   }
 }

@@ -7,8 +7,15 @@ const { McpServerMock, StdioServerTransportMock, toolMock } = vi.hoisted(() => {
   const toolMock = vi.fn();
   return {
     toolMock,
-    McpServerMock: vi.fn(() => ({ tool: toolMock, connect: vi.fn(async () => undefined) })),
-    StdioServerTransportMock: vi.fn(() => ({ kind: "stdio" })),
+    // `function`, not an arrow: the server builds both with `new`, and vitest 4
+    // constructs a mock through `Reflect.construct`, which an arrow does not
+    // support.
+    McpServerMock: vi.fn(function () {
+      return { tool: toolMock, connect: vi.fn(async () => undefined) };
+    }),
+    StdioServerTransportMock: vi.fn(function () {
+      return { kind: "stdio" };
+    }),
   };
 });
 
