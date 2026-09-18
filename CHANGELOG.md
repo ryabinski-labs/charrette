@@ -46,6 +46,12 @@ on. Before then, minor versions may break things.
 
 ### Security
 
+- **`fast-uri` pinned to `^3.1.6`** (GHSA: host confusion via percent-encoded
+  scheme normalization). It is a runtime dependency, reaching the project
+  through both fastify's ajv compiler and the Agent SDK's ajv, neither of which
+  has floated past the vulnerable 3.1.5 yet. The override goes away once they
+  do. The remaining Dependabot alerts are development-scope or need the vitest
+  3.x → 4.x migration, and are tracked separately.
 - **Pull request CI no longer runs on self-hosted runners.** On a public
   repository that let any fork execute code on the project's own infrastructure.
   Pull requests now run on GitHub-hosted runners; `main` and manual dispatch
