@@ -98,14 +98,23 @@ jobs:
           echo "clean"
 
       - name: No private project names reintroduced
-        # These are the author's unreleased repositories. They were scrubbed
-        # from code comments and fixtures for the public release; a copied
-        # snippet is the likely way one comes back.
+        # These are the author's unreleased repositories. The pattern lives in a
+        # repository secret rather than in this file: spelling the names out
+        # here would publish, in a public repo, exactly what the check exists to
+        # keep out — and an earlier version of this job did just that.
+        env:
+          PATTERN: ${{ secrets.PRIVATE_NAME_PATTERN }}
         run: |
-          # `:(exclude)` this file: the names are listed here literally, so the
-          # check would otherwise always fail on itself.
-          if git grep -nIiwE 'api-service|billing-app|dns-project|ledger-app|offers-app|search-app|web-app' \
-               -- . ':(exclude).github/workflows/oss-compliance.yml'; then
+          # A fork's pull request cannot read secrets. Skip rather than fail:
+          # nothing a fork pushes reaches main without a maintainer merging it,
+          # and the push-to-main run below is the gate that matters.
+          if [ -z "$PATTERN" ]; then
+            echo "::notice::PRIVATE_NAME_PATTERN is unset (expected on a fork pull request); skipping"
+            exit 0
+          fi
+          # `-q`: a match must never echo the name it matched into a build log
+          # that anyone can read.
+          if git grep -qIiwE "$PATTERN" -- .; then
             echo "::error::a private project name is present — anonymize it before merging"
             exit 1
           fi
