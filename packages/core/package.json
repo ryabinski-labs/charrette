@@ -1,6 +1,24 @@
 {
   "name": "@charrette/core",
   "version": "0.0.1",
+  "description": "Charrette run engine: planning, dispatch, gates and the event-sourced store",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ryabinski-labs/charrette.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/ryabinski-labs/charrette#readme",
+  "bugs": {
+    "url": "https://github.com/ryabinski-labs/charrette/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.*"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

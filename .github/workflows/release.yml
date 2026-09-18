@@ -1,0 +1,111 @@
+name: Release
+
+# A release is cut from a tag, never from a branch: what gets published has to
+# be a commit that already went through `main` and its required checks.
+on:
+  push:
+    tags: ['v*']
+  # For a re-run after a transient registry failure. It republishes the same
+  # tag; npm refuses a version that already exists, so this cannot overwrite a
+  # release, only finish one that half-landed.
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Tag to publish, e.g. v0.1.0
+        required: true
+
+# Never two releases at once, and never cancel one in flight — a publish
+# interrupted between packages leaves the registry holding half a release.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: publish @charrette/* to npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      contents: read
+      # The whole point of this workflow. npm exchanges this short-lived OIDC
+      # token for publish rights, so no npm credential exists in this
+      # repository at all: nothing to leak, nothing to rotate, and nothing an
+      # attacker gains by reading the secrets list. It also survives npm's
+      # January 2027 removal of 2FA-bypass tokens, which is what a long-lived
+      # automation token here would be.
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v6
+
+      # No `registry-url:` deliberately. It writes an .npmrc line pointing at
+      # ${NODE_AUTH_TOKEN}, which does not exist here — the OIDC exchange is
+      # what authenticates. registry.npmjs.org is the default anyway.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # The same two gates main merges on. The tagged commit has already passed
+      # them, but a release is the one place where "already passed" is not
+      # worth assuming: this is the tree that becomes a tarball other people
+      # install, and the lockfile resolves fresh here.
+      - name: Build (typechecks every package)
+        run: pnpm build
+
+      - name: Test with coverage
+        run: pnpm test:coverage
+
+      - name: The tag and the package versions agree
+        # Publishing v0.2.0 from packages that still say 0.1.0 produces a
+        # release nobody can install under the version they were told about,
+        # and the mistake is only visible after it is permanent.
+        env:
+          TAG: ${{ inputs.ref || github.ref_name }}
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const want = process.env.TAG.replace(/^v/, "");
+            let bad = false;
+            for (const dir of ["packages", "apps"]) {
+              for (const entry of fs.readdirSync(dir)) {
+                const file = `${dir}/${entry}/package.json`;
+                if (!fs.existsSync(file)) continue;
+                const pkg = JSON.parse(fs.readFileSync(file, "utf8"));
+                if (pkg.private) continue;
+                if (pkg.version !== want) {
+                  console.log(`::error file=${file}::${pkg.name} is ${pkg.version}, tag says ${want}`);
+                  bad = true;
+                }
+              }
+            }
+            console.log(bad ? "mismatch" : "every publishable package is at " + want);
+            process.exit(bad ? 1 : 0);
+          '
+
+      - name: Publish
+        # Note what is absent: NODE_AUTH_TOKEN, NPM_TOKEN, an .npmrc. pnpm
+        # mints a registry token from the OIDC credential above. That works
+        # only while the trusted publisher on npmjs.com names this repository
+        # AND this file's name — renaming this workflow breaks publishing until
+        # the registry side is updated to match. docs/RELEASING.md has the
+        # exact values and says this there too.
+        env:
+          # Provenance is what makes the npm page state which commit and which
+          # workflow run produced the tarball, so a reader can check rather
+          # than trust. It requires the `repository` field each publishable
+          # package.json now carries.
+          NPM_CONFIG_PROVENANCE: 'true'
+        run: pnpm publish -r --access public --no-git-checks

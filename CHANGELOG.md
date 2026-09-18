@@ -40,11 +40,36 @@ on. Before then, minor versions may break things.
 
 ### Added
 
+- **Releases publish from CI with no stored npm credential.**
+  `.github/workflows/release.yml` runs on a `v*` tag and authenticates to npm
+  through OIDC — a token minted for that one run and useless afterwards. It
+  re-runs build and the full suite, refuses to publish if any package version
+  disagrees with the tag, and attaches provenance so the npm page states which
+  commit and which run produced the tarball. `docs/RELEASING.md` covers the
+  registry-side setup, which lives on npmjs.com and is therefore invisible from
+  the tree until it breaks.
+- Publish metadata on every shipped package: `description`, `license`,
+  `repository` (with `directory`), `homepage`, `bugs`, and
+  `publishConfig.access: public` — without the last of those a scoped package's
+  first publish is private by default.
+
 - `LICENSE` (MIT), `SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`,
   `SUPPORT.md`, `MAINTAINERS.md`, `CODEOWNERS`, issue and pull request
   templates, Dependabot, and an OSS compliance check in CI.
 
+### Changed
+
+- Published tarballs no longer carry compiled tests. `files` is `dist` minus
+  `dist/**/*.test.*`: the tests are still built, because `pnpm build` is what
+  typechecks them, they simply are not part of what anyone installs. They were
+  more than half the bytes — `@charrette/core` went from 1.4 MB to 716 KB.
+
 ### Security
+
+- **No long-lived registry token exists for this project.** npm releases go
+  through the OIDC trusted publisher above; the PyPI name reservations were
+  placed with a token that was revoked immediately afterwards, and the
+  revocation was confirmed by a rejected upload rather than by the tokens page.
 
 - **`fast-uri` pinned to `^3.1.6`** (GHSA: host confusion via percent-encoded
   scheme normalization). It is a runtime dependency, reaching the project
