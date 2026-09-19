@@ -3524,7 +3524,7 @@ export class RunController {
       if (stopsTheRun(error)) throw error;
       return this.blockRelease(runId, "production", [`the merged release could not be checked out or validated: ${String(error).slice(0, 300)}`], sha);
     } finally {
-      if (cwd) await reapUnder(cwd).catch(() => []);
+      if (cwd) await reapUnder(cwd);
     }
     const productionSpec = { ...spec!, scenarios: spec!.scenarios.filter((s) => spec!.release.productionScenarioIds.includes(s.id)) };
     const verdict = acceptanceVerdict(productionSpec, { exitCode, output });
@@ -4926,7 +4926,7 @@ export class RunController {
    */
   private async sweepOrphans(runId: string): Promise<void> {
     const root = path.join(this.wt.worktreeRoot(), runId);
-    const reaped = await reapUnder(root).catch(() => []);
+    const reaped = await reapUnder(root);
     if (!reaped.length) return;
     this.bus.publish({
       type: "agent.log",
@@ -6028,9 +6028,9 @@ export class RunController {
     ];
     const [stacks, processes] = await Promise.all([
       composeDown(projects, async (bin, args, timeoutMs) => (await execFileP(bin, args, { timeout: timeoutMs })).stdout).catch(() => [] as string[]),
-      reapUnder(path.join(this.wt.worktreeRoot(), runId)).catch(() => [] as unknown[]),
+      reapUnder(path.join(this.wt.worktreeRoot(), runId)),
     ]);
-    await this.wt.pruneAndReconcile().catch(() => undefined);
+    await this.wt.pruneAndReconcile();
     if (!stacks.length && !processes.length) return;
     this.bus.publish({
       type: "agent.log",
@@ -6384,7 +6384,7 @@ export class RunController {
     } finally {
       // It starts servers, databases and emulators by design; nothing it
       // started outlives this gate.
-      if (wtPath) await reapUnder(wtPath).catch(() => []);
+      if (wtPath) await reapUnder(wtPath);
     }
 
     if (!report) {
@@ -6588,7 +6588,7 @@ export class RunController {
       // It starts servers, emulators and databases by design. Nothing it
       // started outlives the pit stop — including across a re-ask that never
       // happened, or one that crashed.
-      if (wtPath) await reapUnder(wtPath).catch(() => []);
+      if (wtPath) await reapUnder(wtPath);
       // Whatever it changed in the tree goes back. The demo agent is told not to
       // touch source, but "told not to" is not a mechanism, and the diff the
       // operator eventually reviews is not the demo's to edit.

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CharretteEvent, PlannedTask, RunConfig, RunSpec } from "@charrette/shared";
+import { BudgetExceeded } from "./budget.js";
 import { Bus } from "./bus.js";
 import { GitHubAdapter, type PrChecks } from "./github.js";
 import type { IntakeUi } from "./intake.js";
@@ -132,6 +133,7 @@ async function fixture(options: { auto?: boolean; seed?: boolean; command?: stri
     queueLiveFixes(id: string): Promise<string[]>; proofOf(id: string): { proven: boolean; unmet: string[]; held: boolean };
     settleChecks(id: string, read: (ref: string) => Promise<PrChecks | null>, ref: string, timeout: number): Promise<PrChecks | null>;
     validateProd(id: string, url: string): Promise<boolean>; deliveryWasVerifying(id: string): boolean;
+    verify(id: string): Promise<boolean>;
     checkAcceptance(id: string): Promise<AcceptanceVerdict | null>; queueScenarioFixes(id: string): Promise<string[]>;
     wt: { freshWorktree(id: string, taskId: string): Promise<string> };
   };
@@ -458,5 +460,65 @@ describe("production delivery lifecycle", () => {
     settle.mockResolvedValueOnce(null);
     expect(await f.internals.deliverProduction("seed")).toBe(false);
     expect(f.store.releaseEvidence("seed")!.unmet.join(" ")).toContain("could not be read");
+  });
+
+  /**
+   * Every one of these is GitHub failing to answer a question the run has
+   * already done the work to earn. None of them may be read as "not merged":
+   * the merge is a fact about the repository, and an unreadable answer is the
+   * charrette's ignorance of it, not evidence against it.
+   */
+  describe("when GitHub stops answering about the merge", () => {
+    it("does not claim a release unmerged when the read-back after an authorized merge fails", async () => {
+      const f = await fixture({ seed: true, auto: true });
+      vi.spyOn(f.internals, "proofOf").mockReturnValue({ proven: true, unmet: [], held: true });
+      // Open on the first read, so the auto-merge runs; unreadable on the
+      // read-back, which is the one call whose answer cannot be invented — the
+      // deploy is followed by that sha and nothing else.
+      vi.mocked(f.github.mergedSha).mockResolvedValueOnce(null).mockRejectedValueOnce(new Error("API down"));
+
+      expect(await f.internals.deliverProduction("seed")).toBe(false);
+
+      expect(f.github.mergeApprovedPR).toHaveBeenCalledOnce();
+      // Blocked with the resume line, not merged-and-verified: the operator is
+      // told the release is in flight, and `charrette resume` reads the sha
+      // once GitHub is answering again.
+      expect(f.store.releaseEvidence("seed")!.unmet.join(" ")).toContain("has not merged");
+    });
+
+    it("keeps waiting when one poll for the merge fails", async () => {
+      const f = await fixture({ seed: true });
+      f.controller.githubRetryMs = 1;
+      f.store.patchRunConfig("seed", { delivery: { ...f.config.delivery, mergeTimeoutMinutes: 1 } });
+      // Not merged, then unreadable, then merged. Giving up on the middle
+      // answer would end delivery a poll before the operator's merge landed.
+      vi.mocked(f.github.mergedSha).mockResolvedValueOnce(null).mockRejectedValueOnce(new Error("API down"));
+      vi.mocked(f.github.prState).mockImplementationOnce(async () => { f.merge(); return "open"; });
+
+      expect(await f.internals.deliverProduction("seed")).toBe(true);
+    });
+
+    it("leaves the run in PR_REVIEW rather than following a deploy it cannot name", async () => {
+      const f = await fixture({ seed: true });
+      vi.mocked(f.github.mergedSha).mockRejectedValueOnce(new Error("API down"));
+
+      expect(await f.internals.verify("seed")).toBe(false);
+      // Not VERIFYING: that transition is the claim that a merge happened, and
+      // `resume` re-enters here once GitHub can say whether one did.
+      expect(f.store.getRun("seed")!.state).toBe("PR_REVIEW");
+    });
+
+    it("reads an unanswerable check as no answer, and still lets a stopped run stop", async () => {
+      const f = await fixture({ seed: true });
+
+      await expect(f.internals.settleChecks("seed", async () => { throw new Error("API down"); }, "sha", 0)).resolves.toBeNull();
+
+      // The exception to the rule above. A budget wall is not GitHub failing to
+      // answer — it is the run ending — and swallowing it here would spend the
+      // rest of the wait, and the rest of the money, on a run that is over.
+      await expect(
+        f.internals.settleChecks("seed", async () => { throw new BudgetExceeded(1200, 1000, "seed"); }, "sha", 0)
+      ).rejects.toBeInstanceOf(BudgetExceeded);
+    });
   });
 });

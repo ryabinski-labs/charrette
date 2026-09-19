@@ -459,6 +459,29 @@ describe("a red check that survives its re-run", () => {
     expect(store.ciStatus(runId)).toMatchObject({ state: "passing" });
   });
 
+  it("copes the same way when the log fetch is offered and then fails", async () => {
+    // The other half of the case above, and the one review forgets: an adapter
+    // that has the method is not an adapter that can answer. A rate-limited or
+    // expired log URL must land exactly where a missing method lands, because
+    // the log was only ever context for the fix — the failing check's name is
+    // the finding, and that already arrived.
+    const repo = repoWithOrigin();
+    const { adapter } = fakeGitHub([
+      { state: "failing", failing: ["Backend test"], total: 1 },
+      { state: "passing", failing: [], total: 1 },
+    ]);
+    delete (adapter as unknown as Record<string, unknown>).rerunFailedChecks;
+    (adapter as unknown as { failingJobLogs: () => Promise<never> }).failingJobLogs = async () => {
+      throw new Error("log archive expired");
+    };
+    const { store, runId } = await build(adapter, pool(), repo);
+
+    expect(ciFixTasks(store, runId)).toHaveLength(1);
+    expect(ciFixTasks(store, runId)[0]!.spec).toContain("No log could be fetched");
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+    expect(store.ciStatus(runId)).toMatchObject({ state: "passing" });
+  });
+
   it("caps a matrix of failures at ten tasks and names what it dropped", async () => {
     const names = Array.from({ length: 11 }, (_, i) => `shard-${i}`);
     const repo = repoWithOrigin();
