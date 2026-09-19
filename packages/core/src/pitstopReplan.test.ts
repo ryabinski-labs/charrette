@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -268,6 +268,44 @@ describe("re-planning what has not been built", () => {
     expect(replanCall.prompt).toContain("drop the offline mode");
     expect(replanCall.prompt).toContain("IMMOVABLE");
     expect(replanCall.prompt).toContain("task-a");
+  });
+
+  it("briefs the re-planner the same way the first plan was briefed", async () => {
+    const dir = repo();
+    // A re-plan is a planning session like any other, and the operator's
+    // planning playbooks are pinned to the role rather than to the phase. The
+    // first plan had always carried them; the re-plan had never been checked.
+    const skills = mkdtempSync(path.join(tmpdir(), "charrette-replan-skills-"));
+    made.push(skills);
+    mkdirSync(path.join(skills, "product-manager"));
+    writeFileSync(
+      path.join(skills, "product-manager", "SKILL.md"),
+      "---\nname: product-manager\ndescription: How this product decides what is worth building\n---\nCut scope before cutting quality."
+    );
+    let replanned = false;
+    const { pool, specs } = rolePool({
+      planner: plannerSaying(dag([{ id: "task-a" }, { id: "task-b" }]), dag([{ id: "task-new" }])),
+      worker,
+      qa: () => QA_PASS,
+      validator: () => '```json\n{"verdict":"PASS","gaps":[],"summary":"ok"}\n```',
+      demo: () => DEMO_OK,
+      reviewer: () => REVIEW_OK,
+    });
+    const { controller } = build({
+      repoPath: dir,
+      pool,
+      decide: () => (replanned ? { action: "continue", feedback: "" } : ((replanned = true), { action: "replan", feedback: "drop the offline mode" })),
+    });
+
+    await controller.startRun(
+      "build a thing",
+      RunConfig.parse({ ...BASE, pitStop: { every: { tasks: 1 } }, skillsDirs: [skills] })
+    );
+
+    const replanCall = specs.filter((s) => s.role === "planner").at(-1)!;
+    expect(replanCall.prompt).toContain("drop the offline mode");
+    expect(replanCall.skills).toEqual(["product-manager"]);
+    expect(replanCall.systemPrompt).toContain('<skill name="product-manager"');
   });
 
   it("keeps the operator's words when the planner cannot be parsed", async () => {

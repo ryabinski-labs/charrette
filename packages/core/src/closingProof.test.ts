@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -490,6 +490,8 @@ describe("the live-exercise gate", () => {
       summary: "it works",
       ...over,
     });
+  /** The evidence directory the live agent's own system prompt tells it to use. */
+  const artifactsDir = (spec: AgentSpec) => spec.systemPrompt!.match(/into (.+?) \(it already exists\)/)![1]!;
   /** A specified run whose live agent answers `live`, with the path in the spec. */
   const exercised = (live: Answer, over: Partial<Record<string, Answer>> = {}) => specified("exit 0", { spec: withPath(), live, ...over });
 
@@ -513,6 +515,87 @@ describe("the live-exercise gate", () => {
     expect(controller.outcome(runId).line).toContain("the critical path works (take a payment)");
     expect(logs(events)).toContainEqual(expect.stringContaining("live exercise: all 3 step(s) worked"));
   });
+
+  it("carries the playbook the operator pinned to the live role", async () => {
+    const dir = repo();
+    // The live agent is the one role with no lens of its own — it matches on
+    // the assignment and nothing else — so a pin is the only way an operator
+    // can hand it the playbook for driving their product. Nothing had ever
+    // checked that the pin reaches it.
+    const skills = mkdtempSync(path.join(tmpdir(), "charrette-proof-skills-"));
+    made.push(skills);
+    mkdirSync(path.join(skills, "checkout-smoke"));
+    writeFileSync(
+      path.join(skills, "checkout-smoke", "SKILL.md"),
+      "---\nname: checkout-smoke\ndescription: How to drive this checkout end to end\n---\nOpen the page, pay, read the receipt."
+    );
+    const { pool, specs } = rolePool(exercised(() => liveOk()));
+    const { controller } = build({ repoPath: dir, pool });
+
+    await controller.startRun(
+      "build a checkout",
+      RunConfig.parse({ ...LIVE_BASE, skillsDirs: [skills], roleSkills: { live: ["checkout-smoke"] } }),
+      operator()
+    );
+
+    const session = specs.find((s) => s.role === "live")!;
+    expect(session.skills).toEqual(["checkout-smoke"]);
+    expect(session.systemPrompt).toContain('<skill name="checkout-smoke"');
+  });
+
+  it("shows the operator the evidence that survived checking, file and claim together", async () => {
+    const dir = repo();
+    // The other side of the strike: a file that was actually written, with a
+    // statement of what it shows. It is the only thing the operator is handed
+    // as proof, so it is the only thing worth reading the verdict's `proof`
+    // for — and nothing had ever put a surviving artifact in there.
+    const kept = { file: "receipt.har", shows: "the charge request and its 200" };
+    const { pool } = rolePool(
+      exercised((spec) => {
+        writeFileSync(path.join(artifactsDir(spec), kept.file), '{"log":{"entries":[{"request":{}}]}}');
+        return liveOk({ artifacts: [kept] });
+      })
+    );
+    const { controller, store } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a checkout", RunConfig.parse(LIVE_BASE), operator());
+
+    const verdict = store.liveVerdict(store.listRuns()[0]!.id)!;
+    expect(verdict.verdict).toBe("worked");
+    expect(verdict.proof).toContain(`${kept.file} — ${kept.shows}`);
+    expect(verdict.couldNotReach).toEqual([]);
+  }, 30_000);
+
+  it("keeps a report that offered its evidence as bare strings, and strikes it for saying nothing", async () => {
+    const dir = repo();
+    // A live agent that ignored the shape: strings where claims belong. The
+    // parser takes them rather than losing the whole report to a parse error,
+    // and each arrives with nothing attached — which is what the evidence gate
+    // then strikes. Lenient at the parser, strict at the gate.
+    const bare = (spec: AgentSpec) => {
+      // Written, so the strike is the one about the missing caption rather
+      // than the one about the missing file.
+      writeFileSync(path.join(artifactsDir(spec), "receipt.har"), '{"log":{"entries":[{"request":{}}]}}');
+      return liveOk({ artifacts: ["receipt.har"], commands: ["curl -sf localhost:5173/health"] });
+    };
+    const { pool } = rolePool(exercised(bare));
+    const { controller, store } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a checkout", RunConfig.parse(LIVE_BASE), operator());
+
+    const verdict = store.liveVerdict(store.listRuns()[0]!.id)!;
+    // The report is not lost: every step it answered about is still read, in
+    // the specification's order and with the agent's own word.
+    expect(verdict.steps.map((s) => s.result)).toEqual(["worked", "worked", "worked"]);
+    // But neither piece of evidence reaches the operator as proof, and a path
+    // that worked with nothing to show for it is `broken` — which is the whole
+    // point of being lenient at the parser and strict at the gate.
+    expect(verdict.proof).toEqual([]);
+    expect(verdict.verdict).toBe("broken");
+    expect(verdict.why).toContain("nothing it offered as proof survived checking");
+    expect(verdict.couldNotReach.join(" ")).toContain("no statement of what it shows");
+    expect(verdict.couldNotReach.join(" ")).toContain("no statement of what it proves");
+  }, 30_000);
 
   it("queues a fix task per broken step, carrying what the agent saw, and holds if it stays broken", async () => {
     const dir = repo();
