@@ -181,14 +181,14 @@ export default defineConfig({
        * When it is gone, put the four hundreds back.
        */
       thresholds: {
-        statements: -37,
-        branches: -27,
-        functions: -35,
-        lines: -14,
+        statements: -28,
+        branches: -17,
+        functions: -26,
+        lines: -10,
         // `.catch(() => fallback)` handlers around git invocations, plus the
         // merge and QA paths that need a failing git or a failing check to
         // reach.
-        "packages/core/src/runController.ts": { statements: -37, functions: -35, branches: -27, lines: -14 },
+        "packages/core/src/runController.ts": { statements: -28, functions: -26, branches: -17, lines: -10 },
       },
     },
   },

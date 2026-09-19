@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -109,6 +109,24 @@ const plannerSaying = (...later: string[]) => (_s: AgentSpec, nth: number) => (n
 // closing pit stop that repeats — and the plan-gate adjudicator would answer
 // that FAIL first, out of the same `pm` role, before any pit stop existed. Its
 // own behaviour is pinned in planGateDecider.test.ts.
+/**
+ * A skills directory, for the lenses and the decider to be found in by name.
+ *
+ * Both lookups are by name and not by score, which is the whole point of
+ * naming them — but with `skillsDirs` empty everywhere else in this file, the
+ * lookups ran against nothing and nothing proved a named skill ever reaches
+ * the session it was named for.
+ */
+function skillsDir(skills: Record<string, string>): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-pitskills-"));
+  made.push(dir);
+  for (const [name, body] of Object.entries(skills)) {
+    mkdirSync(path.join(dir, name));
+    writeFileSync(path.join(dir, name, "SKILL.md"), `---\nname: ${name}\ndescription: how ${name} reads a demo\n---\n${body}`);
+  }
+  return dir;
+}
+
 const BASE = { deterministicChecks: [] as string[], waitForChecks: false, maxParallelWorkers: 1, planGate: { decidedBy: "operator" } };
 
 function build(opts: { repoPath: string; pool: AgentPool; decide?: (stop: PitStop) => PitStopDecision }) {
@@ -134,9 +152,10 @@ function build(opts: { repoPath: string; pool: AgentPool; decide?: (stop: PitSto
 }
 
 /** A run that pit-stops after its first task, with `decidedBy` set. */
-const config = (decidedBy?: string) =>
+const config = (decidedBy?: string, skillsDirs: string[] = []) =>
   RunConfig.parse({
     ...BASE,
+    skillsDirs,
     pitStop: { every: { tasks: 1 }, ...(decidedBy === undefined ? {} : { decidedBy }) },
     budget: { runCapUsd: 1000 },
   });
@@ -177,6 +196,50 @@ describe("a pit stop that decides for itself", () => {
     expect(pm.prompt).toContain("# Pit stop 1");
     expect(pm.prompt).toMatch(/spent \$0\.00 of its \$1000\.00 cap/);
     expect(logs(events)).toContainEqual(expect.stringMatching(/^product-manager decided: continue — both lenses agree/));
+  });
+
+  it("hands each lens and the decider the skill it was named for", async () => {
+    const dir = repo();
+    // One skill per configured lens name, plus a decoy that would win any
+    // lexical match on a demo report and is named after nothing.
+    const skills = skillsDir({
+      "product-manager": "Ask whether this is the product that was asked for.",
+      "critical-challenger": "Argue the run is off track and see if the evidence holds.",
+      "demo-report-analyst": "Demo, report, screenshot, evidence, verdict, steps, scenario, product.",
+    });
+    const { pool, specs } = rolePool({
+      planner: plannerSaying(),
+      worker,
+      qa: () => QA_PASS,
+      validator: () => INTENT_PASS,
+      demo: () => DEMO_OK,
+      reviewer: () => REVIEW_OK,
+      pm: () => decision({ why: "the lenses agree" }),
+    });
+    const { controller } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a thing", config(undefined, [skills]));
+
+    // Every lens that ran got its own playbook and nobody else's — a lens is a
+    // point of view, and giving two of them the same skill is paying twice for
+    // one opinion.
+    const lenses = specs.filter((s) => s.role === "reviewer");
+    expect(lenses.length).toBeGreaterThan(0);
+    for (const lens of lenses) {
+      const named = lens.skills ?? [];
+      expect(named.length).toBeLessThanOrEqual(1);
+      for (const name of named) expect(lens.systemPrompt).toContain(`<skill name="${name}"`);
+      expect(lens.systemPrompt).not.toContain("demo-report-analyst");
+    }
+    // At least one of them is a lens this directory actually has, so the
+    // assertion above is not vacuously true over four empty lists.
+    expect(lenses.flatMap((l) => l.skills ?? [])).toContain("product-manager");
+
+    // And the decider, which is looked up the same way for the same reason.
+    const pm = specs.find((s) => s.role === "pm")!;
+    expect(pm.skills).toEqual(["product-manager"]);
+    expect(pm.systemPrompt).toContain(path.join(skills, "product-manager", "SKILL.md"));
+    expect(pm.systemPrompt).not.toContain("demo-report-analyst");
   });
 
   it("writes what it decided into the report the pit stop leaves behind", async () => {
