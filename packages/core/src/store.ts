@@ -724,8 +724,9 @@ export class Store {
     const row = this.db
       .prepare("SELECT payload FROM events WHERE runId = ? AND type = 'github.pr_publish_failed' ORDER BY seq DESC LIMIT 1")
       .get(runId) as { payload: string } | undefined;
-    /* v8 ignore next */
+    /* v8 ignore start */
     if (!row) return null;
+    /* v8 ignore stop */
     return (JSON.parse(row.payload) as { error?: string }).error || "the pull request could not be opened";
   }
 

@@ -697,8 +697,9 @@ export class AgentPool {
       resumeWhy = LIMIT_CONTINUE_PROMPT;
       // Every way out of this loop is a return or a throw above: a wait that is
       // refused ends it, and the budget only shrinks.
-      /* v8 ignore next */
+      /* v8 ignore start */
     }
+    /* v8 ignore stop */
   }
 
   /**

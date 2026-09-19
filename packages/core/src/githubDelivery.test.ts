@@ -27,6 +27,16 @@ describe("SHA-bound authorized release merge", () => {
     expect(await f.github.mergeApprovedPR(7, "charrette/r/main", "main", "tested")).toBe(false);
     expect(f.merge).not.toHaveBeenCalled();
   });
+  it("refuses when the pull request cannot be read at all", async () => {
+    // The check that everything else here depends on. If reading the PR fails —
+    // a revoked token, a deleted branch, GitHub being down — there is nothing
+    // to compare the validated head against, and "could not check" must merge
+    // no more than "checked and wrong" does.
+    const f = fixture();
+    f.get.mockRejectedValueOnce(new Error("Not Found"));
+    expect(await f.github.mergeApprovedPR(7, "charrette/r/main", "main", "tested")).toBe(false);
+    expect(f.merge).not.toHaveBeenCalled();
+  });
   it("does not bypass unavailable access or server-side protection", async () => {
     expect(await new GitHubAdapter(undefined, undefined).mergeApprovedPR(7, "charrette/r/main", "main", "tested")).toBe(false);
     const f = fixture();

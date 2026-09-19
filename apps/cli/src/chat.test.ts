@@ -118,6 +118,19 @@ describe("what the chat puts on the screen", () => {
     expect(shown()).toBe("");
   });
 
+  it("does not emit a blank line for a paragraph whose last word filled it exactly", () => {
+    // `split(/\s+/)` yields a trailing empty string for a line that ends in a
+    // space, and a word already past the wrap width pushes the line and starts a
+    // new one from that empty string. Printing it anyway puts a stray blank line
+    // into the middle of what the agent said.
+    const wide = "x".repeat(120);
+
+    new TerminalChat(scripted([])).say(`before\n${wide} \nafter`);
+
+    expect(shown()).not.toMatch(/\n\s*\n\s*after/);
+    expect(shown()).toContain("after");
+  });
+
   it("wraps a long message to the terminal width instead of one endless line", () => {
     const sentence = "the charrette never merges its own work and that part is left to you ".repeat(4);
 

@@ -72,6 +72,27 @@ describe("worktree dependency seeding", () => {
   });
 
   /**
+   * The other way an install never produces a `close`: it never starts. `spawn`
+   * reports an unresolvable binary asynchronously, on `error`, so a seeding run
+   * that only listened for `close` would hold the worker slot until the timeout
+   * for a child that died in a millisecond.
+   */
+  it("reports a package manager that is not on PATH instead of waiting out the timeout", async () => {
+    const d = dir();
+    emptyNpmProject(d, "nomanager");
+    const realPath = process.env.PATH;
+    process.env.PATH = path.join(d, "definitely-not-a-bin-dir");
+    try {
+      const started = Date.now();
+      const seeded = await seedWorktreeDeps(d);
+      expect(seeded).toEqual([{ dir: "", manager: "npm", ok: false, seconds: expect.any(Number) }]);
+      expect(Date.now() - started).toBeLessThan(10_000);
+    } finally {
+      process.env.PATH = realPath;
+    }
+  });
+
+  /**
    * The regression this file exists to prevent twice over. A postinstall that
    * never returns — measured in the wild as puppeteer downloading Chromium onto
    * a half-open socket — used to hold a worker slot forever: `execFile`'s

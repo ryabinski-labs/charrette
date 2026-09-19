@@ -252,7 +252,7 @@ vi.mock("./dashboardLink.js", () => ({
 }));
 
 import type { GateHandler } from "@charrette/core";
-import { buildProgram, modelOverrides, parseRunConfig } from "./cli.js";
+import { buildProgram, makeDashboardFactory, modelOverrides, parseRunConfig } from "./cli.js";
 
 let out: string[];
 
@@ -351,7 +351,13 @@ beforeEach(() => {
   });
   h.BusMock.mockReset().mockImplementation(function () {
     return {
-      subscribe: (fn: (e: { event: Record<string, unknown> }) => void) => void h.subscribers.push(fn),
+      // Returns the unsubscribe the real Bus returns. Without it, anything that
+      // subscribes for the life of a command — `watchGateMail` — hands back
+      // `undefined` and the `finally` that calls it throws on the way out.
+      subscribe: (fn: (e: { event: Record<string, unknown> }) => void) => {
+        h.subscribers.push(fn);
+        return () => void h.subscribers.splice(h.subscribers.indexOf(fn), 1);
+      },
     };
   });
   h.AgentPoolMock.mockReset();
@@ -1620,6 +1626,26 @@ describe("charrette resume", () => {
     expect(h.dashboardArgs.at(-1)![2]).toEqual({ port: undefined, preferPort: undefined, token: undefined });
   });
 
+  it("reprints where gate mail goes, because the first banner scrolled away", async () => {
+    // A resumed run is one an operator came back to, often in a new terminal.
+    // The channel that will reach them about a gate has to be visible from the
+    // resume too, or it reads as switched off.
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-open", state: "EXECUTING", assignment: "a" }]);
+    const prior = { to: process.env.CHARRETTE_GATE_EMAIL, cmd: process.env.CHARRETTE_GATE_MAIL_CMD };
+    process.env.CHARRETTE_GATE_EMAIL = "you@example.com";
+    process.env.CHARRETTE_GATE_MAIL_CMD = "python3 /skills/agentdraft_email.py";
+    try {
+      await cli("resume", "--repo", "/repo", "--no-dashboard");
+    } finally {
+      if (prior.to === undefined) delete process.env.CHARRETTE_GATE_EMAIL;
+      else process.env.CHARRETTE_GATE_EMAIL = prior.to;
+      if (prior.cmd === undefined) delete process.env.CHARRETTE_GATE_MAIL_CMD;
+      else process.env.CHARRETTE_GATE_MAIL_CMD = prior.cmd;
+    }
+
+    expect(printed()).toContain("gate mail  you@example.com");
+  });
+
   it("says so plainly when there is nothing to resume", async () => {
     h.storeMethods.listRuns.mockReturnValue([{ id: "run-done", state: "DONE", assignment: "finished" }]);
 
@@ -2318,10 +2344,16 @@ describe("charrette report", () => {
   it("gives the merge check a way to ask GitHub when a repository is configured", async () => {
     h.storeMethods.getRun.mockReturnValue(aRun());
     h.githubMethods.enabled = true;
+    h.githubMethods.mergedSha.mockResolvedValue("deadbeef");
 
     await cli("report", "run-1", "--repo", "/repo");
 
     expect(h.wasMergedMock).toHaveBeenCalledWith(expect.anything(), "run-1", expect.any(Function));
+    // And the function it was handed reaches the adapter, rather than being a
+    // closure over a `merged` the run had already decided for itself.
+    const ask = (h.wasMergedMock.mock.calls.at(-1) as unknown as unknown[])[2] as (pr: number) => Promise<string | null>;
+    expect(await ask(7)).toBe("deadbeef");
+    expect(h.githubMethods.mergedSha).toHaveBeenCalledWith(7);
   });
 
   it("asks nobody when the repository has no GitHub behind it", async () => {
@@ -2801,6 +2833,20 @@ describe("charrette dashboard", () => {
   });
 });
 
+describe("the dashboard factory", () => {
+  it("has nothing to stop when its gate override was never wired into anything", async () => {
+    // The server is born inside `makeController`, from `gateOverride`. A caller
+    // that asks for a dashboard and then fails before the controller exists
+    // still runs the same teardown, and it has to be a no-op rather than a
+    // crash on top of whatever already went wrong.
+    const dash = makeDashboardFactory(true, undefined, "/repo");
+
+    await expect(dash.stop()).resolves.toBeUndefined();
+    expect(h.DashboardMock).not.toHaveBeenCalled();
+    expect(h.clearDashboardMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("charrette init", () => {
   it("writes the settings this repo would run with", async () => {
     h.detectChecksMock.mockReturnValue({ checks: ["npm test", "npm run lint"], source: "package.json", skipped: [] });
@@ -3209,11 +3255,18 @@ describe("the closing report", () => {
     expect(shown).toContain("    ran out of turns");
   });
 
-  it("omits the trailing summary when the validator gave none", async () => {
-    const shown = await reportFor({ intent: { verdict: "FAIL", gaps: ["a gap"], summary: "" } as never });
+  // Both verdicts print a list and then, optionally, the validator's own
+  // sentence under it. An empty summary must not become a blank indented line —
+  // it reads as a list item whose text went missing.
+  it.each([
+    ["FAIL", { verdict: "FAIL", gaps: ["a gap"], summary: "" }],
+    ["UNKNOWN", { verdict: "UNKNOWN", gaps: [], unchecked: ["a gap"], summary: "" }],
+  ])("omits the trailing summary when the %s validator gave none", async (_verdict, intent) => {
+    const shown = await reportFor({ intent: intent as never });
 
     expect(shown).toContain("    - a gap");
     expect(shown.trimEnd().split("\n").filter((l) => l.trim().startsWith("- ")).length).toBe(1);
+    expect(shown).not.toMatch(/\n {4}\n/);
   });
 
   it("puts a branch that cannot merge above CI, and names the files", async () => {

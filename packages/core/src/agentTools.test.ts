@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -284,6 +284,17 @@ describe("finding files", () => {
   it("returns nothing rather than throwing when the search root is not a directory", async () => {
     writeFileSync(join(dir, "afile.txt"), "x");
     expect(await tool("Glob").run({ pattern: "*", path: "afile.txt" }, ctx)).toContain("no files match");
+  });
+
+  it("ignores a directory entry that is neither a file nor a directory", async () => {
+    // A symlink is listed by `readdir` and is neither, so the walk has to say
+    // so explicitly. A dangling one especially: following it would stat a path
+    // that is not there and turn a stray link in someone's worktree into a
+    // failed search.
+    symlinkSync(join(dir, "src/gone.ts"), join(dir, "src/link.ts"));
+    const out = await tool("Glob").run({ pattern: "**/*.ts" }, ctx);
+    expect(out).toContain("src/index.ts");
+    expect(out).not.toContain("link.ts");
   });
 
   it("skips a file it is not allowed to stat instead of failing the whole search", async () => {

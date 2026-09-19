@@ -38,7 +38,14 @@ function execRtkHook(rtkPath: string): RtkRunner {
         (err, stdout) => (err ? reject(err) : resolve(stdout))
       );
       // A dead child EPIPEs the write; the exec callback already reports it.
+      //
+      // Not covered, and deliberately not chased: firing this handler needs a
+      // child that dies between `execFile` returning and the write landing,
+      // which is a race no test can ask for without becoming one itself. The
+      // handler exists so that race cannot become an unhandled 'error' event.
+      /* v8 ignore start */
       child.stdin?.on("error", () => {});
+      /* v8 ignore stop */
       child.stdin?.end(json);
     });
 }

@@ -79,6 +79,22 @@ describe("giving the machine back", () => {
   });
 
   /**
+   * A teardown that fails is not a teardown. Reporting it as one would tell the
+   * next task's worker that a stack it is about to collide with is gone, and
+   * `down` does fail for real reasons — a container wedged in `removing`, a
+   * volume still held open by something outside the project.
+   */
+  it("does not claim a stack it could not bring down", async () => {
+    const { exec } = runtime(["podman"], ["charrette-a-0001", "charrette-b-0001"]);
+    const refusing = async (bin: string, args: string[], timeoutMs: number) => {
+      if (args.includes("down") && args.includes("charrette-a-0001")) throw new Error("volume is in use");
+      return exec(bin, args, timeoutMs);
+    };
+
+    expect(await composeDown(["charrette-a-0001", "charrette-b-0001"], refusing)).toEqual(["podman:charrette-b-0001"]);
+  });
+
+  /**
    * A machine with no container runtime at all is the common case, and a run on
    * one must not notice this exists.
    */

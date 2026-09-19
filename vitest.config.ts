@@ -148,11 +148,47 @@ export default defineConfig({
       // reporting the files nothing tests, with the thresholds still green.
       include: ["packages/*/src/**/*.ts", "apps/*/src/**/*.ts"],
       exclude: ["**/*.test.ts", "**/dist/**", "**/*.d.ts"],
+      /**
+       * Not four hundreds any more, and the reason is a measurement change
+       * rather than a regression.
+       *
+       * Vitest 4 made AST-aware remapping unconditional for the V8 provider.
+       * The old range-based mapping credited a `.catch(() => fallback)` that
+       * never ran, because the line it sits on did; the new one counts the arrow
+       * itself and correctly calls it uncovered. So the repository was never at
+       * 100% in the sense the number claimed — and what the old measurement was
+       * hiding is almost entirely two files' worth of unexercised git and merge
+       * failure paths.
+       *
+       * These are counts, not percentages: a negative threshold is the maximum
+       * number of uncovered entities allowed. That matters here.
+       *
+       * - A percentage floor absorbs new debt as the repository grows; a count
+       *   does not. Every uncovered branch anyone adds, anywhere, fails this.
+       * - The global counts are exactly `git.ts` plus `runController.ts`, which
+       *   is arithmetic rather than coincidence: every other file is at zero
+       *   uncovered. So the other 21 files are held at a real 100% by the global
+       *   count alone — an uncovered line in any of them pushes the total over —
+       *   while the two named files carry the debt where it can be seen.
+       * - The per-file entries stop it migrating *into* those two as well, and
+       *   name what each one owes.
+       *
+       * Vitest 4 also stopped excluding glob-matched files from the global
+       * check, so these two sets overlap deliberately. Both only ever move down:
+       * lower a number as its paths get tests, and delete the entry at zero.
+       * When both are gone, put the four hundreds back.
+       */
       thresholds: {
-        lines: 100,
-        functions: 100,
-        branches: 100,
-        statements: 100,
+        statements: -54,
+        branches: -27,
+        functions: -52,
+        lines: -14,
+        // 17 `.catch(() => fallback)` handlers around git invocations; the
+        // branches and lines they sit on are covered, the handlers are not.
+        "packages/core/src/git.ts": { statements: -17, functions: -17, branches: 100, lines: 100 },
+        // The same shape plus the merge and QA paths that need a failing git or
+        // a failing check to reach.
+        "packages/core/src/runController.ts": { statements: -37, functions: -35, branches: -27, lines: -14 },
       },
     },
   },

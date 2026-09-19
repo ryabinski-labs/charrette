@@ -64,6 +64,25 @@ on. Before then, minor versions may break things.
   typechecks them, they simply are not part of what anyone installs. They were
   more than half the bytes — `@charrette/core` went from 1.4 MB to 716 KB.
 
+- **The coverage gate is counts, not percentages, and two files sit above zero.**
+  Vitest 4 made AST-aware remapping unconditional for the V8 provider, so a
+  `.catch(() => fallback)` that never ran is no longer credited because the line
+  it sits on did. Nothing regressed — the repository was never at 100% in the
+  sense the number claimed — and all 54 statements, 52 functions, 27 branches
+  and 14 lines of it are in `git.ts` and `runController.ts`, whose git and merge
+  failure paths have never been exercised. The thresholds are now maximum
+  uncovered *counts*, globally and per file, because a percentage floor absorbs
+  new debt as a repository grows and a count does not: every other file is at
+  zero, so an uncovered line anywhere else fails the build. Tracked in
+  [#5](https://github.com/ryabinski-labs/charrette/issues/5); the numbers only
+  move down.
+
+- **`vitest.config.ts` is typechecked.** It belongs to no package, so
+  `pnpm -r build` never saw it, and vitest loads it by stripping types rather
+  than checking them — the one file that decides CI's exit code was the only
+  unchecked TypeScript in the repository. `pnpm build` now runs
+  `tsconfig.tools.json` over it.
+
 ### Security
 
 - **No long-lived registry token exists for this project.** npm releases go
@@ -75,8 +94,24 @@ on. Before then, minor versions may break things.
   scheme normalization). It is a runtime dependency, reaching the project
   through both fastify's ajv compiler and the Agent SDK's ajv, neither of which
   has floated past the vulnerable 3.1.5 yet. The override goes away once they
-  do. The remaining Dependabot alerts are development-scope or need the vitest
-  3.x → 4.x migration, and are tracked separately.
+  do.
+
+- **`qs` lifted to `^6.16.0` and `hono` to `^4.13.5`** (GHSA-x5fp-wj9c-mxmx,
+  GHSA-4mjr-xmp4-gh2g, GHSA-gqvv-2mrq-wpjv, GHSA-g6gw-c38x-mqfc,
+  GHSA-crvj-82cr-hjcx). Both arrive through `@modelcontextprotocol/sdk` — express
+  for its HTTP transport, `@hono/node-server` for its Hono one — and the SDK is
+  driven over stdio here, so neither parser is on a path this project calls. They
+  are installed, though, which is what an advisory scan sees, and nothing in the
+  repository declares either package, so only a `pnpm-workspace.yaml` override
+  could move the pin.
+
+- **`vitest` upgraded to 4.1.11** (GHSA-82fw-gwwq-j7x9: arbitrary file read via
+  `@vitest/mocker` redirect mocks). Reachable without authentication only
+  through the standalone `mockerPlugin`/`interceptorPlugin` exports, which this
+  project does not use — but there is no 3.x patch, so the fix is the major.
+  Note for anyone with their own reporter: `onFinished` was **removed** from the
+  reporter interface rather than deprecated, and an unrecognised key on a
+  reporter object is silently never called.
 - **Pull request CI no longer runs on self-hosted runners.** On a public
   repository that let any fork execute code on the project's own infrastructure.
   Pull requests now run on GitHub-hosted runners; `main` and manual dispatch

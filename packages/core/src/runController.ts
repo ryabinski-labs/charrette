@@ -487,8 +487,9 @@ function issueSummary(error: z.ZodError, data: unknown): string {
       .map((i) => {
         // `extractJson` has already guaranteed an object, so every issue has a
         // key to name; "(root)" is for a schema that grows a root-level rule.
-        /* v8 ignore next */
+        /* v8 ignore start */
         const at = i.path.join(".") || "(root)";
+        /* v8 ignore stop */
         const got = valueAt(data, i.path);
         // The path is an index into the assembled plan, which is not an array
         // the planner ever emitted or can count through. The value is the only
@@ -506,8 +507,9 @@ function valueAt(data: unknown, path: PropertyKey[]): unknown {
   for (const key of path) {
     // A Zod issue path always follows the value it was produced from, so this
     // only fires if a schema and its data are ever handed here separately.
-    /* v8 ignore next */
+    /* v8 ignore start */
     if (at === null || typeof at !== "object") return undefined;
+    /* v8 ignore stop */
     at = (at as Record<PropertyKey, unknown>)[key];
   }
   return at;
@@ -1746,8 +1748,9 @@ export class RunController {
       //
       // Same invariant as the issue comment below: a parked task carries a
       // reason on the row or in its transition event.
-      /* v8 ignore next */
+      /* v8 ignore start */
       const why = t.errorSummary || this.store.taskStateReason(runId, t.id) || "parked";
+      /* v8 ignore stop */
       const guidance = await this.askOperator(runId, t.id, why);
       if (guidance === null) continue; // still parked; no transition needed
       this.freshIterations(runId, t.id);
@@ -3191,8 +3194,9 @@ export class RunController {
       // back to INTEGRATING and republishes before the loop reaches here. This
       // is what would stop a resume walking past an unchecked branch if that
       // routing ever changed, and it is one line.
-      /* v8 ignore next */
+      /* v8 ignore start */
       if (failed) return { call: "stop", why: `merged locally, but no pull request could be opened, so nothing has checked this branch: ${failed}` };
+      /* v8 ignore stop */
       return { call: "proceed" };
     }
     const hold = this.holdsUntilGreen(run);
@@ -3991,8 +3995,9 @@ export class RunController {
     // Unreachable from either caller — `republishUnmergeable` checks it first,
     // and `greenGate` is only entered with a pull request open, which no run
     // without GitHub has. Kept because it is the invariant this method reads.
-    /* v8 ignore next */
+    /* v8 ignore start */
     if (!this.github.enabled) return undefined;
+    /* v8 ignore stop */
     const prNumber = this.rollupPr(runId);
     const local = this.store.mergeStatus(runId);
     // No local verdict means nothing reconciled this branch against its base,
@@ -5454,8 +5459,9 @@ export class RunController {
           ? "the breakdown ran past the output-token limit and was cut off mid-JSON — it is too long to emit in one message"
           : // Only `extractJson` and `JSON.parse` throw in here, and both throw
             // Errors — the String() arm is for a future throw that does not.
-            /* v8 ignore next */
+            /* v8 ignore start */
             `the breakdown JSON could not be read: ${(e instanceof Error ? e.message : String(e)).slice(0, 300)}`,
+            /* v8 ignore stop */
       };
     }
     const parsed = PlanBatch.safeParse(json);
@@ -5786,8 +5792,9 @@ export class RunController {
         // loop now claims those before they reach here, so nothing should; what
         // must never happen again is a sweep that ends a run by cancelling
         // something it may not. Park it — the work exists and passed QA.
-        /* v8 ignore next */
+        /* v8 ignore start */
         if (t.state === "ACCEPTED") this.park(runId, t.id, "accepted by QA, but the run ended before the work merged into the integration branch");
+        /* v8 ignore stop */
         else this.store.transitionTask(runId, t.id, "CANCELLED", "unreachable: dependencies parked");
         this.queueIssueSync(runId, t.id);
       }
@@ -6070,8 +6077,9 @@ export class RunController {
       // `|| "HEAD"` is for a run recorded before the base branch was captured
       // at creation — the same absence `backfillBaseBranch` repairs on resume,
       // and one no run started by this build can have.
-      /* v8 ignore next */
+      /* v8 ignore start */
       const diff = await changedFiles(this.repoPath, run.config.baseBranch || "HEAD", this.wt.integrationBranch(runId), run.createdAt, readableForGaps);
+      /* v8 ignore stop */
       return gapLedgerSignal(gapLedger(diff.files));
       /* v8 ignore start -- every git call inside `changedFiles` already
          catches; this is the guard for a repository that disappears under a
@@ -7162,11 +7170,13 @@ export class RunController {
     // Both are guards on a call that only happens after the checks have already
     // run and failed against a branch that therefore exists — kept so a future
     // caller cannot measure a baseline that is not there.
-    /* v8 ignore next */
+    /* v8 ignore start */
     if (!run.config.deterministicChecks.length) return clean;
+    /* v8 ignore stop */
     const sha = await this.wt.integrationHead(runId);
-    /* v8 ignore next */
+    /* v8 ignore start */
     if (!sha) return clean;
+    /* v8 ignore stop */
     const key = `${runId}/${sha}`;
     let measured = this.baselines.get(key);
     if (!measured) {
@@ -7203,8 +7213,9 @@ export class RunController {
   private selectSkills(skills: IndexedSkill[], role: keyof typeof ROLE_SKILL_LENS, text: string, config: RunConfig, forced: IndexedSkill[] = []) {
     // Every role that calls this has a lens; the fallback is for one added
     // later without one.
-    /* v8 ignore next */
+    /* v8 ignore start */
     const query = `${text}\n${ROLE_SKILL_LENS[role] ?? ""}`;
+    /* v8 ignore stop */
     // Routed skills are the operator's declared intent and come first; scoring
     // only fills whatever room is left, and no skill at all is a valid outcome.
     // `forced` outranks even those: it is a skill forged for exactly this task
@@ -7567,8 +7578,9 @@ export class RunController {
           // The clock is set immediately before the loop, so the first pass
           // cannot blow it — anything that gets here has been round at least
           // once, and every path that loops leaves feedback behind.
-          /* v8 ignore next */
+          /* v8 ignore start */
           (qaFeedback ? `\n\nThe pending feedback from the previous iteration still applies:\n${qaFeedback}` : "");
+          /* v8 ignore stop */
       }
       // The issue thread is the other place an operator answers a task, and
       // until now it was the one place nobody read. Polled here rather than on
@@ -7952,8 +7964,9 @@ export class RunController {
         if (!probe.ok) {
           // One command in, so a run that is not ok has exactly one failure in
           // it; the fallback is for the type, not for a state that occurs.
-          /* v8 ignore next */
+          /* v8 ignore start */
           const output = probe.failures[0]?.output ?? "";
+          /* v8 ignore stop */
           qaFeedback =
             `This task's completion probe still fails. The probe is the task's own definition of done, and it does not depend on ` +
             `which files you happened to edit — it passes when the job is complete everywhere and fails while any of it is left:\n\n` +
@@ -8242,8 +8255,9 @@ export class RunController {
         const caught = await this.wt.catchUpTaskBranch(runId, taskId);
         // A merge that conflicted one way conflicts the other way too, so a
         // clean catch-up after a conflicted integrate does not happen.
-        /* v8 ignore next */
+        /* v8 ignore start */
         qaFeedback = conflictPrompt(this.wt.integrationBranch(runId), caught.ok ? merged.conflicts : caught.conflicts, caught.ok);
+        /* v8 ignore stop */
         this.store.transitionTask(runId, taskId, "WORKING", "re-dispatched to resolve merge conflicts");
         continue;
       }
@@ -8313,22 +8327,25 @@ export class RunController {
         sessionId: taskId,
         // Branch is set by ensureWorktree before the task can ever be merged;
         // the fallback is for the column type, not for a state that occurs.
-        /* v8 ignore next */
+        /* v8 ignore start */
         text: `merge produced nothing: ${task.branch ?? this.wt.branchName(runId, taskId)} left ${this.wt.integrationBranch(runId)} where it was`,
+        /* v8 ignore stop */
         ts: Date.now(),
       });
       return merge;
     }
     if (!merge.ok) {
       // Same fallback, and the same reason it never fires.
-      /* v8 ignore next */
+      /* v8 ignore start */
       this.bus.publish({ type: "git.merge_conflict", runId, taskId, branch: task.branch ?? "", files: merge.conflicts, ts: Date.now() });
+      /* v8 ignore stop */
       return merge;
     }
     this.store.transitionTask(runId, taskId, "MERGED");
     this.mergedShas.set(`${runId}/${taskId}`, merge.sha);
-    /* v8 ignore next */
+    /* v8 ignore start */
     this.bus.publish({ type: "git.merged", runId, taskId, branch: task.branch ?? "", sha: merge.sha, ts: Date.now() });
+    /* v8 ignore stop */
     // The PR is NOT opened here. Merging is continuous; publishing waits until
     // the whole run has been validated against the operator's intent (openPrs),
     // so no reviewer ever sees a PR the charrette has not finished judging.
@@ -8395,12 +8412,14 @@ export class RunController {
         issue,
         key,
         // The sha was recorded by this same process when it merged the task.
-        /* v8 ignore next */
+        /* v8 ignore start */
         `**Done** — merged into \`${this.wt.integrationBranch(runId)}\`${sha ? ` as \`${sha.slice(0, 7)}\`` : ""} after ${n} QA iteration${n === 1 ? "" : "s"}.\n\n` +
+        /* v8 ignore stop */
           `**Acceptance criteria**\n${task.acceptanceCriteria.map((c) => `- [x] ${c}`).join("\n")}\n\n` +
           // A merged task always has a branch — see the same note in integrate.
-          /* v8 ignore next */
+          /* v8 ignore start */
           `This closes when the pull request for \`${task.branch ?? "the task branch"}\` is merged.`
+          /* v8 ignore stop */
       );
       return;
     }
@@ -8424,8 +8443,9 @@ export class RunController {
         key,
         // `park()` always records a reason, so the literal is unreachable; it is
         // there so a future path that parks without one still says something.
-        /* v8 ignore next */
+        /* v8 ignore start */
         `**Parked for a human** — ${task.errorSummary || why || "the charrette could not finish it"}\n\n` +
+        /* v8 ignore stop */
           `${where} While the run is still going, a reply in this thread is picked up as guidance and the task is dispatched again.`
       );
       return;
@@ -8434,8 +8454,9 @@ export class RunController {
     if (task.state === "CANCELLED") {
       // Cancelling always records why; the literal is for a path that stops
       // doing so.
-      /* v8 ignore next */
+      /* v8 ignore start */
       await this.github.commentOnIssue(issue, key, `**Not attempted** — ${why || "the run ended before this task became reachable"}.`);
+      /* v8 ignore stop */
       await this.github.closeIssue(issue, "not_planned");
     }
   }
@@ -8445,8 +8466,9 @@ export class RunController {
     const task = this.store.getTask(runId, taskId)!;
     const base = run.config.baseBranch;
     // Only MERGED tasks reach here, and a merged task has a branch.
-    /* v8 ignore next */
+    /* v8 ignore start */
     if (!this.github.enabled || !task.branch) return;
+    /* v8 ignore stop */
     if (!base) throw new Error("the run has no base branch (detached HEAD) — nothing to open a PR against");
 
     // SEC-5: push only charrette/<runId>/* branches, never the base branch.
@@ -8602,8 +8624,9 @@ export class RunController {
     // `enforce` already returned for anything under the cap, and spend only
     // grows — so this is a re-check that cannot fire, kept because the queue
     // between the two makes "still over?" the honest question to ask here.
-    /* v8 ignore next */
+    /* v8 ignore start */
     if (spent < cap) return;
+    /* v8 ignore stop */
     // The operator already declined while this check was queued — every other
     // session stops on its next check without opening the gate again.
     if (run.state === "BUDGET_HOLD") throw new BudgetExceeded(spent, cap, runId);

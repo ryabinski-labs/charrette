@@ -125,6 +125,26 @@ describe("parseCheckpoint", () => {
     expect(parsed!.questions[1]!.recommended).toBe("d");
   });
 
+  it("drops prose written after a question rather than folding it into the digest", () => {
+    // The continuation rule only applies while no question is open. An agent
+    // that editorialises under its own OPTIONS is not extending STATE, and
+    // appending that line would put an aside into the account the next session
+    // resumes from.
+    const parsed = parseCheckpoint(
+      [
+        "<charrette-checkpoint>",
+        "STATE: half done.",
+        "QUESTION: which way?",
+        "OPTIONS: a | b",
+        "RECOMMENDED: a",
+        "though honestly either would work.",
+        "</charrette-checkpoint>",
+      ].join("\n")
+    );
+    expect(parsed!.digest).toBe("half done.");
+    expect(parsed!.questions).toHaveLength(1);
+  });
+
   it("accepts a digest with no questions", () => {
     // "Nothing is genuinely open" is a valid answer and must not read as a
     // malformed one.

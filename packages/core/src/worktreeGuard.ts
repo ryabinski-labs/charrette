@@ -96,8 +96,9 @@ function canonical(target: string): string {
       // machine whose own root cannot be read. Every path this is called with
       // is already absolute, so the walk always terminates at a directory that
       // exists long before here.
-      /* v8 ignore next */
+      /* v8 ignore start */
       if (parent === head) return target;
+      /* v8 ignore stop */
       tail.push(path.basename(head));
       head = parent;
     }
