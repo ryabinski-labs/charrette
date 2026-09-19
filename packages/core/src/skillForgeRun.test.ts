@@ -301,3 +301,51 @@ describe("forging a skill for a task nothing matches", () => {
     );
   });
 });
+
+/**
+ * What the collection almost had is the strongest hint about the topic, so the
+ * smith is told about it. Every case above forges against an empty collection,
+ * where the prompt says "nothing even close" — the other half of that sentence,
+ * the briefing one, had never been written.
+ */
+describe("the smith's briefing", () => {
+  it("names the skills that came close without matching, and does not duplicate them", async () => {
+    const dir = repo();
+    // One faint term in common ("nightly") and nothing else: below the
+    // injection floor, so the forge still fires, and above matchSkills' own
+    // cutoff, so it is still worth telling the smith about.
+    const skills = skillsDirWith("release-checklist", "Nightly maintenance windows and their sign-off");
+    const { pool, specs } = fakePool({
+      planner: (s) =>
+        s.prompt.includes("PRD")
+          ? "```json\n" +
+            JSON.stringify({
+              epics: [{ id: "epic-e", title: "E", summary: "s" }],
+              tasks: [
+                {
+                  id: "task-a",
+                  epicId: "epic-e",
+                  title: "Rotate the audit logs",
+                  spec: "Truncate stale nightly audit log files",
+                  acceptanceCriteria: ["old files go away"],
+                  dependsOn: [],
+                  touchedPaths: [],
+                  completionProbe: "",
+                  estimatedSize: "S",
+                },
+              ],
+            }) +
+            "\n```"
+          : DOCS,
+      skillsmith: CREATE,
+      worker,
+      qa: QA_PASS,
+    });
+    const { controller } = build(dir, pool);
+    await controller.startRun("build a thing", RunConfig.parse({ deterministicChecks: [], skillsDirs: [skills] }));
+
+    const smith = specs.find((s) => s.role === "skillsmith")!;
+    expect(smith.prompt).toContain("release-checklist: Nightly maintenance windows and their sign-off");
+    expect(smith.prompt).not.toContain("nothing even close");
+  });
+});

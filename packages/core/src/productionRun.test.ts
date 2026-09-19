@@ -522,3 +522,29 @@ describe("production delivery lifecycle", () => {
     });
   });
 });
+
+/**
+ * The production validator is the one agent that runs against the deployed
+ * system rather than a worktree, and the operator's own validation playbooks
+ * are exactly what it should be running it with. The pin reaching it had never
+ * been checked.
+ */
+describe("briefing the production validator", () => {
+  it("carries the playbook the operator pinned to its role", async () => {
+    const f = await fixture({ seed: true });
+    const skills = mkdtempSync(path.join(tmpdir(), "charrette-release-skills-"));
+    cleanup.push(() => rmSync(skills, { recursive: true, force: true }));
+    mkdirSync(path.join(skills, "prod-smoke"));
+    writeFileSync(
+      path.join(skills, "prod-smoke", "SKILL.md"),
+      "---\nname: prod-smoke\ndescription: How to validate this service once it is deployed\n---\nCurl the health endpoint, then read the logs."
+    );
+    f.store.patchRunConfig("seed", { skillsDirs: [skills], roleSkills: { prod: ["prod-smoke"] } });
+
+    expect(await f.internals.validateProd("seed", f.config.prodUrl)).toBe(true);
+
+    const session = f.specs.find((s) => s.role === "prod")!;
+    expect(session.skills).toEqual(["prod-smoke"]);
+    expect(session.systemPrompt).toContain('<skill name="prod-smoke"');
+  });
+});

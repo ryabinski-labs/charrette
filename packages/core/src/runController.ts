@@ -6027,7 +6027,7 @@ export class RunController {
       taskIsolation(runId, "live").composeProject,
     ];
     const [stacks, processes] = await Promise.all([
-      composeDown(projects, async (bin, args, timeoutMs) => (await execFileP(bin, args, { timeout: timeoutMs })).stdout).catch(() => [] as string[]),
+      composeDown(projects, async (bin, args, timeoutMs) => (await execFileP(bin, args, { timeout: timeoutMs })).stdout),
       reapUnder(path.join(this.wt.worktreeRoot(), runId)),
     ]);
     await this.wt.pruneAndReconcile();

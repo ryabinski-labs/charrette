@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -949,4 +949,129 @@ describe("giving the machine back at a pit stop", () => {
   it("says nothing at all when there was nothing to take back", async () => {
     expect(await swept([], [])).toEqual([]);
   });
+});
+
+/**
+ * Two things the demo agent is handed and answers with that nothing had read:
+ * the playbook an operator pinned to its role, and a report that ignored the
+ * shape it was asked for.
+ */
+describe("what the demo agent is given, and what it gives back", () => {
+  it("carries the playbook the operator pinned to the demo role", async () => {
+    const dir = repo();
+    const skills = mkdtempSync(path.join(tmpdir(), "charrette-pit-skills-"));
+    made.push(skills);
+    mkdirSync(path.join(skills, "demo-driver"));
+    writeFileSync(
+      path.join(skills, "demo-driver", "SKILL.md"),
+      "---\nname: demo-driver\ndescription: How to stand this product up and drive it for a demo\n---\nStart it, sign in, capture the HAR."
+    );
+    const { pool, specs } = rolePool(ROLES);
+    const { controller } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a thing", RunConfig.parse({ ...BASE, skillsDirs: [skills], roleSkills: { demo: ["demo-driver"] } }));
+
+    const session = specs.find((s) => s.role === "demo")!;
+    expect(session.skills).toEqual(["demo-driver"]);
+    expect(session.systemPrompt).toContain('<skill name="demo-driver"');
+  });
+
+  it("keeps a report whose commands came back as bare strings, and strikes them for saying nothing", async () => {
+    const dir = repo();
+    // A demo agent that ignored the shape: a string where a claim belongs. The
+    // parser takes it rather than losing the whole report to a parse error,
+    // and it arrives with nothing attached — which is what the gate strikes.
+    // Lenient at the parser, strict at the gate.
+    const bare = (spec: AgentSpec) => {
+      writeFileSync(path.join(artifactsDir(spec), SIGNIN_EVIDENCE.file), '{"log":{"entries":[{"request":{}}]}}');
+      return (
+        "```json\n" +
+        JSON.stringify({
+          started: true,
+          howStarted: "pnpm dev on :5173",
+          summary: "sign-in works",
+          plannedJourneys: ["Sign in"],
+          journeys: [{ name: "Sign in", result: "worked", evidence: "302 to /home" }],
+          couldNotReach: [],
+          artifacts: [SIGNIN_EVIDENCE],
+          commands: ["curl -sf localhost:5173/health"],
+        }) +
+        "\n```"
+      );
+    };
+    const { pool } = rolePool({ ...ROLES, demo: bare });
+    const { controller, stops } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a thing", RunConfig.parse(BASE));
+
+    const demo = stops[0]!.demo!;
+    // The journeys it established survive ...
+    expect(demo.journeys.map((j) => j.result)).toEqual(["worked"]);
+    // ... and the command is filed under what the stop could not verify,
+    // named for what it failed to say rather than for being unreadable.
+    expect(demo.couldNotReach.join(" ")).toContain("no statement of what it proves");
+    expect(demo.commands).toHaveLength(0);
+  });
+});
+
+/**
+ * A parked task is the one thing on a pit stop the operator has to act on, and
+ * the only line read out of two places: the summary written on the task when it
+ * was parked, and — for a row written before that column existed — the reason on
+ * the transition itself. Neither had ever been shown at a stop.
+ */
+describe("what a pit stop says about parked work", () => {
+  /** Two epics, and the second finishes around a task that parks. */
+  const parkingPlan =
+    "```json\n" +
+    JSON.stringify({
+      epics: [
+        { id: "epic-one", title: "Sign-in", summary: "s" },
+        { id: "epic-two", title: "The map", summary: "s" },
+      ],
+      tasks: [
+        { id: "task-a", epicId: "epic-one", title: "Sign in", spec: "s", acceptanceCriteria: ["x"], dependsOn: [], touchedPaths: [], completionProbe: "", estimatedSize: "S" as const },
+        { id: "task-b", epicId: "epic-two", title: "The map", spec: "s", acceptanceCriteria: ["x"], dependsOn: [], touchedPaths: [], completionProbe: "", estimatedSize: "S" as const },
+        { id: "task-c", epicId: "epic-two", title: "The legend", spec: "s", acceptanceCriteria: ["x"], dependsOn: [], touchedPaths: [], completionProbe: "", estimatedSize: "S" as const },
+      ],
+    }) +
+    "\n```";
+
+  it("names why each parked task stopped, from the task or from its transition", async () => {
+    const dir = repo();
+    const { pool } = rolePool({
+      ...ROLES,
+      planner: planner(parkingPlan),
+      // One task's worker dies every time, so it parks while its epic finishes
+      // around it — which is what puts a parked task on a stop at all.
+      worker: (spec, nth) => (spec.taskId === "task-b" ? new Error("the worker died") : worker(spec, nth)),
+    });
+    const seen: PitStop[] = [];
+    const { controller, store } = build({
+      repoPath: dir,
+      pool,
+      // Stop at the first stop that has something parked on it, so the run is
+      // PAUSED and can be resumed into the second half of this test.
+      decide: (stop) => (seen.push(stop), stop.parked.length ? { action: "stop", feedback: "" } : { action: "continue", feedback: "" }),
+    });
+
+    const runId = await controller.startRun("build a thing", RunConfig.parse({ ...BASE, workerRespawnCap: 1 }));
+    expect(store.getTask(runId, "task-b")!.state).toBe("NEEDS_HUMAN");
+
+    // Read off the task's own summary, which is what `park` writes there.
+    const fromTask = seen.at(-1)!.parked;
+    expect(fromTask).toHaveLength(1);
+    expect(fromTask[0]).toContain("The map (task-b) — ");
+    expect(store.getRun(runId)!.state).toBe("PAUSED");
+
+    // A database written before that column existed: the reason lived only on
+    // the transition and the task's row carried nothing. The stop still says
+    // why, and says the same thing.
+    store.updateTask(runId, "task-b", { errorSummary: null });
+    seen.length = 0;
+    await controller.resume(runId);
+
+    expect(seen[0]!.reason).toBe("you resumed a run that was parked at a pit stop");
+    expect(seen[0]!.parked).toEqual(fromTask);
+  }, 60_000);
 });

@@ -2,10 +2,11 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { RunConfig, type CharretteEvent } from "@charrette/shared";
+import { RunConfig, type CharretteEvent, type IntakeQuestion } from "@charrette/shared";
 import { describe, expect, it } from "vitest";
 import { Bus } from "./bus.js";
 import type { GitHubAdapter } from "./github.js";
+import type { IntakeUi } from "./intake.js";
 import type { AgentPool, AgentResult, AgentSpec } from "./pool.js";
 import { RunController, type GateHandler } from "./runController.js";
 import { Store } from "./store.js";
@@ -463,5 +464,57 @@ describe("a roleSkills pin this machine cannot honour", () => {
     await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], skillsDirs: [dir] }));
 
     expect(seen.filter((e) => e.type === "skills.unresolved").map((e) => e.skill)).toEqual(["prd-to-tdd"]);
+  }, 60_000);
+});
+
+/**
+ * The spec phase is the one role whose brief is pinned by name rather than
+ * scored, and the only one where a missing brief changes what the run is
+ * measured against rather than how well it is done. It is also the one
+ * injection nothing records on the bus — `skills.injected` carries the worker
+ * and QA roles only — so the session itself is what has to be read.
+ */
+describe("the spec agent's pinned brief", () => {
+  it("reaches the session, by name and in the prompt", async () => {
+    let planning = 0;
+    const specs: AgentSpec[] = [];
+    const pool = {
+      async run(s: AgentSpec): Promise<AgentResult> {
+        if (s.role === "spec") specs.push(s);
+        if (s.role === "planner") return { sessionId: "p", resultText: planning++ === 0 ? DOCS : DAG, costUsd: 0, turns: 1, outcome: "done" };
+        if (s.role === "worker") {
+          writeFileSync(path.join(s.cwd, "f.txt"), "done\n");
+          gitIn(s.cwd, "add", "-A");
+          gitIn(s.cwd, "commit", "-m", "wip");
+          return { sessionId: "w", resultText: "done", costUsd: 0, turns: 1, outcome: "done" };
+        }
+        return { sessionId: "q", resultText: '{"verdict":"PASS","notes":"ok"}', costUsd: 0, turns: 1, outcome: "done" };
+      },
+    } as unknown as AgentPool;
+    const store = new Store(":memory:");
+    const bus = new Bus(store);
+    const seen: CharretteEvent[] = [];
+    bus.subscribe(({ event }) => void seen.push(event));
+    const dir = skillsDir();
+    mkdirSync(path.join(dir, "prd-to-tdd"));
+    writeFileSync(
+      path.join(dir, "prd-to-tdd", "SKILL.md"),
+      "---\nname: prd-to-tdd\ndescription: Turn a PRD into gating scenarios and a test-driven specification\n---\nBody."
+    );
+    const controller = new RunController(store, bus, pool, noGithub, approveAll, repo());
+
+    // An operator at the keyboard: intake is what calls the spec phase, and
+    // with nobody to ask it is skipped along with everything downstream of it.
+    const ui: IntakeUi = { async ask(_q: IntakeQuestion) { return "whatever you think"; }, say() {} };
+    await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], skillsDirs: [dir] }), ui);
+
+    // Honoured rather than reported missing — the spec pin is gone from the
+    // unresolved list, and only the planner-side pin is still absent.
+    expect(seen.filter((e) => e.type === "skills.unresolved").map((e) => e.skill)).toEqual(["product-manager", "product-manager"]);
+    // The session carries it both ways: named on the spec, so a postmortem can
+    // say what the run was specified against, and inlined in the brief.
+    expect(specs).not.toHaveLength(0);
+    expect(specs[0]!.skills).toEqual(["prd-to-tdd"]);
+    expect(specs[0]!.systemPrompt).toContain('<skill name="prd-to-tdd"');
   }, 60_000);
 });
