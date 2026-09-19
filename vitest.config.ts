@@ -158,9 +158,12 @@ export default defineConfig({
        * itself and correctly calls it uncovered. So the repository was never at
        * 100% in the sense the number claimed — and what the old measurement was
        * hiding is unexercised git and merge failure paths, originally in two
-       * files. `git.ts` is now done (`gitFailures.test.ts`), which is where the
-       * 17 statements and 17 functions that used to be in these counts went;
-       * `runController.ts` is what is left.
+       * files. `git.ts` is now done (`gitFailures.test.ts`), and so are
+       * `runController.ts`'s own failure handlers — the eight that survive a
+       * failing git or an unanswerable GitHub, each now asserted on the
+       * direction it fails in, and six more deleted because nothing could
+       * reach them. What is left in that file is a different kind of gap and
+       * is described where it is counted, below.
        *
        * These are counts, not percentages: a negative threshold is the maximum
        * number of uncovered entities allowed. That matters here.
@@ -181,14 +184,15 @@ export default defineConfig({
        * When it is gone, put the four hundreds back.
        */
       thresholds: {
-        statements: -28,
-        branches: -17,
-        functions: -26,
-        lines: -10,
-        // `.catch(() => fallback)` handlers around git invocations, plus the
-        // merge and QA paths that need a failing git or a failing check to
-        // reach.
-        "packages/core/src/runController.ts": { statements: -28, functions: -26, branches: -17, lines: -10 },
+        statements: -12,
+        branches: -15,
+        functions: -12,
+        lines: -8,
+        // Not failure handling any more: zod's string-form union members, the
+        // `skills.map` callbacks a role only reaches with skills configured,
+        // and one-sided `if` guards. Each needs a fixture shaped to reach it
+        // rather than a failure injected underneath it.
+        "packages/core/src/runController.ts": { statements: -12, functions: -12, branches: -15, lines: -8 },
       },
     },
   },

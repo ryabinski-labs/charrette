@@ -380,6 +380,34 @@ describe("a demo that goes wrong", () => {
     expect(readFileSync(path.join(wt, "README.md"), "utf8")).toBe("start\n");
   });
 
+  /**
+   * And when it cannot. The restore is a `git reset --hard` against a
+   * directory a demo agent has just had free rein over — it installs, builds,
+   * starts and stops things, and a teardown script pointed one level too high
+   * takes the worktree with it.
+   *
+   * Nothing the operator is about to read depends on that reset. It protects
+   * the next reader of the diff, and the pit stop it runs inside is the whole
+   * point of the run reaching here: failing it would throw away a demo, four
+   * reviews and the operator's decision over a tidy-up.
+   */
+  it("still opens the pit stop when it cannot put the worktree back", async () => {
+    const dir = repo();
+    const { pool } = rolePool({
+      ...ROLES,
+      demo: (spec) => {
+        const report = demoOk(spec);
+        rmSync(spec.cwd, { recursive: true, force: true });
+        return report;
+      },
+    });
+    const { controller, stops } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a thing", RunConfig.parse(BASE));
+
+    expect(stops).toHaveLength(1);
+  });
+
   it("names a reviewer that did not finish instead of quietly showing three of four", async () => {
     const dir = repo();
     const { pool } = rolePool({

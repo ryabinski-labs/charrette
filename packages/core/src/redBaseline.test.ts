@@ -3,7 +3,7 @@ import { appendFileSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { RunConfig } from "@charrette/shared";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Bus } from "./bus.js";
 import type { GitHubAdapter } from "./github.js";
 import type { AgentPool, AgentResult, AgentSpec } from "./pool.js";
@@ -86,7 +86,16 @@ function pool(work: (cwd: string) => void) {
   return { pool: agents as unknown as AgentPool, qaPrompts };
 }
 
-async function run(work: (cwd: string) => void, checks: string[] = [CHECK], seed?: (store: Store) => void, deterministicCheckTimeoutMinutes?: number) {
+afterEach(() => vi.restoreAllMocks());
+
+async function run(
+  work: (cwd: string) => void,
+  checks: string[] = [CHECK],
+  seed?: (store: Store) => void,
+  deterministicCheckTimeoutMinutes?: number,
+  /** Runs against the controller before the run starts, to break one of its parts. */
+  before?: (controller: RunController) => void
+) {
   const { pool: agents, qaPrompts } = pool(work);
   const store = new Store(":memory:");
   seed?.(store);
@@ -94,6 +103,7 @@ async function run(work: (cwd: string) => void, checks: string[] = [CHECK], seed
   const bus = new Bus(store);
   bus.subscribe(({ event }) => void (event.type === "agent.log" && events.push(event.text)));
   const controller = new RunController(store, bus, agents, noGithub, approveAll, repo());
+  before?.(controller);
   const runId = await controller.startRun(
     "build it",
     RunConfig.parse({ deterministicChecks: checks, qaIterationCap: 1, ...(deterministicCheckTimeoutMinutes === undefined ? {} : { deterministicCheckTimeoutMinutes }) })
@@ -129,6 +139,36 @@ describe("a task whose base is already red", () => {
 
     // One new failure among the inherited ones is still a failure: cap is 1, so
     // it escalates rather than merging.
+    expect(task.state).toBe("NEEDS_HUMAN");
+    expect(qaPrompts).toHaveLength(0);
+  }, 30_000);
+
+  /**
+   * The direction this has to fail in. Measuring the base needs a second
+   * worktree, and that is a `git worktree add` against a disk that can be full
+   * and a lock that can be held — so the measurement is the part most likely to
+   * be missing exactly when the run is under strain.
+   *
+   * A baseline nobody could read is not evidence of innocence. Reading it as
+   * "the base was green" would charge the task for nothing and wave every real
+   * defect through behind it; reading it as "the base was red" excuses whatever
+   * the worker actually broke. Unmeasured therefore means clean-base, which
+   * charges the task for everything and puts a human in front of it.
+   */
+  it("is charged for an inherited failure when the base could not be measured at all", async () => {
+    const { task, qaPrompts } = await run(
+      (cwd) => writeFileSync(path.join(cwd, "feature.ts"), "export const x = 1;\n"),
+      [CHECK],
+      undefined,
+      undefined,
+      (controller) => {
+        const wt = (controller as unknown as { wt: { withBaselineWorktree: (...args: never[]) => Promise<unknown> } }).wt;
+        vi.spyOn(wt, "withBaselineWorktree").mockRejectedValue(new Error("fatal: could not create work tree dir: No space left on device"));
+      }
+    );
+
+    // The same tree that merged above, held back this time — the only honest
+    // answer when the comparison it would have merged on could not be made.
     expect(task.state).toBe("NEEDS_HUMAN");
     expect(qaPrompts).toHaveLength(0);
   }, 30_000);
