@@ -208,6 +208,44 @@ describe("writing the specification before anything is planned", () => {
   });
 
   /**
+   * An operator who is asked and does not answer is not the same as an operator
+   * who was never there. The question was put, the answer came back empty, and
+   * nothing about the specification may move on the strength of it.
+   */
+  it("keeps the draft when the operator is asked and says nothing", async () => {
+    const dir = repo();
+    const blocked = specJson({
+      requirements: [{ id: "REQ-001", text: "take payment", priority: "P0", blockedBy: ["OQ-1"] }],
+      openQuestions: [{ id: "OQ-1", question: "Real Stripe account, or sandbox?", detail: "the brief does not say", blocks: ["REQ-001"] }],
+      scenarios: [{ id: "SC-001", requirement: "REQ-001", title: "takes payment", level: "unit", priority: "P0", oracle: "o", testRef: "", blocked: true }],
+    });
+    const { pool, specs } = rolePool({
+      intake: BRIEF,
+      spec: () => blocked,
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS : dag([{ id: "task-a" }])),
+      worker,
+      qa: () => QA_PASS,
+      validator: () => INTENT_PASS,
+    });
+    const { controller, store, events } = build({ repoPath: dir, pool });
+    // Whitespace, which is what a terminal returns for an empty line.
+    const ui = operator("   ");
+
+    await controller.startRun("build a checkout", RunConfig.parse(BASE), ui);
+
+    expect(ui.asked.map((q) => q.question)).toContain("Real Stripe account, or sandbox?");
+    // No fold: there is nothing to fold in, and paying a second specification
+    // session to hear the silence again settles nothing.
+    expect(specs.filter((s) => s.role === "spec")).toHaveLength(1);
+    const spec = store.runSpec(store.listRuns()[0]!.id)!;
+    expect(spec.scenarios[0]!.blocked).toBe(true);
+    expect(spec.openQuestions.map((q) => q.id)).toEqual(["OQ-1"]);
+    // And the silence is on the record, so a postmortem can tell it from a
+    // question that was never put.
+    expect(events.some((e) => e.type === "intake.answered" && e.sessionId === "spec" && e.answer === "")).toBe(true);
+  });
+
+  /**
    * Run 5122c83a asked its operator eleven questions, was answered on six, and
    * then could not resume the session that had asked them:
    * `No conversation found with session ID: 05a48a8b-…`. A single-attempt fold

@@ -339,6 +339,25 @@ describe("a CI that outlives the wait budget", () => {
     expect(store.ciStatus(runId)).toMatchObject({ state: "passing", total: 28 });
   });
 
+  it("says the answer is short once per wait, however many polls it stays short for", async () => {
+    // A re-run that takes a while to re-attach is polled several times, and
+    // every one of those polls is short. The notice exists so the record shows
+    // why a wait went on past a listing that looked green — said once it does
+    // that, said per poll it buries the rest of the round under itself.
+    const { adapter } = fakeGitHub([
+      { state: "failing", failing: ["test"], total: 28, names: ALL_28, sha: HEAD },
+      { state: "passing", failing: [], total: 17, names: OTHERS, sha: HEAD }, // re-run out, ci.yml not back
+      { state: "passing", failing: [], total: 17, names: OTHERS, sha: HEAD }, // still not back
+      { state: "passing", failing: [], total: 28, names: ALL_28, sha: HEAD }, // the whole answer
+    ]);
+    const { store, runId, logs } = await build(adapter, pool(), repoWithOrigin());
+
+    expect(logs.filter((l) => l.includes("is missing 11 check(s) this head carried"))).toHaveLength(1);
+    expect(ciFixTasks(store, runId)).toHaveLength(0);
+    expect(store.ciStatus(runId)).toMatchObject({ state: "passing", total: 28, sha: HEAD });
+    expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
+  });
+
   it("judges a head pushed part-way through the wait on its own checks, not the last head's", async () => {
     // The hold is per commit. A push that moves the branch mid-wait — an
     // operator's own fix — can honestly carry fewer checks than the head

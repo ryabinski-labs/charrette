@@ -246,6 +246,26 @@ describe("reading the plan before the run spends anything", () => {
     }
   });
 
+  it("starts on the account it asked with when the operator says carry on", async () => {
+    // The third answer the gate can give, and the only one that leaves the run
+    // where it was: not parked, not switched. Nothing is applied to the pool,
+    // because there is nothing to apply.
+    const { pool, policies } = watchingPool(ROLES, { preflight: [weekly(97)] });
+    const { controller, store, events } = build({
+      repoPath: repo(),
+      pool,
+      gates: { async resolveSubscriptionGate() { return { action: "continue" }; } },
+    });
+
+    const runId = await controller.startRun("build a thing", config({ subscription: { accounts: ACCOUNTS, active: "work", preflight: true } }));
+
+    expect(store.getRun(runId)!.config.subscription.active).toBe("work");
+    expect(events.some((e) => e.type === "run.subscription_switched")).toBe(false);
+    // The run keeps the account it started with: no second policy was pushed
+    // at the pool, only the one every run applies for itself.
+    expect(policies.every((p) => p.name === "work")).toBe(true);
+  });
+
   it("does not ask the account anything when the operator turned the check off", async () => {
     const { pool } = watchingPool(ROLES, { preflight: [weekly(99)] });
     const { controller } = build({ repoPath: repo(), pool, gates: { async resolveSubscriptionGate() { return { action: "park" }; } } });
