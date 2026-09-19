@@ -1,6 +1,6 @@
 {
   "name": "@charrette/dashboard",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Live run dashboard for Charrette",
   "license": "MIT",
   "repository": {

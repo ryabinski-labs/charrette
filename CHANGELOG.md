@@ -7,6 +7,15 @@ on. Before then, minor versions may break things.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.0] - 2026-09-18
+
+First public release. `charrette` and the `@charrette/*` packages are on npm
+from here; everything below happened before any of them was published, so it is
+the starting state rather than a set of changes from something people were
+running.
+
 ### Changed — BREAKING
 
 - **The project is now called Charrette.** The working name "Harness" collided

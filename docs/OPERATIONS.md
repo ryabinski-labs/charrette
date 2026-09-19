@@ -446,7 +446,7 @@ you, and prints exactly what it resolved before spending anything:
 
 ```
   repo       /Users/you/code/my-app
-  build      0.0.1@7453d60
+  build      0.1.0@7453d60
   checks     pnpm run typecheck · pnpm run lint · pnpm run test   (auto-detected from package.json scripts via pnpm)
   budget     run $30 · task $10   (defaults)
   skills     /Users/you/.claude/skills · /Users/you/skills   (defaults)

@@ -1,6 +1,6 @@
 {
   "name": "@charrette/shared",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Shared types, events and run vocabulary for Charrette",
   "license": "MIT",
   "repository": {

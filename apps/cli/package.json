@@ -1,6 +1,6 @@
 {
-  "name": "@charrette/cli",
-  "version": "0.0.1",
+  "name": "charrette",
+  "version": "0.1.0",
   "description": "Charrette CLI: a PRD in, reviewed pull requests out",
   "license": "MIT",
   "repository": {
