@@ -214,6 +214,23 @@ export class WorktreeManager {
 
   constructor(private repoPath: string) {}
 
+  /**
+   * Run one merge sequence with the merge lock held, and hand the lock on
+   * whatever the sequence did.
+   *
+   * `then(run, run)` rather than `then(run)`: the next sequence is owed its turn
+   * even when the last one threw. What the lock is then left holding must not be
+   * the rejection itself — nothing awaits the lock, so a rejected promise parked
+   * in it is an unhandled rejection, which this suite's reporter turns into a
+   * failed run (see `vitest.config.ts`). The caller still gets the rejection;
+   * only the lock's copy is neutralised.
+   */
+  private serialiseMerge<T>(run: () => Promise<T>): Promise<T> {
+    const next = this.mergeLock.then(run, run);
+    this.mergeLock = next.catch(() => undefined);
+    return next;
+  }
+
   worktreeRoot(): string {
     return path.join(path.dirname(this.repoPath), `${path.basename(this.repoPath)}-wt`);
   }
@@ -461,9 +478,7 @@ export class WorktreeManager {
         return { ok: false, conflicts };
       }
     };
-    const next = this.mergeLock.then(run, run);
-    this.mergeLock = next.catch(() => undefined);
-    return next;
+    return this.serialiseMerge(run);
   }
 
   /**
@@ -528,9 +543,7 @@ export class WorktreeManager {
         return { ok: false, conflicts, ref: label, sha };
       }
     };
-    const next = this.mergeLock.then(run, run);
-    this.mergeLock = next.catch(() => undefined);
-    return next;
+    return this.serialiseMerge(run);
   }
 
   /**
@@ -575,9 +588,7 @@ export class WorktreeManager {
       const wtPath = await this.ensureIntegrationWorktree(runId);
       await git(wtPath, ["merge", "--abort"], { serialize: true }).catch(() => undefined);
     };
-    const next = this.mergeLock.then(run, run);
-    this.mergeLock = next.catch(() => undefined);
-    return next;
+    return this.serialiseMerge(run);
   }
 
   /**
@@ -632,8 +643,6 @@ export class WorktreeManager {
         return { ok: false, conflicts };
       }
     };
-    const next = this.mergeLock.then(run, run);
-    this.mergeLock = next.catch(() => undefined);
-    return next;
+    return this.serialiseMerge(run);
   }
 }
