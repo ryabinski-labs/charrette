@@ -19,3 +19,8 @@ coverage/
 
 # Browser-pilot run evidence (screenshots, console/network logs) — never committed.
 .browser-pilot/
+
+# macOS Finder metadata; harmless locally, noise in a public tree.
+.DS_Store
+# `pnpm pack` output — release tarballs are built, never committed.
+*.tgz
