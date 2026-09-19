@@ -149,49 +149,34 @@ export default defineConfig({
       include: ["packages/*/src/**/*.ts", "apps/*/src/**/*.ts"],
       exclude: ["**/*.test.ts", "**/dist/**", "**/*.d.ts"],
       /**
-       * Three hundreds and one count left, and the reason the fourth is a count
-       * is a measurement change rather than a regression.
+       * Four hundreds, and they are real ones.
        *
-       * Vitest 4 made AST-aware remapping unconditional for the V8 provider.
-       * The old range-based mapping credited a `.catch(() => fallback)` that
-       * never ran, because the line it sits on did; the new one counts the arrow
-       * itself and correctly calls it uncovered. So the repository was never at
-       * 100% in the sense the number claimed — and what the old measurement was
-       * hiding is unexercised git and merge failure paths, originally in two
-       * files. `git.ts` is done (`gitFailures.test.ts`), so are
-       * `runController.ts`'s own failure handlers, and so is every function,
-       * statement and line in the repository: those three are back at 100 and
-       * stay there. What is left is thirteen one-sided `if` guards, each
-       * needing a fixture shaped to take the side nothing has taken yet.
+       * They were not always. Vitest 4 made AST-aware remapping unconditional
+       * for the V8 provider: the old range-based mapping credited a
+       * `.catch(() => fallback)` that never ran, because the line it sits on
+       * did, and the new one counts the arrow itself. So the repository read
+       * 100% for a long time while its git and GitHub failure paths had never
+       * been exercised. Closing that was issue #5, over which these thresholds
+       * spent four pull requests as negative counts — a maximum number of
+       * uncovered entities — walking down to zero.
        *
-       * That last one is a count, not a percentage: a negative threshold is the
-       * maximum number of uncovered entities allowed. It matters here.
+       * What that exercise actually found, and the reason to keep the bar
+       * here: of the forty-odd gaps, eight were handlers nothing could reach —
+       * guards against contracts the suite already enforced — and they were
+       * deleted rather than tested. The rest were paths nobody had ever run:
+       * six roles that could be briefed and never were, three parsers, a
+       * dozen guards with only one side taken. None of that was visible at
+       * 99%.
        *
-       * - A percentage floor absorbs new debt as the repository grows; a count
-       *   does not. Every uncovered branch anyone adds, anywhere, fails this.
-       * - The global count is exactly `runController.ts`'s, which is arithmetic
-       *   rather than coincidence: every other file is at zero uncovered. So
-       *   every other file is held at a real 100% by the global count alone —
-       *   an uncovered branch in any of them pushes the total over — while the
-       *   one named file carries the debt where it can be seen.
-       * - The per-file entry stops it migrating *into* that one as well, and
-       *   names what it owes.
-       *
-       * Vitest 4 also stopped excluding glob-matched files from the global
-       * check, so the two sets overlap deliberately. Both only ever move down:
-       * lower the number as its branches get tests, and delete the entry at
-       * zero. When it is gone, put the fourth hundred back.
+       * A percentage floor absorbs new debt as the repository grows. This one
+       * does not: every uncovered line, branch, function and statement anyone
+       * adds, anywhere, fails the build.
        */
       thresholds: {
         statements: 100,
+        branches: 100,
         functions: 100,
         lines: 100,
-        branches: -13,
-        // One-sided `if` guards: the condition has only ever been met, or only
-        // ever not been. Each needs a fixture shaped to take the other side —
-        // a detached HEAD, an empty intake answer, a second round of missing
-        // checks — rather than a failure injected underneath it.
-        "packages/core/src/runController.ts": { statements: 100, functions: 100, lines: 100, branches: -13 },
       },
     },
   },

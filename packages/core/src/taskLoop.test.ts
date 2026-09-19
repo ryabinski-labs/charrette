@@ -96,6 +96,7 @@ function rolePool(answers: Partial<Record<string, Answer>>) {
 interface Built {
   controller: RunController;
   store: Store;
+  bus: Bus;
   events: CharretteEvent[];
   gates: TaskGate[];
   runId: string;
@@ -175,7 +176,7 @@ function executing(opts: {
     handler,
     opts.repoPath
   );
-  return { controller, store, events, gates, runId };
+  return { controller, store, bus, events, gates, runId };
 }
 
 const logs = (events: CharretteEvent[]) =>
@@ -1389,6 +1390,36 @@ describe("a task that fails in a way the loop does not expect", () => {
     const task = store.getTask(runId, "task-a")!;
     expect(task.state).toBe("NEEDS_HUMAN");
     expect(task.errorSummary).toMatch(/crashed:/);
+  });
+});
+
+describe("an event subscriber that fails mid-task", () => {
+  it("does not reach the run, and does not unmake a merge that happened", async () => {
+    const dir = repo();
+    const { pool } = rolePool({
+      worker: (spec) => (commitInWorktree(spec.cwd, "work.txt", "done\n"), "did the work"),
+      qa: () => QA_PASS,
+    });
+    const { controller, store, runId, bus } = executing({ repoPath: dir, pool });
+    // The dashboard, the CLI renderer and the watcher all read this stream,
+    // and they are read-side: one of them failing is not the run's problem and
+    // must not become it. The append swallows it, so the throw never reaches
+    // the task loop — where it would have arrived as a crash for a task whose
+    // code was already on the integration branch.
+    let thrown = false;
+    bus.subscribe(({ event }) => {
+      if (event.type === "git.merged" && !thrown) {
+        thrown = true;
+        throw new Error("the dashboard stream went away");
+      }
+    });
+
+    await controller.resume(runId);
+
+    const task = store.getTask(runId, "task-a")!;
+    expect(thrown).toBe(true);
+    expect(task.state).toBe("MERGED");
+    expect(task.errorSummary).toBeNull();
   });
 });
 

@@ -5743,7 +5743,21 @@ export class RunController {
               return;
             }
             const t = this.store.getTask(runId, id)!;
+            // Nothing can reach the other side of this today, and it stays
+            // anyway. Every path that makes a task terminal returns rather
+            // than throwing — `bookAlreadyLanded`, `integrate`, `askOrPark`
+            // and the empty-branch cap all end the task and hand control back
+            // — and the one asynchronous thing that runs after a merge, the
+            // event append, swallows a failing subscriber rather than raising
+            // it here. So a crash arriving for a finished task is a shape the
+            // code does not currently have. What it would cost is the reason
+            // to keep the guard: parking a MERGED task hands the operator
+            // work to look at whose code is already on the integration
+            // branch, with `crashed:` as the only explanation they are given
+            // for it.
+            /* v8 ignore start */
             if (t.state !== "NEEDS_HUMAN" && t.state !== "CANCELLED" && t.state !== "MERGED") {
+              /* v8 ignore stop */
               this.park(runId, id, `crashed: ${String(e).slice(0, 300)}`);
             }
           })

@@ -635,6 +635,42 @@ describe("regrouping per-task PRs into the rollup", () => {
   });
 });
 
+describe("a superseded pull request GitHub will not close", () => {
+  it("still regroups, and does not report a tidy-up that did not happen", async () => {
+    const { adapter: perTask } = fakeGitHub(() => ({ number: 7, url: "u" }));
+    const { store, runId, repo } = await build(perTask, true, undefined, "per-task");
+
+    const { adapter } = fakeGitHub(() => ({ number: 99, url: "https://example.invalid/pr/99" }));
+    // Already closed by hand, closed by a branch protection rule, or closed by
+    // someone else's tooling — whatever the reason, the close is attempted and
+    // comes back false.
+    const attempted: number[] = [];
+    (adapter as unknown as { closePR: (n: number) => Promise<boolean> }).closePR = async (n) => {
+      attempted.push(n);
+      return false;
+    };
+    const controller = new RunController(store, new Bus(store), buildingPool(false), adapter, {
+      async resolvePlanGate() {
+        return { approved: true, feedback: "" };
+      },
+      async resolveBudgetGate() {
+        return null;
+      },
+    }, repo);
+
+    const res = await controller.regroupPrs(runId);
+
+    // The rollup is opened and the tasks are re-pointed at it either way — the
+    // old PR is superseded whether or not it could be closed.
+    expect(res!.pr.number).toBe(99);
+    expect(attempted).toEqual([7]);
+    expect(store.getTask(runId, "task-a")!.prNumber).toBe(99);
+    // But `closed` is what the run tells the operator it tidied up, and it
+    // tidied up nothing.
+    expect(res!.closed).toEqual([]);
+  });
+});
+
 describe("the rollup PR outlived by its branch", () => {
   it("opens a follow-up PR naming the merged one, and says so in the log", async () => {
     // Run publishes rollup #7, the human merges it while more work lands, and

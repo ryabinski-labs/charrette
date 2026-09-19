@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { RunConfig, type CharretteEvent, type IntakeQuestion } from "@charrette/shared";
 import { Bus } from "./bus.js";
 import { BudgetExceeded } from "./budget.js";
@@ -30,6 +30,7 @@ import { Store } from "./store.js";
 const made: string[] = [];
 afterEach(() => {
   for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true });
+  vi.restoreAllMocks();
 });
 
 function repo(remote = false): string {
@@ -726,6 +727,27 @@ describe("the live-exercise gate", () => {
     expect(store.liveVerdict(runId)!.verdict).toBe("worked");
     expect(store.liveVerdict(runId)!.couldNotReach.join(" ")).toContain("missing.png");
   });
+
+  it("records a gate that never got a checkout to run in, and sweeps nothing", async () => {
+    const dir = repo();
+    const { pool, specs } = rolePool(exercised(() => liveOk()));
+    const { controller, store } = build({ repoPath: dir, pool });
+    // The disk is full, or the worktree root is gone: the gate fails before it
+    // has anything to start the product in. There is then nothing to sweep,
+    // and sweeping the run's own tree instead would kill the sessions still
+    // working in it.
+    const wt = (controller as unknown as { wt: { freshWorktree: (...args: never[]) => Promise<unknown> } }).wt;
+    vi.spyOn(wt, "freshWorktree").mockRejectedValue(new Error("fatal: could not create work tree dir: No space left on device"));
+
+    await controller.startRun("build a checkout", RunConfig.parse(LIVE_BASE), operator());
+
+    const verdict = store.liveVerdict(store.listRuns()[0]!.id)!;
+    expect(verdict.verdict).toBe("not-run");
+    expect(verdict.why).toContain("No space left on device");
+    // No agent was spawned for it: the failure is the charrette's, and paying
+    // a live session to be told the same thing settles nothing.
+    expect(specs.filter((s) => s.role === "live")).toHaveLength(0);
+  }, 30_000);
 
   it("lets a budget stop out of the exercise rather than recording it as a product that does not run", async () => {
     const dir = repo();

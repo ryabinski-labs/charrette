@@ -428,6 +428,33 @@ describe("regrouping per-task pull requests", () => {
     expect(store.getRun(runId)!.config.prMode).toBe("single");
   });
 
+  it("leaves the base unrecorded rather than guessing when there is no branch to read", async () => {
+    const dir = repo();
+    const gh = fakeGithub();
+    const { pool } = rolePool({
+      planner: (s) => (s.prompt.includes("PRD") ? dagJson() : DOCS),
+      worker: workerThatCommits,
+      qa: () => QA_PASS,
+      validator: () => '```json\n{"verdict":"PASS","gaps":[],"summary":"ok"}\n```',
+    });
+    const { controller, store } = build({ repoPath: dir, pool, github: gh.adapter });
+    const runId = await controller.startRun(
+      "build a thing",
+      RunConfig.parse({ deterministicChecks: [], prMode: "per-task", waitForChecks: false })
+    );
+    store.patchRunConfig(runId, { baseBranch: "" });
+    // A detached HEAD has no branch name to read, and the regroup must not
+    // invent one: an empty base is what makes the rollup skip the pull request
+    // rather than aim it somewhere nobody chose.
+    execFileSync("git", ["checkout", "--detach"], { cwd: dir, stdio: "ignore" });
+
+    // Refused rather than aimed somewhere nobody chose. The backfill is a
+    // convenience for a run recorded before the base was persisted; it is not
+    // a licence to invent one.
+    await expect(controller.regroupPrs(runId)).rejects.toThrow(/no base branch \(detached HEAD\)/);
+    expect(store.getRun(runId)!.config.baseBranch).toBe("");
+  });
+
   it("refuses when there is no GitHub to regroup on", async () => {
     const dir = repo();
     const { pool } = rolePool({});
@@ -500,6 +527,46 @@ describe("QA that answers with prose", () => {
     const runId = await controller.startRun("build a thing", RunConfig.parse({ deterministicChecks: [] }));
 
     expect(store.getTask(runId, "task-a")!.state).toBe("NEEDS_HUMAN");
+  });
+});
+
+describe("backfilling the base branch a resume reads", () => {
+  it("records the branch the operator is on", async () => {
+    const dir = repo();
+    const { pool } = rolePool({
+      planner: (s) => (s.prompt.includes("PRD") ? dagJson() : DOCS),
+      worker: workerThatCommits,
+      qa: () => QA_PASS,
+      validator: () => '```json\n{"verdict":"PASS","gaps":[],"summary":"ok"}\n```',
+    });
+    const { controller, store } = build({ repoPath: dir, pool });
+    const runId = await controller.startRun("build a thing", RunConfig.parse({ deterministicChecks: [], planIntentCheck: false }));
+    store.patchRunConfig(runId, { baseBranch: "" });
+
+    await controller.resume(runId);
+
+    expect(store.getRun(runId)!.config.baseBranch).toBe("main");
+  });
+
+  it("leaves it empty on a detached HEAD rather than recording a branch nobody is on", async () => {
+    const dir = repo();
+    const { pool } = rolePool({
+      planner: (s) => (s.prompt.includes("PRD") ? dagJson() : DOCS),
+      worker: workerThatCommits,
+      qa: () => QA_PASS,
+      validator: () => '```json\n{"verdict":"PASS","gaps":[],"summary":"ok"}\n```',
+    });
+    const { controller, store } = build({ repoPath: dir, pool });
+    const runId = await controller.startRun("build a thing", RunConfig.parse({ deterministicChecks: [], planIntentCheck: false }));
+    store.patchRunConfig(runId, { baseBranch: "" });
+    execFileSync("git", ["checkout", "--detach"], { cwd: dir, stdio: "ignore" });
+
+    await controller.resume(runId);
+
+    // Still empty: a run whose base nobody can name skips its pull request,
+    // which is the honest outcome. Recording whatever HEAD happened to be
+    // attached to last would aim it at a branch the operator never chose.
+    expect(store.getRun(runId)!.config.baseBranch).toBe("");
   });
 });
 

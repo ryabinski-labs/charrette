@@ -548,3 +548,81 @@ describe("briefing the production validator", () => {
     expect(session.systemPrompt).toContain('<skill name="prod-smoke"');
   });
 });
+
+/**
+ * `reopen` decides what a resumed release goes back to, from the phase on the
+ * record. Three of its readings had never been taken: a release already past
+ * the merge that is not blocked, a skeleton phase with nothing queued behind
+ * it, and a run resumed straight into VERIFYING.
+ */
+describe("resuming a release from where it actually is", () => {
+  const evidence = (f: Awaited<ReturnType<typeof fixture>>, phase: string, verdict: string) =>
+    f.store.appendEvent({
+      type: "run.release_evidence",
+      runId: "seed",
+      releaseId: f.config.delivery.releaseId,
+      phase: phase as "merge" | "deploy" | "production" | "skeleton" | "contract",
+      verdict: verdict as "passed" | "failed" | "blocked",
+      sha: "",
+      url: f.config.prodUrl,
+      requirements: [],
+      unmet: [],
+      evidencePath: "",
+      ts: Date.now(),
+    });
+
+  it("leaves a release past the merge where it is when nothing blocked it", async () => {
+    const f = await fixture({ seed: true });
+    evidence(f, "deploy", "passed");
+
+    await f.internals.reopen("seed");
+
+    // The transition to VERIFYING is for a run the release *blocked*. A run in
+    // review is already where it belongs, and moving it would claim a deploy
+    // is being waited on that nobody is waiting on.
+    expect(f.store.getRun("seed")!.state).toBe("PR_REVIEW");
+  });
+
+  it("does not retry a working skeleton with no queued work behind it", async () => {
+    const f = await fixture({ seed: true });
+    evidence(f, "skeleton", "passed");
+    f.store.transitionRun("seed", "BLOCKED");
+
+    await f.internals.reopen("seed");
+
+    // Everything the plan had is merged. Going back to EXECUTING would put the
+    // run in a state with nothing to dispatch, which reads to an operator as
+    // work in progress that will never move.
+    expect(f.store.getRun("seed")!.state).not.toBe("EXECUTING");
+  });
+
+  it("does nothing at all when the run it is handed is already finished", async () => {
+    const f = await fixture({ seed: true });
+    f.store.transitionRun("seed", "VERIFYING");
+    f.store.transitionRun("seed", "DONE");
+    const before = f.specs.length;
+
+    await f.internals.driveRun("seed");
+
+    // The verification tail belongs to a run in review. A finished run driven
+    // again — `charrette resume` on a run that already ended — must not
+    // re-publish, re-verify or re-deliver anything.
+    expect(f.store.getRun("seed")!.state).toBe("DONE");
+    expect(f.specs).toHaveLength(before);
+    expect(f.github.mergeApprovedPR).not.toHaveBeenCalled();
+  });
+
+  it("finishes a release from VERIFYING rather than starting the run over", async () => {
+    const f = await fixture({ seed: true });
+    f.store.transitionRun("seed", "VERIFYING");
+    const before = f.specs.length;
+
+    await f.internals.driveRun("seed");
+
+    // Nothing merged it, so the release is not complete — and a run that is not
+    // EXECUTING is not re-driven on the way out. Dispatching from here would
+    // rebuild work that is already on the branch the release PR carries.
+    expect(f.store.getRun("seed")!.state).not.toBe("DONE");
+    expect(f.specs.slice(before).some((s) => s.role === "worker")).toBe(false);
+  });
+});

@@ -445,3 +445,58 @@ describe("two charrette processes on one run", () => {
     await expect(second.resume(runId)).resolves.not.toThrow();
   });
 });
+
+/**
+ * The plan gate is the longest a run ever sits waiting for a person, and the
+ * likeliest place for the terminal it was asked in to go away. What it must not
+ * do on the way back is pay a planner to write the plan it already has.
+ */
+describe("a run interrupted while its plan was being reviewed", () => {
+  it("resumes on the plan it already has, and asks again rather than re-planning", async () => {
+    const dir = repo();
+    const store = new Store(":memory:");
+    const bus = new Bus(store);
+    const specs: AgentSpec[] = [];
+    let planning = 0;
+    const pool = {
+      async run(spec: AgentSpec): Promise<AgentResult> {
+        specs.push(spec);
+        let resultText = "";
+        if (spec.role === "planner") resultText = planning++ === 0 ? DOCS : DAG;
+        else if (spec.role === "worker") {
+          writeFileSync(path.join(spec.cwd, `w-${path.basename(spec.cwd)}.txt`), "done\n");
+          gitIn(spec.cwd, "add", "-A");
+          gitIn(spec.cwd, "commit", "-m", "wip");
+          resultText = "worker done";
+        } else resultText = '{"verdict":"PASS","summary":"ok","notes":"ok","gaps":[]}';
+        return { sessionId: `s${specs.length}`, resultText, costUsd: 0, turns: 1, outcome: "done" };
+      },
+    } as unknown as AgentPool;
+
+    const dying: GateHandler = {
+      async resolvePlanGate() {
+        throw new Error("the terminal went away");
+      },
+      async resolveBudgetGate() {
+        return null;
+      },
+    };
+    const interrupted = new RunController(store, bus, pool, noGithub, dying, dir);
+    await expect(interrupted.startRun("build a thing", RunConfig.parse({ deterministicChecks: [], planIntentCheck: false }))).rejects.toThrow(
+      "the terminal went away"
+    );
+    const runId = store.listRuns()[0]!.id;
+    expect(store.getRun(runId)!.state).toBe("PLAN_REVIEW");
+    const plannedBefore = specs.filter((s) => s.role === "planner").length;
+
+    const back = new RunController(store, bus, pool, noGithub, gates(), dir);
+    await back.resume(runId);
+
+    // The gate is asked again — nobody answered it — but the plan behind it is
+    // the one already on the record. A second planner session here would be
+    // paying twice for the same decomposition and could return a different one.
+    expect(specs.filter((s) => s.role === "planner")).toHaveLength(plannedBefore);
+    expect(store.listTasks(runId).map((t) => t.id)).toEqual(["task-a", "task-b"]);
+    expect(store.getRun(runId)!.state).not.toBe("PLAN_REVIEW");
+  }, 60_000);
+});
