@@ -1,9 +1,48 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Bus } from "@charrette/core";
-import { agentdraftScript, mailBanner, mailTarget, watchGateMail, type MailTarget, type Send } from "./gateMail.js";
+import { agentdraftScript, mailBanner, mailTarget, sendMail, watchGateMail, type MailTarget, type Send } from "./gateMail.js";
+
+// The default sender spawns a real CLI. Nothing here may put a message on the
+// wire, so the spawn is intercepted and only the argv it would have used is
+// checked — which is the part that has to match what agentdraft accepts.
+const spawned = vi.hoisted(() => [] as { cmd: string; args: string[] }[]);
+vi.mock("node:child_process", () => ({
+  // The callback is invoked, because `sendMail` passes one and fire-and-forget
+  // means "ignore the result", not "never receive it": an execFile whose
+  // callback throws takes the process down, and this is called from an event
+  // handler with nothing above it to catch.
+  execFile: (cmd: string, args: string[], cb: (e: Error | null) => void) => {
+    spawned.push({ cmd, args });
+    cb(new Error("agentdraft exited 1"));
+  },
+}));
 
 const env = { HOME: "/Users/someone" };
 const AGENTDRAFT = "/Users/someone/.claude/skills/agentdraft-email/scripts/agentdraft_email.py";
+
+describe("the default sender", () => {
+  it("hands agentdraft the whole message on one command line, and does not wait for it", () => {
+    const target: MailTarget = { to: "you@example.com", cmd: "python3", args: ["/skills/agentdraft_email.py"] };
+
+    sendMail(target, { subject: "a gate is open", html: "<p>open</p>", text: "open" });
+
+    expect(spawned).toEqual([
+      {
+        cmd: "python3",
+        args: [
+          "/skills/agentdraft_email.py",
+          "send",
+          "--to",
+          "you@example.com",
+          "--subject",
+          "a gate is open",
+          "--raw-json",
+          JSON.stringify({ body_html: "<p>open</p>", body_text: "open" }),
+        ],
+      },
+    ]);
+  });
+});
 
 describe("where gate mail goes", () => {
   it("finds the agentdraft skill under HOME, and tolerates having none", () => {

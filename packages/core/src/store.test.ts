@@ -107,6 +107,20 @@ describe("live event delivery", () => {
     expect(seqs).toEqual(store.eventsSince("run1", 0, 10).map((e) => e.seq));
   });
 
+  it("stops delivering once a listener unsubscribes", () => {
+    // `onAppend` hands back its own disposer, and a dashboard that is torn down
+    // and rebuilt registers again each time. Without the disposer working, a
+    // long-lived store accumulates listeners for servers that are gone and
+    // reports each event once per dead one.
+    const store = makeStore();
+    const seen: string[] = [];
+    const stop = store.onAppend(({ event }) => seen.push(event.type));
+    makeRun(store);
+    stop();
+    store.transitionRun("run1", "PLANNING");
+    expect(seen).toEqual(["run.created"]);
+  });
+
   it("does not let a throwing subscriber roll back the transition it is reporting", () => {
     const store = makeStore();
     const bus = new Bus(store);

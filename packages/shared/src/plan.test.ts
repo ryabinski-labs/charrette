@@ -38,6 +38,12 @@ describe("validatePlanDag", () => {
     expect(errors).toContain("dependency cycle detected");
   });
 
+  // Two tasks naming the same dependency is the ordinary fan-out shape, and it
+  // is the only way the dependents map is ever appended to rather than created.
+  it("accepts a fan-out where two tasks share one dependency", () => {
+    expect(validatePlanDag(plan([{}, { dependsOn: ["t0"] }, { dependsOn: ["t0"] }]))).toEqual([]);
+  });
+
   it("rejects unknown epics", () => {
     const errors = validatePlanDag(plan([{ epicId: "ghost" }]));
     expect(errors.some((e) => e.includes("unknown epic"))).toBe(true);

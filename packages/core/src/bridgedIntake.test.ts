@@ -241,6 +241,31 @@ describe("BridgedIntake", () => {
     expect(op.working).toEqual([true, false]);
   });
 
+  it("does not let a stale reader's failure close the question that replaced it", async () => {
+    // The mirror of the success path's guard. The agent can ask again before
+    // the terminal has finished with the previous question, and the abandoned
+    // reader can then fail — Ctrl+C, a closed pipe. Clearing `open` there would
+    // discard the *second* question, which nobody has answered, and the control
+    // plane would have nothing left to reply to.
+    const rejects: ((e: unknown) => void)[] = [];
+    const ui: IntakeUi = {
+      ask: () => new Promise<IntakeAnswer>((_resolve, reject) => rejects.push(reject)),
+      say: vi.fn(),
+    };
+    const bridge = new BridgedIntake(ui);
+
+    const first = bridge.ask(q("which database?"));
+    const second = bridge.ask(q("which region?"));
+    const firstSettled = expect(first).rejects.toThrow("operator hung up");
+    rejects[0]!(new Error("operator hung up"));
+    await firstSettled;
+
+    const open = bridge.pending();
+    expect(open?.question).toBe("which region?");
+    expect(bridge.answer(open!.id, "eu-west-1", "pit-crew")).toBe(true);
+    await expect(second).resolves.toEqual({ answer: "eu-west-1", decidedBy: "pit-crew" });
+  });
+
   it("tolerates a transport that implements only ask and say", () => {
     const minimal: IntakeUi = { ask: vi.fn(), say: vi.fn() };
     const bridge = new BridgedIntake(minimal);

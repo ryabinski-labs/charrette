@@ -192,8 +192,9 @@ export function infraMutation(command: string, depth = 0): { what: string; inste
     // Every tool in CHECKS has an INSTEAD entry today; the fallback is there so
     // adding a check and forgetting the advice degrades the message rather than
     // the denial. Unreachable until someone does exactly that.
-    /* v8 ignore next */
+    /* v8 ignore start */
     if (what) return { what, instead: INSTEAD[resolved.bin] ?? "the tool's plan or dry-run mode" };
+    /* v8 ignore stop */
   }
   return null;
 }

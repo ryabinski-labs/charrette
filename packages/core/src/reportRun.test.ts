@@ -300,9 +300,16 @@ describe("reading what the run changed", () => {
   });
 
   it("leaves out a file the run deleted, because a gone file declares nothing", async () => {
+    // `old.ts` rather than the README: the diff names both, but a markdown file
+    // never reaches the read at all — the filter drops it first. Only a deleted
+    // *scannable* file gets as far as `git show <ref>:<path>`, which is the call
+    // that has nothing to return.
     const dir = await repo();
+    writeFileSync(path.join(dir, "old.ts"), "process.env.OLD_FLAG\n");
+    await git(dir, ["add", "-A"]);
+    await commit(dir, "add old", BEFORE);
     await git(dir, ["checkout", "-qb", "charrette/run-1/main"]);
-    await git(dir, ["rm", "-q", "README.md"]);
+    await git(dir, ["rm", "-q", "old.ts", "README.md"]);
     writeFileSync(path.join(dir, "app.ts"), "ok\n");
     await git(dir, ["add", "-A"]);
     await commit(dir, "work", AFTER);

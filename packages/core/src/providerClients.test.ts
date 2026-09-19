@@ -12,7 +12,7 @@ const echoTool: LocalTool = {
 };
 
 /** A fetch that records the request and answers with a canned body. */
-function stubFetch(body: unknown, init: { ok?: boolean; status?: number; text?: string } = {}) {
+function stubFetch(body: unknown, init: { ok?: boolean; status?: number; text?: string; textThrows?: boolean } = {}) {
   const calls: { url: string; body: Record<string, unknown>; headers: Record<string, string> }[] = [];
   const impl = (async (url: string, opts: RequestInit) => {
     calls.push({ url: String(url), body: JSON.parse(String(opts.body)) as Record<string, unknown>, headers: opts.headers as Record<string, string> });
@@ -21,7 +21,10 @@ function stubFetch(body: unknown, init: { ok?: boolean; status?: number; text?: 
       status: init.status ?? 200,
       statusText: init.status === 401 ? "Unauthorized" : "OK",
       json: async () => body,
-      text: async () => init.text ?? "",
+      text: async () => {
+        if (init.textThrows) throw new Error("connection reset while reading the body");
+        return init.text ?? "";
+      },
     };
   }) as unknown as Fetch;
   return { impl, calls };
@@ -116,6 +119,17 @@ describe("talking to OpenAI", () => {
     const turn = await openaiClient("sk", impl)({ model: "gpt-5.6-terra", system: "s", messages: [], tools: [], signal });
     expect(turn.toolCalls).toEqual([{ id: "call_0", name: "", input: {} }]);
     expect(turn.usage.inputTokens).toBe(0);
+  });
+
+  it("still reports the status when the error body cannot be read", async () => {
+    // A failing response whose body also fails to arrive: the connection that
+    // returned the status dropped before the text did. Throwing from `.text()`
+    // there would replace a diagnosable "401" with a read error about a body
+    // nobody asked for.
+    const { impl } = stubFetch({}, { ok: false, status: 401, textThrows: true });
+    await expect(openaiClient("sk", impl)({ model: "gpt-5.6-terra", system: "s", messages: [], tools: [], signal })).rejects.toThrow(
+      /openai API 401 Unauthorized/
+    );
   });
 
   it("puts the status in the error, because the status is the diagnosable part", async () => {

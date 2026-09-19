@@ -511,6 +511,25 @@ describe("a step that depends on one this scanner would not take", () => {
     expect(out.skipped.map((s) => s.reason)).toContain("an earlier step in this job was not lifted, so this one may depend on something that never ran");
   });
 
+  it("says so once per job, not once per step left behind", () => {
+    // A job with a dropped prerequisite usually has several steps after it, and
+    // they are all refused for the same one reason. Repeating it per step pads
+    // the list with the same sentence until nobody reads it — and the point of
+    // the skip list is that an operator reads it against their own CI.
+    const out = scanCiChecks(
+      wf(`${PR}  clippy:
+    steps:
+      - run: npm ci --prefix ui && npm run --prefix ui build
+      - run: cargo clippy -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo doc --no-deps
+`)
+    );
+
+    expect(out.checks).toEqual([]);
+    expect(out.skipped.filter((s) => s.reason.startsWith("an earlier step"))).toHaveLength(1);
+  });
+
   it("still lifts the steps that ran before the dropped one", () => {
     // Nothing was missing yet when these ran, so they are as safe as they were.
     expect(

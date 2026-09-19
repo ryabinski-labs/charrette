@@ -178,6 +178,28 @@ describe("asking a failing check a second time", () => {
     expect(confirmed.inherited.map((i) => i.command)).toEqual([command]);
   });
 
+  /**
+   * The same command twice is not hypothetical: `deterministicChecks` is a list
+   * an operator writes, and `detectChecks` appends to what the configuration
+   * already names. Both re-run, and both come back — so the fold has to be
+   * idempotent per command, or a worker is handed the same "not yours" twice
+   * and reads two unrelated failures where there is one.
+   */
+  it("folds a duplicated command in once, whether it comes back inherited or killed", async () => {
+    const command = "echo '✖ base only' >&2; false";
+    const base = check(command, "✖ base only");
+    const twice = { failures: [0, 1].map(() => ({ command, output: "✖ base only\n✖ mine", introduced: ["✖ mine"] })), inherited: [], timedOut: [] };
+
+    expect((await confirmFailures("/tmp", twice, base)).inherited.map((i) => i.command)).toEqual([command]);
+
+    const hang = "sleep 30";
+    const hungTwice = { failures: [0, 1].map(() => ({ command: hang, output: "✖ real", introduced: ["✖ real"] })), inherited: [], timedOut: [] };
+    const killed = await confirmFailures("/tmp", hungTwice, green, new Set(), 0.01);
+
+    expect(killed.timedOut.map((t) => t.command)).toEqual([hang]);
+    expect(killed.failures).toEqual([]);
+  });
+
   it("does not list a command twice when it was already known to be inherited", async () => {
     const command = "echo '✖ base only' >&2; false";
     const base: CheckResult = { ok: false, failures: [{ command, output: "✖ base only" }, { command: "true", output: "✖ other" }] };

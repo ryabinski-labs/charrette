@@ -1,0 +1,20 @@
+{
+  // vitest.config.ts is not in any package, so `pnpm -r build` never sees it —
+  // and vitest loads it by stripping types, never checking them. That left the
+  // one file that decides CI's exit code as the only unchecked TypeScript in
+  // the repo. `pnpm build` runs this after the packages so the root config is
+  // held to the same compiler settings as the code it tests.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    // Vitest loads this file as an ES module through vite, not through Node's
+    // CommonJS resolver, so `import.meta.url` is legal here. The base config's
+    // NodeNext would judge it against the root package.json, which has no
+    // `"type": "module"`, and reject it.
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": ["vitest.config.ts"]
+}

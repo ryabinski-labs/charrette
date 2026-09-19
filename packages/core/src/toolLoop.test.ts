@@ -414,6 +414,20 @@ describe("folding the transcript into the agent's own checkpoint digest", () => 
     expect(charsOf(seen[seen.length - 1]!.messages)).toBeGreaterThan(120_000);
   });
 
+  it("reports no fold when there was nothing behind the protected tail to fold", async () => {
+    // An agent that checkpoints on its first answer has written a digest of
+    // almost nothing. The three most recent exchanges are protected either way,
+    // so there is no older material to replace — and claiming a fold that saved
+    // zero characters would put a line in the operator's log for work that did
+    // not happen.
+    const { client } = scriptedClient([digestTurn("nothing read yet; starting on the retry helper"), say("done")]);
+    const messages = await collect(
+      toolLoop({ spec, prompts: prompts("go"), signal, client, toolsOverride: bigTool(20_000), contextBudget: 1_000_000, foldOnCheckpoint: true })
+    );
+
+    expect(messages.filter((m) => m.type === "charrette_note" && /folded \d+ characters/.test(String(m.text)))).toEqual([]);
+  });
+
   it("does nothing on an ordinary turn that mentions no checkpoint", async () => {
     const { client, seen } = scriptedClient([
       ...Array.from({ length: 8 }, (_, i) => call("Bash", {}, `c${i}`)),

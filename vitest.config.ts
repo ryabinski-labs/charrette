@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
+import type { Reporter } from "vitest/reporters";
 import { partitionUnhandled, starvationNote, type UnhandledError } from "./packages/shared/src/runnerLoad.js";
 
 const pkg = (name: string) => fileURLToPath(new URL(`./packages/${name}/src`, import.meta.url));
@@ -13,15 +14,28 @@ const pkg = (name: string) => fileURLToPath(new URL(`./packages/${name}/src`, im
  * statements about the machine, anything else sets the exit code back to 1,
  * and the ones let through are printed rather than dropped. Nothing in vitest
  * resets `exitCode` to 0 after reporters run, so setting it here holds.
+ *
+ * The hook is `onTestRunEnd`, not vitest 3's `onFinished`. Vitest 4 removed
+ * `onFinished` from the reporter interface outright rather than deprecating
+ * it, and a reporter object is a plain bag of optional methods — an unknown
+ * key is not an error, it is simply never called. Left unrenamed this would
+ * have gone on typechecking and gone on passing, while CI silently ran with
+ * `dangerouslyIgnoreUnhandledErrors` on and nothing putting the exit code
+ * back: every unhandled error swallowed, which is the exact failure this file
+ * exists to prevent. `satisfies Reporter` is what makes that loud: the
+ * interface is all-optional methods, so an object literal checked against it
+ * fails on an excess property — a hook vitest no longer calls is a build
+ * error rather than silence. No test can cover this file (the coverage
+ * `include` is package sources), so the typecheck is the guard.
  */
 const unhandledErrorPolicy = {
-  onFinished(_files: unknown, errors: UnhandledError[] = []) {
+  onTestRunEnd(_testModules: unknown, errors: readonly UnhandledError[] = []) {
     if (!errors.length) return;
     const { fatal, starvation } = partitionUnhandled(errors);
     if (starvation.length) process.stderr.write(starvationNote(starvation.length, starvation));
     if (fatal.length) process.exitCode = 1;
   },
-};
+} satisfies Reporter;
 
 /**
  * Root test config — the one CI runs.
@@ -122,17 +136,59 @@ export default defineConfig({
       provider: "v8",
       reporter: ["text", "html", "lcov", "json-summary"],
       reportsDirectory: "./coverage",
-      // Every shipped source file counts, whether or not a test imports it —
-      // without this an untested file is simply absent from the report and
+      // Every shipped source file counts, whether or not a test imports it.
+      // Without that an untested file is simply absent from the report and
       // 100% means "100% of what we remembered to test".
-      all: true,
+      //
+      // This used to say `all: true`. Vitest 4 deleted the option and folded
+      // its meaning into `include`: with no `include` only files a test loaded
+      // are measured, and with one, everything matching it is measured whether
+      // a test touched it or not. So the line below now carries both jobs, and
+      // deleting it would not narrow the report — it would silently stop
+      // reporting the files nothing tests, with the thresholds still green.
       include: ["packages/*/src/**/*.ts", "apps/*/src/**/*.ts"],
       exclude: ["**/*.test.ts", "**/dist/**", "**/*.d.ts"],
+      /**
+       * Not four hundreds any more, and the reason is a measurement change
+       * rather than a regression.
+       *
+       * Vitest 4 made AST-aware remapping unconditional for the V8 provider.
+       * The old range-based mapping credited a `.catch(() => fallback)` that
+       * never ran, because the line it sits on did; the new one counts the arrow
+       * itself and correctly calls it uncovered. So the repository was never at
+       * 100% in the sense the number claimed — and what the old measurement was
+       * hiding is almost entirely two files' worth of unexercised git and merge
+       * failure paths.
+       *
+       * These are counts, not percentages: a negative threshold is the maximum
+       * number of uncovered entities allowed. That matters here.
+       *
+       * - A percentage floor absorbs new debt as the repository grows; a count
+       *   does not. Every uncovered branch anyone adds, anywhere, fails this.
+       * - The global counts are exactly `git.ts` plus `runController.ts`, which
+       *   is arithmetic rather than coincidence: every other file is at zero
+       *   uncovered. So the other 21 files are held at a real 100% by the global
+       *   count alone — an uncovered line in any of them pushes the total over —
+       *   while the two named files carry the debt where it can be seen.
+       * - The per-file entries stop it migrating *into* those two as well, and
+       *   name what each one owes.
+       *
+       * Vitest 4 also stopped excluding glob-matched files from the global
+       * check, so these two sets overlap deliberately. Both only ever move down:
+       * lower a number as its paths get tests, and delete the entry at zero.
+       * When both are gone, put the four hundreds back.
+       */
       thresholds: {
-        lines: 100,
-        functions: 100,
-        branches: 100,
-        statements: 100,
+        statements: -54,
+        branches: -27,
+        functions: -52,
+        lines: -14,
+        // 17 `.catch(() => fallback)` handlers around git invocations; the
+        // branches and lines they sit on are covered, the handlers are not.
+        "packages/core/src/git.ts": { statements: -17, functions: -17, branches: 100, lines: 100 },
+        // The same shape plus the merge and QA paths that need a failing git or
+        // a failing check to reach.
+        "packages/core/src/runController.ts": { statements: -37, functions: -35, branches: -27, lines: -14 },
       },
     },
   },

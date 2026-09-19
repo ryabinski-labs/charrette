@@ -855,6 +855,28 @@ describe("live budget raises", () => {
     expect(((await res.json()) as { error: string }).error).toContain("must exceed");
   });
 
+  it("leaves an open gate open when the new cap does not clear what is already spent", async () => {
+    // The header's control and the gate are two views of one decision, but only
+    // when the raise actually answers it. A cap at or below the spend resolves
+    // nothing — releasing the agent on it would restart a run straight into the
+    // same breach, and the gate it was waiting on would be gone.
+    const { dash, post } = await withDash();
+    dash.attach({ ...otherSink, sendFeedback: () => "live", raiseBudget: (_runId, capUsd) => `cap raised to $${capUsd.toFixed(2)}` });
+    const pending = dash.resolveBudgetGate({ spentUsd: 30, capUsd: 25 });
+    let settled = false;
+    void pending.then(() => (settled = true));
+
+    expect((await post({ capUsd: 20 })).status).toBe(200);
+    await new Promise((r) => setImmediate(r));
+
+    expect(settled).toBe(false);
+
+    // And the gate is still the same one, so a raise that does clear the spend
+    // answers it — it was held, not lost.
+    expect((await post({ capUsd: 40 })).status).toBe(200);
+    await expect(pending).resolves.toBe(40);
+  });
+
   it("persists a raise and also resolves an already-open budget gate", async () => {
     const { dash, post } = await withDash();
     const raised: Array<[string, number]> = [];

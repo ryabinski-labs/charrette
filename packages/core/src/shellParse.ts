@@ -88,8 +88,9 @@ export function segments(command: string): string[] {
 export function rawTokens(segment: string): string[] {
   // `segments()` only yields segments with non-whitespace in them, so the match
   // cannot come back null — the fallback is for the type, not for a real input.
-  /* v8 ignore next */
+  /* v8 ignore start */
   return segment.match(/(?:[^\s'"]|'[^']*'|"[^"]*")+/g) ?? [];
+  /* v8 ignore stop */
 }
 
 export const unquote = (token: string): string => (/^(['"]).*\1$/s.test(token) ? token.slice(1, -1) : token);
@@ -137,8 +138,9 @@ export function invocation(segment: string): Invocation | null {
     const token = tokens[i];
     if (!token) return null;
     // `split` always yields at least one element, so `pop` cannot be undefined.
-    /* v8 ignore next */
+    /* v8 ignore start */
     const bin = unquote(token).split("/").pop() ?? "";
+    /* v8 ignore stop */
     if (WRAPPERS.has(bin)) {
       i = skipWrapperArgs(tokens, i + 1);
       continue;

@@ -48,7 +48,7 @@ async function runningRunId(base: string, headers: Record<string, string>): Prom
  * Start the dashboard for a run, or nothing when it is turned off. Kept in one
  * place so `run` and `resume` cannot drift apart on port handling.
  */
-function makeDashboardFactory(want: boolean, port: number | undefined, repoPath: string, reuse = false): {
+export function makeDashboardFactory(want: boolean, port: number | undefined, repoPath: string, reuse = false): {
   gateOverride?: (bus: Bus, store: Store) => GateHandler;
   connect: (controller: RunController) => void;
   connectIntake: (intake: IntakeBridge) => void;

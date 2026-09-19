@@ -9,8 +9,15 @@ const { McpServerMock, StdioServerTransportMock, connectMock, toolMock, indexSki
     return {
       connectMock,
       toolMock,
-      McpServerMock: vi.fn(() => ({ tool: toolMock, connect: connectMock })),
-      StdioServerTransportMock: vi.fn(() => ({ kind: "stdio" })),
+      // `function`, not an arrow: `server.ts` says `new McpServer(...)` and
+      // `new StdioServerTransport()`, and vitest 4 constructs a mock through
+      // `Reflect.construct`, which an arrow function does not support.
+      McpServerMock: vi.fn(function () {
+        return { tool: toolMock, connect: connectMock };
+      }),
+      StdioServerTransportMock: vi.fn(function () {
+        return { kind: "stdio" };
+      }),
       indexSkillsMock: vi.fn(),
       matchSkillsMock: vi.fn(),
     };
