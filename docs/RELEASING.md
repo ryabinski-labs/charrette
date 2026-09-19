@@ -11,8 +11,11 @@ you it is there or warns you when you break it.
 
 ## What the registry expects
 
-Each `@charrette/*` package has a trusted publisher configured at
-`https://www.npmjs.com/package/<name>/access`, under **Trusted publisher**:
+Each published package — `charrette`, and the four `@charrette/*` libraries —
+has a trusted publisher configured at
+`https://www.npmjs.com/package/<name>/access`, under **Trusted publisher**.
+The CLI is deliberately unscoped, so that `npx charrette` reaches it; it is the
+same workspace package as the rest and configured the same way:
 
 | Field | Value |
 |---|---|

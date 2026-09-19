@@ -112,11 +112,17 @@ your own attention, against the repo rather than against the task count.
 ## Quickstart
 
 ```bash
+npm install -g charrette   # or: npx charrette run
+
+cd ~/code/my-app           # the repo you want built
+charrette run
+```
+
+From a clone instead, which is also how you develop on it:
+
+```bash
 pnpm install && pnpm build
 pnpm link-cli        # symlinks `charrette` into ~/.local/bin
-
-cd ~/code/my-app     # the repo you want built
-charrette run
 ```
 
 That is the whole command — no assignment, no flags. The target repo, the

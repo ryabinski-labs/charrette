@@ -1,6 +1,6 @@
 {
   "name": "@charrette/skills-mcp",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "MCP server that exposes local skills to Charrette agents",
   "license": "MIT",
   "repository": {

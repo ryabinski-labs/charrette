@@ -207,10 +207,14 @@ describe("scanWorkspace", () => {
     const root = tmp();
     manifest(path.join(root, "packages", "shared"), { name: "@charrette/shared", version: "0.0.1" });
     manifest(path.join(root, "packages", "core"), { name: "@charrette/core", version: "0.0.1" });
-    manifest(path.join(root, "apps", "cli"), { name: "@charrette/cli", version: "0.0.1" });
+    // Unscoped, like the real one: the CLI carries the bare `charrette` name so
+    // that `npx charrette` works, and the scan orders by directory rather than
+    // by name — so a name that sorts nowhere near the others must still land
+    // last, under `apps/`.
+    manifest(path.join(root, "apps", "cli"), { name: "charrette", version: "0.1.0" });
     writeFileSync(path.join(root, "packages", "README.md"), "");
 
-    expect(scanWorkspace(root).map((p) => p.name)).toEqual(["@charrette/core", "@charrette/shared", "@charrette/cli"]);
+    expect(scanWorkspace(root).map((p) => p.name)).toEqual(["@charrette/core", "@charrette/shared", "charrette"]);
   });
 
   it("skips a parent directory that does not exist", () => {
