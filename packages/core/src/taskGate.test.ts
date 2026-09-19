@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { RunConfig } from "@charrette/shared";
@@ -604,6 +604,16 @@ function probePool(advisorJson: (round: number) => string, dag = PROBE_DAG) {
   return { pool: pool as unknown as AgentPool, workerPrompts, advisorPrompts, advisorSystems };
 }
 
+/** A skills directory, for the gate's decider to be found in by name. */
+function skillsDir(skills: Record<string, string>): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-gateskills-"));
+  for (const [name, body] of Object.entries(skills)) {
+    mkdirSync(path.join(dir, name));
+    writeFileSync(path.join(dir, name, "SKILL.md"), `---\nname: ${name}\ndescription: how ${name} advises\n---\n${body}`);
+  }
+  return dir;
+}
+
 const logs = (store: Store, runId: string) =>
   store
     .eventsSince(runId, 0)
@@ -642,6 +652,32 @@ describe("a completion probe that cannot pass", () => {
     expect(workerPrompts[1]).toContain("test -f feature.txt");
     expect(workerPrompts[1]).not.toContain("test -f nope.txt");
     expect(asked).toHaveLength(1);
+  });
+
+  it("gives the advisor the playbook the gate was told to decide by", async () => {
+    // The advisor is the one session in the run that is looked up by the
+    // gate's own decider name. With `skillsDirs` empty — which is every other
+    // case in this file — the lookup returns nothing and the advisor decides
+    // on the prompt alone, so nothing here proved the name buys anything.
+    const skills = skillsDir({
+      "product-manager": "Rewrite a probe that names an artifact the task was never scoped to write.",
+      "probe-doctor": "Probe, completion probe, failing command, test -f, artifact, rewrite, amend.",
+    });
+    const { pool, advisorSystems } = probePool(
+      () =>
+        '```json\n{"recommendation":"the probe named the wrong artifact","checked":[],"needsOperator":false,"why":"wrong artifact","probe":"test -f feature.txt"}\n```'
+    );
+    const { store, runId } = await run(gates(async () => null), pool, {
+      skillsDirs: [skills],
+      taskGate: { decidedBy: "product-manager" },
+    });
+
+    expect(advisorSystems[0]).toContain('<skill name="product-manager"');
+    expect(advisorSystems[0]).toContain(path.join(skills, "product-manager", "SKILL.md"));
+    // Not the skill that reads like the problem. The gate names who decides;
+    // what the failure sounds like is a different question.
+    expect(advisorSystems[0]).not.toContain("probe-doctor");
+    expect(store.getTask(runId, "task-a")!.completionProbe).toBe("test -f feature.txt");
   });
 
   it("is withdrawn when there is nothing in it worth keeping", async () => {

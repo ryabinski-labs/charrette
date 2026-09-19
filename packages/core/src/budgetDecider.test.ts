@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -45,6 +45,25 @@ function repo(): string {
   writeFileSync(path.join(dir, "README.md"), "start\n");
   run("add", "-A");
   run("commit", "-m", "first");
+  return dir;
+}
+
+/**
+ * A skills directory, for the decider to be found in by name.
+ *
+ * Every other case in this file leaves `skillsDirs` empty, which is a decider
+ * wearing the hat without the playbook — the lookup runs, finds nothing, and
+ * the decision is made on the prompt alone. That is a supported state, but it
+ * is not the one the feature is for, and with no directory anywhere in this
+ * file nothing proved the named skill ever reaches the session.
+ */
+function skillsDir(skills: Record<string, string>): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "charrette-budgetskills-"));
+  made.push(dir);
+  for (const [name, body] of Object.entries(skills)) {
+    mkdirSync(path.join(dir, name));
+    writeFileSync(path.join(dir, name, "SKILL.md"), `---\nname: ${name}\ndescription: how ${name} decides\n---\n${body}`);
+  }
   return dir;
 }
 
@@ -122,7 +141,7 @@ function build(opts: { repoPath: string; pool: AgentPool; ref: { store: Store | 
   return { controller, store, events, asked };
 }
 
-const config = (budget: Record<string, unknown>) =>
+const config = (budget: Record<string, unknown>, skillsDirs: string[] = []) =>
   RunConfig.parse({
     deterministicChecks: [],
     waitForChecks: false,
@@ -130,6 +149,7 @@ const config = (budget: Record<string, unknown>) =>
     pitStop: { every: "never" },
     planGate: { decidedBy: "operator" },
     intentFixRounds: 0,
+    skillsDirs,
     budget,
   });
 
@@ -192,6 +212,65 @@ describe("the run's budget cap answered by a skill", () => {
     expect(budgetGates(events)[0]).toMatchObject({ resolution: "rejected", decidedBy: "product-manager" });
     expect((budgetGates(events)[0] as { feedback: string }).feedback).toContain("failed QA three times");
     if (runId) expect(store.getRun(runId)!.state).toBe("BUDGET_HOLD");
+  });
+  it("gives the decider the playbook it was named for, and only that one", async () => {
+    const dir = repo();
+    // Two skills in the directory. `product-manager` is the name the budget
+    // gate was told to decide by; `cost-cutter` is the one a lexical matcher
+    // would pick for a question about money — it is the closer match to
+    // "budget cap reached" by every word in it. The gate is not matching.
+    const skills = skillsDir({
+      "product-manager": "Raise the cap when what is left is cheaper than re-planning it.",
+      "cost-cutter": "Budget, cap, cost, spend, dollars, overrun, cheaper, money.",
+    });
+    const { pool, specs, ref } = rolePool(
+      {
+        planner: (_s, nth) => (nth === 1 ? DOCS : dag(["task-a"])),
+        validator: () => INTENT_PASS,
+        worker,
+        qa: () => QA_PASS,
+        pm: () => call({ action: "raise", capUsd: 50, why: "the tests are what is left" }),
+      },
+      2
+    );
+    const { controller, store } = build({ repoPath: dir, pool, ref });
+
+    const runId = await controller.startRun("build a thing", config({ runCapUsd: 7, ceilingUsd: 100 }, [skills]));
+
+    const decider = specs.find((s) => s.role === "pm")!;
+    expect(decider.systemPrompt).toContain('<skill name="product-manager"');
+    expect(decider.systemPrompt).not.toContain("cost-cutter");
+    // The playbook travels as a path to read, not as inlined prose: a skill
+    // body can be long, and the gate is paying for a session that is already
+    // mid-decision.
+    expect(decider.systemPrompt).toContain(path.join(skills, "product-manager", "SKILL.md"));
+    expect(store.getRun(runId)!.config.budget.runCapUsd).toBe(50);
+  });
+
+  it("decides anyway when the named skill is not in the directory it was given", async () => {
+    // The other side of the lookup, and the reason it is a filter rather than
+    // a requirement: a decider named after a skill this machine does not have
+    // still decides. Losing the playbook must not turn the gate back into a
+    // question for an operator who is not there.
+    const dir = repo();
+    const skills = skillsDir({ "cost-cutter": "Budget, cap, cost, spend, overrun." });
+    const { pool, specs, ref } = rolePool(
+      {
+        planner: (_s, nth) => (nth === 1 ? DOCS : dag(["task-a"])),
+        validator: () => INTENT_PASS,
+        worker,
+        qa: () => QA_PASS,
+        pm: () => call({ action: "raise", capUsd: 50, why: "the tests are what is left" }),
+      },
+      2
+    );
+    const { controller, store, asked } = build({ repoPath: dir, pool, ref });
+
+    const runId = await controller.startRun("build a thing", config({ runCapUsd: 7, ceilingUsd: 100 }, [skills]));
+
+    expect(asked).toEqual([]);
+    expect(specs.find((s) => s.role === "pm")!.systemPrompt).not.toContain("<skill name=");
+    expect(store.getRun(runId)!.config.budget.runCapUsd).toBe(50);
   });
 });
 
