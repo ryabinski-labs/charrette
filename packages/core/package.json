@@ -35,7 +35,7 @@
     "@charrette/shared": "workspace:*",
     "@charrette/skills-mcp": "workspace:*",
     "octokit": "^5.0.5",
-    "zod": "^3.23.0"
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "typescript": "^5.5.0",
