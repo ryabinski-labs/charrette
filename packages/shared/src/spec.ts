@@ -135,9 +135,9 @@ export const RunSpec = z.object({
   requirements: z.array(SpecRequirement).default([]),
   scenarios: z.array(SpecScenario).default([]),
   openQuestions: z.array(SpecOpenQuestion).default([]),
-  commands: SpecCommands.default({}),
-  criticalPath: CriticalPath.default({}),
-  release: ReleaseVerification.default({}),
+  commands: SpecCommands.prefault({}),
+  criticalPath: CriticalPath.prefault({}),
+  release: ReleaseVerification.prefault({}),
   /** What the spec agent could not derive, in its own words. */
   notCovered: z.array(z.string()).default([]),
 });

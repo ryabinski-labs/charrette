@@ -7,7 +7,22 @@ on. Before then, minor versions may break things.
 
 ## [Unreleased]
 
-Nothing yet.
+### Security
+
+- **All 23 dependency advisories reported by `pnpm audit` are closed** — 15 of
+  them mirrored as open Dependabot alerts — including the critical
+  `proxy-addr` IP-spoofing alert and the high `zod`, `body-parser`,
+  `happy-dom`, `source-map-js`, `vite` and `nanoid` advisories. Overrides lift
+  `fast-uri` to 3.1.9, `vite` to 7.3.7, `hono` to 4.13.14, `ip-address` to
+  10.7.5, `source-map-js` to 1.2.2, `proxy-addr` to 2.0.8, `body-parser` to
+  2.4.0 and `nanoid` to 3.3.18.
+
+  `zod` moves to 4.6.7 across every package, the version the Agent SDK's own
+  peer range asks for. Zod 4 applies a field's default even after `.partial()`,
+  so config-file parsing now explicitly returns only the keys the file
+  declared; without that, `init --force` would persist every default as if the
+  operator had chosen it. A lockfile test fails the build if any security floor
+  slips.
 
 ## [0.1.0] - 2026-09-18
 

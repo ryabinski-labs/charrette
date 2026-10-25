@@ -568,6 +568,36 @@ export function resolveGitHub(repo: string, configuredSlug: string | undefined):
   return resolved;
 }
 
+/**
+ * Keep only what the file itself declared.
+ *
+ * Zod 4 applies a field's default even after `.partial()`: `FileConfig` is
+ * built from partial config schemas, so parsing `{"taskGate":{"decidedBy":
+ * "operator"}}` now hands back every other TaskGate knob already filled in.
+ * Validation still has to use that schema — it is what rejects an unknown key —
+ * but this value is also what `init --force` writes back to disk and what the
+ * run banner calls declared. Defaults belong to `RunConfig`, applied later, not
+ * to a record of what the operator chose. So walk the validated tree and copy
+ * back only the keys the parsed JSON actually had.
+ *
+ * Arrays are taken as parsed. Their items were already validated as written,
+ * and the old `.partial()` never reached inside them either.
+ */
+export function declaredOnly(parsed: unknown, raw: unknown): unknown {
+  if (Array.isArray(parsed) || typeof parsed !== "object" || parsed === null) return parsed;
+  if (Array.isArray(raw) || typeof raw !== "object" || raw === null) return parsed;
+  const out: Record<string, unknown> = {};
+  const source = parsed as Record<string, unknown>;
+  for (const key of Object.keys(raw)) {
+    // A nested partial schema strips an unknown key rather than rejecting it.
+    // The raw object still has it; copying it back would hand the caller a
+    // property the schema never validated.
+    if (!Object.hasOwn(source, key)) continue;
+    out[key] = declaredOnly(source[key], (raw as Record<string, unknown>)[key]);
+  }
+  return out;
+}
+
 export function loadFileConfig(repo: string): { config: FileConfig; path: string | null } {
   const file = configFile(repo);
   if (!file) return { config: {}, path: null };
@@ -584,5 +614,5 @@ export function loadFileConfig(repo: string): { config: FileConfig; path: string
       .join("\n");
     throw new Error(`${file} is invalid:\n${issues}`);
   }
-  return { config: parsed.data, path: file };
+  return { config: declaredOnly(parsed.data, raw) as FileConfig, path: file };
 }

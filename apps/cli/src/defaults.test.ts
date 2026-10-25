@@ -9,7 +9,7 @@ vi.mock("node:child_process", async (importOriginal) => {
   return { ...actual, execFileSync: execFileSyncMock };
 });
 
-import { detectChecks, loadFileConfig, resolveGitHub, resolveRepoRoot, verifyChecks } from "./defaults.js";
+import { declaredOnly, detectChecks, loadFileConfig, resolveGitHub, resolveRepoRoot, verifyChecks } from "./defaults.js";
 
 function tmpRepo(files: Record<string, string> = {}, withGit = true): string {
   const dir = mkdtempSync(path.join(os.tmpdir(), "charrette-cli-"));
@@ -132,14 +132,77 @@ describe("loadFileConfig", () => {
     // Same trap as above: a knob only settable in the type is not settable.
     // `decidedBy: "operator"` is the whole opt-out from the charrette answering
     // its own escalations, and it has to be writable in the file that opts out.
+    //
+    // Zod 4 also makes this a test of what the file gives back: `.partial()`
+    // still applies field defaults, so a validated nested object arrives full
+    // of knobs the operator never wrote. `init --force` would then persist
+    // them, turning a one-line opt-out into a whole config block.
     const declared = { taskGate: { decidedBy: "operator" as const }, pitStop: { decidedBy: "operator" as const } };
     const repo = tmpRepo({ "charrette.config.json": JSON.stringify(declared) });
     expect(loadFileConfig(repo).config).toEqual(declared);
   });
 
+  it("keeps the defaults out of every section the file leaves alone", () => {
+    const declared = {
+      models: { qa: "claude-sonnet-5" },
+      budget: { runCapUsd: 12 },
+      subscription: { active: "personal" },
+      planGate: { decidedBy: "operator" },
+      spec: { gateRounds: 0 },
+      live: { enabled: false },
+      intake: { decidedBy: "operator" },
+      delivery: { mode: "production" },
+    };
+    const repo = tmpRepo({ "charrette.config.json": JSON.stringify(declared) });
+
+    const config = loadFileConfig(repo).config as Record<string, Record<string, unknown>>;
+    for (const [section, declaredFields] of Object.entries(declared)) {
+      expect(Object.keys(config[section] ?? {}).sort()).toEqual(Object.keys(declaredFields).sort());
+    }
+  });
+
+  it("does not resurrect a nested key the schema stripped", () => {
+    const repo = tmpRepo({
+      "charrette.config.json": JSON.stringify({ taskGate: { decidedBy: "operator", nonsense: true } }),
+    });
+
+    // toStrictEqual, not toEqual: an own `nonsense: undefined` would pass the
+    // latter, and then `init --force` would carry a phantom key forward.
+    expect(loadFileConfig(repo).config).toStrictEqual({ taskGate: { decidedBy: "operator" } });
+  });
+
   it("still rejects a routing rule that is not one", () => {
     const repo = tmpRepo({ "charrette.config.json": JSON.stringify({ skillRouting: [{ when: "x" }] }) });
     expect(() => loadFileConfig(repo)).toThrow(/is invalid/);
+  });
+});
+
+describe("declaredOnly", () => {
+  it("returns a validated scalar unchanged", () => {
+    expect(declaredOnly("operator", "operator")).toBe("operator");
+  });
+
+  it("returns a validated array unchanged, including its items", () => {
+    const parsed = [{ id: "a", defaults: true }];
+    expect(declaredOnly(parsed, [{ id: "a" }])).toBe(parsed);
+  });
+
+  it("does not descend into a null tree", () => {
+    expect(declaredOnly(null, {})).toBeNull();
+  });
+
+  it("returns the tree when the file's side is not an object", () => {
+    const parsed = { every: "epic" };
+    expect(declaredOnly(parsed, ["epic"])).toBe(parsed);
+    expect(declaredOnly(parsed, null)).toBe(parsed);
+    expect(declaredOnly(parsed, "epic")).toBe(parsed);
+  });
+
+  it("copies only the keys the file wrote, all the way down", () => {
+    const parsed = { pitStop: { every: "epic", demoMaxTurns: 80, nested: { kept: 1, dropped: 2 } }, added: true };
+    const raw = { pitStop: { every: "epic", nested: { kept: 1 } } };
+
+    expect(declaredOnly(parsed, raw)).toEqual({ pitStop: { every: "epic", nested: { kept: 1 } } });
   });
 });
 
