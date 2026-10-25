@@ -884,14 +884,14 @@ export const RunConfig = z.object({
    * slept through too; `0` restores the old behaviour of failing immediately.
    */
   usageLimitWaitMinutes: z.number().int().min(0).max(7 * 24 * 60).default(360),
-  models: ModelRouting.default({}),
-  budget: Budget.default({}),
+  models: ModelRouting.prefault({}),
+  budget: Budget.prefault({}),
   /**
    * What the run does as the *account's* plan runs out, rather than as this
    * run's dollar cap does. `{"subscription":{"pauseAtPercent":100}}` restores
    * the old behaviour of noticing only once the wall is hit.
    */
-  subscription: SubscriptionConfig.default({}),
+  subscription: SubscriptionConfig.prefault({}),
   /**
    * How often the run stops, demos what it has built, and asks the operator
    * whether it is still the thing they wanted. See docs/PITSTOP.md.
@@ -902,7 +902,7 @@ export const RunConfig = z.object({
    * the charrette had no checkpoint between "approve this plan" and "here is the
    * diff". `{"pitStop":{"every":"never"}}` restores that.
    */
-  pitStop: PitStopConfig.default({}),
+  pitStop: PitStopConfig.prefault({}),
   /**
    * How often a running agent stops to say where it is and what it would like
    * decided. See docs/CHECKPOINT.md.
@@ -913,18 +913,18 @@ export const RunConfig = z.object({
    * thousands of tokens finer-grained than any pit stop can be.
    * `{"checkpoint":{"every":0}}` restores the old behaviour of never asking.
    */
-  checkpoint: CheckpointConfig.default({}),
+  checkpoint: CheckpointConfig.prefault({}),
   /**
    * Who answers a task that hit its cap, and how many times they may answer the
    * same one. `{"taskGate":{"decidedBy":"operator"}}` always asks you.
    */
-  taskGate: TaskGateConfig.default({}),
+  taskGate: TaskGateConfig.prefault({}),
   /**
    * Who adjudicates a failing plan-intent check, and how many times they may
    * send the plan back over it. `{"planGate":{"decidedBy":"operator"}}` shows
    * you the gaps and asks, which is what this used to do unconditionally.
    */
-  planGate: PlanGateConfig.default({}),
+  planGate: PlanGateConfig.prefault({}),
   /**
    * How many times a failing intent check may queue work to close its own gaps.
    *
@@ -974,9 +974,9 @@ export const RunConfig = z.object({
    * framework produces a specification with no runnable scenario, which is
    * reported as unproven rather than passed.
    */
-  spec: SpecConfig.default({}),
-  live: LiveConfig.default({}),
-  intake: IntakeConfig.default({}),
+  spec: SpecConfig.prefault({}),
+  live: LiveConfig.prefault({}),
+  intake: IntakeConfig.prefault({}),
   skillsDirs: z.array(z.string()).default([]),
   /**
    * Let the charrette write a skill for itself when a task matches nothing.
@@ -1016,7 +1016,7 @@ export const RunConfig = z.object({
       enabled: z.boolean().default(true),
       maxPerRun: z.number().int().min(0).max(20).default(3),
     })
-    .default({}),
+    .prefault({}),
   /**
    * Skills bound to a class of work, by name, ahead of any scoring.
    *
@@ -1231,7 +1231,7 @@ export const RunConfig = z.object({
    * Empty (the default) keeps the old behaviour — the run ends at PR_REVIEW.
    */
   prodUrl: z.string().default(""),
-  delivery: DeliveryConfig.default({}),
+  delivery: DeliveryConfig.prefault({}),
   /** How long to wait for the merge commit's deploy before giving up on it. */
   deployTimeoutMinutes: z.number().int().min(1).max(240).default(30),
   /**
