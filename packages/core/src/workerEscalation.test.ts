@@ -35,6 +35,17 @@ const SONNET = "claude-sonnet-5";
 const HAIKU = "claude-haiku-4-5-20251001";
 const OPUS = "claude-opus-5";
 const FABLE = "claude-fable-5-1";
+
+/**
+ * The model table these tests drive the ladder on, stated explicitly rather
+ * than taken from the shipped defaults.
+ *
+ * The subject here is the light-tier and escalation rule, not which model the
+ * product happens to default to this release. Reading the defaults would make
+ * every default change look like an escalation defect; pinning the table keeps
+ * the failure pointing at the rule.
+ */
+const RUN_MODELS = { worker: SONNET, workerLight: HAIKU, workerUi: OPUS, workerHeavy: FABLE };
 const DOCS = "<prd>\n# PRD\n</prd>\n<conventions>\nc\n</conventions>";
 
 /**
@@ -149,7 +160,7 @@ async function run(
   const controller = new RunController(store, new Bus(store), pool, new GitHubAdapter(undefined, undefined), gates, repo());
   const runId = await controller.startRun(
     "do a thing",
-    RunConfig.parse({ deterministicChecks: [], waitForChecks: false, maxParallelWorkers: 1, models, ...opts.config })
+    RunConfig.parse({ deterministicChecks: [], waitForChecks: false, maxParallelWorkers: 1, models: { ...RUN_MODELS, ...models }, ...opts.config })
   );
   return { store, runId, specs, workerSpecs: () => specs.filter((s) => s.role === "worker") };
 }

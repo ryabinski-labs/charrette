@@ -169,10 +169,12 @@ describe("the run config refuses a routing it cannot honour", () => {
 
   it("still applies the defaults, so an empty table is the working one", () => {
     const parsed = ModelRouting.parse({});
-    expect(providerFor(parsed.worker)).toBe("anthropic");
-    // Not all-Anthropic any more, and the default has to satisfy its own pin:
-    // an empty table is what every run without a `models` block gets, so a
-    // default that violated `routingViolations` would refuse every such run.
+    // The regular worker is on DeepSeek now; the interface and heavy rungs are
+    // still Anthropic. The one invariant is that the shipped table satisfies
+    // its own pins, because an empty table is what every run without a `models`
+    // block gets.
+    expect(providerFor(parsed.worker)).toBe("deepseek");
+    expect(providerFor(parsed.workerUi)).toBe("anthropic");
     expect(providerFor(parsed.reviewer)).toBe("google");
     expect(routingViolations(parsed)).toEqual([]);
   });
@@ -181,12 +183,15 @@ describe("the run config refuses a routing it cannot honour", () => {
     // Pinned because these defaults are what the operator actually pays, and a
     // change to one of them is invisible in a diff of anything else. The whole
     // suite passed unchanged when `workerLight` moved from Sonnet to Haiku,
-    // which is how a default gets changed by accident.
+    // which is how a default gets changed by accident. The light tier now names
+    // DeepSeek because that is cheaper than Haiku at both rates; the rule still
+    // runs, so the measurement survives.
     const d = ModelRouting.parse({});
-    expect({ demo: d.demo, repair: d.repair, workerLight: d.workerLight }).toEqual({
+    expect({ demo: d.demo, repair: d.repair, worker: d.worker, workerLight: d.workerLight }).toEqual({
       demo: "claude-haiku-4-5-20251001",
       repair: "claude-haiku-4-5-20251001",
-      workerLight: "claude-haiku-4-5-20251001",
+      worker: "deepseek-flash",
+      workerLight: "deepseek-flash",
     });
     // And the judges are not among them — which the floor now also enforces.
     // `reviewer` is the one judge off Anthropic, and it is pinned there rather

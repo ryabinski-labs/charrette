@@ -3,7 +3,7 @@
  * allowed to leave Anthropic.
  *
  * The charrette has always stored a model as a plain string — `models.worker`
- * is `"claude-sonnet-5"`, not an object with a provider field — and runs
+ * is `"deepseek-flash"`, not an object with a provider field — and runs
  * already recorded carry those strings in their frozen config. So the provider
  * is *derived* from the name rather than configured beside it: every existing
  * run keeps working, and pointing a role at another vendor stays a one-word
@@ -11,7 +11,7 @@
  * not announce its family.
  */
 
-export const Provider = ["anthropic", "openai", "google"] as const;
+export const Provider = ["anthropic", "openai", "google", "deepseek"] as const;
 export type Provider = (typeof Provider)[number];
 
 /**
@@ -23,6 +23,9 @@ const FAMILIES: [RegExp, Provider][] = [
   [/^claude[-.]/i, "anthropic"],
   [/^(gpt|o[1-9]|chatgpt)[-.]/i, "openai"],
   [/^gemini[-.]/i, "google"],
+  // `deepseek-flash` is the current V4.1 Flash id; the legacy
+  // `deepseek-v4-flash` spelling routes to the same checkpoint at the vendor.
+  [/^deepseek[-.]/i, "deepseek"],
 ];
 
 const EXPLICIT = new Set<string>(Provider);
@@ -57,6 +60,7 @@ const VENDOR_NAME: Record<Provider, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
   google: "Google",
+  deepseek: "DeepSeek",
 };
 
 /**

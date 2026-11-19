@@ -7,6 +7,18 @@ on. Before then, minor versions may break things.
 
 ## [Unreleased]
 
+### Changed
+
+- **Regular build tasks now default to DeepSeek V4.1 Flash.** `models.worker`
+  and `models.workerLight` are `deepseek-flash` at $0.30 input and $1.20 output
+  per MTok at peak, roughly a tenth of Sonnet's input rate. `DEEPSEEK_API_KEY`
+  is required for every run, and a run refuses to start without it. Interface
+  tasks (`workerUi`, Opus 5) and the escalation ceiling (`workerHeavy`, Fable
+  5.1) stay where they were. The DeepSeek client is OpenAI-compatible with two
+  vendor differences the shared client now carries: `max_tokens` instead of
+  `max_completion_tokens`, and the return of `reasoning_content` on every later
+  tool turn. Runs already recorded keep the models they froze.
+
 ### Security
 
 - **All 23 dependency advisories reported by `pnpm audit` are closed** — 15 of

@@ -29,7 +29,7 @@ function onDisk(): { dbPath: string; cleanup: () => void } {
 }
 
 /** Writes a run whose stored config has had `models.workerLight` removed. */
-function runFromBeforeTheLightTier(dbPath: string, models: Record<string, string> = {}): string {
+function runFromBeforeTheLightTier(dbPath: string, models: Record<string, string> = { worker: SONNET }): string {
   const store = new Store(dbPath);
   store.createRun({
     id: "run-old",
@@ -118,7 +118,9 @@ describe("a run created before the light tier existed", () => {
     store.db.prepare("UPDATE runs SET config = ? WHERE id = ?").run(JSON.stringify(stored), runId);
     store.db.close();
 
-    expect(new Store(dbPath).getRun(runId)!.config.models.workerLight).toBe(SONNET);
+    // The schema's worker is DeepSeek now, so the fallback follows the schema
+    // rather than a literal — which is the rule this test actually pins.
+    expect(new Store(dbPath).getRun(runId)!.config.models.workerLight).toBe(RunConfig.parse({}).models.worker);
     cleanup();
   });
 
@@ -132,7 +134,7 @@ describe("a run created before the light tier existed", () => {
     // Nothing to freeze — it never expressed a preference, so it takes today's
     // defaults like any other unset field.
     expect(() => new Store(dbPath)).not.toThrow();
-    expect(new Store(dbPath).getRun("run-bare")!.config.models.workerLight).toBe(HAIKU);
+    expect(new Store(dbPath).getRun("run-bare")!.config.models.workerLight).toBe(RunConfig.parse({}).models.workerLight);
     cleanup();
   });
 
@@ -170,7 +172,7 @@ describe("a run created today", () => {
       config: RunConfig.parse({}),
     });
 
-    expect(store.getRun("run-today")!.config.models.workerLight).toBe(HAIKU);
+    expect(store.getRun("run-today")!.config.models.workerLight).toBe(RunConfig.parse({}).models.workerLight);
     cleanup();
   });
 });
@@ -352,7 +354,7 @@ const FABLE = RunConfig.parse({}).models.workerHeavy;
 const OPUS_UI = RunConfig.parse({}).models.workerUi;
 
 /** Writes a run whose stored config has had the two rungs removed. */
-function runFromBeforeTheWorkerTiers(dbPath: string, models: Record<string, string> = {}, keep: string[] = []): string {
+function runFromBeforeTheWorkerTiers(dbPath: string, models: Record<string, string> = { worker: SONNET }, keep: string[] = []): string {
   const store = new Store(dbPath);
   store.createRun({
     id: "run-pre-rungs",
@@ -399,7 +401,7 @@ describe("a run created before the interface and heavy rungs existed", () => {
 
   it("leaves a rung the run named for itself alone, and fills only the missing one", () => {
     const { dbPath, cleanup } = onDisk();
-    const runId = runFromBeforeTheWorkerTiers(dbPath, { workerHeavy: HAIKU }, ["workerHeavy"]);
+    const runId = runFromBeforeTheWorkerTiers(dbPath, { worker: SONNET, workerHeavy: HAIKU }, ["workerHeavy"]);
 
     const store = new Store(dbPath);
     const models = store.getRun(runId)!.config.models;

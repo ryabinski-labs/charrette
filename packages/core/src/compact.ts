@@ -49,6 +49,11 @@ export const BUDGETS: Record<Provider, number> = {
   anthropic: 600_000, // unused — the SDK compacts its own transcript
   openai: 600_000,
   google: 2_000_000,
+  // DeepSeek advertises a 1M-token window. Budgeting 1M characters is a
+  // quarter of that at the file's four-characters-per-token estimate, which is
+  // deliberately the conservative end: compaction here is deletion, and running
+  // it early costs context rather than a failed request.
+  deepseek: 1_000_000,
 };
 
 /** How much of the window to fall back to, so compaction is not re-triggered every turn. */
@@ -63,7 +68,11 @@ const TAIL = 400;
 
 export function messageChars(m: LoopMessage): number {
   if (m.role === "assistant") {
-    return m.text.length + m.toolCalls.reduce((n, c) => n + c.name.length + JSON.stringify(c.input).length, 0);
+    // The chain of thought DeepSeek requires back is part of every later
+    // request, so it is part of what has to fit. Counting only the prose and
+    // the tool calls would let a session sail past the budget on the one field
+    // the loop re-sends in full.
+    return m.text.length + (m.reasoning?.length ?? 0) + m.toolCalls.reduce((n, c) => n + c.name.length + JSON.stringify(c.input).length, 0);
   }
   return m.text.length;
 }

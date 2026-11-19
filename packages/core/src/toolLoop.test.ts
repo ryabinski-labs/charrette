@@ -288,6 +288,22 @@ describe("the turn ceiling", () => {
   });
 });
 
+describe("the chain of thought a vendor requires back", () => {
+  it("carries reasoning from the assistant turn into the next request", async () => {
+    // DeepSeek rejects a later tool turn that drops it. The loop owns the
+    // transcript, so this is the layer that has to keep it — the client only
+    // maps the field name.
+    const reasoned: ProviderTurn = { text: "", toolCalls: [{ id: "c1", name: "Read", input: {} }], usage, reasoning: "I need to look" };
+    const tool: LocalTool = { name: "Read", description: "r", parameters: {}, run: async () => "x" };
+    const { client, seen } = scriptedClient([reasoned, say("done")]);
+
+    await collect(toolLoop({ spec, prompts: prompts("go"), signal, client, toolsOverride: [tool] }));
+
+    const assistant = seen[1]!.messages.find((m) => m.role === "assistant") as { reasoning?: string };
+    expect(assistant.reasoning).toBe("I need to look");
+  });
+});
+
 describe("specs this transport cannot honour", () => {
   it("accepts an ordinary worker spec", () => {
     expect(unsupportedSpec({ ...spec, tools: ["Bash", "Read", "Write", "Edit"] })).toBeNull();
