@@ -1,0 +1,369 @@
+schema: tdd-artifact/v1
+feature: deepseek-worker-default
+title: DeepSeek V4.1 Flash as the default worker model
+source:
+  prd: docs/prd/deepseek-worker-default.md
+  prd_sha256: 834727a2c88435a6c278cadcec4c2df8f76d07df9c0bd7eda6aa44e12c5c6bea
+defaults:
+  priority: P2
+non_goals:
+- models.workerUi stays claude-opus-5 and models.workerHeavy stays claude-fable-5-1.
+- qa, prod and intake stay on Anthropic and reviewer stays on Google.
+- The planner does not nominate a per-task model; modelTier.ts remains the only tier rule.
+- No DeepSeek Anthropic-format endpoint and no resumable DeepSeek sessions.
+- No change to worker prompts, injected skills or the worker tool set.
+- No automatic fallback to Sonnet when DEEPSEEK_API_KEY is absent.
+open_questions: []
+requirements:
+- id: REQ-001
+  text: A run config that omits the worker models defaults models.worker and models.workerLight to deepseek-flash.
+  priority: P0
+  type: functional
+  prd_ref: PRD section 4 goal 1 and section 5 story 1
+  scenarios:
+  - id: SC-001-a
+    level: unit
+    title: an empty models object defaults both regular worker tiers to DeepSeek
+    given: a run config with no models object
+    when: RunConfig.parse is called with an empty object
+    then: models.worker and models.workerLight are both deepseek-flash
+    oracle: RunConfig.parse({}).models.worker === "deepseek-flash" and RunConfig.parse({}).models.workerLight === "deepseek-flash"
+    status: green
+    doubles: none; pure schema parse
+    test_ref: packages/shared/src/deepseek.test.ts::SC-001-a an empty models object defaults both regular worker tiers to DeepSeek
+  - id: SC-001-b
+    level: acceptance
+    title: a default run records a DeepSeek worker session in the ledger
+    given: a fixture repository with a DeepSeek key and no model overrides
+    when: a regular build task completes through charrette run
+    then: the ledger holds a worker session on deepseek-flash priced at the DeepSeek rate
+    oracle: the sessions row for the task has model deepseek-flash and spentUsd equals the DeepSeek-priced sum within 0.01 USD
+    status: green
+    doubles: fixture repository and a stubbed vendor; no live DeepSeek call
+    tags:
+    - acceptance
+    - ledger
+    test_ref: apps/cli/src/cli.test.ts::SC-001-b starts a default run on the DeepSeek worker models
+- id: REQ-002
+  text: 'A model name beginning deepseek- resolves to the deepseek provider, and an explicit deepseek/ or deepseek: prefix splits without reaching the wire id.'
+  priority: P0
+  type: functional
+  prd_ref: PRD section 7 and assumption A-001
+  scenarios:
+  - id: SC-002-a
+    level: unit
+    title: the deepseek family is read from the model name
+    given: the model names deepseek-flash and deepseek-v4-flash
+    when: providerFor resolves each name
+    then: both resolve to the deepseek provider
+    oracle: providerFor("deepseek-flash") === "deepseek" and providerFor("deepseek-v4-flash") === "deepseek"
+    status: green
+    doubles: none
+    test_ref: packages/shared/src/deepseek.test.ts::SC-002-a the deepseek family is read from the model name
+  - id: SC-002-b
+    level: unit
+    title: an explicit deepseek prefix is split and stripped
+    given: the model strings deepseek/deepseek-flash and deepseek:deepseek-v4-flash
+    when: splitModel and modelId run
+    then: the provider is deepseek and the wire id is the part after the separator
+    oracle: 'splitModel("deepseek/deepseek-flash") equals {provider: "deepseek", id: "deepseek-flash"} and modelId("deepseek:deepseek-v4-flash") === "deepseek-v4-flash"'
+    status: green
+    doubles: none
+    test_ref: packages/shared/src/deepseek.test.ts::SC-002-b an explicit deepseek prefix is split and stripped
+- id: REQ-003
+  text: The DeepSeek client sends OpenAI chat-completions requests to api.deepseek.com with the bearer key, sends max_tokens, echoes reasoning_content on every later tool turn, and maps a response without cached-token details to zero cache reads.
+  priority: P0
+  type: functional
+  prd_ref: PRD section 12 and section 5 story 4
+  scenarios:
+  - id: SC-003-a
+    level: contract
+    title: the DeepSeek request matches the OpenAI chat-completions shape
+    given: a recording fetch stub and a turn whose history carries a tool call
+    when: the DeepSeek client sends the turn
+    then: the request targets api.deepseek.com with the bearer key and the OpenAI message shape
+    oracle: url is https://api.deepseek.com/chat/completions, headers.authorization is Bearer sk-deepseek, body.model is deepseek-flash and body.messages[0] is the system message
+    status: green
+    doubles: fetch replaced by the recording stub
+    test_ref: packages/core/src/deepseek.test.ts::SC-003-a the DeepSeek request matches the OpenAI chat-completions shape
+  - id: SC-003-b
+    level: unit
+    title: a response without cached-token details books zero cache reads
+    given: a DeepSeek response with usage.prompt_tokens 100 and no prompt_tokens_details
+    when: the client maps the usage
+    then: cacheReadTokens is 0 and inputTokens is 100
+    oracle: usage.cacheReadTokens === 0 and usage.inputTokens === 100
+    status: green
+    doubles: fetch stub
+    test_ref: packages/core/src/deepseek.test.ts::SC-003-b a response without cached-token details books zero cache reads
+  - id: SC-003-c
+    level: unit
+    title: the chain of thought comes back on the next tool turn
+    given: a DeepSeek turn that returns reasoning_content with a tool call
+    when: the next request is sent with the same assistant message
+    then: the request carries reasoning_content on that assistant message
+    oracle: the second request body has an assistant message with reasoning_content equal to the first turn's reasoning
+    status: green
+    doubles: fetch stub
+    test_ref: packages/core/src/deepseek.test.ts::SC-003-c the chain of thought comes back on the next tool turn
+  - id: SC-003-d
+    level: unit
+    title: the request sends max_tokens, the field DeepSeek documents
+    given: a DeepSeek turn with maxOutputTokens set to 64000
+    when: the client sends the request
+    then: the body carries max_tokens 64000 and no max_completion_tokens
+    oracle: body.max_tokens === 64000 and body.max_completion_tokens === undefined
+    status: green
+    doubles: fetch stub
+    test_ref: packages/core/src/deepseek.test.ts::SC-003-d sends max_tokens, the field DeepSeek documents
+- id: REQ-004
+  text: A worker routed to deepseek-flash runs through the repository tool loop, executes its tool calls and returns the final text without calling the Anthropic SDK.
+  priority: P0
+  type: functional
+  prd_ref: PRD section 5 story 4 and section 12
+  scenarios:
+  - id: SC-004-a
+    level: integration
+    title: a worker session on DeepSeek drives the local tool loop
+    given: a pool spec on deepseek-flash and a stub vendor that answers a Bash call then a final text
+    when: AgentPool.run executes the session
+    then: the tool ran once, the result text is returned and the Anthropic SDK was never called
+    oracle: the tool ran once, resultText === "built it", the Anthropic query spy was not called and the request URL contains api.deepseek.com
+    status: green
+    doubles: fetch stub and Anthropic query spy
+    test_ref: packages/core/src/poolTransport.test.ts::SC-004-a a worker session on DeepSeek drives the local tool loop
+- id: REQ-005
+  text: The light-tier rule still decides and reports its tier when worker and workerLight both name deepseek-flash.
+  priority: P0
+  type: functional
+  prd_ref: PRD section 5 story 1 and section 9
+  scenarios:
+  - id: SC-005-a
+    level: unit
+    title: a light task is still decided light when both regular tiers name DeepSeek
+    given: a light-admissible task and both regular tiers set to deepseek-flash
+    when: workerModelFor decides the tier
+    then: the decision tier is light and the chosen model is deepseek-flash
+    oracle: workerModelFor(task, models).decision.tier === "light" and workerModelFor(task, models).model === "deepseek-flash"
+    status: green
+    doubles: none
+    test_ref: packages/core/src/deepseek.test.ts::SC-005-a a light task is still decided light when both regular tiers name DeepSeek
+- id: REQ-006
+  text: User-interface tasks dispatch on models.workerUi and heavy tasks on models.workerHeavy.
+  priority: P0
+  type: functional
+  prd_ref: PRD section 4 non-goal 1 and section 5 story 1
+  scenarios:
+  - id: SC-006-a
+    level: unit
+    title: a UI task stays on the UI tier model
+    given: the default tier models and a tier of ui
+    when: tierModel resolves the model
+    then: the result is claude-opus-5
+    oracle: tierModel("ui", defaults) === "claude-opus-5"
+    status: green
+    doubles: none
+    test_ref: packages/core/src/deepseek.test.ts::SC-006-a a UI task stays on the UI tier model
+  - id: SC-006-b
+    level: unit
+    title: a heavy task stays on the heavy tier model
+    given: the default tier models and a tier of heavy
+    when: tierModel resolves the model
+    then: the result is claude-fable-5-1
+    oracle: tierModel("heavy", defaults) === "claude-fable-5-1"
+    status: green
+    doubles: none
+    test_ref: packages/core/src/deepseek.test.ts::SC-006-b a heavy task stays on the heavy tier model
+- id: REQ-007
+  text: DeepSeek usage is priced at 0.30 USD per MTok input and 1.20 USD per MTok output, with cache reads at 0.1 times the input rate.
+  priority: P0
+  type: non-functional
+  prd_ref: PRD section 5 story 2, section 13 and assumption A-003
+  scenarios:
+  - id: SC-007-a
+    level: unit
+    title: one million input and one million output tokens cost 1.50 USD
+    given: a usage total of 1,000,000 input tokens and 1,000,000 output tokens on deepseek-flash
+    when: costUsd prices the usage
+    then: the charge is 1.50 USD
+    oracle: costUsd("deepseek-flash", usage) is within 0.000001 of 1.50
+    status: green
+    doubles: none
+    test_ref: packages/core/src/deepseek.test.ts::SC-007-a one million input and one million output tokens cost 1.50 USD
+  - id: SC-007-b
+    level: unit
+    title: one million cache-read tokens cost 0.03 USD
+    given: a usage total of 1,000,000 cache-read tokens on deepseek-flash
+    when: costUsd prices the usage
+    then: the charge is 0.03 USD, which is 0.1 times the input rate
+    oracle: costUsd("deepseek-flash", usage) is within 0.000001 of 0.03
+    status: green
+    doubles: none
+    test_ref: packages/core/src/deepseek.test.ts::SC-007-b one million cache-read tokens cost 0.03 USD
+- id: REQ-008
+  text: A routing table that resolves a role to DeepSeek is refused when DEEPSEEK_API_KEY is not set, and accepted when it is.
+  priority: P0
+  type: functional
+  prd_ref: PRD section 5 story 3 and decision DL-002
+  scenarios:
+  - id: SC-008-a
+    level: unit
+    title: a missing DeepSeek key is reported against the role and model
+    given: an environment without DEEPSEEK_API_KEY
+    when: missingKeys examines models.worker set to deepseek-flash
+    then: one sentence names DEEPSEEK_API_KEY, the worker role and the model
+    oracle: 'missingKeys({worker: "deepseek-flash"}, {}) equals ["DEEPSEEK_API_KEY is not set, but worker (deepseek-flash) is routed to deepseek."]'
+    status: green
+    negative: true
+    doubles: none; a plain environment object
+    test_ref: packages/core/src/deepseek.test.ts::SC-008-a a missing DeepSeek key is reported against the role and model
+  - id: SC-008-b
+    level: unit
+    title: a present DeepSeek key produces no violation
+    given: an environment with DEEPSEEK_API_KEY set
+    when: missingKeys examines models.worker set to deepseek-flash
+    then: no violation is returned
+    oracle: 'missingKeys({worker: "deepseek-flash"}, {DEEPSEEK_API_KEY: "sk-test"}) equals []'
+    status: green
+    doubles: none
+    test_ref: packages/core/src/deepseek.test.ts::SC-008-b a present DeepSeek key produces no violation
+- id: REQ-009
+  text: DEEPSEEK_API_KEY in the working directory .env file is loaded before the routing check.
+  priority: P0
+  type: functional
+  prd_ref: PRD section 5 story 3
+  scenarios:
+  - id: SC-009-a
+    level: integration
+    title: the key in .env reaches the routing check
+    given: a temporary directory whose .env holds DEEPSEEK_API_KEY
+    when: loadDotEnv runs and missingKeys then examines a DeepSeek worker
+    then: the key is present in the environment and no violation is returned
+    oracle: process.env.DEEPSEEK_API_KEY equals the file value and missingKeys returns []
+    status: green
+    doubles: a real temporary file and the real process environment, restored after the test
+    test_ref: apps/cli/src/deepseek.test.ts::SC-009-a the key in .env reaches the routing check
+- id: REQ-010
+  text: A rejected DeepSeek key fails the session with deepseek API 401 Unauthorized and the response body, and is not retried.
+  priority: P0
+  type: functional
+  prd_ref: PRD section 5 story 3
+  scenarios:
+  - id: SC-010-a
+    level: integration
+    title: a rejected key surfaces the vendor status and body
+    given: a stub that answers 401 Unauthorized with the body bad key
+    when: the DeepSeek client sends a turn
+    then: the call rejects with the status and body and fetch was called once
+    oracle: 'the rejection message is deepseek API 401 Unauthorized: bad key and the fetch stub recorded one call'
+    status: green
+    negative: true
+    doubles: fetch stub
+    test_ref: packages/core/src/deepseek.test.ts::SC-010-a a rejected key surfaces the vendor status and body
+- id: REQ-011
+  text: A DeepSeek 429 is recognised as a quota wall by usageLimitOf.
+  priority: P0
+  type: functional
+  prd_ref: PRD section 5 story 4 and assumption A-007
+  scenarios:
+  - id: SC-011-a
+    level: unit
+    title: a DeepSeek 429 is read as a usage limit
+    given: the error text deepseek API 429 Too Many Requests followed by a quota message
+    when: usageLimitOf reads it
+    then: a usage limit is returned rather than null
+    oracle: usageLimitOf(text, NOW) is not null
+    status: green
+    doubles: none
+    test_ref: packages/core/src/deepseek.test.ts::SC-011-a a DeepSeek 429 is read as a usage limit
+- id: REQ-012
+  text: A DeepSeek 503 is retried twice, one second and four seconds later, before the session reports failure.
+  priority: P0
+  type: functional
+  prd_ref: PRD section 5 story 4 and section 13
+  scenarios:
+  - id: SC-012-a
+    level: unit
+    title: a transient DeepSeek failure is retried at one and four seconds
+    given: a fetch that answers 503 twice and then 200
+    when: the DeepSeek client sends a turn
+    then: it returns the third answer after sleeping 1000ms and 4000ms
+    oracle: fetch was called three times, the recorded sleeps are [1000, 4000] and the returned text is the 200 body
+    status: green
+    doubles: fetch stub and a recording sleep
+    test_ref: packages/core/src/deepseek.test.ts::SC-012-a a transient DeepSeek failure is retried at one and four seconds
+- id: REQ-013
+  text: A spec that needs in-process MCP tools is refused on the tool-loop transport before a session row exists.
+  priority: P0
+  type: functional
+  prd_ref: PRD section 5 story 4
+  scenarios:
+  - id: SC-013-a
+    level: unit
+    title: an MCP-dependent spec is refused on the DeepSeek transport
+    given: a tool-loop spec that names an in-process MCP server
+    when: unsupportedSpec checks it
+    then: it returns a message naming in-process MCP tools
+    oracle: unsupportedSpec(spec with charrette_intake) contains "in-process MCP tools"
+    status: green
+    doubles: none
+    test_ref: packages/core/src/toolLoop.test.ts::refuses a role that needs in-process MCP tools
+- id: REQ-014
+  text: README and docs/OPERATIONS.md name deepseek-flash as the default for worker and workerLight and list DEEPSEEK_API_KEY.
+  priority: P0
+  type: constraint
+  prd_ref: PRD section 5 story 5
+  scenarios:
+  - id: SC-014-a
+    level: contract
+    title: the published docs describe the DeepSeek default
+    given: the repository at the merge commit
+    when: README.md and docs/OPERATIONS.md are read
+    then: both name deepseek-flash for the two regular worker tiers and DEEPSEEK_API_KEY in the environment list
+    oracle: README.md contains DEEPSEEK_API_KEY and deepseek-flash, and docs/OPERATIONS.md contains a models.worker row and a models.workerLight row whose value is deepseek-flash
+    status: green
+    doubles: none
+    test_ref: apps/cli/src/deepseek.test.ts::SC-014-a the published docs describe the DeepSeek default
+- id: REQ-015
+  text: The routing policy refuses a DeepSeek model on a pinned judging role and allows it on the worker roles.
+  priority: P0
+  type: functional
+  prd_ref: PRD section 5 story 5 and section 4 non-goal 2
+  scenarios:
+  - id: SC-015-a
+    level: unit
+    title: a pinned judging role may not run on DeepSeek
+    given: models.qa set to deepseek-flash
+    when: routingViolations runs
+    then: one message says qa is pinned to Anthropic
+    oracle: 'routingViolations({qa: "deepseek-flash"}) has length 1 and the message contains "pinned to Anthropic"'
+    status: green
+    negative: true
+    doubles: none
+    test_ref: packages/shared/src/deepseek.test.ts::SC-015-a a pinned judging role may not run on DeepSeek
+  - id: SC-015-b
+    level: unit
+    title: the regular worker roles may run on DeepSeek
+    given: models.worker and models.workerLight both set to deepseek-flash
+    when: routingViolations runs
+    then: no violation is returned
+    oracle: 'routingViolations({worker: "deepseek-flash", workerLight: "deepseek-flash"}) equals []'
+    status: green
+    doubles: none
+    test_ref: packages/shared/src/deepseek.test.ts::SC-015-b the regular worker roles may run on DeepSeek
+- id: REQ-016
+  text: DeepSeek compaction starts at 1,000,000 characters.
+  priority: P1
+  type: non-functional
+  prd_ref: PRD section 13 and assumption A-005
+  scenarios:
+  - id: SC-016-a
+    level: unit
+    title: the DeepSeek context budget is one million characters
+    given: the model deepseek-flash
+    when: budgetFor runs with no override
+    then: the budget is 1,000,000 characters
+    oracle: budgetFor("deepseek-flash") === 1000000
+    status: green
+    doubles: none
+    test_ref: packages/core/src/deepseek.test.ts::SC-016-a the DeepSeek context budget is one million characters

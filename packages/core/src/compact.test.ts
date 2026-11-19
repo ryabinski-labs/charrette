@@ -31,6 +31,15 @@ describe("messageChars", () => {
     expect(messageChars(assistant("", [{ id: "c1", name: "Bash", input: {} }]))).toBe("Bash".length + 2);
   });
 
+  it("counts the chain of thought a vendor requires back", () => {
+    // DeepSeek re-sends it on every later tool turn, so a budget that ignored
+    // it would under-count the request it is trying to keep inside the window.
+    const bare = messageChars(assistant("hi"));
+    const reasoned = messageChars({ role: "assistant", text: "hi", toolCalls: [], reasoning: "because" });
+
+    expect(reasoned - bare).toBe("because".length);
+  });
+
   it("counts a tool result by its text", () => {
     expect(messageChars(tool("Bash", "abcd"))).toBe(4);
   });

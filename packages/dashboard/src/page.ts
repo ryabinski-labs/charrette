@@ -38,6 +38,7 @@ export const MODEL_CHOICES = [
   "gemini-3.5-flash-lite",
   "gemini-3.6-flash",
   "gemini-3.8-flash",
+  "deepseek-flash",
 ];
 
 export const PAGE_HTML = `<!doctype html>

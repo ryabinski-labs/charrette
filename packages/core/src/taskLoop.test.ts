@@ -252,7 +252,7 @@ describe("focused worker briefings", () => {
       },
       qa: (_spec, nth) => nth === 1 ? QA_FAIL : QA_PASS,
     });
-    const { controller, runId } = executing({ repoPath: dir, pool });
+    const { controller, runId } = executing({ repoPath: dir, pool, config: { models: { worker: "claude-sonnet-5" } } });
     await controller.resume(runId);
     const retry = specs.filter((spec) => spec.role === "worker")[1]!;
     expect(retry.resume).toBe("sdk-worker");
@@ -296,7 +296,7 @@ describe("focused worker briefings", () => {
       },
       qa: (_spec, nth) => nth < 3 ? QA_FAIL : QA_PASS,
     });
-    const { controller, runId } = executing({ repoPath: dir, pool, config: { models: { workerHeavy: "gpt-5.6-terra" } } });
+    const { controller, runId } = executing({ repoPath: dir, pool, config: { models: { worker: "claude-sonnet-5", workerHeavy: "gpt-5.6-terra" } } });
     await controller.resume(runId);
     const workers = specs.filter((spec) => spec.role === "worker");
     expect(workers).toHaveLength(3);

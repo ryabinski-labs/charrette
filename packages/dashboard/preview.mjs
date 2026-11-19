@@ -26,7 +26,7 @@ store.createRun({
   integrationBranch: `charrette/${runId}/main`,
   config: {
     maxParallelWorkers: 1, qaIterationCap: 3, workerRespawnCap: 3, taskWallClockMinutes: 45,
-    models: { intake: "claude-opus-5", planner: "claude-opus-5", worker: "claude-sonnet-5", qa: "claude-sonnet-5", integrator: "claude-sonnet-5" },
+    models: { intake: "claude-opus-5", planner: "claude-opus-5", worker: "deepseek-flash", qa: "claude-sonnet-5", integrator: "claude-sonnet-5" },
     budget: { runCapUsd: 30, taskCapUsd: 10 },
     githubRepo: "acme/blog", skillsDirs: [], deterministicChecks: ["pnpm run typecheck", "pnpm run lint", "pnpm run test"],
   },
@@ -87,7 +87,7 @@ bus.publish({ type: "task.qa_verdict", runId, taskId: "token-bucket", verdict: "
 bus.publish({ type: "git.merged", runId, taskId: "token-bucket", branch: `charrette/${runId}/token-bucket`, sha: "9f31c0aa77", ts: at(2) });
 bus.publish({ type: "github.pr_opened", runId, taskId: "token-bucket", prNumber: 118, url: "", ts: at(1) });
 
-bus.publish({ type: "agent.spawned", runId, taskId: "fastify-plugin", sessionId: worker, role: "worker", model: "claude-sonnet-5", ts: at(2) });
+bus.publish({ type: "agent.spawned", runId, taskId: "fastify-plugin", sessionId: worker, role: "worker", model: "deepseek-flash", ts: at(2) });
 bus.publish({ type: "task.qa_verdict", runId, taskId: "fastify-plugin", verdict: "FAIL", iteration: 1, detail: { verdict: "FAIL", reasons: ["the plugin is registered after the routes, so it never runs for /posts"], mustFix: [] }, ts: at(40) });
 bus.publish({ type: "agent.log", runId, taskId: "fastify-plugin", sessionId: worker, text: "QA is right — registration order matters in Fastify. Moving the register call above the route plugins and adding a test that asserts the hook fires for /posts.", ts: at(6) });
 for (const [tool, args] of [
@@ -99,13 +99,13 @@ for (const [tool, args] of [
 
 // keep this session "running" so the Now panel has something live to show
 store.db.prepare("INSERT INTO sessions (id, runId, taskId, role, model, state, startedAt, turns) VALUES (?,?,?,?,?,?,?,?)")
-  .run(worker, runId, "fastify-plugin", "worker", "claude-sonnet-5", "running", Date.now() - 154_000, 23);
+  .run(worker, runId, "fastify-plugin", "worker", "deepseek-flash", "running", Date.now() - 154_000, 23);
 store.db.prepare("INSERT INTO sessions (id, runId, taskId, role, model, state, startedAt, endedAt, turns, costUsd) VALUES (?,?,?,?,?,?,?,?,?,?)")
   .run(planner, runId, null, "planner", "claude-opus-5", "done", t0, t0 + 300_000, 31, 1.207);
 
 store.recordUsage({ runId, sessionId: intake, model: "claude-opus-5", inputTokens: 41200, outputTokens: 3100, cacheReadTokens: 88000, cacheWriteTokens: 12000, costUsd: 0.612 });
 store.recordUsage({ runId, sessionId: planner, model: "claude-opus-5", inputTokens: 96000, outputTokens: 9400, cacheReadTokens: 210000, cacheWriteTokens: 31000, costUsd: 1.207 });
-store.recordUsage({ runId, taskId: "token-bucket", sessionId: "s-tb", model: "claude-sonnet-5", inputTokens: 120000, outputTokens: 18000, cacheReadTokens: 400000, cacheWriteTokens: 40000, costUsd: 3.9 });
+store.recordUsage({ runId, taskId: "token-bucket", sessionId: "s-tb", model: "deepseek-flash", inputTokens: 120000, outputTokens: 18000, cacheReadTokens: 400000, cacheWriteTokens: 40000, costUsd: 0.085 });
 
 const dash = new Dashboard(store, bus, { port: 4788 });
 console.log(await dash.start());

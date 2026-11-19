@@ -202,6 +202,70 @@ describe("running a session on Google", () => {
   });
 });
 
+describe("running a session on DeepSeek", () => {
+  it("SC-004-a a worker session on DeepSeek drives the local tool loop", async () => {
+    vi.stubEnv("DEEPSEEK_API_KEY", "sk-deepseek");
+    stubOpenAI([
+      {
+        choices: [
+          {
+            message: {
+              content: "looking",
+              reasoning_content: "I need a file list",
+              tool_calls: [{ id: "c1", function: { name: "Glob", arguments: '{"pattern":"*.ts"}' } }],
+            },
+          },
+        ],
+        usage: { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 },
+      },
+      { ...said("built it"), usage: { prompt_tokens: 0, completion_tokens: 0 } },
+    ]);
+
+    const out = await pool.run(spec({ model: "deepseek-flash", tools: ["Glob"], cwd: process.cwd() }));
+
+    expect(queryMock).not.toHaveBeenCalled();
+    expect(requests[0]!.url).toContain("api.deepseek.com");
+    expect(requests[0]!.body.model).toBe("deepseek-flash");
+    expect(out.resultText).toBe("built it");
+    expect(out.outcome).toBe("done");
+    const toolUse = events.filter((e) => e.type === "agent.tool_use") as { tool: string }[];
+    expect(toolUse[0]!.tool).toBe("Glob");
+    // $0.30/MTok in and $1.20/MTok out on the first turn; the second is free.
+    expect(out.costUsd).toBeCloseTo(1.5, 6);
+    // DeepSeek rejects the next tool turn without the vendor's reasoning, so
+    // the loop has to hand it back exactly as it arrived.
+    const second = requests[1]!.body.messages as Record<string, unknown>[];
+    expect(second.find((m) => m.role === "assistant")?.reasoning_content).toBe("I need a file list");
+  });
+
+  it("waits out a DeepSeek quota wall instead of counting it as a failure", async () => {
+    vi.stubEnv("DEEPSEEK_API_KEY", "sk-deepseek");
+    pool = new AgentPool(store, bus, async () => undefined);
+    let first = true;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        if (first) {
+          first = false;
+          return {
+            ok: false,
+            status: 429,
+            statusText: "Too Many Requests",
+            json: async () => ({}),
+            text: async () => "quota exceeded. Try again in 1 minute.",
+          };
+        }
+        return { ok: true, status: 200, statusText: "OK", json: async () => said("done"), text: async () => "" };
+      })
+    );
+
+    const out = await pool.run(spec({ model: "deepseek-flash" }));
+
+    expect(out.outcome).toBe("done");
+    expect(out.resultText).toBe("done");
+  });
+});
+
 describe("a session that outgrows its context window", () => {
   it("tells the operator on the bus, and does not book it as a model turn", async () => {
     // A budget of 1 character forces compaction on the very first request, which

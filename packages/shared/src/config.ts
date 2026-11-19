@@ -22,6 +22,24 @@ export const DEFAULT_CHECK_TIMEOUT_MINUTES = 10;
 const HAIKU = "claude-haiku-4-5-20251001";
 
 /**
+ * The regular worker tier's model. Named once because `worker` and
+ * `workerLight` both default to it and the price table keys on this exact id.
+ *
+ * DeepSeek V4.1 Flash lists at $0.30 input and $1.20 output per MTok at peak —
+ * a tenth of Sonnet's input rate and a twelfth of its output rate — and its API
+ * is OpenAI-compatible. It is the default for regular build tasks because the
+ * worker line is where a run's money goes; `workerUi` and `workerHeavy` stay on
+ * the Anthropic tiers where interface feedback and the escalation ceiling are
+ * the things being bought.
+ *
+ * The unversioned `deepseek-flash` id is deliberate: DeepSeek serves the
+ * current V4.1 Flash checkpoint behind it, and the dated names are legacy
+ * aliases. See `providerClients.ts` for the two vendor details the OpenAI
+ * client has to respect — `max_tokens` and `reasoning_content`.
+ */
+const DEEPSEEK = "deepseek-flash";
+
+/**
  * The top tier. Named once for the same reason `HAIKU` is: four roles and the
  * price table key on this exact id, and a copy that drifts is a role billed at
  * the wrong rate.
@@ -43,7 +61,7 @@ export const ModelRoutingShape = z.object({
    * handful of sessions a run.
    */
   planner: z.string().default(FABLE),
-  worker: z.string().default("claude-sonnet-5"),
+  worker: z.string().default(DEEPSEEK),
   /**
    * The worker model for tasks the light-tier rule admits. See modelTier.ts for
    * what "admits" means — it is a deterministic rule over fields the planner
@@ -53,22 +71,20 @@ export const ModelRoutingShape = z.object({
    * seventeen worker sessions against $14 across eight QA ones — so this is the
    * only line in this table that can move the total much.
    *
-   * Two things carry the risk rather than a threshold. The rule admits a
-   * deliberately narrow slice (sized S, at most `LIGHT_TIER_MAX_PATHS` files, a
-   * completion probe, no risky domain), and a light-tier session that dies of
-   * `error_max_turns` is re-dispatched on `worker` rather than retried here —
-   * see `escalateWorker` in runController.ts. A cheap model that needs three
-   * attempts costs more than the expensive one that needed one, so the first
-   * failure spends up instead of replaying the same wall.
+   * It now names the same model as `worker`, on purpose. DeepSeek Flash is
+   * cheaper than Haiku at both rates ($0.30/$1.20 against $1/$5 per MTok), so
+   * leaving this on Haiku would make the "cheap" tier the expensive one. The
+   * rule still runs and still publishes `task.tier_decided`, which is what
+   * keeps the measurement alive when the operator wants to price the experiment
+   * before pointing the rung anywhere else; `taskSpend()` in store.ts splits a
+   * task's bill by role and flags the ones that escalated.
    *
-   * Set this to `models.worker` to switch the experiment off without losing the
-   * measurement: the rule still runs and still publishes `task.tier_decided`,
-   * so the ledger keeps recording which tasks it *would* have sent down the
-   * cheap road. `taskSpend()` in store.ts splits a task's bill by role and
-   * flags the ones that escalated, which is the number that says whether this
-   * paid for itself.
+   * A light-tier session that dies of `error_max_turns` is still re-dispatched
+   * on `worker` rather than retried here — see `escalateWorker` in
+   * runController.ts. With both rungs on one model that re-dispatch costs the
+   * same, and the escalation ladder above it is unchanged.
    */
-  workerLight: z.string().default(HAIKU),
+  workerLight: z.string().default(DEEPSEEK),
   /**
    * The worker model for user-interface tasks — the ones `UI_WHEN` matches,
    * which is the same vocabulary that routes `frontend-design` and

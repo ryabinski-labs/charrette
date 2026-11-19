@@ -450,7 +450,7 @@ describe("the guards on asking", () => {
 });
 
 describe("re-routing a role while the run is going", () => {
-  const withRun = (models: Record<string, string> = {}) => {
+  const withRun = (models: Record<string, string> = { worker: "claude-sonnet-5" }) => {
     const { pool } = rolePool({});
     const built = build(repo(), pool);
     built.store.createRun({

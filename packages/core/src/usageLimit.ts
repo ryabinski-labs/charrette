@@ -66,8 +66,12 @@ const LIMIT_PHRASES = [
    * "on-track"`, because there is no honest verdict to carry. So an
    * unrecognised quota wall does not merely fail loudly, it hands back the
    * pass that pinning the reviewer to a second vendor existed to avoid.
+   *
+   * `deepseek` joined the list with the default worker: every regular build
+   * task now arrives on that transport, so a quota wall there would park a
+   * session on every task in the run at once.
    */
-  /\b(?:openai|google) API 429\b/i,
+  /\b(?:openai|google|deepseek) API 429\b/i,
 ];
 
 /** Clock time in a message: "resets 8:20pm (America/New_York)", "reset at 10:00 (UTC)". */

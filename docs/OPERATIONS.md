@@ -785,7 +785,7 @@ typo surfaces immediately.
   "skillsDirs": ["~/.claude/skills", "~/skills"],
   "qaIterationCap": 3,
   "pitStop": { "every": "epic" },
-  "models": { "planner": "claude-opus-5", "worker": "claude-sonnet-5" }
+  "models": { "planner": "claude-opus-5", "worker": "deepseek-flash" }
 }
 ```
 
@@ -814,8 +814,8 @@ Run configuration is a zod-validated `RunConfig`
 | `usageLimitWaitMinutes` | `360` | — | ✅ | how long **one session** may sleep waiting for your account's usage limit to reset. A quota window closing kills every session in flight at once ("You've hit your session limit · resets 8:20pm") and is not a fault in the work, so the pool waits it out and continues the same session — same conversation, same bill, no attempt or respawn spent on it. Per session rather than per run, so an overnight run survives several outages of this length. Past the bound the failure is reported as it always was; `0` restores that immediately. |
 | `models.intake` | `claude-opus-5` | — | ✅ | this one talks to you; question quality is the whole value. **Anthropic only** — see [Using other providers](#using-other-providers) |
 | `models.planner` | `claude-fable-5-1` | — | ✅ | planning quality dominates run cost efficiency; the two most expensive runs on record both went wrong here, so this is the most capable model at twice Opus's rate for a handful of sessions. Needs Claude Code ≥ 2.1.251 under the Agent SDK (the pin carries it). |
-| `models.worker` | `claude-sonnet-5` | — | ✅ | |
-| `models.workerLight` | `claude-haiku-4-5-20251001` | — | ✅ | the worker model for tasks the light-tier rule admits — sized `S`, at most two `touchedPaths`, carrying a `completionProbe`, and matching none of the risky domains (auth, money, migrations, concurrency, infrastructure). The rule is deterministic and lives in `modelTier.ts`; the planner does not nominate its own tier. A light session that dies of `error_max_turns` is re-dispatched on `models.worker` rather than retried here. Set it to the same value as `models.worker` to switch the experiment off while keeping the measurement — the rule still runs and still publishes `task.tier_decided`. |
+| `models.worker` | `deepseek-flash` | — | ✅ | regular build tasks. DeepSeek V4.1 Flash lists at $0.30 input and $1.20 output per MTok at peak — about a tenth of Sonnet's input rate. Interface tasks stay on `models.workerUi`, and a rejected task still climbs to `models.workerHeavy`. |
+| `models.workerLight` | `deepseek-flash` | — | ✅ | the worker model for tasks the light-tier rule admits — sized `S`, at most two `touchedPaths`, carrying a `completionProbe`, and matching none of the risky domains (auth, money, migrations, concurrency, infrastructure). The rule is deterministic and lives in `modelTier.ts`; the planner does not nominate its own tier. It names the same model as `models.worker` because DeepSeek is cheaper than Haiku at both rates, so the light rung would otherwise cost more than the standard one. The rule still runs and still publishes `task.tier_decided`, so the ledger keeps the measurement; point this at another model to price the experiment. |
 | `models.workerUi` | `claude-opus-5` | — | ✅ | the worker model for interface tasks — the ones the `UI_WHEN` vocabulary matches, which is the same rule that routes `frontend-design` and `ui-ux-cx-engineer` onto the worker and `visual-qa-agent` onto QA. Opus rather than Fable because interface quality is bounded by that feedback loop, not by reasoning depth; a UI task visual QA keeps rejecting still climbs to `workerHeavy`. Set it to `models.worker` to switch the route off while keeping the ledger's record. |
 | `models.workerHeavy` | `claude-fable-5-1` | — | ✅ | the worker model for the hardest tasks and the top of the escalation ladder. A task **starts** here when the planner sized it `L` and it names a risky domain, or when it is a round-two fix of a check the standard tier already failed to turn green; any task **climbs** here after `heavyTierAfterRejections`. A heavy session that ends in a classifier refusal comes back down to `models.worker` for its next attempt rather than spending the respawn cap refusing. Set it to `models.worker` to switch the tier off while keeping the measurement. |
 | `models.qa` | `claude-sonnet-5` | — | ✅ | **Anthropic only** — its verdict decides whether a task merges |
@@ -873,7 +873,7 @@ const controller = new RunController(
   "/path/to/target/repo",
 );
 await controller.startRun("assignment", RunConfig.parse({
-  models: { planner: "claude-opus-5", worker: "claude-sonnet-5", qa: "claude-sonnet-5", integrator: "claude-sonnet-5" },
+  models: { planner: "claude-opus-5", worker: "deepseek-flash", qa: "claude-sonnet-5", integrator: "claude-sonnet-5" },
   budget: { runCapUsd: 50 },
   deterministicChecks: ["pnpm test"],
 }));
@@ -885,22 +885,31 @@ for CI of the charrette itself, not for real work.
 ### Using other providers
 
 A model is a plain string, and the vendor is read from the name: `claude-*` goes
-to Anthropic, `gpt-*` to OpenAI, `gemini-*` to Google. Nothing else changes.
+to Anthropic, `gpt-*` to OpenAI, `gemini-*` to Google, `deepseek-*` to DeepSeek.
+Nothing else changes.
 
 ```json
 { "models": { "worker": "gpt-5.6-terra", "integrator": "gemini-3.5-flash-lite" } }
 ```
 
-Export that vendor's key (`OPENAI_API_KEY`, `GEMINI_API_KEY`) and run. If the key
-is missing the run refuses to start rather than failing at the first dispatch of
-that role — `demo` first runs at a pit stop, after the whole epic has been paid
-for. Spell the provider out as `openai/<model>` if you ever need a model whose
-name does not announce its family.
+Export that vendor's key (`OPENAI_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`)
+and run. If the key is missing the run refuses to start rather than failing at
+the first dispatch of that role — `demo` first runs at a pit stop, after the
+whole epic has been paid for. Spell the provider out as `openai/<model>` if you
+ever need a model whose name does not announce its family.
 
-**The default is all-Anthropic except one role.** `reviewer` is pinned to
-`gemini-3.8-flash`, so `GEMINI_API_KEY` is required for every run — see the
-pinned-role table below for why. Nothing else routes off Anthropic unless you
-say so.
+**The default routing is Anthropic except three roles.** `worker` and
+`workerLight` default to `deepseek-flash`, and `reviewer` is pinned to
+`gemini-3.8-flash`, so `DEEPSEEK_API_KEY` and `GEMINI_API_KEY` are required for
+every run — see the pinned-role table below for why. Interface tasks
+(`workerUi`, Opus 5) and the escalation ceiling (`workerHeavy`, Fable 5.1) stay
+on Anthropic.
+
+DeepSeek runs on the same stateless tool loop as OpenAI and Gemini, with two
+vendor details the client carries: it documents `max_tokens` rather than
+`max_completion_tokens`, and it requires the `reasoning_content` of earlier
+assistant turns to be sent back whenever the request carries tools. Omitting
+either is a 400, not a degraded reply.
 
 #### Changing it mid-run
 
@@ -995,6 +1004,7 @@ under-charging would let a cap silently stop binding.
 | `CLAUDE_CODE_OAUTH_TOKEN` | one of these | Claude Pro/Max subscription credential |
 | `ANTHROPIC_API_KEY` | one of these | Anthropic API credential; **wins if both are set** |
 | `OPENAI_API_KEY` | only if a role is routed to OpenAI | see [Using other providers](#using-other-providers) |
+| `DEEPSEEK_API_KEY` | **always** | `worker` and `workerLight` default to `deepseek-flash`; see [Using other providers](#using-other-providers) |
 | `GEMINI_API_KEY` | **always** | `reviewer` is pinned to Google; `GOOGLE_API_KEY` also accepted |
 | `GITHUB_TOKEN` | no | enables issues + PRs; falls back to `gh auth token` |
 | `CHARRETTE_GITHUB_REPO` | no | `owner/repo`; falls back to `gh repo view` |

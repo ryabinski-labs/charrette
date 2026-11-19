@@ -2,7 +2,7 @@ import { modelId, providerFor, type Provider } from "@charrette/shared";
 import type { LocalTool } from "./agentTools.js";
 
 /**
- * The two non-Anthropic APIs the charrette can drive, behind one small interface.
+ * The three non-Anthropic APIs the charrette can drive, behind one small interface.
  *
  * Deliberately raw `fetch` rather than each vendor's SDK. Two reasons, in
  * order: the request the charrette sends is the request a test can assert on, so
@@ -34,7 +34,7 @@ export interface ToolCall {
 
 export type LoopMessage =
   | { role: "user"; text: string }
-  | { role: "assistant"; text: string; toolCalls: ToolCall[]; signature?: string }
+  | { role: "assistant"; text: string; toolCalls: ToolCall[]; signature?: string; reasoning?: string }
   | { role: "tool"; callId: string; name: string; text: string };
 
 export interface Usage {
@@ -50,6 +50,17 @@ export interface ProviderTurn {
   usage: Usage;
   /** As `ToolCall.signature`, for the turn's own text part. */
   signature?: string;
+  /**
+   * The vendor's chain of thought, when it returns one separately from the
+   * answer.
+   *
+   * DeepSeek needs it back on every later request that carries `tools`, or it
+   * answers 400 — not a degraded reply, a dead session. The loop carries it on
+   * the assistant message for exactly that reason; Google's equivalent is the
+   * per-part `signature`, which is why both fields are per turn rather than in
+   * the transcript text.
+   */
+  reasoning?: string;
 }
 
 export interface TurnRequest {
@@ -71,6 +82,7 @@ const KEY_VARS: Record<Provider, string[]> = {
   anthropic: ["ANTHROPIC_API_KEY"],
   openai: ["OPENAI_API_KEY"],
   google: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+  deepseek: ["DEEPSEEK_API_KEY"],
 };
 
 /** The API key for a provider, or undefined when the operator has not set one. */
@@ -170,8 +182,30 @@ function toNumber(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
-/** OpenAI Chat Completions. */
-export function openaiClient(apiKey: string, fetchImpl: Fetch = globalThis.fetch, baseUrl = "https://api.openai.com/v1", sleep: Sleep = sleepMs): ProviderClient {
+/**
+ * The two wire details the OpenAI-compatible vendors do not share.
+ *
+ * `provider` names the vendor in the error envelope, because `usageLimitOf`
+ * matches `deepseek API 429` on the prefix this module writes. `maxTokensField`
+ * exists because DeepSeek documents `max_tokens` and OpenAI's newer chat API
+ * documents `max_completion_tokens`; sending the wrong one is a 400, not a
+ * harmless extra field.
+ */
+export interface OpenAIWire {
+  provider?: "openai" | "deepseek";
+  maxTokensField?: "max_completion_tokens" | "max_tokens";
+}
+
+/** OpenAI Chat Completions, also serving DeepSeek through `wire`. */
+export function openaiClient(
+  apiKey: string,
+  fetchImpl: Fetch = globalThis.fetch,
+  baseUrl = "https://api.openai.com/v1",
+  sleep: Sleep = sleepMs,
+  wire: OpenAIWire = {}
+): ProviderClient {
+  const provider = wire.provider ?? "openai";
+  const maxTokensField = wire.maxTokensField ?? "max_completion_tokens";
   return async (req) => {
     const messages: Record<string, unknown>[] = [{ role: "system", content: req.system }];
     for (const m of req.messages) {
@@ -183,6 +217,11 @@ export function openaiClient(apiKey: string, fetchImpl: Fetch = globalThis.fetch
           ...(m.toolCalls.length
             ? { tool_calls: m.toolCalls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: JSON.stringify(c.input) } })) }
             : {}),
+          // DeepSeek requires the chain of thought back on every later request
+          // that carries `tools`; without it the next turn is a 400. OpenAI does
+          // not document the field on an assistant message, so it is only sent
+          // on the wire that asked for it.
+          ...(provider === "deepseek" && m.reasoning ? { reasoning_content: m.reasoning } : {}),
         });
       } else messages.push({ role: "tool", tool_call_id: m.callId, content: m.text });
     }
@@ -200,10 +239,10 @@ export function openaiClient(apiKey: string, fetchImpl: Fetch = globalThis.fetch
           ...(req.tools.length
             ? { tools: req.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } })) }
             : {}),
-          ...(req.maxOutputTokens ? { max_completion_tokens: req.maxOutputTokens } : {}),
+          ...(req.maxOutputTokens ? { [maxTokensField]: req.maxOutputTokens } : {}),
         }),
       },
-      "openai",
+      provider,
       sleep
     );
 
@@ -211,6 +250,7 @@ export function openaiClient(apiKey: string, fetchImpl: Fetch = globalThis.fetch
     const usage = (body as { usage?: Record<string, unknown> }).usage ?? {};
     const cached = toNumber((usage.prompt_tokens_details as { cached_tokens?: unknown } | undefined)?.cached_tokens);
     const rawCalls = Array.isArray(choice.tool_calls) ? (choice.tool_calls as Record<string, unknown>[]) : [];
+    const reasoning = typeof choice.reasoning_content === "string" ? choice.reasoning_content : undefined;
     return {
       text: typeof choice.content === "string" ? choice.content : "",
       toolCalls: rawCalls.map((c, i) => {
@@ -221,6 +261,7 @@ export function openaiClient(apiKey: string, fetchImpl: Fetch = globalThis.fetch
           input: parseArgs(fn.arguments),
         };
       }),
+      ...(reasoning !== undefined ? { reasoning } : {}),
       usage: {
         // OpenAI's prompt_tokens includes the cached ones; the ledger prices
         // them separately, so subtract rather than book them at full rate.
@@ -231,6 +272,20 @@ export function openaiClient(apiKey: string, fetchImpl: Fetch = globalThis.fetch
       },
     };
   };
+}
+
+/**
+ * DeepSeek's OpenAI-compatible endpoint. Same request shape, two differences
+ * carried by `OpenAIWire`: the vendor label in the error envelope and the
+ * documented `max_tokens` field.
+ */
+export function deepseekClient(
+  apiKey: string,
+  fetchImpl: Fetch = globalThis.fetch,
+  baseUrl = "https://api.deepseek.com",
+  sleep: Sleep = sleepMs
+): ProviderClient {
+  return openaiClient(apiKey, fetchImpl, baseUrl, sleep, { provider: "deepseek", maxTokensField: "max_tokens" });
 }
 
 /**
@@ -354,6 +409,7 @@ export function clientFor(provider: Provider, env: NodeJS.ProcessEnv = process.e
   if (!key) throw new Error(`no API key for ${provider}: set ${keyVarFor(provider)}`);
   if (provider === "openai") return openaiClient(key, fetchImpl);
   if (provider === "google") return googleClient(key, fetchImpl);
+  if (provider === "deepseek") return deepseekClient(key, fetchImpl);
   // Anthropic runs on the SDK transport and never arrives here. Saying so out
   // loud beats returning something plausible if that ever stops being true.
   throw new Error(`${provider} does not use the charrette tool loop`);

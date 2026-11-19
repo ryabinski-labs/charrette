@@ -28,6 +28,15 @@ export const PRICES: Record<string, { in: number; out: number }> = {
   "claude-opus-5": { in: 5, out: 25 },
   "claude-sonnet-5": { in: 3, out: 15 },
   "claude-haiku-4-5-20251001": { in: 1, out: 5 },
+  // DeepSeek V4.1 Flash (api-docs.deepseek.com, read 2026-11-19). Peak rate:
+  // $0.30 input and $1.20 output per MTok, exactly double the off-peak rate.
+  // The peak figure is deliberate for the same reason the Gemini rows carry the
+  // standing rate — a table holding the cheap half under-charges for seven
+  // hours of every weekday, and under-charging is the direction this table
+  // exists to never go. Cache hits are $0.006 at peak; `CACHE_READ_MULT` books
+  // them at 0.1x input, which is $0.03 — five times the vendor rate and, again,
+  // the over-charging side.
+  "deepseek-flash": { in: 0.3, out: 1.2 },
   // OpenAI GPT-5.6, standard tier (developers.openai.com/api/docs/pricing).
   // Cached input is a flat 0.1x on all three, which is CACHE_READ_MULT already.
   // Only the standard tier is listed: the charrette sends interactive requests, so

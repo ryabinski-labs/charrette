@@ -342,7 +342,7 @@ describe("parallel scheduler", () => {
     };
     const store = new Store(":memory:");
     const controller = new RunController(store, new Bus(store), pool as unknown as AgentPool, noGithub, approveAll, repo());
-    const runId = await controller.startRun("do things", RunConfig.parse({ deterministicChecks: [] }));
+    const runId = await controller.startRun("do things", RunConfig.parse({ deterministicChecks: [], models: { worker: "claude-sonnet-5" } }));
 
     expect(store.getTask(runId, "task-a")!.state).toBe("MERGED");
     expect(workerSpecs).toHaveLength(2);

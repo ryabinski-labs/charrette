@@ -500,6 +500,20 @@ describe("charrette run — resolving what the run will actually do", () => {
     expect(printed()).not.toContain("models     ");
   });
 
+  it("SC-001-b starts a default run on the DeepSeek worker models", async () => {
+    // The schema default is one thing; the operator-visible promise is that a
+    // run started with no model flags hands the controller that default.
+    await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard");
+
+    expect(h.controllerMethods.startRun).toHaveBeenCalledWith(
+      "build a thing",
+      expect.objectContaining({
+        models: expect.objectContaining({ worker: "deepseek-flash", workerLight: "deepseek-flash" }),
+      }),
+      undefined
+    );
+  });
+
   it("names each role the operator moved, and only those", async () => {
     h.loadFileConfigMock.mockReturnValue({
       config: { models: { worker: "gpt-5.6-terra", demo: "gemini-3.5-flash-lite" } },

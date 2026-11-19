@@ -183,9 +183,12 @@ export async function* toolLoop(opts: ToolLoopOptions): AsyncGenerator<Record<st
       for (const call of turn.toolCalls) content.push({ type: "tool_use", id: call.id, name: call.name, input: call.input });
       yield { type: "assistant", session_id: sessionId, message: { content, usage: sdkUsage(turn.usage) } };
 
-      // `signature` rides along untouched: the provider that issued it is the
-      // only thing that reads it, and it must come back exactly as it left.
-      messages.push({ role: "assistant", text: turn.text, toolCalls: turn.toolCalls, signature: turn.signature });
+      // `signature` and `reasoning` ride along untouched: the provider that
+      // issued them is the only thing that reads them, and each must come back
+      // exactly as it left. Google signs the reasoning behind a part; DeepSeek
+      // returns the chain of thought separately and rejects the next tool turn
+      // if it does not come back.
+      messages.push({ role: "assistant", text: turn.text, toolCalls: turn.toolCalls, signature: turn.signature, reasoning: turn.reasoning });
 
       // The agent just wrote an account of its own work, so the material that
       // account was derived from can go. This is the only place the charrette

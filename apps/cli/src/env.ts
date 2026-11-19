@@ -1,17 +1,15 @@
 /**
  * Read `.env` from the working directory into `process.env`, if there is one.
  *
- * The charrette reads three vendor keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
- * `GEMINI_API_KEY`) straight off `process.env`, and until this existed the only
- * way to supply one was to export it in the shell that ran the command. That
- * was survivable while the whole default routing table was Anthropic and most
- * operators had that one key exported in a profile. Pinning `models.reviewer`
- * to Google ended it: a second key is now mandatory for every run, and the
- * obvious place to put a project's keys — the `.env` file already sitting in the
- * repository — was silently ignored. The failure was not subtle (`charrette run`
- * refuses on `missingKeys` before spending anything) but the advice it gives is
- * "export the key", which is the wrong answer for someone who just wrote it
- * down in the file that every other tool they own would have read.
+ * The charrette reads four vendor keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+ * `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`) straight off `process.env`, and until
+ * this existed the only way to supply one was to export it in the shell that
+ * ran the command. That was survivable while the whole default routing table
+ * was Anthropic and most operators had that one key exported in a profile.
+ * Pinning `models.reviewer` to Google ended it: a second key is now mandatory
+ * for every run, and the obvious place to put a project's keys — the `.env`
+ * file already sitting in the repository — was silently ignored. The default
+ * worker moving to DeepSeek made it a third mandatory key for the same reason.
  *
  * Three deliberate properties:
  *
