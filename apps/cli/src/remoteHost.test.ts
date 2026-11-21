@@ -79,3 +79,25 @@ describe("docs/REMOTE.md", () => {
     expect(changelog).toContain("allowlist");
   });
 });
+
+describe("the shareable remote-host plan", () => {
+  it("SC-014-a the compiled plan page carries the problem, architecture, threat model, decisions and rollout", () => {
+    const page = read("docs/remote-host-plan.md");
+    const headings = page
+      .split("\n")
+      .filter((line) => /^##\s/.test(line))
+      .map((line) => line.replace(/^#+\s*/, "").toLowerCase());
+
+    for (const topic of ["problem", "architecture", "threat model", "decisions", "rollout"]) {
+      expect(
+        headings.some((heading) => heading.includes(topic)),
+        `the plan page has no ${topic} section`
+      ).toBe(true);
+    }
+    expect(page).toContain("```text");
+    expect(page).toMatch(/prompt injection/i);
+    expect(page).toContain("DL-001");
+    expect(page).toContain("0.4.0");
+    expect(page).toContain("docs/REMOTE.md");
+  });
+});
