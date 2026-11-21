@@ -76,7 +76,8 @@ export const PRICES: Record<string, { in: number; out: number }> = {
 const CACHE_READ_MULT = 0.1;
 const CACHE_WRITE_MULT = 1.25;
 
-export function priceFor(model: string): { in: number; out: number } {
+/** The price-table row a model is billed at, or undefined when it falls to the fallback. */
+function priceRow(model: string): { in: number; out: number } | undefined {
   // `openai/gpt-5.6-terra` and `gpt-5.6-terra` are the same model and must cost
   // the same; without this the prefixed spelling falls through to the fallback
   // and the operator is over-charged for using a form the config accepts.
@@ -84,7 +85,16 @@ export function priceFor(model: string): { in: number; out: number } {
   const exact = PRICES[name];
   if (exact) return exact;
   const key = Object.keys(PRICES).find((k) => name.startsWith(k) || k.startsWith(name));
-  return key ? PRICES[key]! : { in: 10, out: 50 }; // unknown models priced at the top tier (Fable), never under
+  return key ? PRICES[key] : undefined;
+}
+
+export function priceFor(model: string): { in: number; out: number } {
+  return priceRow(model) ?? { in: 10, out: 50 }; // unknown models priced at the top tier (Fable), never under
+}
+
+/** Whether the ledger knows this model's own price rather than charging the fallback. */
+export function isPriced(model: string): boolean {
+  return priceRow(model) !== undefined;
 }
 
 export function costUsd(model: string, usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }): number {

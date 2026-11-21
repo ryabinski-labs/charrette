@@ -924,6 +924,29 @@ vendor details the client carries: it documents `max_tokens` rather than
 assistant turns to be sent back whenever the request carries tools. Omitting
 either is a 400, not a degraded reply.
 
+#### Newer models
+
+`charrette run` and `charrette resume` ask each vendor the run uses what it
+serves, and print a `newer` line for any role whose model has a newer release
+in the same family, with the `--model` flag and the `charrette.config.json`
+line that would switch it:
+
+```
+newer      claude-sonnet-5-5 is newer than claude-sonnet-5 (qa). To switch: --model qa=claude-sonnet-5-5, or "models": { "qa": "claude-sonnet-5-5" } in charrette.config.json.
+```
+
+It only recommends; nothing is switched for you. It stays within a family
+(Sonnet to Sonnet, Flash to Flash), so it never suggests moving a role to a
+cheaper tier or a pinned judge below its floor. If the newer model is not in
+the price table yet, the line says so, because until it is priced the ledger
+bills it at the $10/$50 fallback.
+
+Anthropic is asked with `ANTHROPIC_API_KEY` when one is set. Otherwise the
+installed Agent SDK's model table is used. Google and OpenAI are asked with
+their keys, and DeepSeek is skipped because its ids carry no version. Each
+request has four seconds, and a vendor that fails or times out just gives no
+recommendation. Set `CHARRETTE_MODEL_CHECK=0` to skip the check.
+
 #### Changing it mid-run
 
 You do not have to decide at the start. `--model` works on `run` and on
@@ -1025,6 +1048,7 @@ under-charging would let a cap silently stop binding.
 | `GEMINI_API_KEY` | **always** | `planner`, `spec`, `pm` and `workerHeavy` default to `gemini-3.8-flash`, and `reviewer` is pinned to Google; `GOOGLE_API_KEY` also accepted |
 | `GITHUB_TOKEN` | no | enables issues + PRs; falls back to `gh auth token` |
 | `CHARRETTE_GITHUB_REPO` | no | `owner/repo`; falls back to `gh repo view` |
+| `CHARRETTE_MODEL_CHECK` | no | `0` skips the startup check for newer models; see [Newer models](#newer-models) |
 
 Any of these may be written to a `.env` file instead of exported. It is read
 from **the directory you run `charrette` from**, which is deliberately not the

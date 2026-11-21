@@ -99,6 +99,7 @@ const h = vi.hoisted(() => {
     // Pass-through: which pins a run still has is settled in skillPins.test.ts.
     // What the CLI owes is asking, with the config the run will really use.
     pinsInPlayMock: vi.fn((c: { roleSkills: Record<string, string[]> }) => c.roleSkills),
+    newerModelBannerMock: vi.fn(async (_models: Record<string, string>) => [] as string[]),
     originSlugMock: vi.fn(async () => "acme/widgets" as string | null),
     verifyChecksMock: vi.fn(
     (_repo: string, checks: string[]): { kept: string[]; dropped: { command: string; reason: string }[] } => ({ kept: checks, dropped: [] })
@@ -173,6 +174,7 @@ vi.mock("@charrette/core", async (importOriginal) => ({
   // What the CLI owes is asking about the checks this run will actually use,
   // and putting the answer where the operator reads before approving a plan.
   checkMemoryBanner: h.checkMemoryBannerMock,
+  newerModelBanner: h.newerModelBannerMock,
   // What an unhonoured pin costs is settled in skillPins.test.ts against real
   // skill directories. What the CLI owes is asking about the directories and
   // the pins this run will actually use, and printing the answer where the
@@ -381,6 +383,7 @@ beforeEach(() => {
   h.ensureIgnoredMock.mockReset().mockReturnValue(false);
   h.repoUnusableMock.mockReset().mockResolvedValue(null);
   h.checkMemoryBannerMock.mockReset().mockReturnValue([]);
+  h.newerModelBannerMock.mockReset().mockResolvedValue([]);
   h.skillPinBannerMock.mockReset().mockReturnValue([]);
   h.pinsInPlayMock.mockClear();
   h.originSlugMock.mockReset().mockResolvedValue("acme/widgets");
@@ -524,7 +527,7 @@ describe("charrette run — resolving what the run will actually do", () => {
     const banner = printed();
     expect(banner).toContain("worker→gpt-5.6-terra");
     expect(banner).toContain("demo→gemini-3.5-flash-lite");
-    expect(banner).toContain("pinned roles are not movable");
+    expect(banner).toContain("pinned roles stay with their vendor");
     // The pinned Gemini reviewer is a default, not a move, so it stays out of a
     // line whose entire job is to show what the operator changed.
     expect(banner).not.toContain("reviewer→");
@@ -3545,5 +3548,41 @@ describe("version", () => {
       agent: { ok: true, version: "2.1.257", path: "/sdk/claude" },
     });
     expect(v.formatVersionMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A newer model in the same family as a role's, recommended at startup and
+ * never applied. The network half is in core's modelUpdates.test.ts; this is
+ * that the line reaches the operator, on both ways a run starts.
+ */
+describe("newer models at startup", () => {
+  const NEWER = ["newer      claude-sonnet-5-5 is newer than claude-sonnet-5 (qa). To switch: --model qa=claude-sonnet-5-5"];
+
+  it("puts the recommendation in `run`'s banner, for the models this run will use", async () => {
+    h.newerModelBannerMock.mockResolvedValue(NEWER);
+    await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard", "--model", "qa=claude-sonnet-5");
+    expect(printed()).toContain("claude-sonnet-5-5 is newer than claude-sonnet-5 (qa)");
+    expect(h.newerModelBannerMock.mock.calls[0]![0]).toMatchObject({ qa: "claude-sonnet-5" });
+  });
+
+  it("tells `resume` too, against the run's frozen models", async () => {
+    h.newerModelBannerMock.mockResolvedValue(NEWER);
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "EXECUTING", assignment: "a" }]);
+    h.storeMethods.getRun.mockReturnValue({ id: "run-1", state: "EXECUTING", config: { deterministicChecks: [], models: { qa: "claude-sonnet-5" } } });
+
+    await cli("resume", "--repo", "/repo", "--no-dashboard");
+
+    expect(printed()).toContain("claude-sonnet-5-5 is newer than claude-sonnet-5 (qa)");
+    expect(h.newerModelBannerMock).toHaveBeenCalledWith({ qa: "claude-sonnet-5" });
+  });
+
+  it("prints nothing on `resume` when nothing is newer", async () => {
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "EXECUTING", assignment: "a" }]);
+    h.storeMethods.getRun.mockReturnValue({ id: "run-1", state: "EXECUTING", config: { deterministicChecks: [], models: { qa: "claude-sonnet-5-5" } } });
+
+    await cli("resume", "--repo", "/repo", "--no-dashboard");
+
+    expect(printed()).not.toContain("is newer than");
   });
 });

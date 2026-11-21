@@ -5,7 +5,7 @@ import { sourceDigest, deliveryConfigProblems } from "@charrette/core";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_CHECK_TIMEOUT_MINUTES, ModelRoutingShape, RunConfig, SubscriptionConfig, statePaths } from "@charrette/shared";
-import { AgentPool, Bus, GateHandler, BridgedIntake, IntakeBridge, GitHubAdapter, RunController, Store, accountEnv, agentBinaryFiles, assembleReport, checkMemoryBanner, detectToolbelt, ensureIgnored, charretteBuild, missingKeys, originSlug, postmortem, renderPostmortem, reportPath, pinsInPlay, runLockHolder, skillPinBanner, standaloneReport, repoUnusable, wasMerged } from "@charrette/core";
+import { AgentPool, Bus, GateHandler, BridgedIntake, IntakeBridge, GitHubAdapter, RunController, Store, accountEnv, agentBinaryFiles, assembleReport, checkMemoryBanner, detectToolbelt, ensureIgnored, charretteBuild, missingKeys, newerModelBanner, originSlug, postmortem, renderPostmortem, reportPath, pinsInPlay, runLockHolder, skillPinBanner, standaloneReport, repoUnusable, wasMerged } from "@charrette/core";
 import { Dashboard } from "@charrette/dashboard";
 import { promptForNewCap, watchBudgetCommands } from "./budget.js";
 import { promptForAccount } from "./subscription.js";
@@ -657,7 +657,7 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
   const defaults = ModelRoutingShape.parse({});
   const moved = Object.entries(config.models).filter(([role, model]) => model !== defaults[role as keyof typeof defaults]);
   if (moved.length) {
-    banner.push(`models     ${moved.map(([role, model]) => `${role}→${model}`).join(" · ")}   (pinned roles are not movable)`);
+    banner.push(`models     ${moved.map(([role, model]) => `${role}→${model}`).join(" · ")}   (pinned roles stay with their vendor)`);
   }
 
   if (filePath) banner.push(`config     ${path.basename(filePath)}`);
@@ -776,6 +776,10 @@ export function buildProgram(): Command {
       // before any task started parks the whole run, and this is the last
       // moment the operator can act on that for free.
       banner.push(...checkMemoryBanner(store, config.deterministicChecks));
+      // A newer model in the same family as one a role is on. Recommended
+      // here, before anything is spent, and never applied: which model every
+      // agent runs on is the operator's call.
+      banner.push(...(await newerModelBanner(config.models)));
       dash.connect(controller);
       const url = await dash.start();
       if (url) {
@@ -1041,6 +1045,10 @@ export function buildProgram(): Command {
       if (resumed) {
         const pinned = skillPinBanner(resumed.config.skillsDirs, pinsInPlay(resumed.config));
         if (pinned.length) process.stdout.write(`skills     ${resumed.config.skillsDirs.join(" · ")}\n${pinned.join("\n")}\n`);
+        // A resumed run can be weeks old, which is when a newer model is most
+        // likely; `--model` on this same command is how to take it.
+        const newer = await newerModelBanner(resumed.config.models);
+        if (newer.length) process.stdout.write(`${newer.join("\n")}\n`);
       }
       const url = await dash.start();
       if (url) process.stdout.write(`Dashboard: ${url}\n(keep the fragment — it is your auth token)\n`);
