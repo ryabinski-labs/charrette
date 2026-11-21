@@ -29,22 +29,22 @@ const REGISTRY = `let MODELS=[${[
   entry("claude-opus-4-5", 32000, 64000),
   entry("claude-opus-4", 32000, 32000),
   entry("claude-sonnet-4-5", 32000, 64000),
-  entry("claude-opus-5", 64000, 128000),
-  entry("claude-fable-5", 64000, 128000),
+  entry("claude-opus-5-5", 64000, 128000),
+  entry("claude-fable-5-2", 64000, 128000),
 ].join(",")}];`;
 
 describe("reading the ceiling the installed SDK will actually grant", () => {
   it("reads every entry of the registry", () => {
     const table = ceilingTable(REGISTRY)!;
     expect(table.models).toHaveLength(6);
-    expect(table.models).toContainEqual({ id: "claude-opus-5", limits: { standard: 64_000, upper: 128_000 } });
+    expect(table.models).toContainEqual({ id: "claude-opus-5-5", limits: { standard: 64_000, upper: 128_000 } });
   });
 
   it("keeps both numbers, because they answer different questions", () => {
     // `standard` is what a message gets unasked; `upper` is what it gets when
     // the charrette asks. Reporting only one of them is how the planner ended up
     // asking for half of what it could have had.
-    expect(modelCeiling(ceilingTable(REGISTRY), "claude-opus-5")).toMatchObject({ known: true, standard: 64_000, upper: 128_000 });
+    expect(modelCeiling(ceilingTable(REGISTRY), "claude-opus-5-5")).toMatchObject({ known: true, standard: 64_000, upper: 128_000 });
   });
 
   it("prefers the longest matching id, because one id is a prefix of another", () => {
@@ -59,7 +59,7 @@ describe("reading the ceiling the installed SDK will actually grant", () => {
     const table = ceilingTable(REGISTRY);
     expect(modelCeiling(table, "Claude-Sonnet-4-5")).toMatchObject({ upper: 64_000 });
     // The 1M-context variant is the same model as far as output is concerned.
-    expect(modelCeiling(table, "claude-opus-5[1m]")).toMatchObject({ upper: 128_000 });
+    expect(modelCeiling(table, "claude-opus-5-5[1m]")).toMatchObject({ upper: 128_000 });
   });
 
   it("says a model is unlisted rather than inventing a number for it", () => {
@@ -69,8 +69,8 @@ describe("reading the ceiling the installed SDK will actually grant", () => {
   });
 
   it("keeps the first entry when a model is listed twice", () => {
-    const twice = `[${entry("claude-opus-5", 64000, 128000)},${entry("claude-opus-5", 1, 2)},${entry("claude-opus-4", 32000, 32000)},${entry("claude-opus-4-5", 32000, 64000)},${entry("claude-sonnet-4-5", 32000, 64000)},${entry("claude-3-5-haiku", 8192, 8192)}]`;
-    expect(modelCeiling(ceilingTable(twice), "claude-opus-5")).toMatchObject({ upper: 128_000 });
+    const twice = `[${entry("claude-opus-5-5", 64000, 128000)},${entry("claude-opus-5-5", 1, 2)},${entry("claude-opus-4", 32000, 32000)},${entry("claude-opus-4-5", 32000, 64000)},${entry("claude-sonnet-4-5", 32000, 64000)},${entry("claude-3-5-haiku", 8192, 8192)}]`;
+    expect(modelCeiling(ceilingTable(twice), "claude-opus-5-5")).toMatchObject({ upper: 128_000 });
   });
 });
 
@@ -81,7 +81,7 @@ describe("a bundle it cannot read the registry out of", () => {
 
   it("has no opinion when there are too few entries to be the registry", () => {
     // A handful of objects that happen to parse is a coincidence, not a table.
-    expect(ceilingTable(`[${entry("claude-opus-5", 64000, 128000)},${entry("claude-opus-4", 32000, 32000)}]`)).toBeUndefined();
+    expect(ceilingTable(`[${entry("claude-opus-5-5", 64000, 128000)},${entry("claude-opus-4", 32000, 32000)}]`)).toBeUndefined();
   });
 
   it("skips an entry that states no output limits rather than borrowing its neighbour's", () => {
@@ -92,7 +92,7 @@ describe("a bundle it cannot read the registry out of", () => {
       entry("claude-opus-4-5", 32000, 64000),
       entry("claude-opus-4", 32000, 32000),
       entry("claude-sonnet-4-5", 32000, 64000),
-      entry("claude-opus-5", 64000, 128000),
+      entry("claude-opus-5-5", 64000, 128000),
     ].join(",")}]`;
     const table = ceilingTable(gap)!;
     expect(table.models.some((m) => m.id === "claude-opus-9")).toBe(false);
@@ -140,17 +140,17 @@ describe("the SDK this charrette is actually installed against", () => {
   });
 
   it("knows the model the heavy tier runs on", async () => {
-    const reading = await sdkCeiling("claude-fable-5-1");
+    const reading = await sdkCeiling("claude-fable-5-2");
     expect(reading).toMatchObject({ known: true });
     expect(requestTokens(reading, 64_000)).toBeGreaterThanOrEqual(64_000);
   });
 
   it("knows the model the planner runs on, and grants more than the charrette used to ask for", async () => {
     // The regression this module exists for, in its fixed form: 0.1.77 had never
-    // heard of `claude-opus-5` and silently handed it 32000, which truncated a
+    // heard of `claude-opus-5-5` and silently handed it 32000, which truncated a
     // plan mid-JSON and — once the wrap-up message landed on the truncated turn
     // — took a whole run down with a 400.
-    const reading = await sdkCeiling("claude-opus-5");
+    const reading = await sdkCeiling("claude-opus-5-5");
     expect(reading).toMatchObject({ known: true });
     expect(requestTokens(reading, 64_000)).toBeGreaterThanOrEqual(64_000);
     expect(ceilingNote(reading, 64_000)).toBeUndefined();
@@ -162,7 +162,7 @@ describe("the SDK this charrette is actually installed against", () => {
       reads++;
       return REGISTRY;
     };
-    await sdkCeiling("claude-opus-5", load);
+    await sdkCeiling("claude-opus-5-5", load);
     await sdkCeiling("claude-opus-4", load);
     expect(reads).toBe(1);
   });
@@ -170,9 +170,9 @@ describe("the SDK this charrette is actually installed against", () => {
   it("has no opinion when the SDK cannot be read at all", async () => {
     // A pnpm layout this cannot resolve, a bundle that is not on disk. None of
     // it may take a run down over a message the run does not need.
-    expect(await sdkCeiling("claude-opus-5", () => Promise.reject(new Error("ENOENT")))).toEqual({
+    expect(await sdkCeiling("claude-opus-5-5", () => Promise.reject(new Error("ENOENT")))).toEqual({
       known: false,
-      model: "claude-opus-5",
+      model: "claude-opus-5-5",
       reason: "unreadable",
     });
   });
@@ -199,13 +199,13 @@ describe("what the operator is told about it", () => {
   it("says nothing when the request stands", () => {
     // Silence is the signal that the ceiling was granted, so it has to stay
     // silence — a reassurance printed every run is a line nobody reads.
-    expect(ceilingNote(modelCeiling(table, "claude-opus-5"), 64_000)).toBeUndefined();
+    expect(ceilingNote(modelCeiling(table, "claude-opus-5-5"), 64_000)).toBeUndefined();
     expect(ceilingNote(modelCeiling(table, "claude-opus-4"), 32_000)).toBeUndefined();
   });
 
   it("says nothing when the ceiling could not be read", () => {
     // Nothing the operator can act on, unlike an SDK that is merely too old.
-    expect(ceilingNote({ known: false, model: "claude-opus-5", reason: "unreadable" }, 64_000)).toBeUndefined();
+    expect(ceilingNote({ known: false, model: "claude-opus-5-5", reason: "unreadable" }, 64_000)).toBeUndefined();
   });
 
   it("names the role that asked, since the planner is not the only one who can", () => {
@@ -219,7 +219,7 @@ describe("how much to ask each message for", () => {
   it("asks for everything the model allows, not the charrette's own figure", () => {
     // The planner emits one indivisible artifact per message. Leaving 64000
     // tokens of the model's allowance unused is a plan split in half for nothing.
-    expect(requestTokens(modelCeiling(table, "claude-opus-5"), 64_000)).toBe(128_000);
+    expect(requestTokens(modelCeiling(table, "claude-opus-5-5"), 64_000)).toBe(128_000);
     expect(requestTokens(modelCeiling(table, "claude-opus-4"), 64_000)).toBe(32_000);
   });
 
@@ -234,8 +234,8 @@ describe("how much to ask each message for", () => {
     // An unreadable SDK leaves the charrette exactly where it was before it could
     // read one: taking its own request at face value.
     expect(grantedTokens(modelCeiling(table, "claude-opus-4"), 64_000)).toBe(32_000);
-    expect(grantedTokens(modelCeiling(table, "claude-opus-5"), 128_000)).toBe(128_000);
-    expect(grantedTokens(modelCeiling(table, "claude-opus-5"), 16_000)).toBe(16_000);
+    expect(grantedTokens(modelCeiling(table, "claude-opus-5-5"), 128_000)).toBe(128_000);
+    expect(grantedTokens(modelCeiling(table, "claude-opus-5-5"), 16_000)).toBe(16_000);
     expect(grantedTokens({ known: false, model: "x", reason: "unreadable" }, 64_000)).toBe(64_000);
   });
 });
@@ -254,8 +254,8 @@ describe("reading the registry out of the SDK's native binary", () => {
     entry("claude-opus-4-5", 32000, 64000),
     entry("claude-opus-4", 32000, 32000),
     entry("claude-sonnet-4-5", 32000, 64000),
-    entry("claude-opus-5", 64000, 128000),
-    entry("claude-fable-5-1", 64000, 128000),
+    entry("claude-opus-5-5", 64000, 128000),
+    entry("claude-fable-5-2", 64000, 128000),
   ];
 
   it("finds it in a file read a chunk at a time, and reads each model once", async () => {
@@ -265,7 +265,7 @@ describe("reading the registry out of the SDK's native binary", () => {
     const table = await ceilingTableFromFile(registryFile(six, 4096), 512, 400);
 
     expect(table!.models).toHaveLength(6);
-    expect(table!.models).toContainEqual({ id: "claude-fable-5-1", limits: { standard: 64_000, upper: 128_000 } });
+    expect(table!.models).toContainEqual({ id: "claude-fable-5-2", limits: { standard: 64_000, upper: 128_000 } });
     // Longest first, so a dated alias matches its family rather than a prefix.
     expect(table!.models[0]!.id.length).toBeGreaterThanOrEqual(table!.models[5]!.id.length);
   });

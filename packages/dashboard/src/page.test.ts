@@ -16,6 +16,7 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PRICES } from "@charrette/core";
+import { RETIRED_MODELS } from "@charrette/shared";
 import { MODEL_CHOICES, PAGE_HTML, PINNED_CHOICES } from "./page.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- the page is untyped JS. */
@@ -409,7 +410,7 @@ describe("the run panel", () => {
 describe("what is running now", () => {
   const session = (over: Partial<Record<string, Any>> = {}): Any => ({
     id: "s1", role: "worker", taskId: "t1", state: "running",
-    startedAt: NOW - 60_000, turns: 12, model: "claude-opus-5", ...over,
+    startedAt: NOW - 60_000, turns: 12, model: "claude-opus-5-5", ...over,
   });
 
   it("lists the running agent", async () => {
@@ -1539,13 +1540,17 @@ describe("the models the dropdown offers", () => {
    * and to nothing else: not another vendor, not that vendor's small tier.
    * The same `routingViolations` the server re-parses through decides it.
    */
+  it("offers no retired model", () => {
+    expect(MODEL_CHOICES.filter((m) => m in RETIRED_MODELS)).toEqual([]);
+  });
+
   it("offers each pinned role only its vendor's models above the floor", () => {
     expect(PINNED_CHOICES.qa).toEqual({
       vendor: "Anthropic",
-      models: ["claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"],
+      models: ["claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5"],
     });
     expect(PINNED_CHOICES.intake!.models).toEqual(PINNED_CHOICES.qa!.models);
     expect(PINNED_CHOICES.prod!.models).toEqual(PINNED_CHOICES.qa!.models);
-    expect(PINNED_CHOICES.reviewer).toEqual({ vendor: "Google", models: ["gemini-3.6-flash", "gemini-3.8-flash"] });
+    expect(PINNED_CHOICES.reviewer).toEqual({ vendor: "Google", models: ["gemini-3.8-flash"] });
   });
 });

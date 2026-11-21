@@ -4,8 +4,8 @@ import { PINNED_ROLES, modelId, providerFor, routingViolations, splitModel } fro
 
 describe("which vendor answers for a model name", () => {
   it("reads the family out of the name, so existing configs keep working", () => {
-    expect(providerFor("claude-opus-5")).toBe("anthropic");
-    expect(providerFor("claude-haiku-4-5-20251001")).toBe("anthropic");
+    expect(providerFor("claude-opus-5-5")).toBe("anthropic");
+    expect(providerFor("claude-haiku-5-5")).toBe("anthropic");
     expect(providerFor("gpt-5.6-terra")).toBe("openai");
     expect(providerFor("o3-mini")).toBe("openai");
     expect(providerFor("gemini-3.5-flash-lite")).toBe("google");
@@ -32,7 +32,7 @@ describe("which vendor answers for a model name", () => {
 
 describe("the roles whose vendor is not the operator's to choose", () => {
   it("passes an all-Anthropic routing table", () => {
-    expect(routingViolations({ worker: "claude-sonnet-5", qa: "claude-sonnet-5" })).toEqual([]);
+    expect(routingViolations({ worker: "claude-sonnet-5-5", qa: "claude-sonnet-5-5" })).toEqual([]);
   });
 
   it("allows the working roles to be pointed at another vendor", () => {
@@ -70,7 +70,7 @@ describe("the roles whose vendor is not the operator's to choose", () => {
     // it only stopped a judge changing *company*. Haiku is an Anthropic model,
     // so the vendor rule waved through the exact routing the pin was written
     // to prevent.
-    const [message, ...rest] = routingViolations({ qa: "claude-haiku-4-5-20251001" });
+    const [message, ...rest] = routingViolations({ qa: "claude-haiku-5-5" });
     expect(rest).toEqual([]);
     expect(message).toContain("models.qa");
     expect(message).toContain("below the capability floor");
@@ -82,7 +82,7 @@ describe("the roles whose vendor is not the operator's to choose", () => {
     // Matched on the family rather than on today's ids, so the next one is
     // refused the day it ships rather than the day somebody updates a list.
     expect(routingViolations({ reviewer: "claude-haiku-9" })).toHaveLength(1);
-    expect(routingViolations({ prod: "anthropic/claude-haiku-4-5-20251001" })).toHaveLength(1);
+    expect(routingViolations({ prod: "anthropic/claude-haiku-5-5" })).toHaveLength(1);
   });
 
   it("reports a moved judge once, for the vendor, rather than twice", () => {
@@ -98,10 +98,10 @@ describe("the roles whose vendor is not the operator's to choose", () => {
     // roles whose verdict ends something, not about cheap models.
     expect(
       routingViolations({
-        demo: "claude-haiku-4-5-20251001",
-        repair: "claude-haiku-4-5-20251001",
-        workerLight: "claude-haiku-4-5-20251001",
-        worker: "claude-sonnet-5",
+        demo: "claude-haiku-5-5",
+        repair: "claude-haiku-5-5",
+        workerLight: "claude-haiku-5-5",
+        worker: "claude-sonnet-5-5",
       })
     ).toEqual([]);
   });
@@ -119,7 +119,7 @@ describe("the roles whose vendor is not the operator's to choose", () => {
     // silent — an Opus reviewer works perfectly, it just shares the blind spots
     // of the Opus-family worker whose diff it is reviewing.
     expect(PINNED_ROLES.reviewer?.provider).toBe("google");
-    const [message, ...rest] = routingViolations({ reviewer: "claude-opus-5" });
+    const [message, ...rest] = routingViolations({ reviewer: "claude-opus-5-5" });
     expect(rest).toEqual([]);
     expect(message).toContain("models.reviewer");
     expect(message).toContain("pinned to Google");
@@ -141,8 +141,8 @@ describe("the roles whose vendor is not the operator's to choose", () => {
     // `lite` and not `flash`: Flash is where Gemini ships the judging-capable
     // model this role is pointed at, so a floor written as /flash/ would refuse
     // the default and stop every run.
-    expect(routingViolations({ reviewer: "gemini-3.6-flash" })).toEqual([]);
-    expect(routingViolations({ reviewer: "google/gemini-3.6-flash" })).toEqual([]);
+    expect(routingViolations({ reviewer: "gemini-3.8-flash" })).toEqual([]);
+    expect(routingViolations({ reviewer: "google/gemini-3.8-flash" })).toEqual([]);
   });
 });
 
@@ -162,7 +162,7 @@ describe("the run config refuses a routing it cannot honour", () => {
   });
 
   it("rejects the whole config when a judging role is dropped to the small tier", () => {
-    const result = ModelRouting.safeParse({ qa: "claude-haiku-4-5-20251001" });
+    const result = ModelRouting.safeParse({ qa: "claude-haiku-5-5" });
     expect(result.success).toBe(false);
     expect(result.error?.issues[0]?.message).toContain("below the capability floor");
   });

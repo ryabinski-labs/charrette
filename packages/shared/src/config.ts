@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { DeliveryConfig } from "./delivery.js";
 import { routingViolations } from "./providers.js";
+import { retireModels } from "./retired.js";
 
 /**
  * How long a single deterministic check may run before the charrette kills it.
@@ -220,8 +221,12 @@ export const ModelRoutingShape = z.object({
  * open. Any future pin that moves a role which already had a default needs the
  * same treatment; the check to make is whether an existing row could hold a
  * value the new rule refuses.
+ *
+ * A retired model (`RETIRED_MODELS` in retired.ts) is read as its replacement
+ * before anything else looks at it, so no config, frozen or fresh, can route a
+ * role to one.
  */
-export const ModelRouting = ModelRoutingShape.superRefine((models, ctx) => {
+export const ModelRouting = z.preprocess(retireModels, ModelRoutingShape).superRefine((models, ctx) => {
   for (const message of routingViolations(models)) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message });
   }

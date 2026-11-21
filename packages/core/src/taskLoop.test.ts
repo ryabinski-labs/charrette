@@ -221,7 +221,7 @@ describe("focused worker briefings", () => {
     expect(specs.find((spec) => spec.role === "qa")!.prompt).not.toContain("checks successfully in this worktree");
   });
 
-  it.each(["gpt-5.6-terra", "gemini-3.6-flash"])("keeps the full assignment when %s retries without a resumable transcript", async (model) => {
+  it.each(["gpt-5.6-terra", "gemini-3.8-flash"])("keeps the full assignment when %s retries without a resumable transcript", async (model) => {
     const dir = repo();
     const { pool, specs } = rolePool({
       worker: (spec, nth) => {
@@ -252,7 +252,7 @@ describe("focused worker briefings", () => {
       },
       qa: (_spec, nth) => nth === 1 ? QA_FAIL : QA_PASS,
     });
-    const { controller, runId } = executing({ repoPath: dir, pool, config: { models: { worker: "claude-sonnet-5" } } });
+    const { controller, runId } = executing({ repoPath: dir, pool, config: { models: { worker: "claude-sonnet-5-5" } } });
     await controller.resume(runId);
     const retry = specs.filter((spec) => spec.role === "worker")[1]!;
     expect(retry.resume).toBe("sdk-worker");
@@ -266,7 +266,7 @@ describe("focused worker briefings", () => {
       worker: (spec, nth) => {
         if (nth === 1) {
           commitInWorktree(spec.cwd, "adapter.txt", "already built\n");
-          built.store.db.prepare("INSERT INTO sessions (id,runId,taskId,role,model,state,startedAt) VALUES ('interrupted',?,'task-a','worker','claude-sonnet-5','crashed',0)").run(spec.runId);
+          built.store.db.prepare("INSERT INTO sessions (id,runId,taskId,role,model,state,startedAt) VALUES ('interrupted',?,'task-a','worker','claude-sonnet-5-5','crashed',0)").run(spec.runId);
           built.store.appendEvent({ type: "agent.checkpoint", runId: spec.runId, taskId: "task-a", sessionId: "interrupted", turn: 20, digest: "adapter.txt is committed; next add its test", questions: [], ts: 0 });
           return new Error("connection closed");
         }
@@ -296,7 +296,7 @@ describe("focused worker briefings", () => {
       },
       qa: (_spec, nth) => nth < 3 ? QA_FAIL : QA_PASS,
     });
-    const { controller, runId } = executing({ repoPath: dir, pool, config: { models: { worker: "claude-sonnet-5", workerHeavy: "gpt-5.6-terra" } } });
+    const { controller, runId } = executing({ repoPath: dir, pool, config: { models: { worker: "claude-sonnet-5-5", workerHeavy: "gpt-5.6-terra" } } });
     await controller.resume(runId);
     const workers = specs.filter((spec) => spec.role === "worker");
     expect(workers).toHaveLength(3);
@@ -313,7 +313,7 @@ describe("focused worker briefings", () => {
       worker: (spec, nth) => {
         if (nth === 1 || (nth === 2 && newCheckpoint)) {
           const sessionId = `worker-${nth}`;
-          built.store.db.prepare("INSERT INTO sessions (id,runId,taskId,role,model,state,startedAt) VALUES (?,?,'task-a','worker','claude-sonnet-5','done',0)").run(sessionId, spec.runId);
+          built.store.db.prepare("INSERT INTO sessions (id,runId,taskId,role,model,state,startedAt) VALUES (?,?,'task-a','worker','claude-sonnet-5-5','done',0)").run(sessionId, spec.runId);
           built.store.appendEvent({ type: "agent.checkpoint", runId: spec.runId, taskId: "task-a", sessionId, turn: 20, digest: nth === 1 ? "old incomplete plan" : "new partial retry progress", questions: [], ts: 0 });
         }
         if (nth === 2) return new Error("connection closed before a result");

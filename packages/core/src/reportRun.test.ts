@@ -327,7 +327,7 @@ describe("assembling the report", () => {
   it("carries the run's own numbers and the ledger through", () => {
     const { store } = run();
     task(store, { id: "a", title: "Checkout", prNumber: 7, touchedPaths: ["src/checkout.ts"] });
-    store.recordUsage({ runId: "run-1", sessionId: "s1", model: "claude-sonnet-5", inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 12.5 });
+    store.recordUsage({ runId: "run-1", sessionId: "s1", model: "claude-sonnet-5-5", inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 12.5 });
 
     const report = buildCompletionReport(sources(store, { project: "demo", changed: [{ path: "src/checkout.ts", text: "process.env.STRIPE_SECRET_KEY" }] }));
     expect(report.project).toBe("demo");

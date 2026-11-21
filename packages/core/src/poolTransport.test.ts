@@ -310,7 +310,7 @@ describe("the pairings the charrette refuses outright", () => {
       yield { type: "result", subtype: "success", result: "ok", usage: {} };
     })());
     // WebSearch has no local implementation, but the SDK provides it.
-    const out = await pool.run(spec({ model: "claude-sonnet-5", tools: ["WebSearch"], mcpServers: { x: {} } as never }));
+    const out = await pool.run(spec({ model: "claude-sonnet-5-5", tools: ["WebSearch"], mcpServers: { x: {} } as never }));
     expect(out.resultText).toBe("ok");
   });
 });
@@ -327,7 +327,7 @@ describe("a re-dispatched worker on a stateless provider", () => {
     queryMock.mockImplementation(() => (async function* () {
       yield { type: "result", subtype: "success", result: "ok", usage: {} };
     })());
-    await pool.run(spec({ model: "claude-opus-5", resume: "earlier-session-id" }));
+    await pool.run(spec({ model: "claude-opus-5-5", resume: "earlier-session-id" }));
     const logs = events.filter((e) => e.type === "agent.log") as { text: string }[];
     expect(logs.some((l) => l.text.includes("starting cold"))).toBe(false);
   });

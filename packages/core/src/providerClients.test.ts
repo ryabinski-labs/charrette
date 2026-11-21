@@ -187,7 +187,7 @@ describe("talking to Google", () => {
   });
 
   it("bills thinking tokens, which Gemini reports outside the candidate count", async () => {
-    // The numbers are a real gemini-3.6-flash reply: candidates and thoughts are
+    // The numbers are a real gemini-3.8-flash reply: candidates and thoughts are
     // siblings summing into totalTokenCount, and Google charges both at the
     // output rate. Counting candidates alone books a reasoning model at under a
     // third of its cost — and since `models.reviewer` is pinned to Gemini, that
@@ -197,7 +197,7 @@ describe("talking to Google", () => {
       candidates: [{ content: { parts: [{ text: "ok" }] } }],
       usageMetadata: { promptTokenCount: 67, candidatesTokenCount: 20, thoughtsTokenCount: 43, totalTokenCount: 130 },
     });
-    const turn = await googleClient("k", impl)({ model: "gemini-3.6-flash", system: "s", messages: [], tools: [], signal });
+    const turn = await googleClient("k", impl)({ model: "gemini-3.8-flash", system: "s", messages: [], tools: [], signal });
     expect(turn.usage).toEqual({ inputTokens: 67, outputTokens: 63, cacheReadTokens: 0, cacheWriteTokens: 0 });
   });
 
@@ -311,7 +311,7 @@ function stubSequence(replies: { status?: number; text?: string; body?: unknown 
  */
 describe("a vendor that is briefly unable rather than refusing", () => {
   const ok = { candidates: [{ content: { parts: [{ text: "fine" }] } }] };
-  const req = { model: "gemini-3.6-flash", system: "s", messages: [], tools: [], signal };
+  const req = { model: "gemini-3.8-flash", system: "s", messages: [], tools: [], signal };
 
   it("tries again when the model is overloaded, and answers", async () => {
     const slept: number[] = [];
@@ -394,7 +394,7 @@ describe("a vendor that is briefly unable rather than refusing", () => {
               {
                 quotaMetric: "generativelanguage.googleapis.com/generate_content_free_tier_requests",
                 quotaId: "GenerateRequestsPerMinutePerProjectPerModel-FreeTier",
-                quotaDimensions: { model: "gemini-3.6-flash", location: "global" },
+                quotaDimensions: { model: "gemini-3.8-flash", location: "global" },
                 quotaValue: "10",
               },
             ],
@@ -434,7 +434,7 @@ describe("finding the operator's API keys", () => {
 
 describe("the check that runs before a run starts", () => {
   it("passes an all-Anthropic table without needing any key", () => {
-    expect(missingKeys({ worker: "claude-sonnet-5", qa: "claude-sonnet-5" }, {})).toEqual([]);
+    expect(missingKeys({ worker: "claude-sonnet-5-5", qa: "claude-sonnet-5-5" }, {})).toEqual([]);
   });
 
   it("passes when the key for the routed vendor is set", () => {

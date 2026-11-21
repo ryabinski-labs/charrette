@@ -19,6 +19,7 @@ const h = vi.hoisted(() => {
     amendProbe: vi.fn(),
   amendCriteria: vi.fn(),
     patchRunConfig: vi.fn(),
+    retiredAtOpen: vi.fn(() => [] as { role: string; from: string; to: string }[]),
     spentUsd: vi.fn(() => 0),
     deployStatus: vi.fn(() => null as unknown),
     prodVerdict: vi.fn(() => null as unknown),
@@ -332,6 +333,7 @@ beforeEach(() => {
   }
   h.storeMethods.listRuns.mockReturnValue([]);
   h.storeMethods.getRun.mockReturnValue(undefined);
+  h.storeMethods.retiredAtOpen.mockReturnValue([]);
   h.storeMethods.listTasks.mockReturnValue([]);
   h.storeMethods.getTask.mockReturnValue(undefined);
   h.storeMethods.spentUsd.mockReturnValue(0);
@@ -553,7 +555,7 @@ describe("charrette run — resolving what the run will actually do", () => {
     // not report that it judged worse, it reports PASS.
     h.loadFileConfigMock.mockReturnValue({ config: {}, path: null });
     await expect(
-      cli("run", "build a thing", "--repo", "/repo", "--no-dashboard", "--model", "qa=claude-haiku-4-5-20251001")
+      cli("run", "build a thing", "--repo", "/repo", "--no-dashboard", "--model", "qa=claude-haiku-5-5")
     ).rejects.toThrow(/below the capability floor/);
     expect(h.RunControllerMock).not.toHaveBeenCalled();
   });
@@ -563,7 +565,7 @@ describe("charrette run — resolving what the run will actually do", () => {
     // issue list, and the crash handler prints that plus a stack trace. The
     // routing rules are the ones an operator trips on purpose, while trying to
     // make a run cheaper, so the reason has to survive being skimmed.
-    h.loadFileConfigMock.mockReturnValue({ config: { models: { reviewer: "claude-haiku-4-5-20251001" } }, path: "/repo/charrette.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { models: { reviewer: "claude-haiku-5-5" } }, path: "/repo/charrette.config.json" });
     const err = await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard").then(
       () => null,
       (e: Error) => e
@@ -575,7 +577,7 @@ describe("charrette run — resolving what the run will actually do", () => {
   });
 
   it("takes a routing change from the command line, over the config file", async () => {
-    h.loadFileConfigMock.mockReturnValue({ config: { models: { worker: "claude-sonnet-5" } }, path: "/repo/charrette.config.json" });
+    h.loadFileConfigMock.mockReturnValue({ config: { models: { worker: "claude-sonnet-5-5" } }, path: "/repo/charrette.config.json" });
     await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard", "--model", "worker=gpt-5.6-terra", "--model", "demo=gemini-3.5-flash-lite");
 
     const banner = printed();
@@ -1271,11 +1273,11 @@ describe("what the run narrates to the terminal", () => {
   });
 
   it("prints spend, QA verdicts and delivered feedback", () => {
-    publish({ type: "agent.usage", costUsd: 0.12345, model: "claude-opus-5" });
+    publish({ type: "agent.usage", costUsd: 0.12345, model: "claude-opus-5-5" });
     publish({ type: "task.qa_verdict", taskId: "auth", iteration: 2, verdict: "REJECTED" });
     publish({ type: "task.feedback", taskId: "auth", delivery: "mid-flight" });
 
-    expect(printed()).toBe("  $ 0.123 (claude-opus-5)\n  QA[auth] iteration 2: REJECTED\n  ✉ your feedback → auth (mid-flight)\n");
+    expect(printed()).toBe("  $ 0.123 (claude-opus-5-5)\n  QA[auth] iteration 2: REJECTED\n  ✉ your feedback → auth (mid-flight)\n");
   });
 
   it("ignores an event type it has nothing to say about", () => {
@@ -1561,9 +1563,9 @@ describe("charrette resume", () => {
     h.storeMethods.getRun.mockReturnValue({
       id: "run-old",
       state: "EXECUTING",
-      config: { models: { reviewer: "gemini-3.6-flash" }, deterministicChecks: [] },
+      config: { models: { reviewer: "gemini-3.8-flash" }, deterministicChecks: [] },
     });
-    h.missingKeysMock.mockReturnValue(["GEMINI_API_KEY is not set, but reviewer (gemini-3.6-flash) is routed to google."]);
+    h.missingKeysMock.mockReturnValue(["GEMINI_API_KEY is not set, but reviewer (gemini-3.8-flash) is routed to google."]);
 
     await expect(cli("resume", "run-old", "--repo", "/repo", "--no-dashboard")).rejects.toThrow(/GEMINI_API_KEY is not set/);
     expect(h.controllerMethods.resume).not.toHaveBeenCalled();
@@ -1857,19 +1859,19 @@ describe("charrette resume — settings the operator changed since the run start
     // The reason to change routing mid-run is that the budget is going faster
     // than the work is, and the tasks still queued are the only ones that can
     // still be made cheaper.
-    existing({ models: { worker: "claude-sonnet-5", qa: "claude-sonnet-5" } });
+    existing({ models: { worker: "claude-sonnet-5-5", qa: "claude-sonnet-5-5" } });
     h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/charrette.config.json" });
 
     await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard", "--model", "worker=gpt-5.6-terra");
 
     expect(h.storeMethods.patchRunConfig).toHaveBeenCalledWith("run-1", {
-      models: { worker: "gpt-5.6-terra", qa: "claude-sonnet-5" },
+      models: { worker: "gpt-5.6-terra", qa: "claude-sonnet-5-5" },
     });
-    expect(printed()).toContain("worker re-routed for the rest of the run: claude-sonnet-5 → gpt-5.6-terra");
+    expect(printed()).toContain("worker re-routed for the rest of the run: claude-sonnet-5-5 → gpt-5.6-terra");
   });
 
   it("takes the same change from the config file", async () => {
-    existing({ models: { worker: "claude-sonnet-5" } });
+    existing({ models: { worker: "claude-sonnet-5-5" } });
     h.loadFileConfigMock.mockReturnValue({ config: { models: { worker: "gpt-5.6-terra" } }, path: "/repo/charrette.config.json" });
 
     await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
@@ -1878,8 +1880,8 @@ describe("charrette resume — settings the operator changed since the run start
   });
 
   it("leaves the routing alone when nothing changed", async () => {
-    existing({ models: { worker: "claude-sonnet-5" } });
-    h.loadFileConfigMock.mockReturnValue({ config: { models: { worker: "claude-sonnet-5" } }, path: "/repo/charrette.config.json" });
+    existing({ models: { worker: "claude-sonnet-5-5" } });
+    h.loadFileConfigMock.mockReturnValue({ config: { models: { worker: "claude-sonnet-5-5" } }, path: "/repo/charrette.config.json" });
 
     await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
 
@@ -1887,7 +1889,7 @@ describe("charrette resume — settings the operator changed since the run start
   });
 
   it("refuses a re-route to a provider with no key, before resuming", async () => {
-    existing({ models: { worker: "claude-sonnet-5" } });
+    existing({ models: { worker: "claude-sonnet-5-5" } });
     h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/charrette.config.json" });
     h.missingKeysMock.mockReturnValue(["OPENAI_API_KEY is not set, but worker (gpt-5.6-terra) is routed to openai."]);
 
@@ -1899,11 +1901,11 @@ describe("charrette resume — settings the operator changed since the run start
     // The resume line is where an operator reaches for a cheaper model, because
     // the reason to re-route is almost always that the budget is going faster
     // than the work. `qa` is the one that must not get cheaper.
-    existing({ models: { qa: "claude-sonnet-5" } });
+    existing({ models: { qa: "claude-sonnet-5-5" } });
     h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/charrette.config.json" });
 
     await expect(
-      cli("resume", "run-1", "--repo", "/repo", "--no-dashboard", "--model", "qa=claude-haiku-4-5-20251001")
+      cli("resume", "run-1", "--repo", "/repo", "--no-dashboard", "--model", "qa=claude-haiku-5-5")
     ).rejects.toThrow(/that run configuration cannot be used:[\s\S]*below the capability floor/);
     expect(h.storeMethods.patchRunConfig).not.toHaveBeenCalled();
   });
@@ -1923,7 +1925,7 @@ describe("charrette resume — settings the operator changed since the run start
   it("rejects a misspelled role instead of silently ignoring it", async () => {
     // A flag that quietly did nothing would leave the operator watching an
     // expensive run they thought they had just made cheap.
-    existing({ models: { worker: "claude-sonnet-5" } });
+    existing({ models: { worker: "claude-sonnet-5-5" } });
     h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/charrette.config.json" });
 
     await expect(cli("resume", "run-1", "--repo", "/repo", "--no-dashboard", "--model", "wroker=gpt-5.6-terra")).rejects.toThrow(/no role called "wroker"/);
@@ -3557,24 +3559,24 @@ describe("version", () => {
  * that the line reaches the operator, on both ways a run starts.
  */
 describe("newer models at startup", () => {
-  const NEWER = ["newer      claude-sonnet-5-5 is newer than claude-sonnet-5 (qa). To switch: --model qa=claude-sonnet-5-5"];
+  const NEWER = ["newer      claude-sonnet-6 is newer than claude-sonnet-5-5 (qa). To switch: --model qa=claude-sonnet-6"];
 
   it("puts the recommendation in `run`'s banner, for the models this run will use", async () => {
     h.newerModelBannerMock.mockResolvedValue(NEWER);
-    await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard", "--model", "qa=claude-sonnet-5");
-    expect(printed()).toContain("claude-sonnet-5-5 is newer than claude-sonnet-5 (qa)");
-    expect(h.newerModelBannerMock.mock.calls[0]![0]).toMatchObject({ qa: "claude-sonnet-5" });
+    await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard", "--model", "qa=claude-sonnet-5-5");
+    expect(printed()).toContain("claude-sonnet-6 is newer than claude-sonnet-5-5 (qa)");
+    expect(h.newerModelBannerMock.mock.calls[0]![0]).toMatchObject({ qa: "claude-sonnet-5-5" });
   });
 
   it("tells `resume` too, against the run's frozen models", async () => {
     h.newerModelBannerMock.mockResolvedValue(NEWER);
     h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "EXECUTING", assignment: "a" }]);
-    h.storeMethods.getRun.mockReturnValue({ id: "run-1", state: "EXECUTING", config: { deterministicChecks: [], models: { qa: "claude-sonnet-5" } } });
+    h.storeMethods.getRun.mockReturnValue({ id: "run-1", state: "EXECUTING", config: { deterministicChecks: [], models: { qa: "claude-sonnet-5-5" } } });
 
     await cli("resume", "--repo", "/repo", "--no-dashboard");
 
-    expect(printed()).toContain("claude-sonnet-5-5 is newer than claude-sonnet-5 (qa)");
-    expect(h.newerModelBannerMock).toHaveBeenCalledWith({ qa: "claude-sonnet-5" });
+    expect(printed()).toContain("claude-sonnet-6 is newer than claude-sonnet-5-5 (qa)");
+    expect(h.newerModelBannerMock).toHaveBeenCalledWith({ qa: "claude-sonnet-5-5" });
   });
 
   it("prints nothing on `resume` when nothing is newer", async () => {
@@ -3584,5 +3586,48 @@ describe("newer models at startup", () => {
     await cli("resume", "--repo", "/repo", "--no-dashboard");
 
     expect(printed()).not.toContain("is newer than");
+  });
+});
+
+/**
+ * A retired model named anywhere reads as its replacement (retired.ts). These
+ * are the lines that tell the operator so, on both ways a run starts.
+ */
+describe("retired models", () => {
+  it("says in `run`'s banner when the file or a flag names a retired model, and runs the replacement", async () => {
+    h.loadFileConfigMock.mockReturnValue({ config: { models: { workerUi: "claude-opus-5" } }, path: "/repo/charrette.config.json" });
+    await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard", "--model", "planner=claude-fable-5-1");
+    expect(printed()).toContain("retired    workerUi claude-opus-5→claude-opus-5-5 · planner claude-fable-5-1→claude-fable-5-2   (update charrette.config.json or the --model flag)");
+    const config = h.controllerMethods.startRun.mock.calls[0]![1] as { models: Record<string, string> };
+    expect(config.models.workerUi).toBe("claude-opus-5-5");
+    expect(config.models.planner).toBe("claude-fable-5-2");
+  });
+
+  it("names only the flag when there is no config file", async () => {
+    await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard", "--model", "qa=claude-sonnet-5");
+    expect(printed()).toContain("qa claude-sonnet-5→claude-sonnet-5-5   (update the --model flag)");
+  });
+
+  it("does not re-route a resumed run to the model it is already on when the file still names the retired one", async () => {
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "EXECUTING", assignment: "a" }]);
+    h.storeMethods.getRun.mockReturnValue({ id: "run-1", state: "EXECUTING", config: { deterministicChecks: [], models: { workerUi: "claude-opus-5-5" } } });
+    h.loadFileConfigMock.mockReturnValue({ config: { models: { workerUi: "claude-opus-5" } }, path: "/repo/charrette.config.json" });
+
+    await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
+
+    expect(h.storeMethods.patchRunConfig).not.toHaveBeenCalledWith("run-1", { models: expect.anything() });
+    expect(printed()).toContain("retired    workerUi claude-opus-5→claude-opus-5-5");
+    expect(printed()).not.toContain("re-routed");
+  });
+
+  it("tells `resume` which of the run's frozen models were moved when the store opened", async () => {
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "EXECUTING", assignment: "a" }]);
+    h.storeMethods.getRun.mockReturnValue({ id: "run-1", state: "EXECUTING", config: { deterministicChecks: [], models: { workerUi: "claude-opus-5-5" } } });
+    h.storeMethods.retiredAtOpen.mockReturnValue([{ role: "workerUi", from: "claude-opus-5", to: "claude-opus-5-5" }]);
+
+    await cli("resume", "--repo", "/repo", "--no-dashboard");
+
+    expect(h.storeMethods.retiredAtOpen).toHaveBeenCalledWith("run-1");
+    expect(printed()).toContain("retired    workerUi claude-opus-5→claude-opus-5-5   (this run's frozen models, now moved for good)");
   });
 });

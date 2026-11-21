@@ -65,7 +65,7 @@ const SPEC: AgentSpec = {
   runId: "run1",
   taskId: "task1",
   role: "worker",
-  model: "claude-opus-5",
+  model: "claude-opus-5-5",
   systemPrompt: "you are a worker",
   prompt: "build the thing",
   cwd: "/tmp/worktree",
@@ -144,10 +144,10 @@ describe("running an agent session", () => {
 
     const res = await pool.run(spec());
 
-    expect(typed("agent.spawned")[0]).toMatchObject({ runId: "run1", taskId: "task1", role: "worker", model: "claude-opus-5" });
+    expect(typed("agent.spawned")[0]).toMatchObject({ runId: "run1", taskId: "task1", role: "worker", model: "claude-opus-5-5" });
     expect(typed("agent.log")[0]).toMatchObject({ sessionId: res.sessionId, text: "thinking out loud" });
     expect(typed("agent.tool_use")[0]).toMatchObject({ tool: "Bash", summary: '{"command":"ls"}' });
-    expect(typed("agent.usage")[0]).toMatchObject({ model: "claude-opus-5", inputTokens: 100 });
+    expect(typed("agent.usage")[0]).toMatchObject({ model: "claude-opus-5-5", inputTokens: 100 });
     expect(typed("agent.ended")[0]).toMatchObject({ outcome: "done" });
   });
 
@@ -261,7 +261,7 @@ describe("what the session is configured with", () => {
 
     const options = optionsGiven();
     expect(options).toMatchObject({
-      model: "claude-opus-5",
+      model: "claude-opus-5-5",
       cwd: "/tmp/worktree",
       systemPrompt: "you are a worker",
       maxTurns: 40,
@@ -976,7 +976,7 @@ describe("checkpoints", () => {
     pool.configureCheckpoints({ every: 5 });
     session(6, seen);
 
-    await pool.run(spec({ model: "claude-opus-5", maxTurns: 100 }));
+    await pool.run(spec({ model: "claude-opus-5-5", maxTurns: 100 }));
 
     expect(seen.some((s) => s.includes("[CHARRETTE] Checkpoint"))).toBe(true);
   });

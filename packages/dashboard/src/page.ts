@@ -23,6 +23,9 @@ import { PINNED_ROLES, VENDOR_NAME, routingViolations } from "@charrette/shared"
  * whose key for a vendor is not exported is refused by `missingKeys` before the
  * config is touched.
  *
+ * Retired models (`RETIRED_MODELS`) are not offered: the server would read
+ * one as its replacement, so the dropdown would not say what runs.
+ *
  * Exported for the test that holds the first sentence to its word: nothing
  * here may be missing from `PRICES`.
  */
@@ -31,15 +34,10 @@ export const MODEL_CHOICES = [
   "claude-opus-5-5",
   "claude-sonnet-5-5",
   "claude-haiku-5-5",
-  "claude-fable-5-1",
-  "claude-opus-5",
-  "claude-sonnet-5",
-  "claude-haiku-4-5-20251001",
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-5.6-luna",
   "gemini-3.5-flash-lite",
-  "gemini-3.6-flash",
   "gemini-3.8-flash",
   "deepseek-flash",
 ];

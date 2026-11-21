@@ -450,7 +450,7 @@ describe("the guards on asking", () => {
 });
 
 describe("re-routing a role while the run is going", () => {
-  const withRun = (models: Record<string, string> = { worker: "claude-sonnet-5" }) => {
+  const withRun = (models: Record<string, string> = { worker: "claude-sonnet-5-5" }) => {
     const { pool } = rolePool({});
     const built = build(repo(), pool);
     built.store.createRun({
@@ -462,10 +462,10 @@ describe("re-routing a role while the run is going", () => {
 
   it("moves the role and says so, naming what the next agent will use", () => {
     const { controller, store } = withRun();
-    expect(controller.rerouteModel("r1", "worker", "claude-haiku-4-5-20251001")).toBe(
-      "worker re-routed: claude-sonnet-5 → claude-haiku-4-5-20251001. The next one to start uses it."
+    expect(controller.rerouteModel("r1", "worker", "claude-haiku-5-5")).toBe(
+      "worker re-routed: claude-sonnet-5-5 → claude-haiku-5-5. The next one to start uses it."
     );
-    expect(store.getRun("r1")!.config.models.worker).toBe("claude-haiku-4-5-20251001");
+    expect(store.getRun("r1")!.config.models.worker).toBe("claude-haiku-5-5");
   });
 
   /**
@@ -475,25 +475,25 @@ describe("re-routing a role while the run is going", () => {
    */
   it("refuses to put a judge on a cheap model, and changes nothing when it does", () => {
     const { controller, store } = withRun();
-    const said = controller.rerouteModel("r1", "qa", "claude-haiku-4-5-20251001");
+    const said = controller.rerouteModel("r1", "qa", "claude-haiku-5-5");
     expect(said).toMatch(/qa/);
     expect(store.getRun("r1")!.config.models.qa).toBe("claude-sonnet-5-5");
   });
 
   it("refuses a role that does not exist rather than silently adding one", () => {
     const { controller, store } = withRun();
-    expect(controller.rerouteModel("r1", "coder", "claude-opus-5")).toMatch(/^unknown role coder/);
+    expect(controller.rerouteModel("r1", "coder", "claude-opus-5-5")).toMatch(/^unknown role coder/);
     expect(Object.keys(store.getRun("r1")!.config.models)).not.toContain("coder");
   });
 
   it("says nothing changed when the role is already there", () => {
     const { controller } = withRun();
-    expect(controller.rerouteModel("r1", "worker", "claude-sonnet-5")).toBe("worker is already on claude-sonnet-5");
+    expect(controller.rerouteModel("r1", "worker", "claude-sonnet-5-5")).toBe("worker is already on claude-sonnet-5-5");
   });
 
   it("refuses a run it has never heard of, and a blank model name", () => {
     const { controller } = withRun();
-    expect(controller.rerouteModel("nope", "worker", "claude-opus-5")).toBe("no run nope");
+    expect(controller.rerouteModel("nope", "worker", "claude-opus-5-5")).toBe("no run nope");
     expect(controller.rerouteModel("r1", "worker", "   ")).toBe("name a model to route it to");
   });
 
@@ -509,9 +509,9 @@ describe("re-routing a role while the run is going", () => {
     // reads and the state it filters on.
     store.db
       .prepare("INSERT INTO sessions (id, runId, taskId, role, model, state, startedAt) VALUES (?,?,?,?,?,?,?)")
-      .run("sess-1", "r1", "task-a", "worker", "claude-sonnet-5", "running", Date.now());
-    expect(controller.rerouteModel("r1", "worker", "claude-haiku-4-5-20251001")).toContain(
-      "1 worker session already running stays on claude-sonnet-5 until it finishes."
+      .run("sess-1", "r1", "task-a", "worker", "claude-sonnet-5-5", "running", Date.now());
+    expect(controller.rerouteModel("r1", "worker", "claude-haiku-5-5")).toContain(
+      "1 worker session already running stays on claude-sonnet-5-5 until it finishes."
     );
   });
 
@@ -520,10 +520,10 @@ describe("re-routing a role while the run is going", () => {
     const insert = store.db.prepare(
       "INSERT INTO sessions (id, runId, taskId, role, model, state, startedAt) VALUES (?,?,?,?,?,?,?)"
     );
-    insert.run("sess-1", "r1", "task-a", "worker", "claude-sonnet-5", "running", Date.now());
-    insert.run("sess-2", "r1", "task-b", "worker", "claude-sonnet-5", "running", Date.now());
-    expect(controller.rerouteModel("r1", "worker", "claude-haiku-4-5-20251001")).toContain(
-      "2 worker sessions already running stay on claude-sonnet-5 until they finish."
+    insert.run("sess-1", "r1", "task-a", "worker", "claude-sonnet-5-5", "running", Date.now());
+    insert.run("sess-2", "r1", "task-b", "worker", "claude-sonnet-5-5", "running", Date.now());
+    expect(controller.rerouteModel("r1", "worker", "claude-haiku-5-5")).toContain(
+      "2 worker sessions already running stay on claude-sonnet-5-5 until they finish."
     );
   });
 
@@ -536,7 +536,7 @@ describe("re-routing a role while the run is going", () => {
     vi.stubEnv("OPENAI_API_KEY", "");
     const { controller, store } = withRun();
     expect(controller.rerouteModel("r1", "worker", "gpt-5.6-terra")).toContain("OPENAI_API_KEY is not set");
-    expect(store.getRun("r1")!.config.models.worker).toBe("claude-sonnet-5");
+    expect(store.getRun("r1")!.config.models.worker).toBe("claude-sonnet-5-5");
     vi.unstubAllEnvs();
   });
 
@@ -545,6 +545,6 @@ describe("re-routing a role while the run is going", () => {
     store.patchRunConfig = () => {
       throw new Error("database is locked");
     };
-    expect(controller.rerouteModel("r1", "worker", "claude-haiku-4-5-20251001")).toContain("database is locked");
+    expect(controller.rerouteModel("r1", "worker", "claude-haiku-5-5")).toContain("database is locked");
   });
 });
