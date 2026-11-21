@@ -24,6 +24,16 @@ export const PRICES: Record<string, { in: number; out: number }> = {
   // rather than late, and a per-model cache rate is not worth a second table
   // until a run's bill is dominated by them.
   "claude-fable-5-1": { in: 10, out: 50 },
+  // The 5.5 / 5.2 generation (platform.claude.com pricing, read 2026-11-21).
+  // Fable 5.2 and Opus 5.5 are each cheaper than the model they succeed, so the
+  // top-tier fallback below stays Fable 5.1's rate. Haiku 5.5 carries its
+  // >100K-prompt band ($0.50/$2.50) rather than the $0.10/$0.50 one, for the
+  // reason the Gemini rows carry the standing rate: one rate per model, and
+  // the higher one is the side this table is allowed to be wrong on.
+  "claude-fable-5-2": { in: 8, out: 40 },
+  "claude-opus-5-5": { in: 4, out: 20 },
+  "claude-sonnet-5-5": { in: 2, out: 10 },
+  "claude-haiku-5-5": { in: 0.5, out: 2.5 },
   "claude-fable-5": { in: 10, out: 50 },
   "claude-opus-5": { in: 5, out: 25 },
   "claude-sonnet-5": { in: 3, out: 15 },

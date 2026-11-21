@@ -16,7 +16,7 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PRICES } from "@charrette/core";
-import { MODEL_CHOICES, PAGE_HTML } from "./page.js";
+import { MODEL_CHOICES, PAGE_HTML, PINNED_CHOICES } from "./page.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- the page is untyped JS. */
 type Any = any;
@@ -1528,5 +1528,24 @@ describe("the models the dropdown offers", () => {
     const unpriced = MODEL_CHOICES.filter((model) => !(model in PRICES));
 
     expect(unpriced).toEqual([]);
+  });
+
+  it("offers the newest Claude generation first", () => {
+    expect(MODEL_CHOICES.slice(0, 4)).toEqual(["claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]);
+  });
+
+  /**
+   * A judge may move to a newer model of its own vendor — Opus 5 to Opus 5.5 —
+   * and to nothing else: not another vendor, not that vendor's small tier.
+   * The same `routingViolations` the server re-parses through decides it.
+   */
+  it("offers each pinned role only its vendor's models above the floor", () => {
+    expect(PINNED_CHOICES.qa).toEqual({
+      vendor: "Anthropic",
+      models: ["claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"],
+    });
+    expect(PINNED_CHOICES.intake!.models).toEqual(PINNED_CHOICES.qa!.models);
+    expect(PINNED_CHOICES.prod!.models).toEqual(PINNED_CHOICES.qa!.models);
+    expect(PINNED_CHOICES.reviewer).toEqual({ vendor: "Google", models: ["gemini-3.6-flash", "gemini-3.8-flash"] });
   });
 });

@@ -96,18 +96,20 @@ your own attention, against the repo rather than against the task count.
   `CLAUDE_CODE_OAUTH_TOKEN` (Claude Pro/Max — run `claude setup-token`) or
   `ANTHROPIC_API_KEY`
 - Optional: `GITHUB_TOKEN` (fine-grained, single repo: contents/issues/PRs write) + `CHARRETTE_GITHUB_REPO=owner/repo`
-- `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) — **required**, not optional. The pit
-  stop's `reviewer` is pinned to Gemini so that the agent judging the work is
-  not from the family that wrote it; a run refuses to start without the key
-  rather than discovering it at the first pit stop, after the epic is paid for
-- `DEEPSEEK_API_KEY` — **required**, not optional. `worker` and `workerLight`
-  default to `deepseek-flash`, so regular build tasks do not run without it; a
-  run refuses to start rather than discovering it at the first worker dispatch
+- `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) — **required**, not optional. The
+  planner, the specification, the pit-stop PM and the escalation ceiling default
+  to `gemini-3.8-flash`, and the pit stop's `reviewer` is pinned to Gemini so
+  that the agent judging the work is not from the family that wrote it; a run
+  refuses to start without the key
+- `DEEPSEEK_API_KEY` — **required**, not optional. The build and tool-driving
+  roles (`worker`, `workerLight`, `integrator`, `advisor`, `demo`, `live`,
+  `repair`, `skillsmith`) default to `deepseek-flash`; a run refuses to start
+  rather than discovering it at the first dispatch
 - Optional: `OPENAI_API_KEY`, if you point a role at OpenAI.
   `charrette run --model worker=gpt-5.6-terra` changes one, and the same flag on
   `charrette resume` changes it for the rest of a run already in flight. `qa`,
-  `prod`, `intake`, `workerUi` and `workerHeavy` stay on Anthropic and
-  `reviewer` stays on Google; see
+  `prod` and `intake` stay on Anthropic and `reviewer` stays on Google, though
+  each can move to another model of its vendor; see
   [Using other providers](docs/OPERATIONS.md#using-other-providers)
 - Any of these may go in a `.env` file in the directory you run `charrette` from
   (not the repository being built — a task spec can write to that one). An

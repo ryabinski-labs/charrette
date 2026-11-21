@@ -45,7 +45,7 @@ const FABLE = "claude-fable-5-1";
  * every default change look like an escalation defect; pinning the table keeps
  * the failure pointing at the rule.
  */
-const RUN_MODELS = { worker: SONNET, workerLight: HAIKU, workerUi: OPUS, workerHeavy: FABLE };
+const RUN_MODELS = { worker: SONNET, workerLight: HAIKU, workerUi: OPUS, workerHeavy: FABLE, qa: SONNET };
 const DOCS = "<prd>\n# PRD\n</prd>\n<conventions>\nc\n</conventions>";
 
 /**

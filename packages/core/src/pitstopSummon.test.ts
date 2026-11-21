@@ -477,7 +477,7 @@ describe("re-routing a role while the run is going", () => {
     const { controller, store } = withRun();
     const said = controller.rerouteModel("r1", "qa", "claude-haiku-4-5-20251001");
     expect(said).toMatch(/qa/);
-    expect(store.getRun("r1")!.config.models.qa).toBe("claude-sonnet-5");
+    expect(store.getRun("r1")!.config.models.qa).toBe("claude-sonnet-5-5");
   });
 
   it("refuses a role that does not exist rather than silently adding one", () => {

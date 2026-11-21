@@ -150,9 +150,9 @@ describe("the run config refuses a routing it cannot honour", () => {
   it("parses a table that moves only the working roles", () => {
     const parsed = ModelRouting.parse({ worker: "gpt-5.6-terra", demo: "gemini-3.5-flash-lite" });
     expect(parsed.worker).toBe("gpt-5.6-terra");
-    // Everything unset still falls back to the Anthropic defaults.
-    expect(parsed.qa).toBe("claude-sonnet-5");
-    expect(parsed.prod).toBe("claude-opus-5");
+    // Everything unset still falls back to the defaults.
+    expect(parsed.qa).toBe("claude-sonnet-5-5");
+    expect(parsed.prod).toBe("claude-opus-5-5");
   });
 
   it("rejects the whole config when a judging role is moved off Anthropic", () => {
@@ -179,30 +179,34 @@ describe("the run config refuses a routing it cannot honour", () => {
     expect(routingViolations(parsed)).toEqual([]);
   });
 
-  it("ships the cheap tier on exactly the roles that were argued for it", () => {
-    // Pinned because these defaults are what the operator actually pays, and a
-    // change to one of them is invisible in a diff of anything else. The whole
-    // suite passed unchanged when `workerLight` moved from Sonnet to Haiku,
-    // which is how a default gets changed by accident. The light tier now names
-    // DeepSeek because that is cheaper than Haiku at both rates; the rule still
-    // runs, so the measurement survives.
-    const d = ModelRouting.parse({});
-    expect({ demo: d.demo, repair: d.repair, worker: d.worker, workerLight: d.workerLight }).toEqual({
-      demo: "claude-haiku-4-5-20251001",
-      repair: "claude-haiku-4-5-20251001",
+  it("ships exactly the default table that was chosen, role by role", () => {
+    // Pinned whole because these defaults are what the operator actually pays,
+    // and a change to one of them is invisible in a diff of anything else. The
+    // suite once passed unchanged when `workerLight` moved from Sonnet to
+    // Haiku, which is how a default gets changed by accident.
+    //
+    // DeepSeek builds and drives tools, Gemini reads and decides, and the
+    // Anthropic 5.5 models hold the roles the pins keep there plus interface
+    // work. `reviewer` is pinned to Google rather than defaulted: see
+    // PINNED_ROLES for why a same-family reviewer is the failure mode.
+    expect(ModelRouting.parse({})).toEqual({
+      intake: "claude-opus-5-5",
+      planner: "gemini-3.8-flash",
       worker: "deepseek-flash",
       workerLight: "deepseek-flash",
-    });
-    // And the judges are not among them — which the floor now also enforces.
-    // `reviewer` is the one judge off Anthropic, and it is pinned there rather
-    // than defaulted: see PINNED_ROLES for why a same-family reviewer is the
-    // failure mode, and budget.ts for the row that prices this id.
-    expect({ qa: d.qa, reviewer: d.reviewer, prod: d.prod, pm: d.pm, advisor: d.advisor }).toEqual({
-      qa: "claude-sonnet-5",
+      workerUi: "claude-opus-5-5",
+      workerHeavy: "gemini-3.8-flash",
+      qa: "claude-sonnet-5-5",
+      integrator: "deepseek-flash",
+      advisor: "deepseek-flash",
+      prod: "claude-opus-5-5",
+      demo: "deepseek-flash",
+      live: "deepseek-flash",
+      repair: "deepseek-flash",
       reviewer: "gemini-3.8-flash",
-      prod: "claude-opus-5",
-      pm: "claude-fable-5-1",
-      advisor: "claude-sonnet-5",
+      pm: "gemini-3.8-flash",
+      skillsmith: "deepseek-flash",
+      spec: "gemini-3.8-flash",
     });
   });
 });

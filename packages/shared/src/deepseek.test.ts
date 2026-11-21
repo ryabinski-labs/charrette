@@ -15,14 +15,15 @@ describe("REQ-001 — a run config that omits the worker models defaults worker 
     expect(config.models.workerLight).toBe("deepseek-flash");
   });
 
-  it("keeps the interface and heavy tiers on their Anthropic models", () => {
-    // The two rungs this change deliberately does not move. They are separate
-    // bets: interface quality comes from the visual feedback loop, and the
-    // heavy rung is the ceiling a rejected task climbs to.
+  it("keeps the interface and heavy tiers off the DeepSeek rung", () => {
+    // The two rungs this change deliberately does not move onto DeepSeek. They
+    // are separate bets: interface quality comes from the visual feedback loop,
+    // and the heavy rung is the ceiling a rejected task climbs to — a different
+    // vendor from the one that kept failing.
     const models = RunConfig.parse({}).models;
 
-    expect(models.workerUi).toBe("claude-opus-5");
-    expect(models.workerHeavy).toBe("claude-fable-5-1");
+    expect(models.workerUi).toBe("claude-opus-5-5");
+    expect(models.workerHeavy).toBe("gemini-3.8-flash");
   });
 
   it("lets a run override the DeepSeek default without touching the rest", () => {

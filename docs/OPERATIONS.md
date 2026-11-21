@@ -785,7 +785,7 @@ typo surfaces immediately.
   "skillsDirs": ["~/.claude/skills", "~/skills"],
   "qaIterationCap": 3,
   "pitStop": { "every": "epic" },
-  "models": { "planner": "claude-opus-5", "worker": "deepseek-flash" }
+  "models": { "planner": "claude-fable-5-2", "qa": "claude-opus-5-5" }
 }
 ```
 
@@ -812,21 +812,21 @@ Run configuration is a zod-validated `RunConfig`
 | `qaMaxTurns` | `90` | — | ✅ | the same knob for QA, raised the same way. A QA session that runs out of turns never writes its verdict. |
 | `taskWallClockMinutes` | `45` | — | ✅ | a task looping this long without being accepted opens a gate. Answering **any** gate re-arms the clock, so the bound measures unattended time rather than time since dispatch. |
 | `usageLimitWaitMinutes` | `360` | — | ✅ | how long **one session** may sleep waiting for your account's usage limit to reset. A quota window closing kills every session in flight at once ("You've hit your session limit · resets 8:20pm") and is not a fault in the work, so the pool waits it out and continues the same session — same conversation, same bill, no attempt or respawn spent on it. Per session rather than per run, so an overnight run survives several outages of this length. Past the bound the failure is reported as it always was; `0` restores that immediately. |
-| `models.intake` | `claude-opus-5` | — | ✅ | this one talks to you; question quality is the whole value. **Anthropic only** — see [Using other providers](#using-other-providers) |
-| `models.planner` | `claude-fable-5-1` | — | ✅ | planning quality dominates run cost efficiency; the two most expensive runs on record both went wrong here, so this is the most capable model at twice Opus's rate for a handful of sessions. Needs Claude Code ≥ 2.1.251 under the Agent SDK (the pin carries it). |
+| `models.intake` | `claude-opus-5-5` | — | ✅ | this one talks to you; question quality is the whole value. **Anthropic only** — see [Using other providers](#using-other-providers) |
+| `models.planner` | `gemini-3.8-flash` | — | ✅ | drafts the PRD and cuts it into the DAG; every worker session is downstream of this reading, and the two most expensive runs on record both went wrong here. Point it at `claude-fable-5-2` when a run is large enough that the plan is where the risk is. A Gemini planner has no session to resume, so each continuation message re-sends the PRD and conventions. |
 | `models.worker` | `deepseek-flash` | — | ✅ | regular build tasks. DeepSeek V4.1 Flash lists at $0.30 input and $1.20 output per MTok at peak — about a tenth of Sonnet's input rate. Interface tasks stay on `models.workerUi`, and a rejected task still climbs to `models.workerHeavy`. |
 | `models.workerLight` | `deepseek-flash` | — | ✅ | the worker model for tasks the light-tier rule admits — sized `S`, at most two `touchedPaths`, carrying a `completionProbe`, and matching none of the risky domains (auth, money, migrations, concurrency, infrastructure). The rule is deterministic and lives in `modelTier.ts`; the planner does not nominate its own tier. It names the same model as `models.worker` because DeepSeek is cheaper than Haiku at both rates, so the light rung would otherwise cost more than the standard one. The rule still runs and still publishes `task.tier_decided`, so the ledger keeps the measurement; point this at another model to price the experiment. |
-| `models.workerUi` | `claude-opus-5` | — | ✅ | the worker model for interface tasks — the ones the `UI_WHEN` vocabulary matches, which is the same rule that routes `frontend-design` and `ui-ux-cx-engineer` onto the worker and `visual-qa-agent` onto QA. Opus rather than Fable because interface quality is bounded by that feedback loop, not by reasoning depth; a UI task visual QA keeps rejecting still climbs to `workerHeavy`. Set it to `models.worker` to switch the route off while keeping the ledger's record. |
-| `models.workerHeavy` | `claude-fable-5-1` | — | ✅ | the worker model for the hardest tasks and the top of the escalation ladder. A task **starts** here when the planner sized it `L` and it names a risky domain, or when it is a round-two fix of a check the standard tier already failed to turn green; any task **climbs** here after `heavyTierAfterRejections`. A heavy session that ends in a classifier refusal comes back down to `models.worker` for its next attempt rather than spending the respawn cap refusing. Set it to `models.worker` to switch the tier off while keeping the measurement. |
-| `models.qa` | `claude-sonnet-5` | — | ✅ | **Anthropic only** — its verdict decides whether a task merges |
-| `models.integrator` | `claude-sonnet-5` | — | ✅ | **not currently used** — integration is deterministic git work, not an agent session. Setting it has no effect. |
-| `models.advisor` | `claude-sonnet-5` | — | ✅ | drafts your answer when a task escalates |
-| `models.prod` | `claude-opus-5` | — | ✅ | **Anthropic only** — the last word on whether the run delivered the assignment |
-| `models.demo` | `claude-haiku-4-5-20251001` | — | ✅ | starts the half-built product at a pit stop and drives it — mostly tool work, at an 80-turn ceiling. Cheap because the demo's thoroughness is checked in code rather than taken on trust: `plannedJourneys` is compared against what came back, and a demo that fell short of its own plan is published as INCONCLUSIVE rather than as thin evidence. |
-| `models.repair` | `claude-haiku-4-5-20251001` | — | ✅ | re-asks a finished QA session for the verdict JSON it produced but did not format. Two turns, against a resumed session, restating a conclusion reached on the judging model — there is no judgment left to degrade. Fires only when a QA agent ignores its output contract. |
-| `models.reviewer` | `gemini-3.8-flash` | — | ✅ | judges the demo through one named lens; this is the judgment a pit stop exists to buy. **Google only** — held off the family that wrote the code so its errors are uncorrelated with the ones already in the diff |
-| `models.pm` | `claude-fable-5-1` | — | ✅ | every decision a skill makes instead of you: what the run does next at a pit stop, whether a failing plan goes back to the planner, and whether a cap that was reached is raised. The only agent whose output redirects the remaining work, re-plans it, or spends money on its own, so it is the last place to save money. |
-| `models.spec` | `claude-fable-5-1` | — | ✅ | writes the specification every downstream check is judged against, once per run, from a brief nobody has built against yet — the hardest reading task in the run |
+| `models.workerUi` | `claude-opus-5-5` | — | ✅ | the worker model for interface tasks — the ones the `UI_WHEN` vocabulary matches, which is the same rule that routes `frontend-design` and `ui-ux-cx-engineer` onto the worker and `visual-qa-agent` onto QA. Interface quality is bounded by that feedback loop; a UI task visual QA keeps rejecting still climbs to `workerHeavy`. Set it to `models.worker` to switch the route off while keeping the ledger's record. |
+| `models.workerHeavy` | `gemini-3.8-flash` | — | ✅ | the worker model for the hardest tasks and the top of the escalation ladder. A task **starts** here when the planner sized it `L` and it names a risky domain, or when it is a round-two fix of a check the standard tier already failed to turn green; any task **climbs** here after `heavyTierAfterRejections`. A heavy session that ends in a classifier refusal comes back down to `models.worker` for its next attempt rather than spending the respawn cap refusing. The default is a different vendor from the regular worker, so a task DeepSeek keeps failing changes model family; `claude-fable-5-2` is the most capable choice. Set it to `models.worker` to switch the tier off while keeping the measurement. |
+| `models.qa` | `claude-sonnet-5-5` | — | ✅ | **Anthropic only, above Haiku** — its verdict decides whether a task merges |
+| `models.integrator` | `deepseek-flash` | — | ✅ | resolves the run's merge conflict with its own base branch when `main` moved under a long run. Every other integration step is deterministic git work and calls no model. |
+| `models.advisor` | `deepseek-flash` | — | ✅ | drafts your answer when a task escalates. You or a skill read it before anything acts on it. |
+| `models.prod` | `claude-opus-5-5` | — | ✅ | **Anthropic only, above Haiku** — the last word on whether the run delivered the assignment |
+| `models.demo` | `deepseek-flash` | — | ✅ | starts the half-built product at a pit stop and drives it — mostly tool work, at an 80-turn ceiling. Cheap because the demo's thoroughness is checked in code rather than taken on trust: `plannedJourneys` is compared against what came back, and a demo that fell short of its own plan is published as INCONCLUSIVE rather than as thin evidence. |
+| `models.repair` | `deepseek-flash` | — | ✅ | re-asks a finished QA session for the verdict JSON it produced but did not format, by resuming that session. Only Anthropic sessions can be resumed, so when this names a model on another vendor the re-ask runs on `models.qa` instead — a cold session asked to restate a verdict it never saw would invent one. Set it to `claude-haiku-5-5` for the cheap resumable option. |
+| `models.reviewer` | `gemini-3.8-flash` | — | ✅ | judges the demo through one named lens; this is the judgment a pit stop exists to buy. **Google only, above Lite** — held off the family that wrote the code so its errors are uncorrelated with the ones already in the diff |
+| `models.pm` | `gemini-3.8-flash` | — | ✅ | every decision a skill makes instead of you: what the run does next at a pit stop, whether a failing plan goes back to the planner, and whether a cap that was reached is raised. The only agent whose output redirects the remaining work, re-plans it, or spends money on its own; point it at `claude-fable-5-2` for the most careful reading. |
+| `models.spec` | `gemini-3.8-flash` | — | ✅ | writes the specification every downstream check is judged against, once per run, from a brief nobody has built against yet — the hardest reading task in the run. Point it at `claude-fable-5-2` when the brief is long or ambiguous. |
 | `pitStop.every` | `"epic"` | — | ✅ | when the run stops to show you what it built: `"epic"`, `"never"`, `{"tasks":5}`, `{"usd":100}`, `{"minutes":90}` — see [PITSTOP.md](./PITSTOP.md) |
 | `pitStop.reviewers` | `product-manager`, `critical-challenger`, `qa-agent`, `ui-ux-cx-engineer` | — | ✅ | one short session per lens, by skill name; max 4, `[]` for none. This is the pit stop's price. |
 | `pitStop.reviewFirstPass` | `2` | — | ✅ | how many lenses read the demo before the charrette decides whether the rest are worth buying. The remaining ones are bought only when the first pass suggests there is something to find — any lens not `on-track`, any disagreement, a lens that did not finish, or an INCONCLUSIVE demo. `0` runs them all every time. Which lenses were skipped, and why, is printed with the report. |
@@ -873,7 +873,7 @@ const controller = new RunController(
   "/path/to/target/repo",
 );
 await controller.startRun("assignment", RunConfig.parse({
-  models: { planner: "claude-opus-5", worker: "deepseek-flash", qa: "claude-sonnet-5", integrator: "claude-sonnet-5" },
+  models: { planner: "claude-fable-5-2", worker: "deepseek-flash", qa: "claude-sonnet-5-5" },
   budget: { runCapUsd: 50 },
   deterministicChecks: ["pnpm test"],
 }));
@@ -898,12 +898,25 @@ the first dispatch of that role — `demo` first runs at a pit stop, after the
 whole epic has been paid for. Spell the provider out as `openai/<model>` if you
 ever need a model whose name does not announce its family.
 
-**The default routing is Anthropic except three roles.** `worker` and
-`workerLight` default to `deepseek-flash`, and `reviewer` is pinned to
-`gemini-3.8-flash`, so `DEEPSEEK_API_KEY` and `GEMINI_API_KEY` are required for
-every run — see the pinned-role table below for why. Interface tasks
-(`workerUi`, Opus 5) and the escalation ceiling (`workerHeavy`, Fable 5.1) stay
-on Anthropic.
+**The default routing spans three vendors**, so `ANTHROPIC_API_KEY` (or a
+Claude login), `DEEPSEEK_API_KEY` and `GEMINI_API_KEY` are all required for
+every run:
+
+| Vendor | Default model | Roles |
+|---|---|---|
+| DeepSeek | `deepseek-flash` | `worker`, `workerLight`, `integrator`, `advisor`, `demo`, `live`, `repair`, `skillsmith` |
+| Google | `gemini-3.8-flash` | `planner`, `spec`, `pm`, `workerHeavy`, and the pinned `reviewer` |
+| Anthropic | `claude-opus-5-5` | the pinned `intake` and `prod`, and `workerUi` |
+| Anthropic | `claude-sonnet-5-5` | the pinned `qa` |
+
+`claude-fable-5-2` is priced and offered for any role that is not pinned to
+Google; point `planner`, `spec`, `pm` or `workerHeavy` at it when a run is
+large or risky enough that those readings are where the money is lost.
+
+Neither Gemini nor DeepSeek can resume a session. Two roles depend on resuming
+and handle it: a non-Anthropic planner is re-sent the PRD with every
+continuation message, and `repair` falls back to `models.qa` because a cold
+session asked to restate a verdict it never saw would invent one.
 
 DeepSeek runs on the same stateless tool loop as OpenAI and Gemini, with two
 vendor details the client carries: it documents `max_tokens` rather than
@@ -932,8 +945,11 @@ the key check both still apply, so `resume` refuses the same things `run` does.
 Completed tasks are never re-executed, so re-routing only ever affects work that
 has not happened yet.
 
-**Four roles are not yours to route**, and the run refuses to start if you move
-them. Three are pinned to Anthropic and one to Google:
+**Four roles are pinned to a vendor**, and the run refuses to start if you move
+them off it. You can still change their model within the pin — Opus 5 to Opus
+5.5, say — in `charrette.config.json`, with `--model`, or from the dashboard's
+model panel, which offers each pinned role only the models its pin allows.
+Three are pinned to Anthropic and one to Google:
 
 | Role | Pinned to | Why |
 |---|---|---|
@@ -962,8 +978,9 @@ answers instead.
 
 Each pinned role also has a floor within its own vendor, so the pin cannot be
 satisfied by the cheapest model that happens to carry the right brand:
-`claude-haiku-*` is refused for the Anthropic three, and `gemini-*-lite` for
-`reviewer`. Flash is above the floor, and is what `reviewer` defaults to.
+`claude-haiku-*` (Haiku 5.5 included) is refused for the Anthropic three, and
+`gemini-*-lite` for `reviewer`. Flash is above the floor, and is what
+`reviewer` defaults to.
 
 **Runs created before the pin are rewritten at open.** They recorded
 `reviewer: "claude-opus-5"`, which the config now refuses, and the stored config
@@ -1004,8 +1021,8 @@ under-charging would let a cap silently stop binding.
 | `CLAUDE_CODE_OAUTH_TOKEN` | one of these | Claude Pro/Max subscription credential |
 | `ANTHROPIC_API_KEY` | one of these | Anthropic API credential; **wins if both are set** |
 | `OPENAI_API_KEY` | only if a role is routed to OpenAI | see [Using other providers](#using-other-providers) |
-| `DEEPSEEK_API_KEY` | **always** | `worker` and `workerLight` default to `deepseek-flash`; see [Using other providers](#using-other-providers) |
-| `GEMINI_API_KEY` | **always** | `reviewer` is pinned to Google; `GOOGLE_API_KEY` also accepted |
+| `DEEPSEEK_API_KEY` | **always** | the build and tool-driving roles default to `deepseek-flash`; see [Using other providers](#using-other-providers) |
+| `GEMINI_API_KEY` | **always** | `planner`, `spec`, `pm` and `workerHeavy` default to `gemini-3.8-flash`, and `reviewer` is pinned to Google; `GOOGLE_API_KEY` also accepted |
 | `GITHUB_TOKEN` | no | enables issues + PRs; falls back to `gh auth token` |
 | `CHARRETTE_GITHUB_REPO` | no | `owner/repo`; falls back to `gh repo view` |
 

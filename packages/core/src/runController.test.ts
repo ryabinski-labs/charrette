@@ -12,7 +12,13 @@ import { BudgetExceeded } from "./budget.js";
 import { tasksPerMessage } from "./prompts.js";
 
 /** A pool that replays canned planner outputs instead of calling the API. */
-function fakePool(outputs: string[], outcome: AgentResult["outcome"] = "done", errorDetail?: string, dies: (call: number) => Error | undefined = () => undefined) {
+function fakePool(
+  outputs: string[],
+  outcome: AgentResult["outcome"] = "done",
+  errorDetail?: string,
+  dies: (call: number) => Error | undefined = () => undefined,
+  sdkSessionId?: string
+) {
   const specs: AgentSpec[] = [];
   let i = 0;
   const pool = {
@@ -22,19 +28,25 @@ function fakePool(outputs: string[], outcome: AgentResult["outcome"] = "done", e
       const resultText = outputs[Math.min(i, outputs.length - 1)]!;
       i++;
       if (death) throw death;
-      return { sessionId: `s${i}`, resultText, costUsd: 0, turns: 1, outcome, errorDetail };
+      return { sessionId: `s${i}`, resultText, costUsd: 0, turns: 1, outcome, errorDetail, sdkSessionId };
     },
   };
   return { pool: pool as unknown as AgentPool, specs, calls: () => i };
 }
 
-function charrette(outputs: string[], outcome?: AgentResult["outcome"], errorDetail?: string, dies?: (call: number) => Error | undefined) {
+function charrette(
+  outputs: string[],
+  outcome?: AgentResult["outcome"],
+  errorDetail?: string,
+  dies?: (call: number) => Error | undefined,
+  sdkSessionId?: string
+) {
   const repo = mkdtempSync(path.join(tmpdir(), "charrette-plan-"));
   const store = new Store(":memory:");
   const bus = new Bus(store);
   const events: { type: string; reason?: string }[] = [];
   bus.subscribe(({ event }) => events.push(event as { type: string; reason?: string }));
-  const { pool, specs, calls } = fakePool(outputs, outcome, errorDetail, dies);
+  const { pool, specs, calls } = fakePool(outputs, outcome, errorDetail, dies, sdkSessionId);
   const controller = new RunController(
     store,
     bus,
@@ -264,7 +276,33 @@ describe("a DAG too big for one message", () => {
     await controller.startRun("do a thing", RunConfig.parse({ planIntentCheck: false })).catch(() => undefined);
     expect(specs[2]!.prompt).toContain("task-a (epic-e)");
     expect(specs[2]!.prompt).toContain("epic-e: E");
-    expect(specs[2]!.prompt).not.toContain("<prd>"); // and not the documents a second time
+  });
+
+  it("re-sends the briefing only to a planner that has no session to resume", async () => {
+    // A stateless planner (Gemini, DeepSeek) hands back no session id, so its
+    // continuation starts cold: without the PRD it would be asked for the next
+    // tasks of a plan it has never read. A resumed one already has it.
+    const cold = charrette([
+      DOCS,
+      batch({ epics: [epic], tasks: [task("task-a")], more: true }),
+      batch({ tasks: [task("task-b")], more: false }),
+    ]);
+    await cold.controller.startRun("do a thing", RunConfig.parse({ planIntentCheck: false })).catch(() => undefined);
+    expect(cold.specs[2]!.resume).toBeUndefined();
+    expect(cold.specs[2]!.prompt).toContain("<prd>\n# PRD");
+    expect(cold.specs[2]!.prompt).toContain("Continue the breakdown.");
+    expect(cold.specs[2]!.prompt).not.toContain("Emit the epic/task DAG as JSON.");
+
+    const warm = charrette(
+      [DOCS, batch({ epics: [epic], tasks: [task("task-a")], more: true }), batch({ tasks: [task("task-b")], more: false })],
+      undefined,
+      undefined,
+      undefined,
+      "sdk-planner"
+    );
+    await warm.controller.startRun("do a thing", RunConfig.parse({ planIntentCheck: false })).catch(() => undefined);
+    expect(warm.specs[2]!.resume).toBe("sdk-planner");
+    expect(warm.specs[2]!.prompt).not.toContain("<prd>"); // and not the documents a second time
   });
 
   it("judges the DAG once the whole plan is in, not one message at a time", async () => {
@@ -379,7 +417,17 @@ describe("what the operator is told about the output ceiling", () => {
     // run is a line nobody reads.
     const { controller, events } = charrette([DOCS, dagJson()]);
 
-    await controller.startRun("do a thing", RunConfig.parse({ planIntentCheck: false })).catch(() => undefined);
+    await controller.startRun("do a thing", RunConfig.parse({ planIntentCheck: false, models: { planner: "claude-opus-5-5" } })).catch(() => undefined);
+
+    expect(events.some((e) => e.type === "agent.log" && (e as { text?: string }).text?.includes("output ceiling"))).toBe(false);
+  });
+
+  it("says nothing about the SDK's table for a planner that does not run through the SDK", async () => {
+    // Gemini and DeepSeek are driven by the charrette's own tool loop, so the
+    // SDK neither knows nor clamps them; "upgrade the SDK" would be wrong advice.
+    const { controller, events } = charrette([DOCS, dagJson()]);
+
+    await controller.startRun("do a thing", RunConfig.parse({ planIntentCheck: false, models: { planner: "gemini-3.8-flash" } })).catch(() => undefined);
 
     expect(events.some((e) => e.type === "agent.log" && (e as { text?: string }).text?.includes("output ceiling"))).toBe(false);
   });

@@ -5201,7 +5201,13 @@ export class RunController {
         // happened on the judging model, in the conversation being resumed, and
         // what is left is transcription. Two turns, no investigation, and the
         // prompt below forbids changing the verdict.
-        model: run.config.models.repair,
+        //
+        // Unless `models.repair` is on a transport that cannot resume. That
+        // session would start cold and be asked for "the conclusion you already
+        // reached" with no conclusion in front of it — and the cheapest way to
+        // satisfy that prompt is to invent one. The QA model can resume, and it
+        // is the one that reached the verdict.
+        model: providerFor(run.config.models.repair) === "anthropic" ? run.config.models.repair : run.config.models.qa,
         systemPrompt: "You are finishing a verification you have already done. Answer with JSON and nothing else.",
         prompt:
           "Your previous message did not contain the verdict JSON this task requires. Do not investigate anything further and do not change your judgment — just state the conclusion you already reached, as exactly one JSON object inside a ```json fence:\n" +
@@ -5264,6 +5270,11 @@ export class RunController {
    */
   private async warnOutputCeiling(runId: string): Promise<void> {
     const model = this.store.getRun(runId)!.config.models.planner;
+    // Only the Anthropic transport runs through the SDK. A Gemini or DeepSeek
+    // planner is sent the request as written, so the SDK's table says nothing
+    // about it and a warning naming that table would send the operator to
+    // upgrade a package that is not in the path.
+    if (providerFor(model) !== "anthropic") return;
     const text = ceilingNote(await sdkCeiling(model), PLANNER_MAX_OUTPUT_TOKENS);
     if (text) this.bus.publish({ type: "agent.log", runId, sessionId: "planner", text, ts: Date.now() });
   }
@@ -5360,6 +5371,12 @@ export class RunController {
     // What the planner is told to fit in one message follows what it will
     // actually be granted, so the two can never drift apart again.
     const perMessage = tasksPerMessage(grantedTokens(await sdkCeiling(run.config.models.planner), maxOutputTokens));
+    // Everything the planner needs to know to emit any part of the DAG.
+    const briefing = `Assignment:\n${run.assignment}\n${specPlanBlock(this.store.runSpec(runId) ?? RunSpec.parse({}))}${feedback ? `\nOperator feedback on the previous plan:\n${feedback}\n` : ""}\n\nYou have already surveyed the repository and written these documents. Do not use any tools.\n\n<prd>\n${docs.prdMarkdown}\n</prd>\n\n<conventions>\n${docs.conventionsMarkdown}\n</conventions>\n${
+      files
+        ? `\n<repository-files>\n${files}\n</repository-files>\n\nThese are the files that exist today. Put the real ones under \`touchedPaths\` — a path you invent for a file that already exists is a task pointed at nothing, and two tasks naming the same file by different paths will collide instead of depending on each other. Only invent a path for a file the assignment genuinely requires and the repository does not have.\n`
+        : ""
+    }`;
 
     for (let attempt = 1; attempt <= attempts; attempt++) {
       // Only the first attempt restates the PRD. A rejected breakdown is a shape
@@ -5391,14 +5408,16 @@ export class RunController {
           resume,
           prompt:
             batch > 1
-              ? plannerContinuePrompt(epics, tasks, perMessage)
+              ? // A stateless planner (Gemini, OpenAI, DeepSeek) hands back no
+                // session to resume, so its continuation starts cold. Without the
+                // briefing it would be asked for "the NEXT tasks" of a PRD it has
+                // never read, holding nothing but the titles emitted so far.
+                resume
+                ? plannerContinuePrompt(epics, tasks, perMessage)
+                : `${briefing}\n${plannerContinuePrompt(epics, tasks, perMessage)}`
               : repair
                 ? plannerRepairPrompt(lastOutput, lastReason, lastTruncated, lastMessages)
-                : `Assignment:\n${run.assignment}\n${specPlanBlock(this.store.runSpec(runId) ?? RunSpec.parse({}))}${feedback ? `\nOperator feedback on the previous plan:\n${feedback}\n` : ""}\n\nYou have already surveyed the repository and written these documents. Do not use any tools.\n\n<prd>\n${docs.prdMarkdown}\n</prd>\n\n<conventions>\n${docs.conventionsMarkdown}\n</conventions>\n${
-                    files
-                      ? `\n<repository-files>\n${files}\n</repository-files>\n\nThese are the files that exist today. Put the real ones under \`touchedPaths\` — a path you invent for a file that already exists is a task pointed at nothing, and two tasks naming the same file by different paths will collide instead of depending on each other. Only invent a path for a file the assignment genuinely requires and the repository does not have.\n`
-                      : ""
-                  }\nEmit the epic/task DAG as JSON.`,
+                : `${briefing}\nEmit the epic/task DAG as JSON.`,
           cwd: this.repoPath,
           tools: [],
           allowedTools: [],

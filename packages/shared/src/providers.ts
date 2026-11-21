@@ -56,7 +56,7 @@ export function modelId(model: string): string {
 }
 
 /** The vendor's own name, for a message an operator reads. */
-const VENDOR_NAME: Record<Provider, string> = {
+export const VENDOR_NAME: Record<Provider, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
   google: "Google",

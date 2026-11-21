@@ -93,7 +93,10 @@ describe("QA that finished without writing its verdict", () => {
     const { pool, specs } = poolThatForgetsTheJson({ retryAnswers: '```json\n{"verdict":"PASS","notes":"criteria met"}\n```' });
     const store = new Store(":memory:");
     const controller = new RunController(store, new Bus(store), pool, noGithub, approveAll, repo());
-    const runId = await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], qaIterationCap: 3 }));
+    const runId = await controller.startRun(
+      "do a thing",
+      RunConfig.parse({ deterministicChecks: [], qaIterationCap: 3, models: { repair: "claude-haiku-5-5" } })
+    );
 
     const retry = specs.find((s) => s.role === "repair");
     expect(retry?.resume).toBe("sdk-qa-1");
@@ -103,7 +106,7 @@ describe("QA that finished without writing its verdict", () => {
     // On the cheap tier, and — the part that matters — NOT on the QA model. The
     // judging already happened in the session this resumes; what is left is
     // transcription, and it must not be billed or reasoned about as a verdict.
-    expect(retry?.model).toBe("claude-haiku-4-5-20251001");
+    expect(retry?.model).toBe("claude-haiku-5-5");
     expect(retry?.model).not.toBe(specs.find((s) => s.role === "qa")?.model);
 
     const task = store.getTask(runId, "task-a")!;
@@ -112,6 +115,24 @@ describe("QA that finished without writing its verdict", () => {
     // and the worker was never sent back to fix nothing.
     expect(task.qaIterations).toBe(1);
     expect(specs.filter((s) => s.role === "worker")).toHaveLength(1);
+  });
+
+  /**
+   * `models.repair` defaults to DeepSeek, which cannot resume a session. A
+   * re-ask that starts cold is asked to "state the conclusion you already
+   * reached" with no conclusion in front of it, and the cheapest way to answer
+   * that is to invent one — a PASS nobody judged. So it resumes on QA's model.
+   */
+  it("resumes on the QA model when the repair model cannot resume a session", async () => {
+    const { pool, specs } = poolThatForgetsTheJson({ retryAnswers: '```json\n{"verdict":"PASS","notes":"criteria met"}\n```' });
+    const store = new Store(":memory:");
+    const controller = new RunController(store, new Bus(store), pool, noGithub, approveAll, repo());
+    await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], qaIterationCap: 3 }));
+
+    const retry = specs.find((s) => s.role === "repair");
+    expect(retry?.resume).toBe("sdk-qa-1");
+    expect(retry?.model).toBe(specs.find((s) => s.role === "qa")?.model);
+    expect(retry?.model).not.toBe("deepseek-flash");
   });
 
   it("keeps the FAIL when the retry will not answer either", async () => {
