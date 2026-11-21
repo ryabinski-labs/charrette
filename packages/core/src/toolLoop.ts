@@ -49,7 +49,14 @@ export interface ToolLoopOptions {
   /** Injected in tests; otherwise built from the provider and the environment. */
   client?: ProviderClient;
   fetchImpl?: Fetch;
+  /** Credentials for the provider client. Defaults to charrette's environment. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * The allowlisted environment the session's tools see (agentEnv.ts). Built by
+   * the pool; absent only when the loop is driven directly, in which case the
+   * old inherited-plus-overlay behaviour is kept.
+   */
+  sessionEnv?: NodeJS.ProcessEnv;
   /** Injected in tests, so a tool loop can be driven without touching a disk. */
   toolsOverride?: LocalTool[];
   execOverride?: ToolContext["exec"];
@@ -116,9 +123,16 @@ export async function* toolLoop(opts: ToolLoopOptions): AsyncGenerator<Record<st
   const tools = opts.toolsOverride ?? toolsFor(spec);
   const byName = new Map(tools.map((t) => [t.name, t]));
 
+  const toolEnv: Record<string, string> = {};
+  for (const [name, value] of Object.entries(opts.sessionEnv ?? process.env)) {
+    if (value !== undefined) toolEnv[name] = value;
+  }
+  // A direct caller that passed no `sessionEnv` still gets the old overlay
+  // behaviour; the pool's own session environment already carries it.
+  Object.assign(toolEnv, spec.env);
   const ctx: ToolContext = {
     cwd: spec.cwd,
-    env: { ...(process.env as Record<string, string>), ...(spec.env ?? {}) },
+    env: toolEnv,
     signal,
     rewrite: rtkCommandRewriter(opts.env ?? process.env),
     exec: opts.execOverride,

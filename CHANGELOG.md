@@ -7,6 +7,35 @@ on. Before then, minor versions may break things.
 
 ## [Unreleased]
 
+### Security
+
+- **Agents no longer inherit every key charrette holds.** A session is built
+  from a base allowlist of shell and toolchain variables, plus the Claude login
+  a Claude session needs, instead of `{ ...process.env }`. The vendor keys, the
+  GitHub token and cloud credentials are withheld from every agent that does
+  not need them, so one prompt injection in a repository file or an install
+  script cannot read them. A task that genuinely needs one gets it from
+  `charrette.config.json`:
+
+  ```json
+  { "agentEnv": { "allow": ["STRIPE_TEST_KEY"] } }
+  ```
+
+  `run` and `resume` print `agent env   12 passed · +STRIPE_TEST_KEY · withheld
+  GEMINI_API_KEY DEEPSEEK_API_KEY GITHUB_TOKEN` (names only, never values), and
+  `run.agent_env` records the same names. An absent `agentEnv` block takes the
+  allowlist, so old runs keep working; `{"agentEnv":{"inherit":true}}` restores
+  the old whole-environment behaviour and says so in the banner. This is the
+  breaking change in this release: a task whose key happened to be exported now
+  fails until the key is allowed or inherit is set, and the banner names it.
+- **Push notices on a headless host.** Set `CHARRETTE_NOTIFY_URL` (and
+  optionally `CHARRETTE_NOTIFY_FORMAT`, `CHARRETTE_NOTIFY_TOKEN`) and charrette
+  sends a notice to ntfy or any HTTPS endpoint when a gate opens, a task enters
+  `NEEDS_HUMAN`, the run finishes or the run stops on an error. At most 20 per
+  run per ten minutes, then one summary; a 5xx or a timeout is retried twice,
+  and a failed notice is one `agent.log` line rather than a failed run.
+  `charrette notify-test` sends one and prints the HTTP status.
+
 ### Changed
 
 - **Old models are retired.** Claude Fable 5 and 5.1, Opus 5, Sonnet 5,

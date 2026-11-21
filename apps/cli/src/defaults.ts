@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import { SUBPROJECT_DIRS, scanCiChecks, type CiCheck, type SkippedStep } from "@charrette/core";
-import { DEFAULT_CHECK_TIMEOUT_MINUTES, DeliveryConfig, LiveConfig, SpecConfig, PitStopConfig, PlanGateConfig, SubscriptionConfig, TaskGateConfig } from "@charrette/shared";
+import { AgentEnvConfig, DEFAULT_CHECK_TIMEOUT_MINUTES, DeliveryConfig, LiveConfig, SpecConfig, PitStopConfig, PlanGateConfig, SubscriptionConfig, TaskGateConfig } from "@charrette/shared";
 
 export const CONFIG_FILENAME = "charrette.config.json";
 /** What the per-repo config file was called before the project was renamed. */
@@ -374,6 +374,8 @@ export const FileConfig = z
      * (default six hours). `0` fails the moment the quota window closes.
      */
     usageLimitWaitMinutes: z.number().int().min(0).max(7 * 24 * 60).optional(),
+    /** What every agent session may inherit; see `AgentEnvConfig` in shared. */
+    agentEnv: AgentEnvConfig.partial().optional(),
     models: z
       .object({
         intake: z.string().optional(),

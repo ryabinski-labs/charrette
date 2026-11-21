@@ -55,6 +55,7 @@ acceptance. Merging remains manual unless you explicitly authorize
 `--auto-merge`; GitHub protections still apply.
 
 - **[docs/OPERATIONS.md](./docs/OPERATIONS.md)** — install, configure, run, observe, recover. Start here.
+- **[docs/REMOTE.md](./docs/REMOTE.md)** — run it on a Linux host you reach over SSH: allowlisted agent environments, push notices, the dashboard tunnel and a provisioning script.
 - **[docs/PRODUCTION-DELIVERY.md](./docs/PRODUCTION-DELIVERY.md)** — full PRD → deployed release, authority, evidence and resume.
 - **[docs/CLAUDEFLOW-LEARNINGS.md](./docs/CLAUDEFLOW-LEARNINGS.md)** — Claude Flow comparison and adopted practices for focused context, recovery and efficient verification.
 - **[PRD.md](./PRD.md)** — the full product spec: architecture, threat model, performance budget, phasing.

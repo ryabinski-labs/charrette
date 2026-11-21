@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+#
+# Attach to the charrette tmux session, creating it if this is the first time.
+#
+# The env file is loaded here rather than in a shell profile so the keys reach
+# charrette and nothing else on the host: a login shell that exports them to
+# every process is the habit this is meant to avoid. Mode 0600, owned by the
+# account this runs as; see docs/REMOTE.md section 6.
+#
+set -euo pipefail
+
+ENV_FILE="${HOME}/.config/charrette/env"
+if [[ -f "$ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set +a
+fi
+
+exec tmux new-session -A -s charrette

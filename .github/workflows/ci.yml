@@ -69,6 +69,13 @@ jobs:
       - name: Build (typechecks every package)
         run: pnpm build
 
+      # The remote-host work ships two shell files that run as root on an
+      # operator's machine. shellcheck is the only static check they get, and
+      # it is cheap: ubuntu-latest already has it, and a warning here is a
+      # quoting or `set -e` bug that would otherwise surface at 2am.
+      - name: Lint the remote provisioning scripts
+        run: shellcheck scripts/remote/provision.sh scripts/remote/charrette-session
+
       # `vitest run` fails the job on the first failing test. The coverage
       # thresholds in vitest.config.ts (100% lines/functions/branches/
       # statements) fail it separately, after the suite passes — so a green

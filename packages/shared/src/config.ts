@@ -14,6 +14,39 @@ import { retireModels } from "./retired.js";
  */
 export const DEFAULT_CHECK_TIMEOUT_MINUTES = 10;
 
+/** The shape an allow entry may take: a name, or a name-prefix rule. */
+export const AGENT_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+export const AGENT_ENV_PREFIX = /^[A-Za-z_][A-Za-z0-9_]*\*$/;
+
+/**
+ * What an agent session may inherit from charrette's own environment.
+ *
+ * `allow` names variables a task needs beyond the base allowlist; a trailing
+ * `*` makes it a prefix rule. `inherit` is the escape hatch: it hands sessions
+ * everything, which is what every run did before this block existed.
+ *
+ * The entries are validated here rather than at the point a session is built.
+ * A typo in this list fails the whole config load with the entry named, which
+ * is the one moment the operator is still looking; accepted silently, it
+ * either withholds a variable the task needed or adds a key nobody meant.
+ */
+export const AgentEnvConfig = z.object({
+  allow: z
+    .array(z.string())
+    .superRefine((entries, ctx) => {
+      for (const entry of entries) {
+        if (AGENT_ENV_NAME.test(entry) || AGENT_ENV_PREFIX.test(entry)) continue;
+        ctx.addIssue({
+          code: "custom",
+          message: `agentEnv.allow entry "${entry}" is not a valid variable name or prefix — use ^[A-Za-z_][A-Za-z0-9_]*$ or a prefix ending in *`,
+        });
+      }
+    })
+    .default([]),
+  inherit: z.boolean().default(false),
+});
+export type AgentEnvConfig = z.infer<typeof AgentEnvConfig>;
+
 /**
  * The model ids the defaults below name, each written once: the price table in
  * budget.ts keys on the exact id, and a copy that drifts is a role billed at the
@@ -859,6 +892,8 @@ export const RunConfig = z.object({
    */
   usageLimitWaitMinutes: z.number().int().min(0).max(7 * 24 * 60).default(360),
   models: ModelRouting.prefault({}),
+  /** What every agent session may see; see `AgentEnvConfig`. */
+  agentEnv: AgentEnvConfig.prefault({}),
   budget: Budget.prefault({}),
   /**
    * What the run does as the *account's* plan runs out, rather than as this

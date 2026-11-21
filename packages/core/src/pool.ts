@@ -4,7 +4,8 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { query, type HookInput, type HookJSONOutput, type Options, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import { AgentRole, providerFor } from "@charrette/shared";
+import { AgentRole, providerFor, type AgentEnvConfig } from "@charrette/shared";
+import { buildAgentEnv } from "./agentEnv.js";
 import { checkpointDue, checkpointPrompt, describeQuestions, isCheckpointOnly, parseCheckpoint, DEFAULT_EVERY } from "./checkpoint.js";
 import { toolLoop, unsupportedSpec, type PromptSource } from "./toolLoop.js";
 import { Bus } from "./bus.js";
@@ -572,6 +573,21 @@ export class AgentPool {
    */
   private subscription: Required<Pick<SubscriptionPolicy, "name" | "env">> & Pick<SubscriptionPolicy, "watch"> = { name: "", env: {} };
 
+  /**
+   * What every session this run spawns may see, set once per run.
+   *
+   * Same reason as the checkpoint cadence and the subscription: seventeen call
+   * sites reach `run()`, and a filter threaded through all of them is a filter
+   * missing from whichever one is added next. A run whose frozen config
+   * predates `agentEnv` keeps this default, which is the allowlist.
+   */
+  private agentEnv: AgentEnvConfig = { allow: [], inherit: false };
+
+  configureAgentEnv(policy: Partial<AgentEnvConfig> | undefined): void {
+    if (!policy) return;
+    this.agentEnv = { allow: policy.allow ?? [], inherit: policy.inherit ?? false };
+  }
+
   configureSubscription(policy: SubscriptionPolicy | undefined): void {
     if (!policy) return;
     // Filled in here so everything downstream reads a name and an overlay that
@@ -613,7 +629,15 @@ export class AgentPool {
         maxTurns: 1,
         abortController: abort,
         settingSources: [],
-        env: { ...process.env, ...this.subscription.env },
+        // The probe is a Claude session too, so it gets the login and nothing
+        // else. It never runs a tool, but a spawned environment is a spawned
+        // environment.
+        env: buildAgentEnv({
+          source: process.env,
+          config: this.agentEnv,
+          provider: "anthropic",
+          subscription: this.subscription.env,
+        }).env,
       },
     });
     // Every failure lands on the same answer — nothing — so the question is
@@ -840,6 +864,16 @@ export class AgentPool {
     // none, which is how the two-turn repair role and the four-turn probes stay
     // out of this without being named anywhere. See checkpoint.ts.
     const checkpointEvery = spec.checkpointEvery ?? this.checkpoints.every;
+    // One decision, used below for the SDK options and for the tool loop's
+    // context. The overlay and the subscription are inside it: this is the
+    // environment the session and everything it spawns will see.
+    const sessionEnv = buildAgentEnv({
+      source: process.env,
+      config: this.agentEnv,
+      provider: providerFor(spec.model),
+      overlay: spec.env,
+      subscription: this.subscription.env,
+    }).env;
     const options: Options = {
       model: spec.model,
       cwd: spec.cwd,
@@ -876,22 +910,14 @@ export class AgentPool {
       // which under bypassPermissions is the only thing standing between a
       // `terraform destroy` an agent writes and the operator's account.
       hooks: bashHooks(spec.cwd),
-      // `env` replaces the inherited environment wholesale, so spread rather than
-      // set: workers reach gh/aws/podman through PATH (see toolbelt.ts).
+      // `env` replaces the inherited environment wholesale. What is in it was
+      // decided by `buildAgentEnv`: the base allowlist, the Claude login when
+      // this is a Claude session, the operator's `agentEnv.allow`, and then the
+      // per-task overlay and the subscription. Workers still reach gh/aws/
+      // podman through PATH (see toolbelt.ts); the keys they do not need are
+      // not there to be read.
       env: {
-        ...process.env,
-        // Caller-supplied first — the per-task compose project and port block —
-        // so the charrette's own settings below stay non-negotiable and a spec
-        // cannot hand an agent back the two-minute Bash timeout.
-        ...spec.env,
-        // Which subscription pays for this session. Above the inherited
-        // environment on purpose: the operator's own `CLAUDE_CODE_OAUTH_TOKEN`
-        // or `CLAUDE_CONFIG_DIR` is exactly what a switch is getting away from,
-        // and an overlay that lost to the shell it was spawned from would keep
-        // spending the exhausted account while the log said otherwise. Empty
-        // for every run that never names an account, which is the old behaviour
-        // of using whatever the operator is logged into.
-        ...this.subscription.env,
+        ...sessionEnv,
         // The CLI backgrounds any command that outruns its timeout, and a
         // backgrounded command kills this session when it exits — see
         // backgroundShellHook. The stock 120s default reaches that outcome on an
@@ -977,6 +1003,10 @@ export class AgentPool {
             spec,
             prompts: stream.asSource(),
             signal: abort.signal,
+            // The tools see the allowlisted environment; the provider client
+            // still reads charrette's own environment for its API key. Those
+            // are different questions and must not share one answer.
+            sessionEnv,
             contextBudget: spec.contextBudget,
             // Only this transport can act on a digest. The SDK owns its own
             // transcript, so on Anthropic a checkpoint buys the record and the
