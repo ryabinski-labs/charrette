@@ -7,6 +7,8 @@ on. Before then, minor versions may break things.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-21
+
 ### Changed
 
 - **New default models, across three vendors.** DeepSeek Flash now runs every
