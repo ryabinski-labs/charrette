@@ -364,6 +364,41 @@ describe("opening pull requests from a detached HEAD", () => {
   });
 });
 
+describe("the environment a started run records", () => {
+  it("SC-004-f a started run publishes run.agent_env with the names agents could read", async () => {
+    const dir = repo();
+    const { pool } = rolePool({
+      planner: (s) => (Array.isArray(s.tools) && s.tools.length > 0 ? DOCS() : dagJson()),
+      worker,
+      qa: () => QA_PASS,
+      validator: () => '```json\n{"verdict":"PASS","gaps":[],"summary":"ok"}\n```',
+    });
+    const { controller, events } = build({ repoPath: dir, pool });
+    process.env.STRIPE_TEST_KEY = "sk_test_123";
+    process.env.OPENCODE_TEST_SECRET = "not-for-agents";
+
+    try {
+      await controller.startRun(
+        "build a thing",
+        RunConfig.parse({ ...BASE, agentEnv: { allow: ["STRIPE_TEST_KEY"] } })
+      );
+
+      const recorded = events.find((e) => e.type === "run.agent_env");
+      expect(recorded).toBeDefined();
+      expect(recorded).toMatchObject({ added: ["STRIPE_TEST_KEY"], inherit: false });
+      const withheld = (recorded as { withheld: string[] }).withheld;
+      expect(withheld).toContain("OPENCODE_TEST_SECRET");
+      expect(withheld).not.toContain("STRIPE_TEST_KEY");
+      // Names, never values: the event is an audit record.
+      expect(JSON.stringify(recorded)).not.toContain("sk_test_123");
+      expect(JSON.stringify(recorded)).not.toContain("not-for-agents");
+    } finally {
+      delete process.env.STRIPE_TEST_KEY;
+      delete process.env.OPENCODE_TEST_SECRET;
+    }
+  });
+});
+
 describe("the pull request's title and body", () => {
   it("takes the title from the assignment when the PRD has no heading", async () => {
     const dir = repo({ remote: true });

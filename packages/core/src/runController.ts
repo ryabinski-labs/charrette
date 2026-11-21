@@ -25,6 +25,7 @@ import {
 } from "@charrette/shared";
 import { indexSkills, matchSkills, verifyHash, type IndexedSkill } from "@charrette/skills-mcp";
 import { pinsInPlay, skillsByName, unresolvedRoleSkills } from "./skillPins.js";
+import { agentEnvEvent, summarizeAgentEnv } from "./agentEnv.js";
 import { Bus } from "./bus.js";
 import { BudgetExceeded } from "./budget.js";
 import { seedWorktreeDeps } from "./deps.js";
@@ -1033,6 +1034,9 @@ export class RunController {
     // with. `drive` sets it again from the frozen config, which is what a
     // resumed run reads.
     this.applyCheckpointCadence(runId);
+    // Intake is already an agent with a shell, so the allowlist is in place
+    // before the first turn rather than before the first task.
+    this.applyAgentEnv(runId);
     // Before intake, because intake is already an agent carrying a pinned skill
     // — the first thing this run does is the first thing a missing pin can
     // spoil.
@@ -1080,6 +1084,25 @@ export class RunController {
    */
   private applyCheckpointCadence(runId: string): void {
     this.pool.configureCheckpoints?.(this.store.getRun(runId)!.config.checkpoint);
+  }
+
+  /**
+   * Hand the pool this run's agent-environment allowlist.
+   *
+   * Optional-called like the cadence above, for the pool doubles the
+   * controller's own tests stand up. A run whose frozen config predates
+   * `agentEnv` parses with the schema's default — allowlist, not inherit — so
+   * an old run resumed on a new binary gets the safer answer rather than the
+   * one it was created under.
+   */
+  private applyAgentEnv(runId: string): void {
+    this.pool.configureAgentEnv?.(this.store.getRun(runId)!.config.agentEnv);
+  }
+
+  /** Names only; this event is an audit record, not a credentials dump. */
+  private publishAgentEnv(runId: string): void {
+    const config = this.store.getRun(runId)!.config.agentEnv;
+    this.bus.publish(agentEnvEvent(runId, summarizeAgentEnv(process.env, config)));
   }
 
   /**
@@ -1895,6 +1918,11 @@ export class RunController {
     // here rather than in the constructor, because it is the run's frozen
     // config that decides it and a resumed run must pick up its own.
     this.applyCheckpointCadence(runId);
+    // What every session may see, and the record of it. Published once per
+    // drive — start and resume both arrive here — so the event says which
+    // variables agents could read for the attempt that is about to spend money.
+    this.applyAgentEnv(runId);
+    this.publishAgentEnv(runId);
     // Which subscription this run spends, and the watch that stops it before
     // the plan runs out. Set beside the checkpoint cadence and for the same
     // reason — it belongs to the run, not to the call sites.

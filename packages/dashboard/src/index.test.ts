@@ -1225,22 +1225,34 @@ describe("serving on a token the operator already holds", () => {
   });
 
   it("reuses a supplied token, and still answers the old URL after a restart", async () => {
-    const first = dashboard();
-    const url = await first.start();
-    const token = first.token;
-    // The process the operator's tab was talking to goes away — a pause they
-    // took far enough to close the terminal, or a reboot.
-    await first.stop();
+    // Retried for the same reason as the port-selection case above: the port
+    // released by `first.stop()` is free for anything on the machine to take,
+    // including another test file's dashboard in a parallel worker. The
+    // behaviour is deterministic; the port space is not.
+    for (let attempt = 1; ; attempt++) {
+      const first = dashboard();
+      const url = await first.start();
+      const token = first.token;
+      // The process the operator's tab was talking to goes away — a pause they
+      // took far enough to close the terminal, or a reboot.
+      await first.stop();
 
-    const again = dashboard({ preferPort: Number(new URL(url).port), token });
-    started.push(again);
-    const backAt = await again.start();
+      const again = dashboard({ preferPort: Number(new URL(url).port), token });
+      started.push(again);
+      const backAt = await again.start();
+      if (backAt !== url && attempt < 5) {
+        await again.stop();
+        started.pop();
+        continue;
+      }
 
-    expect(again.token).toBe(token);
-    expect(backAt).toBe(url);
-    const res = await fetch(new URL("/api/state", backAt), { headers: { authorization: `Bearer ${token}`, connection: "close" } });
-    expect(res.status).toBe(200);
-    await res.arrayBuffer();
+      expect(again.token).toBe(token);
+      expect(backAt).toBe(url);
+      const res = await fetch(new URL("/api/state", backAt), { headers: { authorization: `Bearer ${token}`, connection: "close" } });
+      expect(res.status).toBe(200);
+      await res.arrayBuffer();
+      return;
+    }
   });
 
   it("takes another port rather than refusing to come back at all", async () => {

@@ -82,7 +82,7 @@ describe("provision.sh refuses what it cannot do", () => {
 
     const malformed = run("debian", ["--user", "charrette", "--ssh-key", keyFile("not a public key\n")]);
     expect(malformed.status).not.toBe(0);
-    expect(String(malformed.stderr).toMatch(/public key/i)).toBe(true);
+    expect(String(malformed.stderr)).toMatch(/public key/i);
   });
 });
 

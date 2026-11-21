@@ -43,7 +43,7 @@ const NOTICE: Notice = {
   event: "run.gate_opened",
   runId: "run1",
   repo: "charrette",
-  title: "charrette — plan gate",
+  title: "charrette — plan gate · run1",
   message: "Plan ready for approval",
   priority: "high",
   tags: ["charrette", "gate"],
@@ -98,6 +98,8 @@ describe("turning run events into notices", () => {
         spentUsd: 12,
         artifactsDir: "/tmp/demo",
         demoStarted: true,
+        summoned: false,
+        askedAt: 0,
         ts: 4,
       }),
       "charrette"
@@ -115,6 +117,61 @@ describe("turning run events into notices", () => {
     expect(subscription!.message).toContain("seven-day window at 96%");
     expect(pitStop!.message).toContain("every epic");
     expect(pitStop!.event).toBe("run.pitstop_opened");
+
+    // The rest of the gate kinds, and the payloads that do not have the fields
+    // a rendered notice would like: the message still has to say something,
+    // and it still must not copy the payload through.
+    const budgetWithoutFigures = noticeForEvent(
+      event({ type: "run.gate_opened", runId: "run1", gateId: "g4", kind: "budget", payload: null, ts: 4 }),
+      "charrette"
+    );
+    const budgetWithStrings = noticeForEvent(
+      event({
+        type: "run.gate_opened",
+        runId: "run1",
+        gateId: "g5",
+        kind: "budget",
+        payload: { spentUsd: "30", capUsd: "30" },
+        ts: 5,
+      }),
+      "charrette"
+    );
+    const subscriptionWithoutSummary = noticeForEvent(
+      event({ type: "run.gate_opened", runId: "run1", gateId: "g6", kind: "subscription", payload: {}, ts: 6 }),
+      "charrette"
+    );
+    const conflict = noticeForEvent(
+      event({ type: "run.gate_opened", runId: "run1", gateId: "g7", kind: "integration-conflict", payload: {}, ts: 7 }),
+      "charrette"
+    );
+    const escalation = noticeForEvent(
+      event({ type: "run.gate_opened", runId: "run1", gateId: "g8", kind: "task-escalation", payload: {}, ts: 8 }),
+      "charrette"
+    );
+    const pitStopGate = noticeForEvent(
+      event({ type: "run.gate_opened", runId: "run1", gateId: "g9", kind: "pit-stop", payload: {}, ts: 9 }),
+      "charrette"
+    );
+    const taskGate = noticeForEvent(
+      event({
+        type: "task.gate_opened",
+        runId: "run1",
+        taskId: "api-auth",
+        why: "QA rejected it three times",
+        recommendation: "",
+        iterations: 3,
+        ts: 10,
+      }),
+      "charrette"
+    );
+    expect(budgetWithoutFigures!.message).toBe("Budget gate needs you");
+    expect(budgetWithStrings!.message).toBe("Budget gate needs you");
+    expect(subscriptionWithoutSummary!.message).toBe("Subscription limit reached");
+    expect(conflict!.message).toContain("Integration conflict");
+    expect(escalation!.message).toContain("Task escalation");
+    expect(pitStopGate!.message).toContain("Pit stop");
+    expect(taskGate!.message).toContain("api-auth");
+    expect(taskGate!.message).toContain("QA rejected it three times");
   });
 
   it("SC-005-b a task entering NEEDS_HUMAN becomes one notice", () => {
@@ -154,6 +211,12 @@ describe("turning run events into notices", () => {
     expect(notice!.title).toContain("run done");
     expect(notice!.message).toContain("14 merged, 1 parked");
     expect(notice!.priority).toBe("default");
+
+    const withoutReason = noticeForEvent(
+      event({ type: "run.state_changed", runId: "run1", from: "VERIFYING", to: "DONE", reason: "", ts: 2 }),
+      "charrette"
+    );
+    expect(withoutReason!.message).toBe("Run done");
   });
 
   it("SC-005-e a run stopped on an error becomes one notice", () => {
@@ -163,6 +226,9 @@ describe("turning run events into notices", () => {
     expect(notice.title).toContain("run stopped");
     expect(notice.message).toContain("worktree is gone");
     expect(notice.priority).toBe("default");
+
+    // A throw that is not an Error still has to become a sentence.
+    expect(notifyStopped("run1", "charrette", "plain failure").message).toContain("plain failure");
   });
 });
 
@@ -175,7 +241,7 @@ describe("the request each format sends", () => {
     expect(calls).toHaveLength(1);
     const headers = calls[0]!.init.headers as Record<string, string>;
     expect(calls[0]!.init.body).toBe("Plan ready for approval");
-    expect(headers.Title).toBe("charrette — plan gate");
+    expect(headers.Title).toBe("charrette — plan gate · run1");
     expect(headers.Priority).toBe("high");
     expect(headers.Tags).toContain("charrette");
   });
@@ -210,6 +276,9 @@ describe("the request each format sends", () => {
     await sendPush({ ...TARGET, token: "tk_secret" }, NOTICE, { fetchImpl, sleep: noSleep });
 
     expect((calls[0]!.init.headers as Record<string, string>).Authorization).toBe("Bearer tk_secret");
+    expect(
+      notifyTarget({ CHARRETTE_NOTIFY_URL: "https://ntfy.sh/topic", CHARRETTE_NOTIFY_TOKEN: "tk_secret" })!.token
+    ).toBe("tk_secret");
   });
 });
 
@@ -257,12 +326,14 @@ describe("charrette notify-test", () => {
   it("SC-008-a the test notice reports the HTTP status", async () => {
     const { calls, fetchImpl } = recorder([200]);
 
-    const result = await sendTestNotice(TARGET, { fetchImpl, sleep: noSleep });
+    // No `sleep`: success is the default path, including the real delay
+    // factory it would use if a retry were needed.
+    const result = await sendTestNotice(TARGET, { fetchImpl });
 
     expect(result.status).toBe(200);
     expect(result.ok).toBe(true);
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.init.body).toContain("test");
+    expect(String(calls[0]!.init.body)).toMatch(/test/i);
   });
 });
 
@@ -278,10 +349,30 @@ describe("retries and timeouts", () => {
       },
     });
 
-    expect(calls).toHaveLength(4);
+    expect(calls).toHaveLength(3);
     expect(sleeps).toEqual([2000, 10000]);
     expect(result.ok).toBe(false);
     expect(result.status).toBe(503);
+
+    // A 4xx is a wrong request, not a broken endpoint: one attempt, no sleeps.
+    const rejected = recorder([404]);
+    const short = await sendPush(TARGET, NOTICE, { fetchImpl: rejected.fetchImpl, sleep: noSleep });
+    expect(rejected.calls).toHaveLength(1);
+    expect(short.ok).toBe(false);
+    expect(short.status).toBe(404);
+
+    // And the sleep a real run uses, driven by fake timers rather than two
+    // seconds of wall clock. One 500 then a 200 is one retry.
+    vi.useFakeTimers();
+    try {
+      const retried = recorder([500, 200]);
+      const inflight = sendPush(TARGET, NOTICE, { fetchImpl: retried.fetchImpl });
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(inflight).resolves.toMatchObject({ ok: true, status: 200 });
+      expect(retried.calls).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("SC-009-b a notice that times out is retried and never blocks the run", async () => {
@@ -297,6 +388,14 @@ describe("retries and timeouts", () => {
 
     expect(result.ok).toBe(false);
     expect(calls).toBe(3);
+
+    // A thrown non-Error is still a reason, not a crash.
+    const thrown = (async () => {
+      throw "socket closed";
+    }) as unknown as typeof fetch;
+    const plain = await sendPush(TARGET, NOTICE, { fetchImpl: thrown, sleep: noSleep });
+    expect(plain.ok).toBe(false);
+    expect(plain.error).toBe("socket closed");
   });
 
   it("SC-009-c the last failure writes one agent.log line and does not throw", async () => {

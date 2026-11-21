@@ -73,6 +73,10 @@ describe("the Claude session environment", () => {
     vi.stubEnv("GEMINI_API_KEY", "gem-secret");
     vi.stubEnv("GITHUB_TOKEN", "ghp_secret");
     vi.stubEnv("PATH", "/usr/bin");
+    // A frozen config with no block and a block with no fields both mean the
+    // allowlist; the second is what the controller hands over for an old run.
+    pool.configureAgentEnv(undefined);
+    pool.configureAgentEnv({});
 
     await pool.run(SPEC);
 

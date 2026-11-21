@@ -107,7 +107,8 @@ describe("the base allowlist", () => {
       signal: new AbortController().signal,
       client,
       toolsOverride: [capture],
-      sessionEnv,
+      // An undefined value is not a variable; a direct caller may pass one.
+      sessionEnv: { ...sessionEnv, NOT_SET: undefined },
     })) {
       messages.push(message);
     }
@@ -213,10 +214,24 @@ describe("what the banner says", () => {
   };
 
   it("SC-004-a withheld names are the secret-like variables no agent receives", () => {
-    const summary = summarizeAgentEnv(source, { allow: [], inherit: false });
+    // The scenario is about a run with no allow entries, so the key the next
+    // case allows is absent from this environment rather than counted here.
+    const { STRIPE_TEST_KEY: _allowedByAnotherCase, ...withoutAllowedKey } = source;
+    const summary = summarizeAgentEnv(withoutAllowedKey, { allow: [], inherit: false });
 
     expect(summary.withheld).toEqual(["GEMINI_API_KEY", "GITHUB_TOKEN", "STRIPE_SECRET_KEY"]);
     expect(summary.withheld).not.toContain("PATH");
+
+    // No config block is an old run, and an undefined value is not a variable.
+    const bare = summarizeAgentEnv({ PATH: "/usr/bin", NOT_SET: undefined });
+    expect(bare).toEqual({ passed: 1, added: [], missing: [], withheld: [], inherit: false });
+    expect(summarizeAgentEnv(source, { allow: ["STRIPE_TEST_KEY"], inherit: true })).toEqual({
+      passed: 0,
+      added: [],
+      missing: [],
+      withheld: [],
+      inherit: true,
+    });
   });
 
   it("SC-004-b inherit returns the whole environment", () => {
@@ -229,6 +244,18 @@ describe("what the banner says", () => {
     expect(state.env.GITHUB_TOKEN).toBe("ghp_x");
     expect(state.env.PATH).toBe("/usr/bin");
     expect(state.inherit).toBe(true);
+
+    // An undefined value is absent, in inherit and in the allowlist path alike.
+    expect(
+      buildAgentEnv({
+        source: { PATH: "/usr/bin", NOT_SET: undefined },
+        provider: "deepseek",
+        config: { allow: [], inherit: true },
+      }).env
+    ).toEqual({ PATH: "/usr/bin" });
+    expect(
+      buildAgentEnv({ source: { PATH: undefined }, provider: "deepseek", config: { allow: [], inherit: false } }).env
+    ).toEqual({});
   });
 
   it("SC-004-c the banner names what passed, what was added and what was withheld", () => {

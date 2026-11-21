@@ -22,7 +22,7 @@ import {
 import { TerminalChat } from "./chat.js";
 import { armCrashLog } from "./crashlog.js";
 import { clearDashboard, liveDashboardUrl, recordDashboard, recordedDashboard } from "./dashboardLink.js";
-import { notifyBanner, notifyDone, notifyTarget, type NotifyTarget } from "./notify.js";
+import { notifyBanner, notifyDone, notifyStopped, notifyTarget, sendPush, sendTestNotice, watchPush, type NotifyTarget } from "./notify.js";
 import { mailBanner, mailTarget, watchGateMail } from "./gateMail.js";
 import { collectVersion, formatVersion } from "./version.js";
 
@@ -604,6 +604,9 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
     // The flag wins over the file: it is the thing you reach for when the run
     // in front of you needs to get cheaper right now.
     models: requestedModels,
+    // What this run's sessions may see. A typo in an entry is rejected by the
+    // schema here, before the run exists.
+    agentEnv: file.agentEnv,
     budget: { runCapUsd },
     // The subscriptions this run may spend, and which one it starts on. The
     // flag wins over the file for the same reason `--model` does: it is what
@@ -834,15 +837,25 @@ export function buildProgram(): Command {
       const bridgedIntake = wantChat && (chat || url) ? new BridgedIntake(chat) : undefined;
       if (bridgedIntake) dash.connectIntake(bridgedIntake);
       const stopGateMail = watchGateMail(bus, { project: path.basename(repo), url: url ?? "", target: mail });
+      const stopPush = notify ? watchPush(bus, { project: path.basename(repo), target: notify }) : () => undefined;
       const stopBudgetWatch = watchBudgetCommands(controller, liveRunId);
+      let runId: string | undefined;
       try {
-        const runId = await controller.startRun(seed, config, bridgedIntake);
+        runId = await controller.startRun(seed, config, bridgedIntake);
         await reportOutcome(controller, repo, runId);
       } catch (e) {
-        notifyDone(`${path.basename(repo)} — run stopped`, e instanceof Error ? e.message : String(e));
+        const message = e instanceof Error ? e.message : String(e);
+        notifyDone(`${path.basename(repo)} — run stopped`, message);
+        // A failure during intake happens after the run row exists but before
+        // `startRun` returns its id, so ask the store before giving up on one.
+        if (notify) {
+          const stoppedId = runId ?? store.listRuns()[0]?.id ?? "unknown";
+          void sendPush(notify, notifyStopped(stoppedId, path.basename(repo), message));
+        }
         throw e;
       } finally {
         stopGateMail();
+        stopPush();
         stopBudgetWatch();
         chat?.close();
         await dash.stop();
@@ -862,6 +875,9 @@ export function buildProgram(): Command {
     .action(async (runIdArg: string | undefined, opts: { repo: string; dashboard?: boolean; port?: string; model?: string[]; account?: string }, cmd: Command) => {
       const repo = resolveRepoRoot(opts.repo);
       if (await repoBlocked(repo)) return;
+      // A bad URL refuses here, as it does in `run`, before a resumed run
+      // spends anything.
+      const notify = notifyTarget();
       const file = loadFileConfig(repo).config;
       const fromCli = (name: string) => cmd.getOptionValueSource(name) === "cli";
       const wantDashboard = fromCli("dashboard") ? opts.dashboard === true : file.dashboard ?? true;
@@ -960,11 +976,23 @@ export function buildProgram(): Command {
       // the moment it started, which means a run half finished when the operator
       // decided its UI work needs a designer would never see that decision — and
       // the tasks that would benefit are exactly the ones still queued.
-      for (const key of ["skillRouting", "roleSkills"] as const) {
+      //
+      // `agentEnv` travels with them for the same reason and a sharper one: the
+      // most likely reason to resume a run is that a task failed because a key
+      // it needed was withheld. The file now allows it; the remaining sessions
+      // are the ones that should get it.
+      for (const key of ["skillRouting", "roleSkills", "agentEnv"] as const) {
         if (!existing || !file[key] || JSON.stringify(file[key]) === JSON.stringify(existing.config[key])) continue;
         store.patchRunConfig(runId, { [key]: file[key] } as Partial<RunConfig>);
         process.stdout.write(`${key} updated from ${CONFIG_FILENAME} for the remaining tasks\n`);
       }
+      // The two lines `run` prints, printed again here: a run resumed weeks
+      // later is the moment an operator most needs to know what an agent can
+      // read and where a notice would reach them. Read after the patch above,
+      // so it names the environment the next session will really get.
+      const resumedEnv = store.getRun(runId)?.config.agentEnv ?? { allow: [], inherit: false };
+      process.stdout.write(`${agentEnvBanner(summarizeAgentEnv(process.env, resumedEnv)).join("\n")}\n`);
+      process.stdout.write(`${notifyBanner(notify).join("\n")}\n`);
       // Which model answers for each role, for the rest of the run.
       //
       // This is the knob an operator reaches for mid-run, and usually for one
@@ -1095,15 +1123,19 @@ export function buildProgram(): Command {
       const mail = mailTarget();
       mailBanner(mail).forEach((l) => process.stdout.write(`${l}\n`));
       const stopGateMail = watchGateMail(bus, { project: path.basename(repo), url: url ?? "", target: mail });
+      const stopPush = notify ? watchPush(bus, { project: path.basename(repo), target: notify }) : () => undefined;
       const stopBudgetWatch = watchBudgetCommands(controller, () => runId);
       try {
         await controller.resume(runId, bridgedIntake);
         await reportOutcome(controller, repo, runId);
       } catch (e) {
-        notifyDone(`${path.basename(repo)} — run stopped`, e instanceof Error ? e.message : String(e));
+        const message = e instanceof Error ? e.message : String(e);
+        notifyDone(`${path.basename(repo)} — run stopped`, message);
+        if (notify) void sendPush(notify, notifyStopped(runId, path.basename(repo), message));
         throw e;
       } finally {
         stopGateMail();
+        stopPush();
         stopBudgetWatch();
         chat?.close();
         await dash.stop();
@@ -1544,8 +1576,13 @@ export function buildProgram(): Command {
     .command("notify-test")
     .description("send one test notice to CHARRETTE_NOTIFY_URL and print the HTTP status")
     .action(async () => {
-      // Filled in with the push channel; the command exists so the red-phase
-      // acceptance case fails on what is printed, not on an unknown command.
+      const target = notifyTarget();
+      if (!target) throw new Error("CHARRETTE_NOTIFY_URL is not set");
+      const result = await sendTestNotice(target);
+      // The status is the answer, including a failure: an operator debugging a
+      // relay learns more from `HTTP 403` than from a sentence about it.
+      process.stdout.write(`HTTP ${result.status}\n`);
+      if (!result.ok) throw new Error(`the test notice failed: ${result.error}`);
     });
 
   program

@@ -813,6 +813,9 @@ describe("the agent environment and the notify channel in the banner", () => {
 
   it("SC-003-d the run banner names an allowlisted variable", async () => {
     process.env.STRIPE_TEST_KEY = "sk_test_123";
+    // A configured endpoint also puts the watcher in place; the banner case is
+    // about the other line, but a run holds both subscriptions.
+    process.env.CHARRETTE_NOTIFY_URL = "https://ntfy.sh/a-topic";
     h.loadFileConfigMock.mockReturnValue({
       config: { agentEnv: { allow: ["STRIPE_TEST_KEY"] } },
       path: "/repo/charrette.config.json",
@@ -823,6 +826,8 @@ describe("the agent environment and the notify channel in the banner", () => {
     const banner = printed();
     expect(banner).toContain("agent env");
     expect(banner).toContain("+STRIPE_TEST_KEY");
+    // The other line the remote-host banner adds, with the topic elided.
+    expect(banner).toContain("notify      ntfy.sh/…");
   });
 
   it("SC-004-e the run banner lists a withheld secret-like name without its value", async () => {
@@ -852,8 +857,20 @@ describe("the agent environment and the notify channel in the banner", () => {
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 204 }) as Response));
 
     await cli("notify-test");
-
     expect(printed()).toContain("HTTP 204");
+
+    // The failure paths are the reason the command exists: an operator with a
+    // broken relay needs the status, and a missing URL needs its name.
+    out.length = 0;
+    // A 4xx, not a 5xx: the command's failure path is the subject, and a 5xx
+    // would spend the two real retry waits proving a sender already covered by
+    // its own case.
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 403 }) as Response));
+    await expect(cli("notify-test")).rejects.toThrow(/test notice failed/);
+    expect(printed()).toContain("HTTP 403");
+
+    delete process.env.CHARRETTE_NOTIFY_URL;
+    await expect(cli("notify-test")).rejects.toThrow(/CHARRETTE_NOTIFY_URL is not set/);
   });
 });
 
@@ -1215,11 +1232,51 @@ describe("charrette run — intake", () => {
 
   it("notifies, closes the chat and stops the dashboard when the run throws", async () => {
     h.controllerMethods.startRun.mockRejectedValue(new Error("the pool died"));
+    process.env.CHARRETTE_NOTIFY_URL = "https://ntfy.sh/a-topic";
+    const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => ({ ok: true, status: 200 }) as Response);
+    vi.stubGlobal("fetch", fetchMock);
 
-    await expect(cli("run", "x", "--repo", "/repo")).rejects.toThrow("the pool died");
+    try {
+      await expect(cli("run", "x", "--repo", "/repo")).rejects.toThrow("the pool died");
 
-    expect(h.notifyDoneMock).toHaveBeenCalledWith("repo — run stopped", "the pool died");
-    expect(h.dashboardMethods.stop).toHaveBeenCalledOnce();
+      expect(h.notifyDoneMock).toHaveBeenCalledWith("repo — run stopped", "the pool died");
+      expect(h.dashboardMethods.stop).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+      // No run id exists yet, and the notice still has to say which run stopped.
+      const headers = (fetchMock.mock.calls[0]![1] as RequestInit).headers as Record<string, string>;
+      expect(headers.Title).toContain("unknown");
+
+      // The other half of that fallback: a run row exists even though startRun
+      // has not returned its id, so the notice can name the real run.
+      fetchMock.mockClear();
+      h.storeMethods.listRuns.mockReturnValue([{ id: "run-orphan", state: "EXECUTING", assignment: "a" }]);
+      await expect(cli("run", "x", "--repo", "/repo")).rejects.toThrow("the pool died");
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+      const named = (fetchMock.mock.calls[0]![1] as RequestInit).headers as Record<string, string>;
+      expect(named.Title).toContain("run-orphan");
+    } finally {
+      delete process.env.CHARRETTE_NOTIFY_URL;
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("sends the stopped notice with the run id once the run exists", async () => {
+    h.controllerMethods.outcome.mockImplementation(() => {
+      throw new Error("the closing report failed");
+    });
+    process.env.CHARRETTE_NOTIFY_URL = "https://ntfy.sh/a-topic";
+    const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => ({ ok: true, status: 200 }) as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      await expect(cli("run", "x", "--repo", "/repo", "--no-dashboard")).rejects.toThrow("the closing report failed");
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+      const headers = (fetchMock.mock.calls[0]![1] as RequestInit).headers as Record<string, string>;
+      expect(headers.Title).toContain("run-1");
+    } finally {
+      delete process.env.CHARRETTE_NOTIFY_URL;
+      vi.unstubAllGlobals();
+    }
   });
 
   it("reports a non-Error failure as its string form", async () => {
@@ -1874,11 +1931,22 @@ describe("charrette resume", () => {
   it("notifies and stops the dashboard when the resume throws", async () => {
     h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "EXECUTING", assignment: "a" }]);
     h.controllerMethods.resume.mockRejectedValue(new Error("worktree is gone"));
+    process.env.CHARRETTE_NOTIFY_URL = "https://ntfy.sh/a-topic";
+    const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => ({ ok: true, status: 200 }) as Response);
+    vi.stubGlobal("fetch", fetchMock);
 
-    await expect(cli("resume", "--repo", "/repo")).rejects.toThrow("worktree is gone");
+    try {
+      await expect(cli("resume", "--repo", "/repo")).rejects.toThrow("worktree is gone");
 
-    expect(h.notifyDoneMock).toHaveBeenCalledWith("repo — run stopped", "worktree is gone");
-    expect(h.dashboardMethods.stop).toHaveBeenCalledOnce();
+      expect(h.notifyDoneMock).toHaveBeenCalledWith("repo — run stopped", "worktree is gone");
+      expect(h.dashboardMethods.stop).toHaveBeenCalledOnce();
+      // The desktop notice and the push notice are the same event on two
+      // channels; a headless host only has the second.
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    } finally {
+      delete process.env.CHARRETTE_NOTIFY_URL;
+      vi.unstubAllGlobals();
+    }
   });
 
   it("reports a non-Error resume failure as its string form", async () => {
@@ -1905,6 +1973,35 @@ describe("charrette resume — settings the operator changed since the run start
 
     expect(h.storeMethods.patchRunConfig).toHaveBeenCalledWith("run-1", { deterministicChecks: ["npm test"] });
     expect(printed()).toContain("Checks updated from charrette.config.json:\n  $ npm test");
+  });
+
+  it("SC-003-e resume applies an agentEnv change from the config file", async () => {
+    // The likeliest reason to resume a run: a task failed because a key it
+    // needed was withheld, and the file now allows it. The sessions still to
+    // run are exactly the ones that should get it.
+    const run = { id: "run-1", state: "EXECUTING", config: { agentEnv: { allow: [], inherit: false } } };
+    h.storeMethods.getRun.mockReturnValue(run);
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "EXECUTING", assignment: "a" }]);
+    h.storeMethods.patchRunConfig.mockImplementation((_id: string, patch: Record<string, unknown>) => {
+      Object.assign(run.config, patch);
+    });
+    h.loadFileConfigMock.mockReturnValue({
+      config: { agentEnv: { allow: ["STRIPE_TEST_KEY"] } },
+      path: "/repo/charrette.config.json",
+    });
+    process.env.STRIPE_TEST_KEY = "sk_test_123";
+
+    try {
+      await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
+
+      expect(h.storeMethods.patchRunConfig).toHaveBeenCalledWith("run-1", {
+        agentEnv: { allow: ["STRIPE_TEST_KEY"] },
+      });
+      expect(printed()).toContain("agentEnv updated from charrette.config.json for the remaining tasks");
+      expect(printed()).toContain("+STRIPE_TEST_KEY");
+    } finally {
+      delete process.env.STRIPE_TEST_KEY;
+    }
   });
 
   it("leaves the checks alone when the file says the same thing", async () => {
