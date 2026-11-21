@@ -155,7 +155,7 @@ import { renderCi, scanCi } from "./ciScan.js";
 import { renderProduction, scanProduction } from "./productionScan.js";
 import { detectToolbelt, toolbeltBlock } from "./toolbelt.js";
 import { extendForged, forgeDir, installForged, SkillForgeDecision, validateDraft } from "./skillForge.js";
-import { workerModelFor } from "./modelTier.js";
+import { LIGHT_TIER_MAX_PATHS, productWords, withoutProductName, workerModelFor } from "./modelTier.js";
 import { Store, TaskRow, type RunRow, type StoredIntentVerdict, type StoredLiveVerdict } from "./store.js";
 
 const execFileP = promisify(execFile);
@@ -7433,7 +7433,9 @@ export class RunController {
     // Skill matching + provenance (SEC-14, PERF-4). Selected once per task,
     // per role: workers match on the task text alone, QA matches with a
     // verification lens on top (ROLE_SKILL_LENS).
-    const taskText = `${task.title}\n${task.spec}`;
+    // Without the product's own name (modelTier.ts, `productWords`), so the
+    // skills a task carries agree with the tier it runs on.
+    const taskText = withoutProductName(`${task.title}\n${task.spec}`, productWords(run.repoPath));
     // WORKING before the forge rather than after it: the skillsmith is an
     // agent spawned for this task, spending this task's budget, and a budget
     // stop inside it must find the task in the state an operator would call
@@ -7492,7 +7494,7 @@ export class RunController {
      * back to `models.worker` still gets a full record of what the light tier
      * would have taken, from their own plans rather than from an estimate.
      */
-    const tier = workerModelFor(task, run.config.models);
+    const tier = workerModelFor(task, run.config.models, LIGHT_TIER_MAX_PATHS, productWords(run.repoPath));
     this.bus.publish({
       type: "task.tier_decided",
       runId,

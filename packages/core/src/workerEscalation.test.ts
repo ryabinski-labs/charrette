@@ -79,8 +79,8 @@ const PLAN = plan();
 
 const gitIn = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "ignore" });
 
-function repo(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "charrette-escalate-"));
+function repo(name = "charrette-escalate"): string {
+  const dir = mkdtempSync(path.join(tmpdir(), `${name}-`));
   made.push(dir, `${dir}-wt`);
   writeFileSync(path.join(dir, "README.md"), "# fixture\n");
   gitIn(dir, "init", "-b", "main");
@@ -122,7 +122,7 @@ async function run(
   worker: (nth: number) => Ending,
   qaFails = 0,
   models: Record<string, string> = {},
-  opts: { plan?: string; config?: Record<string, unknown> } = {}
+  opts: { plan?: string; config?: Record<string, unknown>; repoName?: string } = {}
 ) {
   const planText = opts.plan ?? PLAN;
   let planning = 0;
@@ -157,7 +157,7 @@ async function run(
   } as unknown as AgentPool;
 
   const store = new Store(":memory:");
-  const controller = new RunController(store, new Bus(store), pool, new GitHubAdapter(undefined, undefined), gates, repo());
+  const controller = new RunController(store, new Bus(store), pool, new GitHubAdapter(undefined, undefined), gates, repo(opts.repoName));
   const runId = await controller.startRun(
     "do a thing",
     RunConfig.parse({ deterministicChecks: [], waitForChecks: false, maxParallelWorkers: 1, models: { ...RUN_MODELS, ...models }, ...opts.config })
@@ -343,6 +343,16 @@ describe("interface work", () => {
 
     expect(workerSpecs().map((s) => s.model)).toEqual([OPUS, OPUS]);
     expect(logs(store, runId).some((t) => t.includes("worker escalated"))).toBe(false);
+  });
+});
+
+describe("a product whose name is interface vocabulary", () => {
+  it("does not send its non-interface tasks to the design model", async () => {
+    const scaffold = plan({ title: "Scaffold the acme dashboard service", spec: "Set up the Go module and the test runner." });
+    const { store, runId, workerSpecs } = await run(() => "done", 0, {}, { plan: scaffold, repoName: "acme-dashboard" });
+
+    expect(workerSpecs()[0]!.tier).not.toBe("ui");
+    expect(events(store, runId).find((e) => e.type === "task.tier_decided")).not.toMatchObject({ tier: "ui" });
   });
 });
 
