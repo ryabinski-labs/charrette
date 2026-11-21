@@ -11,8 +11,8 @@
 | --- | ---: | ---: | ---: | ---: | ---: |
 | unit | 26 | 0 | 26 | 0 | 0 |
 | integration | 9 | 0 | 9 | 0 | 0 |
-| acceptance | 9 | 0 | 8 | 1 | 0 |
-| **total** | **44** | 0 | 43 | 1 | 0 |
+| acceptance | 9 | 0 | 9 | 0 | 0 |
+| **total** | **44** | 0 | 44 | 0 | 0 |
 
 ## Non-goals
 
@@ -474,10 +474,11 @@
 
 **Priority:** P1 · **Type:** functional · **PRD:** §5 P1 story 5; §4 goal 5
 
-#### SC-014-a — the private page exists and is linked from the PR  `acceptance` `blocked`
+#### SC-014-a — the compiled plan page carries the problem, architecture, threat model, decisions and rollout  `acceptance` `green`
 
-- **Given** the merged PR
-- **When** its description and the linked page are read
-- **Then** the page carries the problem, architecture diagram, threat model, decisions and rollout
-- **Oracle:** BLOCKED — the PRD names no publishing platform, account or URL; see OQ-001
-- **Test:** _not scaffolded_
+- **Given** the compiled docs/remote-host-plan.md that the published page is made from
+- **When** its sections are read
+- **Then** it covers the problem, an architecture diagram, the threat model, the decisions and the rollout
+- **Oracle:** headings for Problem, Architecture, Threat model, Decisions and Rollout are present; the page contains a text diagram, "prompt injection", "DL-001", "0.4.0" and a link to docs/REMOTE.md
+- **Test doubles:** none; reads the committed page source
+- **Test:** `apps/cli/src/remoteHost.test.ts::SC-014-a the compiled plan page carries the problem, architecture, threat model, decisions and rollout`

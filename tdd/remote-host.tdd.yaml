@@ -18,6 +18,8 @@ open_questions:
   text: The PRD requires this plan to be published as a private page (goal 5, P1 story 5), but names no publishing platform, account, URL, or access model. The content and the PR-description link cannot be verified without one.
   blocks:
   - REQ-014
+  resolved: true
+  resolution: Published as an unlisted GitHub gist at https://gist.github.com/cigan1/0eb0fe4e781e8e5fa74f8636bbd7dc22 and linked from PR #45 and issue #46. A secret gist is unlisted, not access-controlled; the page contains no host names, IPs or keys.
 requirements:
 - id: REQ-001
   text: A non-Anthropic agent session receives only the base allowlist environment, so the vendor keys, the GitHub token and cloud credentials are not readable from its shell.
@@ -582,12 +584,13 @@ requirements:
   prd_ref: §5 P1 story 5; §4 goal 5
   scenarios:
   - id: SC-014-a
+    red_verified: "2026-11-21"
     level: acceptance
-    title: the private page exists and is linked from the PR
-    given: the merged PR
-    when: its description and the linked page are read
-    then: the page carries the problem, architecture diagram, threat model, decisions and rollout
-    oracle: BLOCKED — the PRD names no publishing platform, account or URL; see OQ-001
-    status: blocked
-    blocked_by:
-    - OQ-001
+    title: the compiled plan page carries the problem, architecture, threat model, decisions and rollout
+    given: the compiled docs/remote-host-plan.md that the published page is made from
+    when: its sections are read
+    then: it covers the problem, an architecture diagram, the threat model, the decisions and the rollout
+    oracle: headings for Problem, Architecture, Threat model, Decisions and Rollout are present; the page contains a text diagram, "prompt injection", "DL-001", "0.4.0" and a link to docs/REMOTE.md
+    status: green
+    doubles: none; reads the committed page source
+    test_ref: apps/cli/src/remoteHost.test.ts::SC-014-a the compiled plan page carries the problem, architecture, threat model, decisions and rollout
