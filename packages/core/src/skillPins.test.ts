@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { indexSkills, type IndexedSkill } from "@charrette/skills-mcp";
-import { pinsInPlay, skillPinBanner, skillPinLines, unresolvedRoleSkills } from "./skillPins.js";
+import { pinsInPlay, skillPinBanner, skillPinLines, skillsByName, unresolvedRoleSkills } from "./skillPins.js";
 
 /**
  * A `roleSkills` pin is a name, and names are matched against a collection the
@@ -69,6 +69,41 @@ describe("finding the pins this machine cannot honour", () => {
     expect(unresolvedRoleSkills(stale, { spec: ["prd-to-tdd"] })).toEqual([
       { role: "spec", skill: "prd-to-tdd", reason: "changed" },
     ]);
+  });
+});
+
+/**
+ * A public routing table names skills generically; the operator's copy may
+ * carry its own name and list the generic one under `aliases:`.
+ */
+describe("a pin satisfied through an alias", () => {
+  function writeAliased(dir: string, name: string, aliases: string): void {
+    mkdirSync(path.join(dir, name), { recursive: true });
+    writeFileSync(path.join(dir, name, "SKILL.md"), `---\nname: ${name}\ndescription: does ${name} things\naliases: ${aliases}\n---\n\n# ${name}\n`);
+  }
+
+  it("counts a skill that lists the pinned name as an alias as resolved", () => {
+    const dir = skillsDir();
+    writeAliased(dir, "my-dns-iac", "dns-iac-engineer");
+
+    expect(unresolvedRoleSkills(indexSkills([dir]), { worker: ["dns-iac-engineer"] })).toEqual([]);
+  });
+
+  it("gives an exact name precedence over another skill's alias, and the first claimant keeps a shared alias", () => {
+    const dir = skillsDir();
+    writeAliased(dir, "a-first", "dns-iac-engineer, shared");
+    writeAliased(dir, "b-second", "shared");
+    writeSkill(dir, "dns-iac-engineer");
+
+    const byName = skillsByName(indexSkills([dir]));
+    expect(byName.get("dns-iac-engineer")!.name).toBe("dns-iac-engineer");
+    expect(byName.get("shared")!.name).toBe("a-first");
+    expect(byName.get("b-second")!.name).toBe("b-second");
+  });
+
+  it("indexes a skill built without aliases under its own name only", () => {
+    const bare: IndexedSkill = { name: "qa-agent", description: "d", path: "/x/SKILL.md", sha256: "0", body: "b", tokensApprox: 1 };
+    expect([...skillsByName([bare]).keys()]).toEqual(["qa-agent"]);
   });
 });
 

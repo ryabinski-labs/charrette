@@ -24,7 +24,7 @@ import {
   statePaths,
 } from "@charrette/shared";
 import { indexSkills, matchSkills, verifyHash, type IndexedSkill } from "@charrette/skills-mcp";
-import { pinsInPlay, unresolvedRoleSkills } from "./skillPins.js";
+import { pinsInPlay, skillsByName, unresolvedRoleSkills } from "./skillPins.js";
 import { Bus } from "./bus.js";
 import { BudgetExceeded } from "./budget.js";
 import { seedWorktreeDeps } from "./deps.js";
@@ -270,6 +270,46 @@ const ROLE_SKILL_LENS: Record<string, string> = {
 const SKILL_SCORE_FLOOR = 1;
 /** Context budget: how many skills any one session's prompt will carry. */
 const MAX_SKILLS_PER_ROLE = 4;
+/**
+ * How many sibling playbooks a session is pointed at, across every skill it
+ * carries. Siblings are listed by path rather than injected, so they cost a
+ * line each rather than a slot; the cap keeps a skill with a long
+ * `delegates_to` from turning the list into the index it replaces.
+ */
+const MAX_RELATED_SKILLS = 6;
+
+/**
+ * The installed siblings each chosen skill delegates to, by name.
+ *
+ * The operator's skills name the playbooks they hand work to (`delegates_to`)
+ * and expect the agent to find them through the skills-discovery MCP — which a
+ * run session does not have (pool.ts). Resolving them here, against the same
+ * index and with the same hash check as the skills themselves, is what keeps a
+ * playbook's "hand off to `prd-to-tdd`" meaningful inside a run without
+ * opening a second, unrouted path into the prompt.
+ *
+ * A sibling the session already carries is not listed again, nor is one that
+ * is not installed or no longer matches its indexed hash.
+ */
+export function relatedSkills(index: IndexedSkill[], chosen: { name: string; delegatesTo?: string[] }[]): Map<string, { name: string; path: string }[]> {
+  const byName = new Map(index.map((s) => [s.name, s]));
+  const carried = new Set(chosen.map((c) => c.name));
+  const listed = new Set<string>();
+  const out = new Map<string, { name: string; path: string }[]>();
+  for (const skill of chosen) {
+    const mine: { name: string; path: string }[] = [];
+    for (const name of skill.delegatesTo ?? []) {
+      if (listed.size >= MAX_RELATED_SKILLS) break;
+      if (carried.has(name) || listed.has(name)) continue;
+      const sibling = byName.get(name);
+      if (!sibling || !verifyHash(sibling)) continue;
+      listed.add(name);
+      mine.push({ name, path: sibling.path });
+    }
+    if (mine.length) out.set(skill.name, mine);
+  }
+  return out;
+}
 /**
  * How many times an accepted task's merge conflict goes back to its worker
  * before it goes to the operator. One: a worker that cannot resolve its own
@@ -2651,7 +2691,12 @@ export class RunController {
     }
     /* v8 ignore stop */
     try {
-      const { stdout, stderr } = await execFileP("sh", ["-c", command], { cwd: dir, maxBuffer: 16 * 1024 * 1024, timeout: timeoutMinutes * 60_000 });
+      // `TDD_RED_CHECK=1` switches off the expected-failure markers `prd-to-tdd`
+      // stubs carry (`it.fails`, `xfail(strict=True)`, `test.fail()`). Without
+      // it, a stub nobody implemented reports ✓ — an expected failure is a
+      // pass to the runner — and this gate would read the promise as kept.
+      const env = { ...process.env, TDD_RED_CHECK: "1" };
+      const { stdout, stderr } = await execFileP("sh", ["-c", command], { cwd: dir, env, maxBuffer: 16 * 1024 * 1024, timeout: timeoutMinutes * 60_000 });
       return acceptanceVerdict(spec, { exitCode: 0, output: `${stdout}\n${stderr}` }, this.store.getRun(runId)!.config.spec.requireExecutionEvidence);
     } catch (e) {
       return acceptanceVerdict(spec, suiteRunFrom(e as { code?: number; killed?: boolean }, timeoutMinutes));
@@ -7106,11 +7151,11 @@ export class RunController {
    * than fatal: the routing table outlives any one machine's skill collection.
    */
   private routedSkills(skills: IndexedSkill[], config: RunConfig, text: string, role: string): IndexedSkill[] {
-    const byName = new Map(skills.map((s) => [s.name, s]));
+    const byName = skillsByName(skills);
     const picked: IndexedSkill[] = [];
     const take = (name: string) => {
       const skill = byName.get(name);
-      if (skill && !picked.some((p) => p.name === name) && verifyHash(skill)) picked.push(skill);
+      if (skill && !picked.some((p) => p.name === skill.name) && verifyHash(skill)) picked.push(skill);
     };
     // Bound to the job before bound to the topic: a role's standing skills are
     // unconditional, so they must not lose the per-role cap to a keyword hit.
@@ -7245,10 +7290,17 @@ export class RunController {
       if (!chosen.some((c) => c.name === skill.name)) chosen.push(skill);
     }
     let fullCount = 0;
+    const related = relatedSkills(skills, chosen);
     return chosen.map((skill) => {
       const full = skill.tokensApprox <= FULL_TEXT_SKILL_TOKEN_LIMIT && fullCount < MAX_FULL_TEXT_SKILLS;
       if (full) fullCount++;
-      return { name: skill.name, path: skill.path, sha256: skill.sha256, content: full ? skill.body : undefined };
+      return {
+        name: skill.name,
+        path: skill.path,
+        sha256: skill.sha256,
+        content: full ? skill.body : undefined,
+        related: related.get(skill.name) ?? [],
+      };
     });
   }
 

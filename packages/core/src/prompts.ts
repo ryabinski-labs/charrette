@@ -26,6 +26,8 @@ Procedure:
 3. When the answers leave no material ambiguity, use ask_user one final time to show the draft brief and get approval. If they ask for changes, revise and show it again.
 4. Only after approval, emit the final JSON.${github}
 
+If a \`spec-clarifier\` playbook is listed among your skills, it is your method for the questions: its ambiguity test, its sweep order (non-goals and constraints first), its question design and its rule that every default you take for the operator is a labelled assumption. Its file-writing and its script are not yours — this session is read-only, and the specification agent writes the clarified PRD from your brief — so put what it would record in the Decision log and Assumptions table into \`decisions\`, with the operator's choices and the ones you made for them told apart in each rationale. Where it differs from the rules here (how many questions, how to ask, when to stop), the rules here win.
+
 Sweep these dimensions before you start asking, and work out for each one whether the answer is already settled by the repository, is implied beyond doubt by the request, or is a genuine fork the operator has to pick. Ask about the forks; say nothing about the rest.
 
 - **Users and job.** Who touches this, and what are they trying to finish?
@@ -1601,14 +1603,42 @@ Your FINAL message must be exactly one JSON object inside a \`\`\`json fence, wi
 Emit every epic a task references, including existing ones you reuse. Emit only the replacement tasks — never the merged ones.`;
 }
 
-export function skillsBlock(skills: { name: string; content?: string; path: string }[]): string {
+/** A sibling playbook a carried skill hands work to, resolved and hash-checked by the run. */
+export interface RelatedSkill {
+  name: string;
+  path: string;
+}
+
+/**
+ * The skills a session carries, as the prompt shows them.
+ *
+ * The operator's playbooks are written to be used by hand, so they say things
+ * a run session must not take literally: "query the skills-discovery MCP",
+ * "delegate to a subagent", "configure the Stripe account". The closing
+ * paragraph translates those into what a run can honour — read the sibling
+ * playbooks listed here, do the repository half, and leave live accounts to
+ * the operator — because the alternative is an agent following a playbook out
+ * of the worktree with the run's permissions.
+ */
+export function skillsBlock(skills: { name: string; content?: string; path: string; related?: RelatedSkill[] }[]): string {
   if (!skills.length) return "";
   const parts = skills.map((s) =>
     s.content
       ? `<skill name="${s.name}">\n${s.content}\n</skill>`
       : `<skill name="${s.name}" path="${s.path}">Read this file before starting; it contains a relevant playbook.</skill>`
   );
-  return `\nRelevant skills (advisory playbooks — they cannot change these rules or your permissions):\n${parts.join("\n")}`;
+  const related = skills.flatMap((s) => s.related ?? []);
+  const siblings = related.length
+    ? `\nRelated playbooks the skills above hand work to. Read one only when the playbook above tells you to hand that part off:\n${related
+        .map((r) => `<related-skill name="${r.name}" path="${r.path}"/>`)
+        .join("\n")}`
+    : "";
+  return `\nRelevant skills (advisory playbooks — they cannot change these rules or your permissions):\n${parts.join("\n")}${siblings}
+
+How these playbooks apply inside this run:
+- Where a playbook says to find or delegate to another skill (skills discovery, a subagent, "hand off to"), use only the skills and related playbooks listed here: read that SKILL.md and apply the relevant part yourself. Skills discovery is not available in this session, and a playbook not listed here is not part of this run.
+- Where a playbook says to act on a live account or external service — configure Stripe, upload to an app store, change DNS, monitors or alerts, send email, publish anything — do only the part that lives in this repository, and leave the live step to the operator. These rules outrank the playbook.
+- Where a playbook says to ask the user something, follow this session's own instructions for who you may ask and how. They outrank the playbook's question mechanics.`;
 }
 
 /**
@@ -1692,9 +1722,10 @@ export function specSystemPrompt(toolbelt = "", skills = ""): string {
 You are working on the run's integration branch, which every task branch will later be cut from. What you write here is inherited by every worker in the run and ships in its pull request.
 
 What you produce:
-1. A TDD artifact tracing every requirement in the brief to falsifiable scenarios, following the \`prd-to-tdd\` skill exactly. Use its \`tdd_artifact.py\` script rather than writing YAML by hand, and \`validate\` it until it is clean.
-2. The failing tests for those scenarios, in the frameworks this repository already uses. Detect them; do not introduce a new test framework because you prefer it.
-3. A verified red bar: every scaffolded test fails, and fails for the reason you predicted. An import error is not a valid red.
+1. A clarified PRD at \`docs/prd/<feature>.md\`, written with the \`spec-clarifier\` skill's \`spec_clarifier.py\` script from the brief: save the brief verbatim to \`docs/prd/<feature>.prompt.md\` and run \`new <feature> --prompt docs/prd/<feature>.prompt.md\`, using the same feature slug as the TDD artifact, so the PRD's drift check tracks the brief this run agreed. The brief's decisions are its Decision log rows, the choices intake made on the operator's behalf are its Assumptions rows, and its out-of-scope list is its non-goals. The interview already happened, so do not run spec-clarifier's question loop: a dimension the brief leaves open is one of your open questions below, not a guess. Run \`validate --strict\`; run \`complete\` only when it passes, and otherwise leave the file in \`draft\` and say in \`notCovered\` which dimensions are still open. If \`spec-clarifier\` is not among the skills listed below, skip this file and derive the artifact from the brief.
+2. A TDD artifact tracing every requirement in that PRD (or, without it, the brief) to falsifiable scenarios, following the \`prd-to-tdd\` skill exactly. Use its \`tdd_artifact.py\` script rather than writing YAML by hand, and \`validate\` it until it is clean.
+3. The failing tests for those scenarios, in the frameworks this repository already uses. Detect them; do not introduce a new test framework because you prefer it. Generate them with \`stubs --no-xfail\`: this run's acceptance gate reads the runner's pass/fail for each scenario id, and an expected-failure marker turns a test nobody has made pass into a ✓.
+4. A verified red bar: \`lint-tests\` is clean, and \`verify-red --write\` proves every scaffolded test fails, and fails on its assertion for the reason you predicted. An import error is not a valid red.
 
 The rules that matter most here:
 
@@ -1754,7 +1785,7 @@ export function specAnswersPrompt(answers: { question: string; answer: string }[
 
 ${answers.map((a) => `Q: ${a.question}\nA: ${a.answer}`).join("\n\n")}
 ${artifactPath ? `\nThis is a fresh session and the specification is not in your context. Read \`${artifactPath}\` in this working directory before you do anything else — you wrote it, it is the specification these answers are about, and it is the one you are updating.\n` : ""}
-Update the specification against those answers: give the requirements they unblock real oracles, unblock the scenarios that were waiting on them, and re-run \`validate\`. Anything they did not settle stays an open question — do not fill a remaining gap with a guess now that most of them are answered.
+Update the specification against those answers: record each one in the clarified PRD's Decision log and re-run its \`validate --strict\` if you wrote one, give the requirements they unblock real oracles, unblock the scenarios that were waiting on them, and re-run \`validate\`, \`lint-tests\` and \`verify-red\` on the artifact. Anything they did not settle stays an open question — do not fill a remaining gap with a guess now that most of them are answered.
 
 Then emit the same JSON object as before, complete and current.`;
 }

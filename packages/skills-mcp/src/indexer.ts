@@ -9,18 +9,60 @@ export interface IndexedSkill {
   description: string;
   body: string;
   tokensApprox: number;
+  /**
+   * The phrases an operator uses for this skill (`aliases:`) and the topics it
+   * covers (`tags:`). Matched with the same weight as the description: they
+   * are the skill author saying what a task about this skill sounds like,
+   * which is exactly the signal the lexical matcher is short of.
+   */
+  aliases?: string[];
+  tags?: string[];
+  /**
+   * The sibling skills this one hands work to (`delegates_to:`). A playbook
+   * that says "hand off to `prd-to-tdd`" is only useful if the agent reading
+   * it can find `prd-to-tdd`; the injection path resolves these against the
+   * same index, by name, and hash-verifies them like any other skill.
+   */
+  delegatesTo?: string[];
 }
 
-/** Parse minimal YAML frontmatter (name/description lines) without a YAML dependency. */
-function parseFrontmatter(text: string): { name?: string; description?: string; body: string } {
+/** Frontmatter keys read; everything else in the block is left to the skill. */
+const FRONTMATTER_KEYS = /^(name|description|aliases|tags|delegates_to):\s*(.+)$/;
+
+/** A comma-separated frontmatter value, or a YAML flow list `[a, b]`, as a list. */
+function list(value: string | undefined): string[] {
+  if (!value) return [];
+  return value
+    .replace(/^\[|\]$/g, "")
+    .split(",")
+    .map((v) => v.trim().replace(/^["']|["']$/g, ""))
+    .filter(Boolean);
+}
+
+/** Parse minimal YAML frontmatter (single-line scalar keys) without a YAML dependency. */
+function parseFrontmatter(text: string): {
+  name?: string;
+  description?: string;
+  aliases: string[];
+  tags: string[];
+  delegatesTo: string[];
+  body: string;
+} {
   const m = text.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
-  if (!m) return { body: text };
+  if (!m) return { body: text, aliases: [], tags: [], delegatesTo: [] };
   const fm: Record<string, string> = {};
   for (const line of m[1]!.split("\n")) {
-    const kv = line.match(/^(name|description):\s*(.+)$/);
+    const kv = line.match(FRONTMATTER_KEYS);
     if (kv) fm[kv[1]!] = kv[2]!.trim();
   }
-  return { name: fm.name, description: fm.description, body: m[2]! };
+  return {
+    name: fm.name,
+    description: fm.description,
+    aliases: list(fm.aliases),
+    tags: list(fm.tags),
+    delegatesTo: list(fm.delegates_to),
+    body: m[2]!,
+  };
 }
 
 /** Index SKILL.md files from the given directories (each subdir holding a SKILL.md). */
@@ -40,7 +82,7 @@ export function indexSkills(dirs: string[]): IndexedSkill[] {
         if (seen.has(real)) continue;
         seen.add(real);
         const raw = readFileSync(skillPath, "utf8");
-        const { name, description, body } = parseFrontmatter(raw);
+        const { name, description, aliases, tags, delegatesTo, body } = parseFrontmatter(raw);
         skills.push({
           name: name ?? entry,
           path: skillPath,
@@ -48,6 +90,9 @@ export function indexSkills(dirs: string[]): IndexedSkill[] {
           description: description ?? body.slice(0, 200),
           body: raw,
           tokensApprox: Math.ceil(raw.length / 4),
+          aliases,
+          tags,
+          delegatesTo,
         });
       } catch {
         // unreadable entries are skipped, not fatal
@@ -98,7 +143,7 @@ export function matchSkills(skills: IndexedSkill[], taskText: string, k = 3): { 
   const df = new Map<string, number>();
   const docs = skills.map((skill) => ({
     skill,
-    nameTerms: terms(`${skill.name} ${skill.description}`),
+    nameTerms: terms(`${skill.name} ${skill.description} ${(skill.aliases ?? []).join(" ")} ${(skill.tags ?? []).join(" ")}`),
     bodyTerms: terms(skill.body),
   }));
   for (const d of docs) {

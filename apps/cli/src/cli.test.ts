@@ -734,7 +734,12 @@ describe("charrette run — resolving what the run will actually do", () => {
     await cli("run", "x", "--repo", "/repo", "--no-dashboard");
 
     const [, pins] = h.skillPinBannerMock.mock.calls.at(-1) as unknown as [string[], Record<string, string[]>];
-    expect(pins).toEqual({ intake: ["product-manager"], planner: ["product-manager"], spec: ["prd-to-tdd"] });
+    expect(pins).toEqual({
+      intake: ["product-manager", "spec-clarifier"],
+      planner: ["product-manager"],
+      spec: ["prd-to-tdd", "spec-clarifier"],
+      prod: ["prod-validator"],
+    });
   });
 
   it("says nothing about PR mode when there is no GitHub repo to open one on", async () => {

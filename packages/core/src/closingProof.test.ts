@@ -314,6 +314,23 @@ describe("the acceptance gate's three answers", () => {
     expect(controller.awaitingVerification(runId)).toBe(false);
   });
 
+  /**
+   * `prd-to-tdd` stubs carry strict expected-failure markers, and an expected
+   * failure is a ✓ to the runner. The gate runs the suite with the markers
+   * switched off, so an unimplemented scenario reads as the red it is.
+   */
+  it("runs the suite with expected-failure markers switched off", async () => {
+    const dir = repo();
+    // Stands in for `it.fails`: passes unless TDD_RED_CHECK=1 turns the marker off.
+    const { pool } = rolePool(specified('test "$TDD_RED_CHECK" = 1 && printf \'× SC-001\\n\' && exit 1; true'));
+    const { controller, store } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a checkout", RunConfig.parse(BASE), operator());
+
+    const runId = store.listRuns()[0]!.id;
+    expect(controller.outcome(runId).line).not.toContain("acceptance green");
+  });
+
   it("says acceptance green in the closing line once the gate is", async () => {
     const dir = repo();
     const { pool } = rolePool(specified("exit 0"));

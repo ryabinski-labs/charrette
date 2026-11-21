@@ -121,7 +121,12 @@ describe("loadFileConfig", () => {
   it("accepts the knobs that decide who works on what", () => {
     const declared = {
       workerMaxTurns: 200,
-      skillRouting: [{ when: "\\b(payments|billing)\\b", skills: ["fintech-reviewer"] }],
+      skillRouting: [
+        { when: "\\b(payments|billing)\\b", skills: ["fintech-reviewer"] },
+        // `roles` narrows a rule to the sessions that should carry it; the strict
+        // schema used to reject the whole file over it.
+        { when: "\\bcheckout\\b", skills: ["visual-qa-agent"], roles: ["qa"] },
+      ],
       roleSkills: { planner: ["product-manager"], qa: ["security-engineer"] },
     };
     const repo = tmpRepo({ "charrette.config.json": JSON.stringify(declared) });
