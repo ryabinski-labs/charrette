@@ -571,13 +571,16 @@ describe("the page itself", () => {
   });
 
   /**
-   * The four pinned roles get no control at all rather than a control the
-   * server rejects. Preventing beats validating: a stale tab is otherwise the
-   * only thing between a cheap model and the agent that decides what merges.
+   * The four pinned roles are editable, but only among the models their pin
+   * allows — the page is handed that list rather than working it out, so it
+   * cannot offer what the server would refuse. They sit apart, with the
+   * vendor named, and the reason is said once.
    */
-  it("renders the pinned roles as text and says once why", () => {
-    expect(PAGE_HTML).toMatch(/const LOCKED_ROLES = \[/);
-    for (const role of Object.keys(PINNED_ROLES)) expect(PAGE_HTML).toContain(`"${role}"`);
+  it("offers the pinned roles only the models their pin allows, and says once why", () => {
+    expect(PAGE_HTML).toMatch(/const PINNED = \{/);
+    for (const role of Object.keys(PINNED_ROLES)) expect(PAGE_HTML).toContain(`"${role}":{"vendor":`);
+    expect(PAGE_HTML).toContain('const offered = pin ? pin.models : MODEL_CHOICES;');
+    expect(PAGE_HTML).toContain('pin.vendor + " only"');
     expect(PAGE_HTML).toContain("A cheap model here is how bad work merges.");
     // The edit only reaches agents that have not started yet, and the panel
     // says so while it is open rather than only after a save.

@@ -7,6 +7,42 @@ on. Before then, minor versions may break things.
 
 ## [Unreleased]
 
+### Changed
+
+- **New default models, across three vendors.** DeepSeek Flash now runs every
+  role that builds or drives tools (`worker`, `workerLight`, `integrator`,
+  `advisor`, `demo`, `live`, `repair`, `skillsmith`). Gemini 3.8 Flash runs the
+  roles that read and decide (`planner`, `spec`, `pm`, `workerHeavy`). The
+  Anthropic roles move to the current generation: `intake`, `prod` and
+  `workerUi` to `claude-opus-5-5`, and `qa` to `claude-sonnet-5-5`. Runs
+  already recorded keep the models they froze.
+- **The pinned roles can be changed from the dashboard.** `intake`, `qa`,
+  `prod` and `reviewer` were shown as locked text. Each now has a dropdown that
+  offers only the models its pin allows, so a judge can move to a newer model
+  from the same vendor but not to another vendor or that vendor's small tier.
+
+### Added
+
+- **Claude Fable 5.2, Opus 5.5, Sonnet 5.5 and Haiku 5.5** are priced
+  ($8/$40, $4/$20, $2/$10 and $0.50/$2.50 per MTok) and offered in the
+  dashboard. Haiku 5.5 is billed at its rate for prompts over 100K tokens,
+  so the ledger can only over-charge it.
+
+### Fixed
+
+- **A non-Anthropic `repair` model could have invented a QA verdict.** Repair
+  resumes the QA session to restate a verdict it did not format. Gemini,
+  DeepSeek and OpenAI sessions cannot be resumed, so a repair on one of them
+  started with nothing in front of it and was asked for "the conclusion you
+  already reached". The re-ask now runs on `models.qa` whenever the repair
+  model cannot resume.
+- **A non-Anthropic planner lost the PRD after its first message.** When a
+  plan took more than one message, a planner with no session to resume was
+  asked for "the NEXT tasks" holding only the titles emitted so far. Each
+  continuation now re-sends the briefing to a planner that cannot resume.
+- **The output-ceiling warning no longer names the Agent SDK for a planner
+  that does not run through it.**
+
 ## [0.2.0] - 2026-11-21
 
 ### Added

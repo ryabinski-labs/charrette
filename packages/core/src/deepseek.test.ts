@@ -188,11 +188,11 @@ describe("REQ-005 — the light-tier rule still decides and reports its tier whe
 
 describe("REQ-006 — UI and heavy tasks keep their own tier models", () => {
   it("SC-006-a a UI task stays on the UI tier model", () => {
-    expect(tierModel("ui", RunConfig.parse({}).models)).toBe("claude-opus-5");
+    expect(tierModel("ui", RunConfig.parse({}).models)).toBe("claude-opus-5-5");
   });
 
   it("SC-006-b a heavy task stays on the heavy tier model", () => {
-    expect(tierModel("heavy", RunConfig.parse({}).models)).toBe("claude-fable-5-1");
+    expect(tierModel("heavy", RunConfig.parse({}).models)).toBe("gemini-3.8-flash");
   });
 
   it("sends an interface task to the UI rung even when the regular worker is DeepSeek", () => {
@@ -210,7 +210,7 @@ describe("REQ-006 — UI and heavy tasks keep their own tier models", () => {
     );
 
     expect(out.decision.tier).toBe("ui");
-    expect(out.model).toBe("claude-opus-5");
+    expect(out.model).toBe("claude-opus-5-5");
   });
 });
 

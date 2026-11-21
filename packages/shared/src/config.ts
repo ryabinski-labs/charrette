@@ -14,75 +14,65 @@ import { routingViolations } from "./providers.js";
 export const DEFAULT_CHECK_TIMEOUT_MINUTES = 10;
 
 /**
- * The cheap tier. Named once because four roles reference it and a version
- * string copied five times is four chances to price one of them wrong: the
- * budget table in budget.ts keys on this exact id, and a model absent from that
- * table is charged at the top tier rather than its own.
- */
-const HAIKU = "claude-haiku-4-5-20251001";
-
-/**
- * The regular worker tier's model. Named once because `worker` and
- * `workerLight` both default to it and the price table keys on this exact id.
+ * The model ids the defaults below name, each written once: the price table in
+ * budget.ts keys on the exact id, and a copy that drifts is a role billed at the
+ * wrong rate.
  *
- * DeepSeek V4.1 Flash lists at $0.30 input and $1.20 output per MTok at peak —
- * a tenth of Sonnet's input rate and a twelfth of its output rate — and its API
- * is OpenAI-compatible. It is the default for regular build tasks because the
- * worker line is where a run's money goes; `workerUi` and `workerHeavy` stay on
- * the Anthropic tiers where interface feedback and the escalation ceiling are
- * the things being bought.
+ * The split is by what a role does, not by how much it matters:
  *
- * The unversioned `deepseek-flash` id is deliberate: DeepSeek serves the
- * current V4.1 Flash checkpoint behind it, and the dated names are legacy
- * aliases. See `providerClients.ts` for the two vendor details the OpenAI
- * client has to respect — `max_tokens` and `reasoning_content`.
+ * - **DeepSeek V4.1 Flash** ($0.30 input, $1.20 output per MTok at peak) runs
+ *   every role whose work is building or driving tools: the worker rungs, the
+ *   integrator, the advisor, the demo and live agents, repair and the
+ *   skillsmith. Its API is OpenAI-compatible; see `providerClients.ts` for the
+ *   two vendor details the client has to respect, `max_tokens` and
+ *   `reasoning_content`. The unversioned `deepseek-flash` id is deliberate:
+ *   DeepSeek serves the current checkpoint behind it, and the dated names are
+ *   legacy aliases.
+ * - **Gemini 3.8 Flash** ($1.50/$7.50, the standing rate) runs the roles that
+ *   read a lot and decide: the planner, the specification, the pit-stop PM and
+ *   the escalation ceiling. It is also the pinned pit-stop reviewer.
+ * - **Claude Opus 5.5 and Sonnet 5.5** stay on the roles `PINNED_ROLES` holds
+ *   to Anthropic (intake, QA, prod) and on interface work, where the feedback
+ *   loop is a design playbook in and a screenshot-reading grader out.
+ *
+ * Neither of the stateless transports can resume a session. The roles that
+ * re-attach to an earlier conversation account for that where they do it:
+ * `reaskVerdict` resumes QA on an Anthropic model, and the planner re-sends its
+ * briefing with every continuation (runController.ts).
  */
 const DEEPSEEK = "deepseek-flash";
-
-/**
- * The top tier. Named once for the same reason `HAIKU` is: four roles and the
- * price table key on this exact id, and a copy that drifts is a role billed at
- * the wrong rate.
- *
- * Fable 5.1 needs a Claude Code of 2.1.251 or newer underneath the Agent SDK —
- * an older one answers every session with `400 Claude Code 2.1.222 does not
- * support this model` — which is why the SDK pin moved with this constant.
- */
-const FABLE = "claude-fable-5-1";
+const GEMINI = "gemini-3.8-flash";
+const OPUS = "claude-opus-5-5";
+const SONNET = "claude-sonnet-5-5";
 
 export const ModelRoutingShape = z.object({
-  intake: z.string().default("claude-opus-5"),
+  /** Talks to the operator through an in-process tool only the Anthropic transport can expose. Pinned. */
+  intake: z.string().default(OPUS),
   /**
    * Drafts the PRD and cuts it into the DAG. Every worker session in the run is
    * downstream of this one reading, and the two runs this charrette has lost the
    * most money on (40da9337, f338b5c8) both went wrong here — a plan that
-   * under-recognised the work, built anyway. The most expensive place to be
-   * wrong, so the most capable model: Fable, at twice Opus's rate for a
-   * handful of sessions a run.
+   * under-recognised the work, built anyway. Point it at `claude-fable-5-2` when
+   * a run is large enough that the plan is where the risk is.
    */
-  planner: z.string().default(FABLE),
+  planner: z.string().default(GEMINI),
   worker: z.string().default(DEEPSEEK),
   /**
    * The worker model for tasks the light-tier rule admits. See modelTier.ts for
    * what "admits" means — it is a deterministic rule over fields the planner
    * already emits, not a tier the planner names for itself.
    *
-   * The worker is where the money is — one recorded run spent $65 across
-   * seventeen worker sessions against $14 across eight QA ones — so this is the
-   * only line in this table that can move the total much.
-   *
-   * It now names the same model as `worker`, on purpose. DeepSeek Flash is
-   * cheaper than Haiku at both rates ($0.30/$1.20 against $1/$5 per MTok), so
-   * leaving this on Haiku would make the "cheap" tier the expensive one. The
-   * rule still runs and still publishes `task.tier_decided`, which is what
-   * keeps the measurement alive when the operator wants to price the experiment
-   * before pointing the rung anywhere else; `taskSpend()` in store.ts splits a
-   * task's bill by role and flags the ones that escalated.
+   * It names the same model as `worker`, on purpose: nothing priced is cheaper
+   * than DeepSeek Flash at both rates, so a separate light model would make the
+   * "cheap" rung the expensive one. The rule still runs and still publishes
+   * `task.tier_decided`, which keeps the measurement alive when the operator
+   * wants to price the experiment before pointing the rung anywhere else;
+   * `taskSpend()` in store.ts splits a task's bill by role and flags the ones
+   * that escalated.
    *
    * A light-tier session that dies of `error_max_turns` is still re-dispatched
    * on `worker` rather than retried here — see `escalateWorker` in
-   * runController.ts. With both rungs on one model that re-dispatch costs the
-   * same, and the escalation ladder above it is unchanged.
+   * runController.ts.
    */
   workerLight: z.string().default(DEEPSEEK),
   /**
@@ -90,19 +80,14 @@ export const ModelRoutingShape = z.object({
    * which is the same vocabulary that routes `frontend-design` and
    * `ui-ux-cx-engineer` onto the worker and `visual-qa-agent` onto QA.
    *
-   * Opus rather than Fable, and the reason is where interface quality actually
-   * comes from. It is bounded by the feedback loop — a design playbook going
-   * in, a screenshot-reading grader coming out — not by reasoning depth, and
-   * both halves of that loop are already forced onto every UI task by the
-   * routing rules. Fable at 3.3x Sonnet's price on the most numerous kind of
-   * task buys the least per dollar there, and its own guidance is that long
-   * prescriptive prompts (which is what a 200-line design skill is) lower its
-   * output quality. A UI task that visual QA keeps rejecting still climbs to
-   * `workerHeavy` through the ordinary escalation. Set this to `models.worker`
-   * to switch the route off while keeping the ledger's record of what it would
-   * have taken, exactly as `workerLight` allows.
+   * Opus, because interface quality is bounded by the feedback loop — a design
+   * playbook going in, a screenshot-reading grader coming out — and Opus reads
+   * screenshots and long prescriptive playbooks well. A UI task that visual QA
+   * keeps rejecting still climbs to `workerHeavy` through the ordinary
+   * escalation. Set this to `models.worker` to switch the route off while
+   * keeping the ledger's record of what it would have taken.
    */
-  workerUi: z.string().default("claude-opus-5"),
+  workerUi: z.string().default(OPUS),
   /**
    * The worker model for the hardest tasks, and the top of the escalation
    * ladder every other task can climb.
@@ -113,140 +98,108 @@ export const ModelRoutingShape = z.object({
    * (auth, money, migrations, concurrency, infrastructure), or when it is a
    * second-round fix of a check the standard tier already failed to turn
    * green. A task *climbs* here after `heavyTierAfterRejections` iterations
-   * were sent back, whatever tier it started on: at that point the evidence
-   * that the model is the problem is on the record, and the cheapest thing
-   * left is the expensive model that finishes.
+   * were sent back, whatever tier it started on.
    *
-   * Set this to `models.worker` to switch the tier off without losing the
-   * measurement — the rule still runs, `task.tier_decided` still says `heavy`,
-   * and the ledger keeps counting what it would have cost.
+   * Gemini by default, which makes the ladder a change of vendor rather than of
+   * price: a task DeepSeek keeps failing is handed to a different model family
+   * with a different set of blind spots. Point it at `claude-fable-5-2` for the
+   * most capable model the charrette can drive. Set it to `models.worker` to
+   * switch the tier off without losing the measurement.
    */
-  workerHeavy: z.string().default(FABLE),
-  qa: z.string().default("claude-sonnet-5"),
+  workerHeavy: z.string().default(GEMINI),
+  /** Decides whether a task merges. Pinned to Anthropic, above the Haiku floor. */
+  qa: z.string().default(SONNET),
   /**
    * Resolves the run's merge conflict with its own base branch.
    *
    * Almost every `sessionId: "integrator"` in runController.ts is deterministic
    * git work — merging a task branch, opening a pull request, waiting on checks —
-   * and calls no model at all. This key was documented as unused for exactly
-   * that reason. `reconcileWithBase` is the one exception: when `main` has moved
-   * under a long run and the integration branch no longer merges into it, an
-   * agent is dispatched into the integration worktree to resolve it, because the
-   * alternative is a pull request nobody can merge.
-   *
-   * Stays on Sonnet. The judgment it needs is narrow — which side of a hunk
-   * belongs, given two commit histories it can read — and it is bounded by
+   * and calls no model at all. `reconcileWithBase` is the one exception: when
+   * `main` has moved under a long run and the integration branch no longer
+   * merges into it, an agent is dispatched into the integration worktree to
+   * resolve it. The judgment it needs is narrow — which side of a hunk belongs,
+   * given two commit histories it can read — and it is bounded by
    * `BASE_CONFLICT_FIX_ATTEMPTS` and verified against the branch afterwards
    * rather than taken on trust.
    */
-  integrator: z.string().default("claude-sonnet-5"),
+  integrator: z.string().default(DEEPSEEK),
   /**
    * Drafts the operator's answer when a task escalates (Gate: task-escalation).
    *
-   * Stays on Sonnet, and the reason is worth writing down because this role
-   * *looks* like the cheapest thing in the charrette: it writes one short answer,
-   * and a human or a skill reads it before anything acts on it. What that
-   * framing misses is that the answer decides which hypothesis gets attention.
-   * Run f338b5c8 spent nine rounds and about $80 on a single task whose probe
-   * was a false positive, and every advisor answer in that loop was *correct* —
-   * "the probe is wrong, leave it alone" — and every one of them led straight
-   * back to the same gate. Correct-but-useless is the failure mode here, it is
-   * not visible in the draft, and a cheaper drafter makes more of it.
+   * A human or a skill reads the draft before anything acts on it. Worth
+   * knowing before pointing it anywhere cheaper still: the answer decides which
+   * hypothesis gets attention, and correct-but-useless is the failure mode. Run
+   * f338b5c8 spent nine rounds and about $80 on one task whose probe was a
+   * false positive, with every advisor answer in that loop correct.
    */
-  advisor: z.string().default("claude-sonnet-5"),
-  /** Judges the deployed system against the assignment. The last word, so: Opus. */
-  prod: z.string().default("claude-opus-5"),
+  advisor: z.string().default(DEEPSEEK),
+  /** Judges the deployed system against the assignment. The last word, so: Opus. Pinned. */
+  prod: z.string().default(OPUS),
   /**
-   * Starts the half-built product at a pit stop and drives it.
+   * Starts the half-built product at a pit stop and drives it — an 80-turn
+   * ceiling of mostly tool work.
    *
-   * The expensive half of a pit stop — an 80-turn ceiling against a product the
-   * agent has never seen — and mostly tool work, which is what Haiku is for.
-   *
-   * It is on the cheap tier only because the demo now has to say what it set out
-   * to do before it says what it did. A demo that degrades quietly is the one
-   * genuinely dangerous thing about this change: "started it and clicked twice"
-   * reaches four Opus reviewers looking exactly like "drove it and photographed
-   * six screens", and they reason about the product from whichever one they were
-   * handed. So `plannedJourneys` is compared against what came back, in code,
-   * and a demo that fell short of its own plan is published as INCONCLUSIVE
-   * rather than as thin evidence. See `demoCoverage` in evidence.ts.
-   *
-   * Break-even, if the operator wants to check the bet against the ledger: Haiku
-   * may burn up to 3x Sonnet's tokens at the same price, less whatever the
-   * fallback rate costs — under about 2.4x at a 20% fallback rate.
+   * Safe on a cheap model only because the demo has to say what it set out to
+   * do before it says what it did. "Started it and clicked twice" would
+   * otherwise reach the reviewers looking exactly like "drove it and
+   * photographed six screens". So `plannedJourneys` is compared against what
+   * came back, in code, and a demo that fell short of its own plan is published
+   * as INCONCLUSIVE rather than as thin evidence. See `demoCoverage` in
+   * evidence.ts.
    */
-  demo: z.string().default(HAIKU),
+  demo: z.string().default(DEEPSEEK),
   /**
    * The closing gate's agent: starts the finished product from a clean checkout
-   * and drives the critical path.
-   *
-   * A tier above the pit-stop demo, and deliberately. The demo runs a dozen
-   * times a run against a half-built tree and its report informs a decision;
-   * this runs once, against everything the run merged, and its report *is* the
-   * decision — a run does not report itself in review over a product nothing
-   * has used. It also has the harder job: a clean checkout, no history to lean
-   * on, and a repository whose documented start it has to find and follow.
+   * and drives the critical path. Its report is checked against the screenshots
+   * and files it names (`checkEvidence`), and the prod validator reads it.
    */
-  live: z.string().default("claude-sonnet-5"),
+  live: z.string().default(DEEPSEEK),
   /**
-   * Re-asks a finished session for output it already produced but did not format.
+   * Re-asks a finished QA session for the verdict JSON it reached but did not
+   * format, in two turns against the *resumed* session.
    *
-   * The only role in the charrette that is genuinely mechanical, and the reason is
-   * structural rather than a judgment about how hard the work is: it runs with
-   * `maxTurns: 2` against a *resumed* session, and its entire instruction is to
-   * restate a conclusion someone else already reached without revisiting it.
-   * There is no judgment left to degrade — the judging was done, on the judging
-   * model, in the session being resumed. What is being bought here is JSON.
-   *
-   * It saves very little. A repair only fires when a QA agent ignored its output
-   * contract, and it is capped at two turns when it does. It is on this list
-   * because it is free of risk, not because it is worth money.
+   * Only an Anthropic session can be resumed, and a re-ask that starts cold
+   * has no verdict to restate — it would be asked for "the conclusion you
+   * already reached" with nothing in front of it. So when this names a model
+   * on a stateless transport, `reaskVerdict` resumes on `models.qa` instead,
+   * and this setting decides nothing.
    */
-  repair: z.string().default(HAIKU),
+  repair: z.string().default(DEEPSEEK),
   /**
    * Reads the demo through one named lens and says whether the run is still
    * building the right thing. This is the judgment the whole pit stop exists to
    * buy, and it is judgment rather than tool work.
    *
-   * Gemini rather than Opus, and the reason is independence rather than price.
-   * Every line this role is judging was written by an Anthropic worker and
-   * already passed an Anthropic QA; a reviewer from the same family is fluent
-   * in exactly the reasoning that produced the work, which makes the objection
-   * it is least likely to raise the one the pit stop exists to buy. Pinned, not
-   * merely defaulted — see `PINNED_ROLES` in providers.ts.
-   *
-   * Flash rather than Pro because the reviewer's expensive input is already
-   * paid for: it reads a demo report and a PRD that other roles produced, at a
-   * 30-turn ceiling, and emits a short verdict-and-findings JSON. The judgment
-   * is what is being bought here, not long-horizon tool work, and Flash is the
-   * tier where a second opinion is cheap enough to run on every lens rather
-   * than on the one lens somebody picked.
+   * Gemini, and the reason is independence rather than price: a reviewer from
+   * the family that wrote and passed the work is fluent in exactly the
+   * reasoning that produced it, which makes the objection it is least likely
+   * to raise the one the pit stop exists to buy. Pinned, not merely defaulted —
+   * see `PINNED_ROLES` in providers.ts.
    */
-  reviewer: z.string().default("gemini-3.8-flash"),
+  reviewer: z.string().default(GEMINI),
   /**
    * Decides what the run does next at a pit stop, having read the demo and
    * every reviewer. It is the only agent in the charrette whose output redirects
-   * or re-plans the remaining work on its own, so it is the last place to save
-   * money: Fable, for the same reason the planner is.
+   * or re-plans the remaining work on its own; point it at `claude-fable-5-2`
+   * for the most careful reading of that decision.
    */
-  pm: z.string().default(FABLE),
+  pm: z.string().default(GEMINI),
   /**
    * Writes a playbook when a task matched nothing in the operator's skill
-   * collection (`skillForge`). Sonnet rather than Haiku, and the reason is the
-   * blast radius rather than the difficulty: a skill is injected into every
-   * later session it matches, so a wrong claim here is repeated by agents that
-   * have no way to know it is wrong — the one-to-many amplifier the PRD's
-   * trust boundary 6 warns about. Not Opus, because the skillsmith's output is
-   * advisory prose the worker can ignore, not a verdict that gates anything.
+   * collection (`skillForge`). The blast radius is the thing to watch: a skill
+   * is injected into every later session it matches, so a wrong claim here is
+   * repeated by agents that have no way to know it is wrong — the one-to-many
+   * amplifier the PRD's trust boundary 6 warns about. The playbook is advisory
+   * prose the worker can ignore, not a verdict that gates anything.
    */
-  skillsmith: z.string().default("claude-sonnet-5"),
+  skillsmith: z.string().default(DEEPSEEK),
   /**
    * The specification is the standard everything downstream is judged against,
-   * and it is written once per run from a brief nobody has built against yet —
-   * which is the hardest reading task in the run and the cheapest place to be
-   * wrong expensively. Fable, for the same reason the planner is.
+   * written once per run from a brief nobody has built against yet — the
+   * hardest reading task in the run. Point it at `claude-fable-5-2` when the
+   * brief is long or ambiguous.
    */
-  spec: z.string().default(FABLE),
+  spec: z.string().default(GEMINI),
 });
 
 /**

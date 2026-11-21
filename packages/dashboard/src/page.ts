@@ -11,23 +11,26 @@
  * Rendering rule: every dynamic string reaches the DOM through textContent, never
  * innerHTML — agent output and repository contents are untrusted input here.
  */
-import { PINNED_ROLES } from "@charrette/shared";
+import { PINNED_ROLES, VENDOR_NAME, routingViolations } from "@charrette/shared";
 
 /**
  * What the model dropdowns offer.
  *
  * The priced tiers from `budget.ts` — a model absent from that table is billed
  * at the top tier, so offering one here would be offering the operator a saving
- * the ledger cannot see. Anthropic first because it is where the roles this
- * dropdown can actually move still live: the pinned roles are rendered without
- * a control at all (see `LOCKED_ROLES`), so nothing here is offered for
- * `reviewer` even though it now runs on Gemini. A run whose key for a vendor is
- * not exported is refused by `missingKeys` before the config is touched.
+ * the ledger cannot see. Newest generation first within each vendor. The
+ * pinned roles see only the subset their pin allows (`PINNED_CHOICES`). A run
+ * whose key for a vendor is not exported is refused by `missingKeys` before the
+ * config is touched.
  *
  * Exported for the test that holds the first sentence to its word: nothing
  * here may be missing from `PRICES`.
  */
 export const MODEL_CHOICES = [
+  "claude-fable-5-2",
+  "claude-opus-5-5",
+  "claude-sonnet-5-5",
+  "claude-haiku-5-5",
   "claude-fable-5-1",
   "claude-opus-5",
   "claude-sonnet-5",
@@ -40,6 +43,22 @@ export const MODEL_CHOICES = [
   "gemini-3.8-flash",
   "deepseek-flash",
 ];
+
+/**
+ * What each pinned role's dropdown offers: the choices above that its pin
+ * allows — the right vendor, above that vendor's judging floor.
+ *
+ * Filtered with `routingViolations` itself, the same function the server
+ * re-parses the config through, so the page cannot offer a model the server
+ * would refuse or hide one it would take. The server still refuses either way;
+ * a stale tab is not what stands between a cheap model and the judge.
+ */
+export const PINNED_CHOICES: Record<string, { vendor: string; models: string[] }> = Object.fromEntries(
+  Object.entries(PINNED_ROLES).map(([role, pin]) => [
+    role,
+    { vendor: VENDOR_NAME[pin.provider], models: MODEL_CHOICES.filter((m) => routingViolations({ [role]: m }).length === 0) },
+  ])
+);
 
 export const PAGE_HTML = `<!doctype html>
 <html lang="en">
@@ -691,11 +710,10 @@ export const PAGE_HTML = `<!doctype html>
 <script>
 const token = location.hash.slice(1);
 const headers = { authorization: "Bearer " + token };
-/* The roles the server refuses to move off a strong model, inlined from
-   PINNED_ROLES at build time so the page and the config cannot drift. Their rows
-   are rendered without any control at all — preventing the edit is better than
-   validating it, and the server refuses it either way. */
-const LOCKED_ROLES = ${JSON.stringify(Object.keys(PINNED_ROLES))};
+/* The roles the server holds to one vendor and above its judging floor, with the
+   models each may move to — inlined from PINNED_CHOICES at build time so the page
+   and the config cannot drift. The server refuses anything else either way. */
+const PINNED = ${JSON.stringify(PINNED_CHOICES)};
 /* Models the operator may route a role to. Not free text: a model id is not
    typeable from memory, and a typo surfaces as a spawn failure minutes later,
    in the log, a long way from the cause. */
@@ -1713,10 +1731,10 @@ let modelSig = "";
 /**
  * The run's model-per-role table, editable for the rest of the run.
  *
- * The four pinned roles are rendered as text with no control at all. Refusing
- * the edit at the server and never offering it are both correct; doing both is
- * what stops a stale tab from being the only thing between a cheap model and
- * the agent that decides whether work is shippable.
+ * The pinned roles are editable too, but only among the models their pin
+ * allows: a judge can move to a newer model of its vendor, never to another
+ * vendor or below the floor. They sit apart from the rest, with the vendor
+ * named, because they are the rows where a cheap model is how bad work merges.
  */
 function renderModels(run, box) {
   const models = run.config.models;
@@ -1726,8 +1744,7 @@ function renderModels(run, box) {
   if (!models) return;
   const roles = Object.keys(models);
   if (!roles.length) return;
-  const open = roles.filter((r) => LOCKED_ROLES.indexOf(r) === -1);
-  const changed = open.filter((r) => modelSaid[r] && modelSaid[r].ok).length;
+  const changed = roles.filter((r) => modelSaid[r] && modelSaid[r].ok).length;
 
   const d = el("details");
   d.id = "models";
@@ -1739,18 +1756,15 @@ function renderModels(run, box) {
   d.append(el("summary", null, "Models \\u00b7 " + roles.length + " roles" + (changed ? " \\u00b7 " + changed + " changed" : "")));
   d.append(el("small", "note", "affects agents started from now on"));
 
-  const row = (role, locked) => {
+  const row = (role) => {
+    const pin = PINNED[role];
     const r = el("div", "row");
     r.append(el("span", "role", role));
-    if (locked) {
-      r.append(el("span", "val", models[role]));
-      r.append(el("span", "lock", "locked"));
-      return r;
-    }
     if (editingRole === role) {
       const sel = el("select");
       sel.setAttribute("aria-label", "Model for the " + role + " role");
-      const choices = MODEL_CHOICES.indexOf(models[role]) === -1 ? [models[role]].concat(MODEL_CHOICES) : MODEL_CHOICES;
+      const offered = pin ? pin.models : MODEL_CHOICES;
+      const choices = offered.indexOf(models[role]) === -1 ? [models[role]].concat(offered) : offered;
       for (const m of choices) {
         const o = el("option", null, m);
         o.value = m;
@@ -1760,26 +1774,35 @@ function renderModels(run, box) {
       sel.addEventListener("change", () => { if (sel.value !== models[role]) saveModel(run, role, sel.value); });
       sel.addEventListener("keydown", (e) => { if (e.key === "Escape") { editingRole = ""; modelSig = ""; renderRunInfo(); } });
       r.append(sel);
-      return r;
+    } else {
+      const val = el("span", "val editable", models[role]);
+      val.tabIndex = 0;
+      val.setAttribute("role", "button");
+      val.setAttribute("aria-label", "Model for the " + role + " role: " + models[role] + ". Change it.");
+      const edit = () => { editingRole = role; modelSig = ""; renderRunInfo(); };
+      val.addEventListener("click", edit);
+      val.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); edit(); } });
+      r.append(val);
     }
-    const val = el("span", "val editable", models[role]);
-    val.tabIndex = 0;
-    val.setAttribute("role", "button");
-    val.setAttribute("aria-label", "Model for the " + role + " role: " + models[role] + ". Change it.");
-    const edit = () => { editingRole = role; modelSig = ""; renderRunInfo(); };
-    val.addEventListener("click", edit);
-    val.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); edit(); } });
-    r.append(val);
+    if (pin) r.append(el("span", "lock", pin.vendor + " only"));
     return r;
   };
+  const said = (into, role) => {
+    if (modelSaid[role]) into.append(el("small", "said" + (modelSaid[role].ok ? "" : " bad"), modelSaid[role].text));
+  };
 
-  for (const role of open) {
-    d.append(row(role, false));
-    if (modelSaid[role]) d.append(el("small", "said" + (modelSaid[role].ok ? "" : " bad"), modelSaid[role].text));
+  for (const role of roles) {
+    if (PINNED[role]) continue;
+    d.append(row(role));
+    said(d, role);
   }
   const locked = el("div", "locked");
-  for (const role of roles) if (LOCKED_ROLES.indexOf(role) !== -1) locked.append(row(role, true));
-  locked.append(el("small", "why", "These decide whether work is correct or shippable. A cheap model here is how bad work merges."));
+  for (const role of roles) {
+    if (!PINNED[role]) continue;
+    locked.append(row(role));
+    said(locked, role);
+  }
+  locked.append(el("small", "why", "These decide whether work is correct or shippable, so each stays with its vendor and above its small tier. A cheap model here is how bad work merges."));
   d.append(locked);
   box.append(d);
 }

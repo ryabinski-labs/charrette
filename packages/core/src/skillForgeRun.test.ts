@@ -131,7 +131,7 @@ describe("forging a skill for a task nothing matches", () => {
     // The smith ran read-only in the main repo, on its own model, before the worker.
     const smith = specs.find((s) => s.role === "skillsmith")!;
     expect(smith.cwd).toBe(dir);
-    expect(smith.model).toBe("claude-sonnet-5");
+    expect(smith.model).toBe("deepseek-flash");
     expect(smith.disallowedTools).toContain("Write");
     expect(specs.findIndex((s) => s.role === "skillsmith")).toBeLessThan(specs.findIndex((s) => s.role === "worker"));
 
