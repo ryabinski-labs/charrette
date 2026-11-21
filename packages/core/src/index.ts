@@ -12,6 +12,7 @@ export * from "./darkSwitches.js";
 export * from "./intentPosture.js";
 export * from "./bus.js";
 export * from "./budget.js";
+export * from "./modelUpdates.js";
 export * from "./build.js";
 export * from "./ciChecks.js";
 export * from "./coChange.js";

@@ -23,6 +23,13 @@ on. Before then, minor versions may break things.
 
 ### Added
 
+- **A startup check for newer models.** `charrette run` and `charrette resume`
+  list what each vendor in use serves and print a `newer` line for any role
+  whose model has a newer release in the same family, with the flag and
+  config line that would switch it. It recommends and never applies, stays
+  within a family, and says when the newer model is not priced yet. A vendor
+  that cannot be reached is skipped quietly. `CHARRETTE_MODEL_CHECK=0` turns
+  it off.
 - **Claude Fable 5.2, Opus 5.5, Sonnet 5.5 and Haiku 5.5** are priced
   ($8/$40, $4/$20, $2/$10 and $0.50/$2.50 per MTok) and offered in the
   dashboard. Haiku 5.5 is billed at its rate for prompts over 100K tokens,
