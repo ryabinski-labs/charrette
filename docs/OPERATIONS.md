@@ -811,6 +811,8 @@ Run configuration is a zod-validated `RunConfig`
 | `workerMaxTurns` | `120` | — | ✅ | turns before the SDK cuts a worker off. A session that hits it is the most expensive kind of failure — it dies having done the most work — so hitting it raises the ceiling **for the whole run**, not just that task: the repository is the same size for all of them. |
 | `qaMaxTurns` | `90` | — | ✅ | the same knob for QA, raised the same way. A QA session that runs out of turns never writes its verdict. |
 | `taskWallClockMinutes` | `45` | — | ✅ | a task looping this long without being accepted opens a gate. Answering **any** gate re-arms the clock, so the bound measures unattended time rather than time since dispatch. |
+| `agentEnv.allow` | `[]` | — | ✅ | variables an agent session may see beyond the base allowlist, as exact names or a prefix ending in `*` (e.g. `"STRIPE_*"`). An entry that is not set is printed as `+NAME (not set)`; an invalid entry stops the run with the rule named. Keys belong in the environment or `.env`, never in this file. |
+| `agentEnv.inherit` | `false` | — | ✅ | `true` hands every agent charrette's whole environment, which is what runs did before the allowlist and what the banner calls out as `agent env   inherit (every variable reaches agents)`. The escape hatch, not the default: it gives a prompt injection every key charrette holds. |
 | `usageLimitWaitMinutes` | `360` | — | ✅ | how long **one session** may sleep waiting for your account's usage limit to reset. A quota window closing kills every session in flight at once ("You've hit your session limit · resets 8:20pm") and is not a fault in the work, so the pool waits it out and continues the same session — same conversation, same bill, no attempt or respawn spent on it. Per session rather than per run, so an overnight run survives several outages of this length. Past the bound the failure is reported as it always was; `0` restores that immediately. |
 | `models.intake` | `claude-opus-5-5` | — | ✅ | this one talks to you; question quality is the whole value. **Anthropic only** — see [Using other providers](#using-other-providers) |
 | `models.planner` | `gemini-3.8-flash` | — | ✅ | drafts the PRD and cuts it into the DAG; every worker session is downstream of this reading, and the two most expensive runs on record both went wrong here. Point it at `claude-fable-5-2` when a run is large enough that the plan is where the risk is. A Gemini planner has no session to resume, so each continuation message re-sends the PRD and conventions. |
@@ -1078,6 +1080,9 @@ under-charging would let a cap silently stop binding.
 | `GITHUB_TOKEN` | no | enables issues + PRs; falls back to `gh auth token` |
 | `CHARRETTE_GITHUB_REPO` | no | `owner/repo`; falls back to `gh repo view` |
 | `CHARRETTE_MODEL_CHECK` | no | `0` skips the startup check for newer models; see [Newer models](#newer-models) |
+| `CHARRETTE_NOTIFY_URL` | no | HTTPS endpoint that receives a push notice when a gate opens, a task enters `NEEDS_HUMAN`, a run finishes or a run stops on an error. `http://` is accepted only for `localhost` and `127.0.0.1`; a bad URL stops `charrette run`. Unset sends nothing. |
+| `CHARRETTE_NOTIFY_FORMAT` | no | `ntfy` (plain-text body plus `Title`/`Priority`/`Tags` headers) or `json`. Defaults to `ntfy` when the host is `ntfy.sh` or the path has one segment, `json` otherwise. |
+| `CHARRETTE_NOTIFY_TOKEN` | no | sent as `Authorization: Bearer …` on every notice. Not passed to agents (`CHARRETTE_NOTIFY_*` is excluded from the base allowlist). |
 
 Any of these may be written to a `.env` file instead of exported. It is read
 from **the directory you run `charrette` from**, which is deliberately not the
@@ -1098,6 +1103,16 @@ yours to configure — they are how a task is told what part of the machine it o
 
 See **Worktrees are not machine isolation** under §14 for what this does and does
 not protect against.
+
+### Running on a remote Linux host
+
+A run that should survive a closed laptop belongs on a dedicated Debian 13 or
+Ubuntu 24.04 machine reached over Tailscale and SSH. [docs/REMOTE.md](./REMOTE.md)
+covers the threat model, the host preparation and provisioning script, the
+dashboard tunnel, scoped credentials, the `agentEnv` allowlist and the push
+notify variables. The short version: no inbound port, the dashboard stays on
+`127.0.0.1` behind `ssh -L`, and agents get an allowlisted environment rather
+than every key charrette holds.
 
 ---
 

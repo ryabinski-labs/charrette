@@ -33,7 +33,7 @@ requirements:
     when: a DeepSeek session environment is built
     then: PATH and TERM reach the session and none of the six secrets do
     oracle: env.PATH === "/usr/bin" and env.TERM === "xterm" and every one of the six secret names is absent from env
-    status: red
+    status: green
     doubles: none; pure function over a supplied environment
     test_ref: packages/core/src/agentEnv.test.ts::SC-001-a the base allowlist keeps the shell working and drops every vendor key
   - id: SC-001-b
@@ -44,7 +44,7 @@ requirements:
     when: the base environment is built with no allow entries
     then: every family passes except the notification settings
     oracle: LC_ALL, XDG_CONFIG_HOME, BASH_MAX_TIMEOUT_MS, CHARRETTE_RUN_ID, http_proxy and SSL_CERT_FILE are present; CHARRETTE_NOTIFY_TOKEN and CHARRETTE_NOTIFY_URL are absent
-    status: red
+    status: green
     doubles: none
     test_ref: packages/core/src/agentEnv.test.ts::SC-001-b prefix families are matched exactly as the base list documents
   - id: SC-001-c
@@ -55,7 +55,7 @@ requirements:
     when: the session asks its Bash tool to inspect the tool context environment
     then: the tool sees PATH and neither secret
     oracle: the captured tool-context keys include PATH and exclude DEEPSEEK_API_KEY and GITHUB_TOKEN
-    status: red
+    status: green
     doubles: a scripted provider client and a capture tool; the tool-loop wiring is real
     test_ref: packages/core/src/agentEnv.test.ts::SC-001-c a non-Anthropic session's tool context receives the filtered environment
 - id: REQ-002
@@ -72,7 +72,7 @@ requirements:
     when: the session environment is built
     then: the three Claude variables and PATH reach it, and the other two secrets do not
     oracle: ANTHROPIC_API_KEY, CLAUDE_CONFIG_DIR, ANTHROPIC_BASE_URL and PATH are present; GEMINI_API_KEY and GITHUB_TOKEN are absent
-    status: red
+    status: green
     doubles: none
     test_ref: packages/core/src/agentEnv.test.ts::SC-002-a a Claude session receives its login and no other vendor key
   - id: SC-002-b
@@ -83,7 +83,7 @@ requirements:
     when: the pool starts the session
     then: the SDK options carry the Claude key and PATH, and not the Gemini key or the GitHub token
     oracle: options.env.ANTHROPIC_API_KEY is present, options.env.PATH is present, options.env.GEMINI_API_KEY and options.env.GITHUB_TOKEN are undefined
-    status: red
+    status: green
     doubles: the Anthropic SDK query function; the pool and its store are real
     test_ref: packages/core/src/poolAgentEnv.test.ts::SC-002-b the pool spawns Claude sessions with the filtered environment
   - id: SC-002-c
@@ -94,7 +94,7 @@ requirements:
     when: the session environment is built
     then: both overlay values are present even though neither is in the base allowlist
     oracle: env.COMPOSE_PROJECT_NAME === "charrette-task1" and env.CLAUDE_CODE_OAUTH_TOKEN === "oat-work"
-    status: red
+    status: green
     doubles: none
     test_ref: packages/core/src/agentEnv.test.ts::SC-002-c task and subscription overlays apply on top of the allowlist
 - id: REQ-003
@@ -111,7 +111,7 @@ requirements:
     when: a session environment is built
     then: STRIPE_TEST_KEY is present and listed as added
     oracle: env.STRIPE_TEST_KEY === "sk_test_123" and added contains STRIPE_TEST_KEY
-    status: red
+    status: green
     doubles: none
     test_ref: packages/core/src/agentEnv.test.ts::SC-003-a a configured allow entry reaches the session and is reported
   - id: SC-003-b
@@ -122,7 +122,7 @@ requirements:
     when: a session environment is built
     then: the key is absent and reported as missing
     oracle: env.STRIPE_TEST_KEY is undefined and missing contains STRIPE_TEST_KEY
-    status: red
+    status: green
     doubles: none
     test_ref: packages/core/src/agentEnv.test.ts::SC-003-b an allow entry that is not set is reported and absent
   - id: SC-003-c
@@ -133,7 +133,7 @@ requirements:
     when: the config file and the run config are parsed
     then: both refuse it and the message names the entry and the accepted rule
     oracle: FileConfig.safeParse(...).success === false and the issue message contains "1BAD-NAME" and "^[A-Za-z_][A-Za-z0-9_]*$" or "prefix ending in *"; RunConfig.parse throws the same
-    status: red
+    status: green
     negative: true
     doubles: none; schema parse
     test_ref: apps/cli/src/agentEnvConfig.test.ts::SC-003-c an invalid allow entry is refused with the entry and the rule
@@ -144,10 +144,21 @@ requirements:
     given: a repo whose charrette.config.json allows STRIPE_TEST_KEY and exports it
     when: charrette run starts
     then: the banner says agent env and names +STRIPE_TEST_KEY
-    oracle: the printed banner contains "agent env" and "+STRIPE_TEST_KEY"
-    status: red
+    oracle: the printed banner contains "agent env", "+STRIPE_TEST_KEY" and "notify      ntfy.sh/…" with no topic path
+    status: green
     doubles: the cli.test harness; the agent-env summary and banner compositor are real
     test_ref: apps/cli/src/cli.test.ts::SC-003-d the run banner names an allowlisted variable
+  - id: SC-003-e
+    red_verified: "2026-11-21"
+    level: acceptance
+    title: resume applies an agentEnv change from the config file
+    given: a run frozen with no allow entries and a config file that now allows STRIPE_TEST_KEY
+    when: charrette resume runs
+    then: the run's config is patched and the banner names +STRIPE_TEST_KEY
+    oracle: patchRunConfig is called with agentEnv allow STRIPE_TEST_KEY, the update is printed, and the banner contains "+STRIPE_TEST_KEY"
+    status: green
+    doubles: the cli.test harness; the patch and banner are the real implementations
+    test_ref: apps/cli/src/cli.test.ts::SC-003-e resume applies an agentEnv change from the config file
 - id: REQ-004
   text: The run and resume banners name the secret-like variables withheld from agents without their values, say when inherit is on, and the run.agent_env event records the same facts.
   priority: P0
@@ -162,7 +173,7 @@ requirements:
     when: the run's agent environment is summarized with no allow entries
     then: the three secret-like names are withheld and PATH is not
     oracle: withheld equals GEMINI_API_KEY, GITHUB_TOKEN, STRIPE_SECRET_KEY; PATH is not in withheld
-    status: red
+    status: green
     doubles: none
     test_ref: packages/core/src/agentEnv.test.ts::SC-004-a withheld names are the secret-like variables no agent receives
   - id: SC-004-b
@@ -173,7 +184,7 @@ requirements:
     when: a session environment is built
     then: every variable is present
     oracle: env.GITHUB_TOKEN === "ghp_x" and env.PATH === "/usr/bin" and inherit is true
-    status: red
+    status: green
     doubles: none
     test_ref: packages/core/src/agentEnv.test.ts::SC-004-b inherit returns the whole environment
   - id: SC-004-c
@@ -184,7 +195,7 @@ requirements:
     when: the banner line is composed
     then: it reads as the documented line and contains no secret values
     oracle: the line is "agent env   12 passed · +STRIPE_TEST_KEY · withheld GEMINI_API_KEY GITHUB_TOKEN STRIPE_SECRET_KEY"
-    status: red
+    status: green
     doubles: none
     test_ref: packages/core/src/agentEnv.test.ts::SC-004-c the banner names what passed, what was added and what was withheld
   - id: SC-004-d
@@ -195,7 +206,7 @@ requirements:
     when: the instrumentation event is built
     then: it carries passed, added, withheld and inherit
     oracle: event.type === "run.agent_env", event.runId === "run1", event.passed === 12, event.added contains STRIPE_TEST_KEY, event.withheld has length 3, event.inherit === false
-    status: red
+    status: green
     doubles: none
     test_ref: packages/core/src/agentEnv.test.ts::SC-004-d the run.agent_env event records the summary
   - id: SC-004-e
@@ -206,9 +217,20 @@ requirements:
     when: charrette run starts
     then: the banner lists STRIPE_SECRET_KEY under withheld and never prints the value
     oracle: the printed banner contains "withheld" and "STRIPE_SECRET_KEY" and does not contain "sk_live_secret"
-    status: red
+    status: green
     doubles: the cli.test harness
     test_ref: apps/cli/src/cli.test.ts::SC-004-e the run banner lists a withheld secret-like name without its value
+  - id: SC-004-f
+    red_verified: "2026-11-21"
+    level: integration
+    title: a started run publishes run.agent_env with the names agents could read
+    given: a run whose config allows STRIPE_TEST_KEY and an environment holding a secret the run does not allow
+    when: the controller starts the run
+    then: a run.agent_env event records the added and withheld names and no value
+    oracle: the event has added ["STRIPE_TEST_KEY"], withheld contains OPENCODE_TEST_SECRET and not STRIPE_TEST_KEY, and its serialized form contains neither value
+    status: green
+    doubles: a real Store and Bus; the agent pool is scripted
+    test_ref: packages/core/src/controllerEdges.test.ts::SC-004-f a started run publishes run.agent_env with the names agents could read
 - id: REQ-005
   text: When a notify URL is configured, a gate opening, a task entering NEEDS_HUMAN, run completion and a run stopped on an error each produce one push notice.
   priority: P0
@@ -223,7 +245,7 @@ requirements:
     when: the notice for the event is built
     then: each has a title naming the repo and the gate, and a one-line reason
     oracle: every notice has event "run.gate_opened", repo "charrette" in the title, priority "high", and a non-empty message; the budget message contains "$30.00" and "$30.00"
-    status: red
+    status: green
     doubles: none
     test_ref: apps/cli/src/notifyPush.test.ts::SC-005-a a gate opening becomes one notice
   - id: SC-005-b
@@ -234,7 +256,7 @@ requirements:
     when: the notice for the event is built
     then: the notice names the task and the reason at high priority
     oracle: notice.message contains "api-auth" and "no test can prove it"; notice.priority === "high"
-    status: red
+    status: green
     doubles: none
     test_ref: apps/cli/src/notifyPush.test.ts::SC-005-b a task entering NEEDS_HUMAN becomes one notice
   - id: SC-005-c
@@ -245,7 +267,7 @@ requirements:
     when: the notice for the event is built
     then: the notice says the run finished at default priority
     oracle: notice.title contains "run done" and notice.priority === "default"
-    status: red
+    status: green
     doubles: none
     test_ref: apps/cli/src/notifyPush.test.ts::SC-005-c a finished run becomes one notice
   - id: SC-005-d
@@ -256,7 +278,7 @@ requirements:
     when: one run.gate_opened event is published
     then: exactly one POST is made and it is recorded on the bus
     oracle: fetch was called once; a notify.sent event exists with event "run.gate_opened" and status 200
-    status: red
+    status: green
     doubles: fetch replaced by a recording stub; the bus and store are real
     test_ref: apps/cli/src/notifyPush.test.ts::SC-005-d the watcher posts exactly once for an opening gate
   - id: SC-005-e
@@ -267,7 +289,7 @@ requirements:
     when: the stopped notice is built
     then: the notice says the run stopped and carries the reason
     oracle: notice.event === "run.stopped", notice.title contains "run stopped", notice.message contains "worktree is gone", notice.priority === "default"
-    status: red
+    status: green
     doubles: none
     test_ref: apps/cli/src/notifyPush.test.ts::SC-005-e a run stopped on an error becomes one notice
 - id: REQ-006
@@ -283,8 +305,8 @@ requirements:
     given: an ntfy target and a high-priority notice
     when: the request is built
     then: the body is the message and the headers carry Title, Priority high and Tags
-    oracle: init.body === "Plan ready for approval", headers.Title === "charrette — plan gate", headers.Priority === "high", headers.Tags contains "charrette"
-    status: red
+    oracle: init.body === "Plan ready for approval", headers.Title === "charrette — plan gate · run1", headers.Priority === "high", headers.Tags contains "charrette"
+    status: green
     doubles: fetch replaced by a recording stub
     test_ref: apps/cli/src/notifyPush.test.ts::SC-006-a ntfy notices carry the plain-text body and priority headers
   - id: SC-006-b
@@ -295,7 +317,7 @@ requirements:
     when: the request is built
     then: the body is the six documented fields with an application/json type
     oracle: JSON.parse(body) has exactly event, runId, repo, title, message and ts; headers["Content-Type"] === "application/json"
-    status: red
+    status: green
     doubles: fetch replaced by a recording stub
     test_ref: apps/cli/src/notifyPush.test.ts::SC-006-b json notices carry the documented object
   - id: SC-006-c
@@ -306,7 +328,7 @@ requirements:
     when: the format is inferred with no explicit CHARRETTE_NOTIFY_FORMAT
     then: the first two are ntfy and the third is json
     oracle: notifyTarget({CHARRETTE_NOTIFY_URL:"https://ntfy.sh/topic"}).format === "ntfy" and ...example.com/hook === "ntfy" and ...example.com/a/b === "json"
-    status: red
+    status: green
     doubles: none
     test_ref: apps/cli/src/notifyPush.test.ts::SC-006-c the default format follows the host and path shape
   - id: SC-006-d
@@ -317,7 +339,7 @@ requirements:
     when: the request is built
     then: it carries Authorization Bearer token
     oracle: headers.Authorization === "Bearer tk_secret"
-    status: red
+    status: green
     doubles: fetch replaced by a recording stub
     test_ref: apps/cli/src/notifyPush.test.ts::SC-006-d a token becomes a bearer header
 - id: REQ-007
@@ -334,7 +356,7 @@ requirements:
     when: the notice is built and serialized
     then: the body contains the repo, run id and reason, and none of the sensitive values
     oracle: the serialized notice contains "charrette", "run1" and "Plan ready for approval"; it does not contain "http://localhost:4777", "tok_dash", "the whole prompt", "diff --git" or "sk-ant-secret"
-    status: red
+    status: green
     doubles: none
     test_ref: apps/cli/src/notifyPush.test.ts::SC-007-a a notice carries the repo, run and reason and nothing else
   - id: SC-007-b
@@ -345,7 +367,7 @@ requirements:
     when: the banner line is composed
     then: it names the host and elides the topic
     oracle: the line contains "notify" and "ntfy.sh/…" and does not contain "a-long-private-topic"
-    status: red
+    status: green
     doubles: none
     test_ref: apps/cli/src/notifyPush.test.ts::SC-007-b the banner elides the notification path
 - id: REQ-008
@@ -362,7 +384,7 @@ requirements:
     when: the test notice is sent
     then: it returns the status and one request was made
     oracle: result.status === 200 and result.ok === true and fetch called once
-    status: red
+    status: green
     doubles: fetch replaced by a recording stub
     test_ref: apps/cli/src/notifyPush.test.ts::SC-008-a the test notice reports the HTTP status
   - id: SC-008-b
@@ -373,7 +395,7 @@ requirements:
     when: charrette notify-test runs
     then: the command prints 204 and exits successfully
     oracle: printed output contains "HTTP 204"
-    status: red
+    status: green
     doubles: the cli.test harness; the notify sender is real and fetch is stubbed
     test_ref: apps/cli/src/cli.test.ts::SC-008-b notify-test prints the HTTP status
 - id: REQ-009
@@ -389,8 +411,8 @@ requirements:
     given: a fetch that answers 503 every time
     when: the notice is sent
     then: four attempts are made and the sleeps are 2000 and 10000 milliseconds
-    oracle: fetch call count === 4 and sleeps === [2000, 10000] and result.ok === false and result.status === 503
-    status: red
+    oracle: fetch call count === 3 and sleeps === [2000, 10000] and result.ok === false and result.status === 503
+    status: green
     doubles: fetch and sleep replaced
     test_ref: apps/cli/src/notifyPush.test.ts::SC-009-a a 5xx is retried twice at two and ten seconds
   - id: SC-009-b
@@ -401,7 +423,7 @@ requirements:
     when: the notice is sent with a short test timeout
     then: the attempt aborts, is retried, and the sender returns a failure rather than throwing
     oracle: the call resolves to ok false, fetch was called three times, and no exception escapes
-    status: red
+    status: green
     doubles: fetch replaced by an abort-aware stub; timeout shortened for the test
     test_ref: apps/cli/src/notifyPush.test.ts::SC-009-b a notice that times out is retried and never blocks the run
   - id: SC-009-c
@@ -412,7 +434,7 @@ requirements:
     when: a gate event is published
     then: one agent.log event says the notice failed and the bus keeps working
     oracle: exactly one agent.log event contains "notify"; a notify.failed event exists; publishing another event does not throw
-    status: red
+    status: green
     doubles: fetch replaced; the bus and store are real
     test_ref: apps/cli/src/notifyPush.test.ts::SC-009-c the last failure writes one agent.log line and does not throw
 - id: REQ-010
@@ -429,7 +451,7 @@ requirements:
     when: the notify target is resolved
     then: the first three resolve and the last two are refused by name
     oracle: the first three return a target; the last two throw with a message containing CHARRETTE_NOTIFY_URL
-    status: red
+    status: green
     negative: true
     doubles: none
     test_ref: apps/cli/src/notifyPush.test.ts::SC-010-a https is accepted and plain http is only for loopback
@@ -441,7 +463,7 @@ requirements:
     when: charrette run starts
     then: it exits non-zero before starting a run and names the variable
     oracle: the action rejects with a message containing CHARRETTE_NOTIFY_URL and the controller startRun is not called
-    status: red
+    status: green
     negative: true
     doubles: the cli.test harness
     test_ref: apps/cli/src/cli.test.ts::SC-010-b run refuses an invalid notification setting
@@ -459,7 +481,7 @@ requirements:
     when: twenty-five gate events are published inside one ten-minute window
     then: twenty notices and one summary are sent, then nothing more
     oracle: fetch call count === 21, the last body contains "suppressed" or "summary", and events after the twenty-first send nothing
-    status: red
+    status: green
     doubles: fetch replaced; the clock is injected
     test_ref: apps/cli/src/notifyPush.test.ts::SC-011-a more than twenty notices become one summary and then silence
 - id: REQ-012
@@ -476,7 +498,7 @@ requirements:
     when: its headings are read in order
     then: it covers threat model, architecture, host preparation, access, tunnel, credentials, agent environment, notifications, tmux, updates, backups and hardening in that order
     oracle: the ordered heading list contains each promised topic at an increasing index, and the dashboard tunnel section contains "ssh -L 4777:127.0.0.1:4777"
-    status: red
+    status: green
     doubles: none; reads the committed file
     test_ref: apps/cli/src/remoteHost.test.ts::SC-012-a the guide covers the promised sections in order
   - id: SC-012-b
@@ -487,7 +509,7 @@ requirements:
     when: it is read
     then: it gives the API-key-with-spend-limit path and the claude setup-token path, says an agent can read each, and specifies the five GitHub token scopes with no Workflows permission
     oracle: 'the file contains "claude setup-token", "spend limit", "an agent", "Contents: read and write", "Pull requests: read and write", "Checks: read", "Metadata: read" and "no Workflows"'
-    status: red
+    status: green
     doubles: none
     test_ref: apps/cli/src/remoteHost.test.ts::SC-012-b both Claude logins and the scoped GitHub token are documented
   - id: SC-012-c
@@ -498,7 +520,7 @@ requirements:
     when: they are read
     then: both docs link to docs/REMOTE.md, OPERATIONS documents agentEnv and the notify variables in its tables, and the changelog calls out the allowlist change
     oracle: README contains "docs/REMOTE.md"; OPERATIONS contains "docs/REMOTE.md", "agentEnv", "CHARRETTE_NOTIFY_URL", "CHARRETTE_NOTIFY_FORMAT" and "CHARRETTE_NOTIFY_TOKEN"; CHANGELOG contains "agentEnv" and "allowlist"
-    status: red
+    status: green
     doubles: none
     test_ref: apps/cli/src/remoteHost.test.ts::SC-012-c the README and OPERATIONS point at the guide and document the new settings
 - id: REQ-013
@@ -515,7 +537,7 @@ requirements:
     when: provision.sh runs with a valid user and public key
     then: it exits non-zero naming the supported versions
     oracle: exit status is non-zero and stderr contains "Debian 13" and "Ubuntu 24.04"
-    status: red
+    status: green
     negative: true
     doubles: a temporary OS release fixture; no root or package manager touched
     test_ref: apps/cli/src/provision.test.ts::SC-013-a an unsupported operating system is refused before anything changes
@@ -527,7 +549,7 @@ requirements:
     when: provision.sh runs on Debian 13
     then: each invocation exits non-zero naming the key problem
     oracle: both invocations exit non-zero and stderr contains "ssh-key" or "public key"
-    status: red
+    status: green
     negative: true
     doubles: temporary OS release and key fixtures
     test_ref: apps/cli/src/provision.test.ts::SC-013-b a missing or malformed public key is refused before anything changes
@@ -539,7 +561,7 @@ requirements:
     when: provision.sh runs with --dry-run in a temporary target root
     then: it prints the user, Node 22, pnpm, git, gh, tmux, Tailscale, SSH, unattended upgrades and nftables steps and writes nothing
     oracle: exit status is 0, stdout names "useradd", "Node 22", "pnpm", "gh", "tmux", "tailscale", "authorized_keys", "unattended-upgrades" and "nftables", and the target root remains empty
-    status: red
+    status: green
     doubles: OS release and key fixtures; commands are planned, not run
     test_ref: apps/cli/src/provision.test.ts::SC-013-c a dry run prints the plan and changes nothing
   - id: SC-013-d
@@ -550,7 +572,7 @@ requirements:
     when: its syntax is checked and its content read
     then: it loads ~/.config/charrette/env and attaches to or creates the charrette session
     oracle: bash -n exits 0; the file contains ".config/charrette/env", "tmux" and "new-session -A -s charrette"
-    status: red
+    status: green
     doubles: none
     test_ref: apps/cli/src/provision.test.ts::SC-013-d the session wrapper loads the env file and attaches to tmux
 - id: REQ-014
