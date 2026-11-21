@@ -29,6 +29,23 @@ export interface UnresolvedPin {
 }
 
 /**
+ * The index keyed by every name a pin or route may use for a skill: its own
+ * name first, then each of its `aliases:`.
+ *
+ * The aliases are what let a public routing table name a skill generically
+ * (`dns-iac-engineer`) while the operator's copy carries its own name. An
+ * exact name always wins, and the first skill to claim an alias keeps it, so
+ * an alias can never take a route away from the skill actually called that.
+ */
+export function skillsByName(skills: IndexedSkill[]): Map<string, IndexedSkill> {
+  const byName = new Map(skills.map((s) => [s.name, s]));
+  for (const s of skills) {
+    for (const alias of s.aliases ?? []) if (!byName.has(alias)) byName.set(alias, s);
+  }
+  return byName;
+}
+
+/**
  * Every `roleSkills` pin the given index cannot satisfy, in config order.
  *
  * Takes the index rather than the directories so it answers the same question
@@ -38,7 +55,7 @@ export interface UnresolvedPin {
  * about what "present" means.
  */
 export function unresolvedRoleSkills(skills: IndexedSkill[], roleSkills: Record<string, string[]>): UnresolvedPin[] {
-  const byName = new Map(skills.map((s) => [s.name, s]));
+  const byName = skillsByName(skills);
   const out: UnresolvedPin[] = [];
   for (const [role, names] of Object.entries(roleSkills)) {
     for (const skill of names) {

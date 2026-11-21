@@ -1274,13 +1274,81 @@ before scoring fills whatever room is left. `roleSkills` does the same for a *jo
 rather than a topic — the planner carries `product-manager` whatever the
 assignment says, because "add rate limiting" is still a product decision.
 
+The default role pins:
+
+| Role | Skills |
+|---|---|
+| `intake` | `product-manager`, `spec-clarifier` (its questioning method; intake is read-only) |
+| `spec` | `prd-to-tdd`, `spec-clarifier` (writes `docs/prd/<feature>.md`, then the TDD artifact from it) |
+| `planner` | `product-manager` |
+| `prod` | `prod-validator` |
+
 The defaults route architecture, UI, product, marketing, sales and research work,
-plus two narrow rules that must stay near the top of the list:
+plus narrow rules that must stay near the top of the list:
 
 | Rule | Skill |
 |---|---|
+| `.github/workflows`, GitHub Actions, CI gates, runners, Dependabot | `github-pipeline-expert` |
 | DNS, nameservers, CNAME/TXT records, cert-manager, DNS-01, ACME, Route 53 | `dns-iac-engineer` |
+| Stripe, payments, checkout sessions, billing portal, invoices, refunds, payouts | `stripe-setup-specialist` |
+| ledgers, double-entry, bookkeeping, payout/bank reconciliation, tax forms, payroll | `accountant` |
+| App Store, App Store Connect, TestFlight, iOS release, provisioning profiles | `app-store-publisher` |
+| Google Play, Play Console, AAB, staged rollouts | `play-store-publisher` |
+| lifecycle/transactional/onboarding email, SES, SendGrid, Postmark, unsubscribe | `lifecycle-email-engineer` |
+| privacy policy, terms of use, cookie consent, GDPR/CCPA, auto-renewal, refund policy | `legal-page-reviewer` |
+| i18n, l10n, localization, translations, locale files | `technical-translator` |
+| SLOs, monitoring, alerting rules, on-call, runbooks, incidents, backups, DR | `sre` |
+| rightsizing, HPA/KEDA/VPA, PDBs, node pools, resource requests and limits | `k8s-optimizer` |
+| cloud bill, Cost Explorer, FinOps, savings plans, token/LLM spend | `cost-optimizer` |
+| security, auth, login, passkeys, OAuth/OIDC/SSO, CSRF/XSS/SSRF, RBAC, tenancy, secrets, SPF/DKIM/DMARC | `sentinel` |
 | greenfield, scaffolding, technology-stack choice, DynamoDB, magic-link, WebAuthn, serverless | `fullstack-app` |
+| README, changelog, release notes, guides, tutorials, docs pages (worker only) | `human-writer` |
+
+Several of these playbooks act on live accounts when you run them by hand —
+configuring Stripe, uploading a build, changing monitors. Inside a run they are
+advisory for the repository half only: every session's skills block says that a
+live step is left to the operator, and that rule outranks the playbook.
+
+A route names the skill it wants, but your copy of that skill does not have to
+carry that exact name. When no installed skill is named `dns-iac-engineer`, a
+skill whose frontmatter lists it as an alias takes the route instead:
+
+```yaml
+---
+name: my-dns-provider-iac
+aliases: dns-iac-engineer
+---
+```
+
+An exact name always wins over an alias. This applies to `skillRouting` and
+`roleSkills`; pit-stop lenses and `decidedBy` still match the name exactly.
+
+### Sibling playbooks and skills discovery
+
+A skill can name the skills it hands work to in its frontmatter
+(`delegates_to: prd-to-tdd, qa-agent`), and the indexer also reads `aliases:`
+and `tags:`, which are matched with the same weight as the description. For
+each skill a session carries, the run lists the installed, hash-verified
+siblings it delegates to as `<related-skill name=… path=…/>` lines (at most six
+per session). They cost a line rather than one of the four slots, and the agent
+reads one only when the playbook says to hand that part off.
+
+Your own skills-discovery MCP server (`skills-discovery` in `~/.claude.json`) is
+switched off inside run sessions (`mcp__skills-discovery` is a disallowed tool).
+Sessions load your user settings, so without this every worker could rank and
+read any skill on the machine, around the routing table and the injection-time
+hash check. What a session reads as a playbook is what the run routed to it,
+plus the siblings listed above.
+
+### Expected-failure stubs and the acceptance gate
+
+`prd-to-tdd` scaffolds red tests with strict expected-failure markers
+(`it.fails`, `xfail(strict=True)`, `test.fail()`), and a runner reports an
+expected failure as a pass. The spec agent is told to scaffold with
+`stubs --no-xfail` and to prove the red bar with `lint-tests` and
+`verify-red`. As a backstop, the acceptance gate runs `commands.all` with
+`TDD_RED_CHECK=1`, which switches every marker off, so an unimplemented
+scenario reads as red rather than as a ✓.
 
 **A role carries at most four skills.** Rules are applied in list order and the
 fifth match is dropped, so a narrow rule placed below a broad one never fires in
@@ -1290,7 +1358,8 @@ specific rule above the general one — the regression tests in
 `skillsInjection.test.ts` assert exactly this and go red if the order is reversed.
 
 A rule may also name the `roles` it applies to (`intake`, `planner`, `worker`,
-`qa`, `prod`); omit the field and it applies to all of them, which is what every
+`qa`, `prod`) — in `charrette.config.json` too, which used to reject the field;
+omit it and it applies to all of them, which is what every
 rule written before this option existed still means. Use it when a skill belongs
 to one side of the work rather than to the topic — the UI defaults build with
 `frontend-design`, `ui-ux-cx-engineer` and `product-manager`, and grade with

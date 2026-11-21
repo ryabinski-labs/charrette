@@ -17,6 +17,8 @@ import {
   specAnswersPrompt,
   specPlanBlock,
   specPrompt,
+  specSystemPrompt,
+  intakeSystemPrompt,
 } from "./prompts.js";
 import { BASH_TIMEOUT_MS } from "./limits.js";
 
@@ -627,5 +629,71 @@ describe("what the specification agent and the planner are told", () => {
     expect(p).toContain("Q: Real Stripe, or sandbox?");
     expect(p).toContain("A: sandbox");
     expect(p).toContain("do not fill a remaining gap with a guess");
+  });
+});
+
+/**
+ * The operator's playbooks are written for a person driving Claude by hand, so
+ * they say "ask skills discovery", "delegate to a subagent", "configure the
+ * account". Inside a run those are translated, not obeyed.
+ */
+describe("how a carried playbook applies inside a run", () => {
+  it("lists a carried skill's siblings by path and says discovery is not available", () => {
+    const block = skillsBlock([
+      { name: "spec-clarifier", path: "/s/spec-clarifier/SKILL.md", related: [{ name: "feedback-provider", path: "/s/feedback-provider/SKILL.md" }] },
+    ]);
+    expect(block).toContain('<skill name="spec-clarifier" path="/s/spec-clarifier/SKILL.md">');
+    expect(block).toContain('<related-skill name="feedback-provider" path="/s/feedback-provider/SKILL.md"/>');
+    expect(block).toContain("Skills discovery is not available in this session");
+  });
+
+  it("keeps a playbook's live-account steps on the operator's side", () => {
+    const block = skillsBlock([{ name: "stripe-setup-specialist", path: "/s/stripe/SKILL.md" }]);
+    expect(block).toContain("do only the part that lives in this repository, and leave the live step to the operator");
+    // No sibling list at all when nothing was delegated.
+    expect(block).not.toContain("<related-skill");
+  });
+
+  it("is empty when a session carries nothing", () => {
+    expect(skillsBlock([])).toBe("");
+  });
+});
+
+/**
+ * `spec-clarifier` → `prd-to-tdd` is the chain the two skills are written to
+ * form. Intake asks the questions; the spec agent, which can write, writes the
+ * clarified PRD and derives the artifact from it.
+ */
+describe("the spec-clarifier and prd-to-tdd chain", () => {
+  it("has the spec agent write the clarified PRD from the brief, and validate it strictly", () => {
+    const p = specSystemPrompt();
+    expect(p).toContain("docs/prd/<feature>.md");
+    expect(p).toContain("new <feature> --prompt docs/prd/<feature>.prompt.md");
+    expect(p).toContain("validate --strict");
+    expect(p).toContain("do not run spec-clarifier's question loop");
+  });
+
+  /**
+   * Strict expected-failure markers report ✓ while a stub is unimplemented, and
+   * the acceptance gate reads ✓ next to a scenario id as a kept promise.
+   */
+  it("scaffolds red tests without expected-failure markers, and proves the red bar", () => {
+    const p = specSystemPrompt();
+    expect(p).toContain("stubs --no-xfail");
+    expect(p).toContain("lint-tests");
+    expect(p).toContain("verify-red --write");
+  });
+
+  it("carries the operator's answers into the PRD's decision log as well as the artifact", () => {
+    const p = specAnswersPrompt([{ question: "Real Stripe or a fake?", answer: "Stripe test mode" }]);
+    expect(p).toContain("clarified PRD's Decision log");
+    expect(p).toContain("verify-red");
+  });
+
+  it("gives intake spec-clarifier's method but keeps its own question rules on top", () => {
+    const p = intakeSystemPrompt();
+    expect(p).toContain("spec-clarifier");
+    expect(p).toContain("this session is read-only, and the specification agent writes the clarified PRD from your brief");
+    expect(p).toContain("the rules here win");
   });
 });

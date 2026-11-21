@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { indexSkills, matchSkills, verifyHash } from "./indexer.js";
+import { indexSkills, matchSkills, verifyHash, type IndexedSkill } from "./indexer.js";
 
 function fixtureDir(): string {
   const dir = mkdtempSync(path.join(os.tmpdir(), "skills-"));
@@ -53,5 +53,32 @@ describe("skills indexer", () => {
     symlinkSync(dir, link);
     const skills = indexSkills([dir, link]);
     expect(skills.map((s) => s.name).sort()).toEqual(["qa-agent", "stripe-setup"]);
+  });
+
+  it("reads aliases, tags and delegates_to, and matches on aliases", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "skills-fm-"));
+    mkdirSync(path.join(dir, "spec-clarifier"));
+    writeFileSync(
+      path.join(dir, "spec-clarifier", "SKILL.md"),
+      "---\nname: spec-clarifier\ndescription: Interrogate a prompt until nothing is ambiguous\n" +
+        "aliases: disambiguate, requirements interview\ntags: [requirements, ambiguity]\n" +
+        "delegates_to: feedback-provider, prd-to-tdd\n---\nBody."
+    );
+    mkdirSync(path.join(dir, "branding"));
+    writeFileSync(path.join(dir, "branding", "SKILL.md"), "---\nname: branding\ndescription: Brand names and voice\n---\nBody.");
+    const skills = indexSkills([dir]);
+    const clarifier = skills.find((s) => s.name === "spec-clarifier")!;
+    expect(clarifier.aliases).toEqual(["disambiguate", "requirements interview"]);
+    expect(clarifier.tags).toEqual(["requirements", "ambiguity"]);
+    expect(clarifier.delegatesTo).toEqual(["feedback-provider", "prd-to-tdd"]);
+    // "disambiguate" appears only in the alias line, never in name, description or body.
+    expect(matchSkills(skills, "please disambiguate this request", 3)[0]!.skill.name).toBe("spec-clarifier");
+  });
+
+  // An IndexedSkill built by hand, or by an index written before these fields
+  // existed, carries no aliases or tags; matching must not trip over that.
+  it("matches a skill that carries no aliases or tags", () => {
+    const bare: IndexedSkill = { name: "stripe-setup", description: "Configure Stripe checkout", path: "/x/SKILL.md", sha256: "0", body: "Stripe.", tokensApprox: 2 };
+    expect(matchSkills([bare], "set up stripe checkout", 3)[0]!.skill.name).toBe("stripe-setup");
   });
 });

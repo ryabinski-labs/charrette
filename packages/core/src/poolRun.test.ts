@@ -268,13 +268,21 @@ describe("what the session is configured with", () => {
       permissionMode: "bypassPermissions",
       tools: [],
       allowedTools: ["Read"],
-      disallowedTools: ["Write"],
+      // The operator's skills-discovery MCP is off in every session: what a
+      // session may read as a playbook is what the run routed to it.
+      disallowedTools: ["Write", "mcp__skills-discovery", "mcp__skills-discovery__*"],
       resume: "prior-sdk-session",
       // Skills are discovered from a setting source and nowhere else, so the
       // source is loaded and `skills` does the isolating.
       settingSources: ["user"],
       skills: [],
     });
+  });
+
+  it("switches off the operator's skills-discovery MCP even when a role disallows nothing", async () => {
+    await pool.run(spec({}));
+
+    expect(optionsGiven().disallowedTools).toEqual(["mcp__skills-discovery", "mcp__skills-discovery__*"]);
   });
 
   it("lets a session invoke exactly the skills the run routed to it", async () => {

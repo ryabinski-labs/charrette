@@ -1093,13 +1093,70 @@ export const RunConfig = z.object({
         when: "\\b(dns|nameservers?|name server|cname|txt record|mx record|zone file|subdomain|apex domain|custom domain|cert-?manager|clusterissuer|dns-?01|let'?s encrypt|route ?53)\\b",
         skills: ["dns-iac-engineer"],
       },
+      // Domain specialists, each above the broad rules below for the same cap
+      // reason as DNS: their vocabulary overlaps "infrastructure", "auth" and
+      // "product", and a payments task that spent its four slots on the
+      // architecture rule would go in without the one skill that knows Stripe.
+      // Several of these playbooks act on live accounts when an operator runs
+      // them by hand; inside a run they are advisory for the repository half,
+      // which `skillsBlock` says to the agent in so many words.
+      {
+        when: "\\b(stripe|payments?|payment (intents?|links?|methods?)|checkout sessions?|billing portal|customer portal|subscriptions? billing|metered billing|invoic\\w+|refunds?|payouts?)\\b",
+        skills: ["stripe-setup-specialist"],
+      },
+      {
+        // Bare `reconcile` is React's word as often as an accountant's, so it is
+        // only matched next to the thing being reconciled.
+        when: "\\b(ledgers?|double-?entry|bookkeeping|chart of accounts|journal entr(y|ies)|accounts (payable|receivable)|(bank|payout|transaction) reconciliation|reconcil\\w* (payouts?|transactions?|bank|statements?)|tax (forms?|returns?|calculations?|estimates?)|sales tax|vat|gst|1099|w-?[29]|payroll|gaap|accrual|depreciation)\\b",
+        skills: ["accountant"],
+      },
+      {
+        when: "\\b(app store|app store connect|testflight|ios (release|build|submission)|xcode (archive|cloud)|provisioning profiles?|bundle id|app review)\\b",
+        skills: ["app-store-publisher"],
+      },
+      {
+        when: "\\b(google play|play store|play console|android (release|build|submission)|aab|app bundle|staged rollouts?|internal testing track)\\b",
+        skills: ["play-store-publisher"],
+      },
+      {
+        when: "\\b(lifecycle emails?|drip|email (sequences?|campaigns?|templates?|nurture)|onboarding emails?|transactional emails?|welcome emails?|win-?back|re-?engagement emails?|unsubscribe|suppression list|ses|sendgrid|postmark|mailgun)\\b",
+        skills: ["lifecycle-email-engineer"],
+      },
+      {
+        when: "\\b(privacy policy|terms of (use|service)|cookie (policy|banner|consent)|gdpr|ccpa|cpra|consent (flow|banner)|acceptable use|refund policy|cancellation (policy|terms)|auto-?renew\\w*|disclaimers?|legal pages?)\\b",
+        skills: ["legal-page-reviewer"],
+      },
+      {
+        when: "\\b(i18n|l10n|locali[sz]ation|locali[sz]e|internationali[sz]ation|translations?|locale files?|string catalogs?|multi-?lingual|right-to-left|rtl)\\b",
+        skills: ["technical-translator"],
+      },
+      // Operations. `alert` and `monitor` alone are a dialog and a component as
+      // often as they are paging, so only their operational forms route.
+      {
+        when: "\\b(sre|slos?|slis?|error budgets?|monitoring|alerting|alert (rules?|routing|polic(y|ies))|on-?call|pager\\w*|runbooks?|incident (response|management)|post-?mortems?|observability|uptime|health ?checks?|heartbeats?|dead-?man|backups?|disaster recovery|rto|rpo|failover)\\b",
+        skills: ["sre"],
+      },
+      {
+        when: "\\b(right-?siz\\w+|hpa|horizontal pod autoscal\\w+|keda|vpa|pod disruption budgets?|pdbs?|node ?pools?|resource (requests|limits)|cluster autoscal\\w+|karpenter|replica counts?)\\b",
+        skills: ["k8s-optimizer"],
+      },
+      {
+        when: "\\b(cloud (bill|costs?|spend)|aws (bill|costs?|spend)|cost explorer|cost (optimi[sz]\\w*|reduction|savings)|finops|savings plans?|reserved instances?|idle resources?|token (spend|costs?)|llm (spend|costs?)|inference costs?)\\b",
+        skills: ["cost-optimizer"],
+      },
+      // Security above greenfield and architecture, both of which also match
+      // auth vocabulary and would otherwise take the slot first.
+      {
+        when: "\\b(security|auth(n|z|entication|orization)?|login|sign-?in|passwords?|passkeys?|webauthn|oauth|oidc|saml|sso|jwt|csrf|xss|cors|ssrf|sql injection|owasp|rbac|access control|multi-?tenan\\w+|tenant isolation|encrypt\\w*|secrets? (management|manager|scanning|rotation)|api keys?|rate limit\\w*|threat model\\w*|vulnerab\\w+|harden\\w*|spf|dkim|dmarc|mta-sts|cves?|supply chain)\\b",
+        skills: ["sentinel"],
+      },
       {
         when: "\\b(greenfield|from scratch|scaffold\\w*|boilerplate|new (project|service|application)|tech(nology)? stack|stack (choice|selection)|dynamodb|magic[- ]link|webauthn|passwordless|serverless|lambda|cloudfront|api gateway)\\b",
         skills: ["fullstack-app"],
       },
       {
         when: "\\b(architect(ure|ural)?|system design|data model|schema design|infrastructur\\w*|terraform|cloudformation|kubernetes|k8s|deployment topology|scalab\\w+|throughput|latency|capacity)\\b",
-        skills: ["architect", "security-engineer", "performance-engineer", "frontend-design"],
+        skills: ["architect", "sentinel", "performance-engineer", "frontend-design"],
       },
       // UI work, split by who is doing what. The build side gets a product voice
       // alongside the design ones; the grading side gets the specialist that
@@ -1123,6 +1180,14 @@ export const RunConfig = z.object({
         when: "\\b(focus group|persona panel|user research|customer interview|usability (test|study)|voice of (the )?customer|survey)\\b",
         skills: ["persona-panel"],
       },
+      // Prose, last and worker-only: a README or release-notes task needs one
+      // voice, and every topical rule above outranks it for the cap. QA judges
+      // whether the docs are right, not how they read.
+      {
+        when: "\\b(readme|changelog|release notes|user guides?|how-?to guides?|tutorials?|blog posts?|docs? (pages?|site)|documentation (pages?|site)|pr (body|description))\\b",
+        skills: ["human-writer"],
+        roles: ["worker"],
+      },
     ]),
   /**
    * Skills a role always carries, whatever the text says.
@@ -1134,7 +1199,7 @@ export const RunConfig = z.object({
    * operator's one-line assignment. "Add rate limiting" contains no product
    * vocabulary and is still a product decision.
    *
-   * Keyed by role (`intake`, `planner`, `worker`, `qa`, `prod`). Named skills
+   * Keyed by role (`intake`, `spec`, `planner`, `worker`, `qa`, `prod`). Named skills
    * absent from `skillsDirs` are ignored — but said out loud rather than
    * dropped in silence: the startup banner and a `skills.unresolved` event name
    * every pin this machine cannot honour before the run dispatches anything
@@ -1146,8 +1211,22 @@ export const RunConfig = z.object({
     // `spec` is routed rather than left to scoring: the specification agent
     // without `prd-to-tdd` is an agent inventing its own idea of what a
     // scenario is, and the whole point of the phase is that the standard is not
-    // improvised. The other two are advisory — they score well anyway.
-    .default({ intake: ["product-manager"], planner: ["product-manager"], spec: ["prd-to-tdd"] }),
+    // improvised. It also carries `spec-clarifier`, because it is the agent that
+    // writes the clarified PRD (`docs/prd/<feature>.md`) that `prd-to-tdd`
+    // derives from — the chain those two skills are written to form.
+    //
+    // `intake` carries `spec-clarifier` as its questioning method: the
+    // ambiguity test, the dimension order and the decision log. Intake is
+    // read-only, so the file itself is the spec agent's to write.
+    //
+    // `prod` carries `prod-validator`, the operator's own playbook for exactly
+    // what that session does: prove merged work is live and working.
+    .default({
+      intake: ["product-manager", "spec-clarifier"],
+      planner: ["product-manager"],
+      spec: ["prd-to-tdd", "spec-clarifier"],
+      prod: ["prod-validator"],
+    }),
   githubRepo: z.string().optional(),
   /**
    * The branch the run started from. Component PRs target this, not the run's

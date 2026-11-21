@@ -116,6 +116,23 @@ export function bashHooks(worktree = ""): Options["hooks"] {
   return { PreToolUse: [guard, ...rtk] };
 }
 
+/**
+ * The operator's own skills-discovery MCP, switched off inside run sessions.
+ *
+ * `settingSources: ["user"]` starts every MCP server the operator declared,
+ * and their skills now tell an agent to ask that server for a sibling skill
+ * and read whatever `SKILL.md` it names. Inside a run that is a second,
+ * unrouted, unhashed path into the prompt: the run decides which playbooks a
+ * session carries (`selectSkills`), verifies each one's hash at injection
+ * (SEC-14), and lists the siblings a carried playbook delegates to. A session
+ * that went shopping on its own would carry whatever the discovery server
+ * ranked highest, and nothing in the run's record would say so.
+ *
+ * Both spellings, because a permission rule naming the server and one naming
+ * its tools by wildcard are each honoured by some SDK version.
+ */
+export const OPERATOR_SKILL_DISCOVERY_TOOLS = ["mcp__skills-discovery", "mcp__skills-discovery__*"];
+
 /** Parsed `mcpServers` per config file, because that file is a third of a megabyte. */
 const operatorServers = new Map<string, unknown>();
 
@@ -834,7 +851,7 @@ export class AgentPool {
       permissionMode: "bypassPermissions",
       tools: spec.tools,
       allowedTools: spec.allowedTools,
-      disallowedTools: spec.disallowedTools,
+      disallowedTools: [...(spec.disallowedTools ?? []), ...OPERATOR_SKILL_DISCOVERY_TOOLS],
       mcpServers: spec.mcpServers,
       resume: spec.resume,
       abortController: abort,

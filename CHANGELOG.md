@@ -7,6 +7,39 @@ on. Before then, minor versions may break things.
 
 ## [Unreleased]
 
+### Added
+
+- **`spec-clarifier` is part of the run.** Intake carries it as its
+  questioning method, and the spec agent writes the clarified PRD to
+  `docs/prd/<feature>.md` with `spec_clarifier.py` (`validate --strict`)
+  before deriving the `prd-to-tdd` artifact from it.
+- **Routing for 13 more of the operator's skills**: `stripe-setup-specialist`,
+  `accountant`, `app-store-publisher`, `play-store-publisher`,
+  `lifecycle-email-engineer`, `legal-page-reviewer`, `technical-translator`,
+  `sre`, `k8s-optimizer`, `cost-optimizer`, `sentinel` (security and auth),
+  `human-writer` (docs, worker only), and `prod-validator` pinned to the
+  `prod` role.
+- **Sibling playbooks.** The indexer reads `aliases`, `tags` and
+  `delegates_to`. Each carried skill's installed siblings are listed by path in
+  the session's skills block, hash-checked like the skills themselves.
+
+### Fixed
+
+- **The security route named a skill that no longer exists.**
+  `security-engineer` is now `sentinel`; the old name had been dropped without
+  a word on every run.
+- **A routed skill can answer to another name.** `skillRouting` now resolves a
+  name through a skill's `aliases:` frontmatter when no skill has that exact
+  name, so a DNS skill installed under its own name can still take the
+  `dns-iac-engineer` route by listing it as an alias.
+- **The acceptance gate could pass an unimplemented scenario.** `prd-to-tdd`
+  stubs carry strict expected-failure markers, which a runner reports as ✓.
+  The gate now runs the suite with `TDD_RED_CHECK=1`, which switches them off,
+  and the spec agent scaffolds with `stubs --no-xfail` and proves the red bar
+  with `lint-tests` and `verify-red`.
+- **`roles` on a `skillRouting` rule in `charrette.config.json`** no longer
+  makes the strict config schema reject the whole file.
+
 ### Changed
 
 - **Regular build tasks now default to DeepSeek V4.1 Flash.** `models.worker`
@@ -20,6 +53,12 @@ on. Before then, minor versions may break things.
   tool turn. Runs already recorded keep the models they froze.
 
 ### Security
+
+- **The operator's skills-discovery MCP is switched off inside run sessions.**
+  Updated skills tell an agent to query it and read whatever `SKILL.md` it
+  ranks, which bypassed routing and the injection-time hash check. Every
+  session's skills block also says that a playbook's live-account steps
+  (Stripe, app stores, DNS, monitors, email) are left to the operator.
 
 - **All 23 dependency advisories reported by `pnpm audit` are closed** — 15 of
   them mirrored as open Dependabot alerts — including the critical

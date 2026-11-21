@@ -471,7 +471,17 @@ export const FileConfig = z
      * skills they do not have would be harder to reason about than a list they
      * can read. Copy the default out of `RunConfig` and edit it.
      */
-    skillRouting: z.array(z.object({ when: z.string(), skills: z.array(z.string()) })).optional(),
+    // `roles` is carried through: without it here, an operator's
+    // `"roles": ["qa"]` was stripped on parse and the rule reached every role.
+    skillRouting: z
+      .array(
+        z.object({
+          when: z.string(),
+          skills: z.array(z.string()),
+          roles: z.array(z.enum(["intake", "planner", "worker", "qa", "prod"])).optional(),
+        })
+      )
+      .optional(),
     /** Skills a role always carries, keyed by role, whatever the work says. */
     roleSkills: z.record(z.string(), z.array(z.string())).optional(),
     githubRepo: z.string().optional(),

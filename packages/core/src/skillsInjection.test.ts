@@ -8,7 +8,8 @@ import { Bus } from "./bus.js";
 import type { GitHubAdapter } from "./github.js";
 import type { IntakeUi } from "./intake.js";
 import type { AgentPool, AgentResult, AgentSpec } from "./pool.js";
-import { RunController, type GateHandler } from "./runController.js";
+import { relatedSkills, RunController, type GateHandler } from "./runController.js";
+import { indexSkills, type IndexedSkill } from "@charrette/skills-mcp";
 import { Store } from "./store.js";
 
 const DOCS = "<prd>\n# PRD\n</prd>\n<conventions>\nc\n</conventions>";
@@ -142,7 +143,7 @@ describe("skill routing", () => {
 
   const ROUTED = [
     "architect",
-    "security-engineer",
+    "sentinel",
     "performance-engineer",
     "frontend-design",
     "ui-ux-cx-engineer",
@@ -168,7 +169,7 @@ describe("skill routing", () => {
   }
 
   /** The system prompt each of the two task-level roles was handed. */
-  async function injectRoles(title: string, spec: string): Promise<{ worker: string; qa: string }> {
+  async function injectRoles(title: string, spec: string, skillsDir = routingSkillsDir()): Promise<{ worker: string; qa: string }> {
     let planning = 0;
     const seen = { worker: "", qa: "" };
     const pool = {
@@ -187,7 +188,7 @@ describe("skill routing", () => {
     } as unknown as AgentPool;
     const store = new Store(":memory:");
     const controller = new RunController(store, new Bus(store), pool, noGithub, approveAll, repo());
-    await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], skillsDirs: [routingSkillsDir()] }));
+    await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], skillsDirs: [skillsDir] }));
     return seen;
   }
 
@@ -196,7 +197,7 @@ describe("skill routing", () => {
   it("gives architecture work the architecture skills by default", async () => {
     const system = await inject("Design the ledger", "Decide the data model and system design for double-entry postings");
     expect(system).toContain('<skill name="architect"');
-    expect(system).toContain('<skill name="security-engineer"');
+    expect(system).toContain('<skill name="sentinel"');
     expect(system).toContain('<skill name="performance-engineer"');
   }, 30_000);
 
@@ -238,6 +239,21 @@ describe("skill routing", () => {
     expect(system).toContain('<skill name="dns-iac-engineer"');
     // Four slots, five matching skills: the architecture rule's last one gives way.
     expect(system).not.toContain('<skill name="frontend-design"');
+  }, 30_000);
+
+  // The operator's DNS skill goes by its own name and answers to the generic
+  // one through `aliases:`. It takes the route, and is injected once, under
+  // the name it actually has.
+  it("routes DNS work to a skill that lists the routed name as an alias", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "skills-alias-"));
+    mkdirSync(path.join(dir, "my-dns-iac"));
+    writeFileSync(
+      path.join(dir, "my-dns-iac", "SKILL.md"),
+      "---\nname: my-dns-iac\ndescription: guidance for records\naliases: dns-iac-engineer\n---\nGuidance body."
+    );
+    const { worker } = await injectRoles("Point the apex at the load balancer", "Add the CNAME and the cert-manager DNS-01 issuer", dir);
+    expect(worker).toContain('<skill name="my-dns-iac"');
+    expect(worker.match(/<skill name="my-dns-iac"/g)).toHaveLength(1);
   }, 30_000);
 
   /**
@@ -414,18 +430,21 @@ describe("a roleSkills pin this machine cannot honour", () => {
     const controller = new RunController(store, bus, pool, noGithub, approveAll, repo());
 
     // The fixture holds stripe-setup, qa-playbook and branding-manager — none
-    // of the three skills the default table pins.
+    // of the skills the default table pins.
     await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], skillsDirs: [skillsDir()] }));
 
     const unresolved = seen.filter((e) => e.type === "skills.unresolved");
     expect(unresolved.map((e) => `${e.role}:${e.skill}:${e.reason}`)).toEqual([
       "intake:product-manager:missing",
+      "intake:spec-clarifier:missing",
       "planner:product-manager:missing",
       "spec:prd-to-tdd:missing",
+      "spec:spec-clarifier:missing",
+      "prod:prod-validator:missing",
     ]);
     // Early is the whole point: an agent already briefed cannot be re-briefed,
     // so these land before the run has left the state it was created in.
-    expect(seen.slice(0, 4).map((e) => e.type)).toEqual(["run.created", "skills.unresolved", "skills.unresolved", "skills.unresolved"]);
+    expect(seen.slice(0, 7).map((e) => e.type)).toEqual(["run.created", ...Array(6).fill("skills.unresolved")]);
   }, 60_000);
 
   /**
@@ -447,7 +466,7 @@ describe("a roleSkills pin this machine cannot honour", () => {
     );
 
     const unresolved = seen.filter((e) => e.type === "skills.unresolved");
-    expect(unresolved.map((e) => e.role)).toEqual(["intake", "planner"]);
+    expect(unresolved.map((e) => e.role)).toEqual(["intake", "intake", "planner", "prod"]);
   }, 60_000);
 
   it("stays quiet about the pins it can honour", async () => {
@@ -463,7 +482,12 @@ describe("a roleSkills pin this machine cannot honour", () => {
 
     await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], skillsDirs: [dir] }));
 
-    expect(seen.filter((e) => e.type === "skills.unresolved").map((e) => e.skill)).toEqual(["prd-to-tdd"]);
+    expect(seen.filter((e) => e.type === "skills.unresolved").map((e) => e.skill)).toEqual([
+      "spec-clarifier",
+      "prd-to-tdd",
+      "spec-clarifier",
+      "prod-validator",
+    ]);
   }, 60_000);
 });
 
@@ -499,8 +523,12 @@ describe("the spec agent's pinned brief", () => {
     mkdirSync(path.join(dir, "prd-to-tdd"));
     writeFileSync(
       path.join(dir, "prd-to-tdd", "SKILL.md"),
-      "---\nname: prd-to-tdd\ndescription: Turn a PRD into gating scenarios and a test-driven specification\n---\nBody."
+      "---\nname: prd-to-tdd\ndescription: Turn a PRD into gating scenarios and a test-driven specification\n" +
+        "delegates_to: qa-agent, prd-to-tdd, not-installed\n---\nBody."
     );
+    // A sibling the pinned skill hands work to: listed by path, not carried.
+    mkdirSync(path.join(dir, "qa-agent"));
+    writeFileSync(path.join(dir, "qa-agent", "SKILL.md"), "---\nname: qa-agent\ndescription: gates a build on the artifact\n---\nBody.");
     const controller = new RunController(store, bus, pool, noGithub, approveAll, repo());
 
     // An operator at the keyboard: intake is what calls the spec phase, and
@@ -510,11 +538,67 @@ describe("the spec agent's pinned brief", () => {
 
     // Honoured rather than reported missing — the spec pin is gone from the
     // unresolved list, and only the planner-side pin is still absent.
-    expect(seen.filter((e) => e.type === "skills.unresolved").map((e) => e.skill)).toEqual(["product-manager", "product-manager"]);
+    expect(seen.filter((e) => e.type === "skills.unresolved").map((e) => e.skill)).toEqual([
+      "product-manager",
+      "spec-clarifier",
+      "product-manager",
+      "spec-clarifier",
+      "prod-validator",
+    ]);
     // The session carries it both ways: named on the spec, so a postmortem can
     // say what the run was specified against, and inlined in the brief.
     expect(specs).not.toHaveLength(0);
     expect(specs[0]!.skills).toEqual(["prd-to-tdd"]);
     expect(specs[0]!.systemPrompt).toContain('<skill name="prd-to-tdd"');
+    // `delegates_to` resolves against the same index: the installed sibling is
+    // pointed at by path, a self-reference and a missing name are not.
+    expect(specs[0]!.systemPrompt).toContain(`<related-skill name="qa-agent" path="${path.join(dir, "qa-agent", "SKILL.md")}"/>`);
+    expect(specs[0]!.systemPrompt).not.toContain('<related-skill name="not-installed"');
+    expect(specs[0]!.systemPrompt).not.toContain('<related-skill name="prd-to-tdd"');
+    expect(specs[0]!.systemPrompt).toContain("Skills discovery is not available in this session");
   }, 60_000);
+});
+
+/**
+ * The sibling list on its own, against a real index: what is listed, what is
+ * not, and where it stops.
+ */
+describe("sibling playbooks a carried skill hands off to", () => {
+  function indexOf(names: string[]): IndexedSkill[] {
+    const dir = mkdtempSync(path.join(tmpdir(), "skills-related-"));
+    for (const name of names) {
+      mkdirSync(path.join(dir, name));
+      writeFileSync(path.join(dir, name, "SKILL.md"), `---\nname: ${name}\ndescription: guidance for ${name}\n---\nBody.`);
+    }
+    return indexSkills([dir]);
+  }
+
+  it("lists nothing for a skill that names no siblings", () => {
+    expect(relatedSkills(indexOf(["qa-agent"]), [{ name: "spec-clarifier" }]).size).toBe(0);
+  });
+
+  it("lists a sibling once, under the first skill that names it", () => {
+    const index = indexOf(["qa-agent"]);
+    const out = relatedSkills(index, [
+      { name: "a", delegatesTo: ["qa-agent"] },
+      { name: "b", delegatesTo: ["qa-agent"] },
+    ]);
+    expect(out.get("a")!.map((r) => r.name)).toEqual(["qa-agent"]);
+    expect(out.has("b")).toBe(false);
+  });
+
+  it("skips a sibling whose bytes changed since indexing", () => {
+    const index = indexOf(["qa-agent"]).map((s) => ({ ...s, sha256: "not-what-is-on-disk" }));
+    expect(relatedSkills(index, [{ name: "a", delegatesTo: ["qa-agent"] }]).size).toBe(0);
+  });
+
+  it("stops at six siblings across the whole session", () => {
+    const names = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8"];
+    const out = relatedSkills(indexOf(names), [
+      { name: "a", delegatesTo: names.slice(0, 4) },
+      { name: "b", delegatesTo: names.slice(4) },
+    ]);
+    expect(out.get("a")!.map((r) => r.name)).toEqual(["s1", "s2", "s3", "s4"]);
+    expect(out.get("b")!.map((r) => r.name)).toEqual(["s5", "s6"]);
+  });
 });
