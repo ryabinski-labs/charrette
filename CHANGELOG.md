@@ -21,6 +21,13 @@ on. Before then, minor versions may break things.
 
 ### Fixed
 
+- **A product's own name no longer makes every task interface work.** The
+  interface rule and the skill router matched the repository's name inside
+  each task, so in a repository called `sales_dashboard` nearly every task,
+  including the repo scaffold, went to `workerUi` on Opus with the design
+  skills. Words from the repository's directory name are now ignored for that
+  match. A task about the product's charts, pages or forms is still interface
+  work.
 - **`charrette resume` no longer re-routes a run to the model it is already
   on** when `charrette.config.json` still names a retired id.
 

@@ -107,6 +107,32 @@ const RISKY_RE = new RegExp(RISKY, "i");
 const UI_RE = new RegExp(UI_WHEN, "i");
 
 /**
+ * The words in the product's own name, read from the repository directory.
+ *
+ * A product's name is in its tasks everywhere — titles, specs, paths — and it
+ * says nothing about any one of them. In a repository called
+ * `sales_dashboard` nearly every task says "dashboard", which is interface
+ * vocabulary, so before this every task in it — the repo scaffold, the API, the
+ * CI setup — went to the design model with the design skills. The words are
+ * taken out of the text before the interface rule and the skill router read
+ * it; whatever else a task says still counts, so a task about the dashboard's
+ * charts or pages is still interface work.
+ *
+ * Words shorter than three letters are kept: `ui` or `db` in a name is too
+ * short to be a product word and too likely to be the one that matters.
+ */
+export function productWords(repoPath: string): string[] {
+  const base = repoPath.replace(/[\\/]+$/, "").split(/[\\/]/).pop()!;
+  return [...new Set(base.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 3))];
+}
+
+/** `text` with every product word (and its plural) blanked out. The words are `productWords`' plain `[a-z0-9]` tokens, so none needs escaping. */
+export function withoutProductName(text: string, words: string[]): string {
+  if (!words.length) return text;
+  return text.replace(new RegExp(`\\b(?:${words.join("|")})(?:e?s)?\\b`, "gi"), " ");
+}
+
+/**
  * A fix task the charrette wrote itself, and which round it belongs to.
  *
  * `queueCiFixes`, `queueScenarioFixes` and `queueIntentFixes` all name their
@@ -153,7 +179,7 @@ type Nominee = Pick<
  * cost of wrongly refusing a task is that it runs on the model it runs on today,
  * and the cost of wrongly admitting one is a merge nobody caught.
  */
-export function taskTier(task: Nominee, maxPaths = LIGHT_TIER_MAX_PATHS): TierDecision {
+export function taskTier(task: Nominee, maxPaths = LIGHT_TIER_MAX_PATHS, product: string[] = []): TierDecision {
   const std = (why: string): TierDecision => ({ tier: "standard", why });
   const haystack = [task.title, task.spec, task.acceptanceCriteria.join("\n"), task.touchedPaths.join("\n")].join("\n");
 
@@ -183,7 +209,10 @@ export function taskTier(task: Nominee, maxPaths = LIGHT_TIER_MAX_PATHS): TierDe
   // a UI task is. Checked before the light rule: a small badge-copy change is
   // exactly the S-sized, two-path, probe-checked task the light tier admits,
   // and it is still a screen somebody looks at.
-  const ui = UI_RE.exec(haystack);
+  // Without the product's own name: see `productWords`. Only here — a risky
+  // word in the name still keeps a task off the light tier, which is the
+  // cautious side of that rule.
+  const ui = UI_RE.exec(withoutProductName(haystack, product));
   if (ui) {
     return { tier: "ui", why: `it is interface work (${ui[0].toLowerCase()}), which gets the design model and the design skills` };
   }
@@ -245,7 +274,12 @@ export function tierModel(tier: Tier, models: TierModels): string {
  * the ledger records which tasks it would have moved long before any of them
  * move, and the operator can price the experiment before running it.
  */
-export function workerModelFor(task: Nominee, models: TierModels, maxPaths = LIGHT_TIER_MAX_PATHS): { model: string; decision: TierDecision } {
-  const decision = taskTier(task, maxPaths);
+export function workerModelFor(
+  task: Nominee,
+  models: TierModels,
+  maxPaths = LIGHT_TIER_MAX_PATHS,
+  product: string[] = []
+): { model: string; decision: TierDecision } {
+  const decision = taskTier(task, maxPaths, product);
   return { model: tierModel(decision.tier, models), decision };
 }

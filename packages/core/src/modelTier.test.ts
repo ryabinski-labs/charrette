@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { LIGHT_TIER_MAX_PATHS, taskTier, tierModel, workerModelFor } from "./modelTier.js";
+import { LIGHT_TIER_MAX_PATHS, productWords, taskTier, tierModel, withoutProductName, workerModelFor } from "./modelTier.js";
 
 /**
  * The rule that decides whether a task is cheap enough to run cheaply.
@@ -165,6 +165,41 @@ describe("what reaches the interface tier", () => {
     // Bare `page` is pagination when followed by size; bare `table` is a
     // database table. Neither is a screen, and the rule says so.
     expect(taskTier({ ...eligible, spec: "Raise the default page size of the list endpoint to 50." }).tier).toBe("light");
+  });
+});
+
+describe("the product's own name", () => {
+  const product = productWords("/Users/me/projects/sales_dashboard");
+
+  it("reads the words of the repository's directory name", () => {
+    expect(product).toEqual(["sales", "dashboard"]);
+    expect(productWords("/srv/repos/ops-console/")).toEqual(["ops", "console"]);
+    expect(productWords("C:\\code\\my-ui-kit")).toEqual(["kit"]);
+    expect(productWords("/")).toEqual([]);
+  });
+
+  it("does not make every task in a dashboard product interface work", () => {
+    const scaffold = {
+      ...eligible,
+      title: "Scaffold the sales dashboard repository",
+      spec: "Set up the Go module, the Makefile and the test runner for the dashboard.",
+      estimatedSize: "M" as const,
+    };
+    expect(taskTier(scaffold).tier).toBe("ui");
+    expect(taskTier(scaffold, LIGHT_TIER_MAX_PATHS, product).tier).toBe("standard");
+    expect(workerModelFor(scaffold, { worker: "w", workerLight: "l", workerUi: "u", workerHeavy: "h" }, LIGHT_TIER_MAX_PATHS, product).model).toBe("w");
+  });
+
+  it("still sends the product's real screens to the design model", () => {
+    const charts = { ...eligible, title: "Add the campaign charts to the dashboards", spec: "Render spend per channel." };
+    const d = taskTier(charts, LIGHT_TIER_MAX_PATHS, product);
+    expect(d.tier).toBe("ui");
+    expect(d.why).toContain("charts");
+  });
+
+  it("blanks the words and their plurals, and nothing when there are none", () => {
+    expect(withoutProductName("Dashboards and the dashboard, not dashboarding", ["dashboard"])).toBe("  and the  , not dashboarding");
+    expect(withoutProductName("unchanged", [])).toBe("unchanged");
   });
 });
 
