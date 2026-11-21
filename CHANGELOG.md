@@ -7,6 +7,8 @@ on. Before then, minor versions may break things.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-21
+
 ### Added
 
 - **`spec-clarifier` is part of the run.** Intake carries it as its
