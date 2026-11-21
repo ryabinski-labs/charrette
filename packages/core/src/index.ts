@@ -38,5 +38,6 @@ export * from "./skillPins.js";
 export * from "./subscription.js";
 export * from "./toolbelt.js";
 export * from "./agentTools.js";
+export * from "./agentEnv.js";
 export * from "./providerClients.js";
 export * from "./toolLoop.js";

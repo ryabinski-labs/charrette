@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Red-phase placeholder: the real session wrapper lands once its test fails.
+set -euo pipefail

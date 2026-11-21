@@ -24,3 +24,6 @@ coverage/
 .DS_Store
 # `pnpm pack` output — release tarballs are built, never committed.
 *.tgz
+
+# Red-phase JUnit reports from the prd-to-tdd skill
+.tdd/

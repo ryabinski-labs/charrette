@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process";
+import type { Bus } from "@charrette/core";
+import type { CharretteEvent } from "@charrette/shared";
 
 /**
  * Tell the operator the run is over.
@@ -39,4 +41,76 @@ function clean(s: string): string {
  */
 function osa(s: string): string {
   return `"${clean(s).replace(/[\\"]/g, "\\$&")}"`;
+}
+
+/** How a notice is put on the wire. */
+export type NotifyFormat = "ntfy" | "json";
+
+export interface NotifyTarget {
+  url: string;
+  format: NotifyFormat;
+  token?: string;
+}
+
+export interface Notice {
+  event: string;
+  runId: string;
+  repo: string;
+  title: string;
+  message: string;
+  priority: "high" | "default";
+  tags: string[];
+  ts: number;
+}
+
+export interface PushResult {
+  ok: boolean;
+  status?: number;
+  attempts: number;
+  latencyMs: number;
+  error?: string;
+}
+
+export interface PushOptions {
+  fetchImpl?: typeof fetch;
+  sleep?: (ms: number) => Promise<unknown>;
+  timeoutMs?: number;
+  now?: () => number;
+}
+
+export interface WatchPushOptions extends PushOptions {
+  project: string;
+  target: NotifyTarget;
+}
+
+/** Minimal interface for the red phase. */
+export function notifyTarget(_env: NodeJS.ProcessEnv = process.env): NotifyTarget | null {
+  return null;
+}
+
+export function notifyBanner(_target: NotifyTarget | null): string[] {
+  return [];
+}
+
+export function noticeForEvent(_event: CharretteEvent, _project: string): Notice | null {
+  return null;
+}
+
+export function notifyStopped(runId: string, repo: string, _error: unknown): Notice {
+  return { event: "run.stopped", runId, repo, title: "", message: "", priority: "default", tags: [], ts: Date.now() };
+}
+
+export async function sendPush(_target: NotifyTarget, _notice: Notice, _opts: PushOptions = {}): Promise<PushResult> {
+  return { ok: false, attempts: 0, latencyMs: 0 };
+}
+
+export async function sendTestNotice(
+  _target: NotifyTarget,
+  _opts: PushOptions = {}
+): Promise<PushResult> {
+  return { ok: false, attempts: 0, latencyMs: 0 };
+}
+
+export function watchPush(_bus: Bus, _opts: WatchPushOptions): () => void {
+  return () => undefined;
 }

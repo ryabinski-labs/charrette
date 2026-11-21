@@ -15,6 +15,19 @@ import { retireModels } from "./retired.js";
 export const DEFAULT_CHECK_TIMEOUT_MINUTES = 10;
 
 /**
+ * What an agent session may inherit from charrette's own environment.
+ *
+ * `allow` names variables a task needs beyond the base allowlist; a trailing
+ * `*` makes it a prefix rule. `inherit` is the escape hatch: it hands sessions
+ * everything, which is what every run did before this block existed.
+ */
+export const AgentEnvConfig = z.object({
+  allow: z.array(z.string()).default([]),
+  inherit: z.boolean().default(false),
+});
+export type AgentEnvConfig = z.infer<typeof AgentEnvConfig>;
+
+/**
  * The model ids the defaults below name, each written once: the price table in
  * budget.ts keys on the exact id, and a copy that drifts is a role billed at the
  * wrong rate.
@@ -859,6 +872,8 @@ export const RunConfig = z.object({
    */
   usageLimitWaitMinutes: z.number().int().min(0).max(7 * 24 * 60).default(360),
   models: ModelRouting.prefault({}),
+  /** What every agent session may see; see `AgentEnvConfig`. */
+  agentEnv: AgentEnvConfig.prefault({}),
   budget: Budget.prefault({}),
   /**
    * What the run does as the *account's* plan runs out, rather than as this

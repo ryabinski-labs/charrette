@@ -161,6 +161,10 @@ const h = vi.hoisted(() => {
 vi.mock("@charrette/core", async (importOriginal) => ({
   sourceDigest: (await importOriginal<typeof import("@charrette/core")>()).sourceDigest,
   deliveryConfigProblems: (await importOriginal<typeof import("@charrette/core")>()).deliveryConfigProblems,
+  // The banner and the withheld list are the real implementation: what this
+  // file owes them is the moment they are printed and the config they read.
+  agentEnvBanner: (await importOriginal<typeof import("@charrette/core")>()).agentEnvBanner,
+  summarizeAgentEnv: (await importOriginal<typeof import("@charrette/core")>()).summarizeAgentEnv,
   Store: h.StoreMock,
   Bus: h.BusMock,
   AgentPool: h.AgentPoolMock,
@@ -223,7 +227,10 @@ vi.mock("./defaults.js", async (importOriginal) => {
 });
 vi.mock("./chat.js", () => ({ TerminalChat: h.TerminalChatMock }));
 vi.mock("./crashlog.js", () => ({ armCrashLog: h.armCrashLogMock }));
-vi.mock("./notify.js", () => ({ notifyDone: h.notifyDoneMock }));
+vi.mock("./notify.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./notify.js")>()),
+  notifyDone: h.notifyDoneMock,
+}));
 
 /**
  * The build check is exercised against real files in `version.test.ts`. Here
@@ -793,6 +800,60 @@ describe("charrette run — resolving what the run will actually do", () => {
     await cli("run", "x", "--repo", "/repo", "--no-dashboard");
 
     expect(printed()).toContain("WARNING    2 runs are still open in this repo: run-a (EXECUTING), run-c (PLANNING)");
+  });
+});
+
+describe("the agent environment and the notify channel in the banner", () => {
+  afterEach(() => {
+    delete process.env.STRIPE_TEST_KEY;
+    delete process.env.CHARRETTE_NOTIFY_URL;
+    delete process.env.CHARRETTE_NOTIFY_TOKEN;
+    vi.unstubAllGlobals();
+  });
+
+  it("SC-003-d the run banner names an allowlisted variable", async () => {
+    process.env.STRIPE_TEST_KEY = "sk_test_123";
+    h.loadFileConfigMock.mockReturnValue({
+      config: { agentEnv: { allow: ["STRIPE_TEST_KEY"] } },
+      path: "/repo/charrette.config.json",
+    });
+
+    await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard");
+
+    const banner = printed();
+    expect(banner).toContain("agent env");
+    expect(banner).toContain("+STRIPE_TEST_KEY");
+  });
+
+  it("SC-004-e the run banner lists a withheld secret-like name without its value", async () => {
+    process.env.STRIPE_SECRET_KEY = "sk_live_secret";
+    try {
+      await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard");
+      const banner = printed();
+      expect(banner).toContain("withheld");
+      expect(banner).toContain("STRIPE_SECRET_KEY");
+      expect(banner).not.toContain("sk_live_secret");
+    } finally {
+      delete process.env.STRIPE_SECRET_KEY;
+    }
+  });
+
+  it("SC-010-b run refuses an invalid notification setting", async () => {
+    process.env.CHARRETTE_NOTIFY_URL = "http://example.com/topic";
+
+    await expect(cli("run", "build a thing", "--repo", "/repo", "--no-dashboard")).rejects.toThrow(
+      /CHARRETTE_NOTIFY_URL/
+    );
+    expect(h.controllerMethods.startRun).not.toHaveBeenCalled();
+  });
+
+  it("SC-008-b notify-test prints the HTTP status", async () => {
+    process.env.CHARRETTE_NOTIFY_URL = "https://ntfy.sh/a-topic";
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 204 }) as Response));
+
+    await cli("notify-test");
+
+    expect(printed()).toContain("HTTP 204");
   });
 });
 

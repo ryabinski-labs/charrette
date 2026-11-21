@@ -5,7 +5,7 @@ import { sourceDigest, deliveryConfigProblems } from "@charrette/core";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_CHECK_TIMEOUT_MINUTES, ModelRoutingShape, RunConfig, SubscriptionConfig, retireModels, retiredMoves, statePaths, type RetiredMove } from "@charrette/shared";
-import { AgentPool, Bus, GateHandler, BridgedIntake, IntakeBridge, GitHubAdapter, RunController, Store, accountEnv, agentBinaryFiles, assembleReport, checkMemoryBanner, detectToolbelt, ensureIgnored, charretteBuild, missingKeys, newerModelBanner, originSlug, postmortem, renderPostmortem, reportPath, pinsInPlay, runLockHolder, skillPinBanner, standaloneReport, repoUnusable, wasMerged } from "@charrette/core";
+import { AgentPool, Bus, GateHandler, BridgedIntake, IntakeBridge, GitHubAdapter, RunController, Store, accountEnv, agentBinaryFiles, agentEnvBanner, assembleReport, checkMemoryBanner, detectToolbelt, ensureIgnored, charretteBuild, missingKeys, newerModelBanner, originSlug, postmortem, renderPostmortem, reportPath, pinsInPlay, runLockHolder, skillPinBanner, standaloneReport, repoUnusable, summarizeAgentEnv, wasMerged } from "@charrette/core";
 import { Dashboard } from "@charrette/dashboard";
 import { promptForNewCap, watchBudgetCommands } from "./budget.js";
 import { promptForAccount } from "./subscription.js";
@@ -22,7 +22,7 @@ import {
 import { TerminalChat } from "./chat.js";
 import { armCrashLog } from "./crashlog.js";
 import { clearDashboard, liveDashboardUrl, recordDashboard, recordedDashboard } from "./dashboardLink.js";
-import { notifyDone } from "./notify.js";
+import { notifyBanner, notifyDone, notifyTarget, type NotifyTarget } from "./notify.js";
 import { mailBanner, mailTarget, watchGateMail } from "./gateMail.js";
 import { collectVersion, formatVersion } from "./version.js";
 
@@ -411,6 +411,8 @@ interface Resolved {
   /** undefined = take the first free port, so several repos can run at once. */
   dashboardPort: number | undefined;
   chat: boolean;
+  /** Where push notices go, or null when no URL is configured. */
+  notify: NotifyTarget | null;
   banner: string[];
 }
 
@@ -662,8 +664,16 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
     banner.push(`models     ${moved.map(([role, model]) => `${role}→${model}`).join(" · ")}   (pinned roles stay with their vendor)`);
   }
 
+  // What every session this run spawns may see. Printed before the first
+  // intake turn, because that is already an agent with a shell.
+  banner.push(...agentEnvBanner(summarizeAgentEnv(process.env, config.agentEnv)));
+  // Where a notice reaches the operator, or that nothing will. A URL that is
+  // present but unusable refuses here, before a run has started.
+  const notify = notifyTarget();
+  banner.push(...notifyBanner(notify));
+
   if (filePath) banner.push(`config     ${path.basename(filePath)}`);
-  return { repo, config, dashboard, dashboardPort, chat, banner };
+  return { repo, config, dashboard, dashboardPort, chat, notify, banner };
 }
 
 /**
@@ -765,7 +775,7 @@ export function buildProgram(): Command {
         if (!assignment.trim()) throw new Error("The PRD is empty.");
       }
       if (await repoBlocked(resolveRepoRoot(opts.repo))) return;
-      const { repo, config, dashboard: wantDashboard, dashboardPort, chat: wantChat, banner } = resolveRun(cmd, opts, assignment);
+      const { repo, config, dashboard: wantDashboard, dashboardPort, chat: wantChat, notify, banner } = resolveRun(cmd, opts, assignment);
       const dash = makeDashboardFactory(wantDashboard, dashboardPort, repo);
       const { controller, store, bus, liveRunId } = makeController(repo, dash.gateOverride);
       // A new run forks from the base branch as it is right now. Another run whose
@@ -1528,6 +1538,14 @@ export function buildProgram(): Command {
         if (detected.skipped.length > SHOWN) out(`  … and ${detected.skipped.length - SHOWN} more`);
       }
       out(`\nEdit it and re-run \`charrette run "<assignment>"\` — no flags needed.`);
+    });
+
+  program
+    .command("notify-test")
+    .description("send one test notice to CHARRETTE_NOTIFY_URL and print the HTTP status")
+    .action(async () => {
+      // Filled in with the push channel; the command exists so the red-phase
+      // acceptance case fails on what is printed, not on an unknown command.
     });
 
   program

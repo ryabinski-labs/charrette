@@ -31,6 +31,33 @@ export const CharretteEvent = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("run.release_evidence"), ...ReleaseEvidence.shape }),
   z.object({ ...base, type: z.literal("run.created"), assignment: z.string(), repoPath: z.string() }),
   z.object({ ...base, type: z.literal("run.state_changed"), from: RunState, to: RunState, reason: z.string().default("") }),
+  // What the agents could see when this run started or resumed. Names only —
+  // a value on this stream would be the leak the event exists to rule out.
+  z.object({
+    ...base,
+    type: z.literal("run.agent_env"),
+    passed: z.number().int(),
+    added: z.array(z.string()),
+    withheld: z.array(z.string()),
+    inherit: z.boolean(),
+  }),
+  // A push notice reached (or failed to reach) the operator's endpoint. The
+  // event is the record; the notice itself is fire-and-forget.
+  z.object({
+    ...base,
+    type: z.literal("notify.sent"),
+    event: z.string(),
+    status: z.number().int(),
+    attempts: z.number().int(),
+    latencyMs: z.number().int(),
+  }),
+  z.object({
+    ...base,
+    type: z.literal("notify.failed"),
+    event: z.string(),
+    status: z.number().int().optional(),
+    error: z.string().default(""),
+  }),
   z.object({ ...base, type: z.literal("run.gate_opened"), gateId: z.string(), kind: GateKind, payload: z.unknown() }),
   // `decidedBy` names the skill that answered, or "operator" when a person did —
   // the same field, and the same default, that `task.gate_resolved` carries. The
