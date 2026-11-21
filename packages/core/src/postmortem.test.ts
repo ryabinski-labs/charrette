@@ -59,12 +59,12 @@ const task = (store: Store, over: Partial<TaskRow>) =>
 const session = (store: Store, id: string, state: string, costUsd: number) =>
   store.db
     .prepare("INSERT INTO sessions (id, runId, taskId, role, model, state, startedAt, costUsd) VALUES (?,?,?,?,?,?,?,?)")
-    .run(id, "run-1", null, "worker", "claude-sonnet-5", state, 1, costUsd);
+    .run(id, "run-1", null, "worker", "claude-sonnet-5-5", state, 1, costUsd);
 
 const built = (store: Store, id: string, build: string, startedAt: number) =>
   store.db
     .prepare("INSERT INTO sessions (id, runId, taskId, role, model, state, startedAt, build) VALUES (?,?,?,?,?,?,?,?)")
-    .run(id, "run-1", null, "worker", "claude-sonnet-5", "done", startedAt, build);
+    .run(id, "run-1", null, "worker", "claude-sonnet-5-5", "done", startedAt, build);
 
 describe("why a run produced what it produced", () => {
   it("names the intake question nobody answered", () => {

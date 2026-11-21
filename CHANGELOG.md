@@ -7,6 +7,23 @@ on. Before then, minor versions may break things.
 
 ## [Unreleased]
 
+### Changed
+
+- **Old models are retired.** Claude Fable 5 and 5.1, Opus 5, Sonnet 5,
+  Haiku 4.5, and Gemini 3.6 and 3.7 Flash now run as their current
+  replacement from the same vendor and tier: Fable 5.2, Opus 5.5, Sonnet 5.5,
+  Haiku 5.5 and Gemini 3.8 Flash. That applies to `charrette.config.json`,
+  `--model`, the dashboard and the models an existing run recorded when it
+  started. A run created under the old defaults was still sending interface
+  tasks to `claude-opus-5` after Opus 5.5 became the default; it now moves at
+  its next `charrette resume`, which prints a `retired` line for each role that
+  moved. The dashboard no longer offers retired models.
+
+### Fixed
+
+- **`charrette resume` no longer re-routes a run to the model it is already
+  on** when `charrette.config.json` still names a retired id.
+
 ## [0.3.0] - 2026-11-21
 
 ### Changed

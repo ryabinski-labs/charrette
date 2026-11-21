@@ -58,7 +58,7 @@ let pool: AgentPool;
 const SPEC: AgentSpec = {
   runId: "run1",
   role: "worker",
-  model: "claude-opus-5",
+  model: "claude-opus-5-5",
   systemPrompt: "you are a worker",
   prompt: "build the thing",
   cwd: "/tmp/worktree",

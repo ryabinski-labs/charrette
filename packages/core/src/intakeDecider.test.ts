@@ -61,7 +61,7 @@ function req(over: Partial<ConstructorParameters<typeof AgentIntake>[2]> = {}) {
     repoPath: "/tmp/repo",
     decidedBy: "product-manager",
     rounds: 12,
-    model: "claude-opus-5",
+    model: "claude-opus-5-5",
     skillsBlock: "",
     skills: [],
     ...over,

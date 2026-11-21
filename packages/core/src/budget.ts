@@ -18,12 +18,6 @@ import { modelId } from "@charrette/shared";
  * new fallback in the same commit.
  */
 export const PRICES: Record<string, { in: number; out: number }> = {
-  // Cache reads on Fable 5.1 are a flat $0.25/MTok, not the 0.1x that
-  // `CACHE_READ_MULT` applies to every model here ($1.00). Left as is: the
-  // charrette over-charges Fable's cache hits by 4x, which stops a run early
-  // rather than late, and a per-model cache rate is not worth a second table
-  // until a run's bill is dominated by them.
-  "claude-fable-5-1": { in: 10, out: 50 },
   // The 5.5 / 5.2 generation (platform.claude.com pricing, read 2026-11-21).
   // Fable 5.2 and Opus 5.5 are each cheaper than the model they succeed, so the
   // top-tier fallback below stays Fable 5.1's rate. Haiku 5.5 carries its
@@ -34,10 +28,6 @@ export const PRICES: Record<string, { in: number; out: number }> = {
   "claude-opus-5-5": { in: 4, out: 20 },
   "claude-sonnet-5-5": { in: 2, out: 10 },
   "claude-haiku-5-5": { in: 0.5, out: 2.5 },
-  "claude-fable-5": { in: 10, out: 50 },
-  "claude-opus-5": { in: 5, out: 25 },
-  "claude-sonnet-5": { in: 3, out: 15 },
-  "claude-haiku-4-5-20251001": { in: 1, out: 5 },
   // DeepSeek V4.1 Flash (api-docs.deepseek.com, read 2026-11-19). Peak rate:
   // $0.30 input and $1.20 output per MTok, exactly double the off-peak rate.
   // The peak figure is deliberate for the same reason the Gemini rows carry the
@@ -68,9 +58,22 @@ export const PRICES: Record<string, { in: number; out: number }> = {
   // from 1 Jan 2027. A table holding the promotional half would silently start
   // under-charging on New Year's Day — for the one model every pit stop of every
   // run spends — which is the direction this table exists to never go.
+  "gemini-3.8-flash": { in: 1.5, out: 7.5 },
+  // Retired models (RETIRED_MODELS in @charrette/shared). No run dispatches
+  // these any more: every config reads them as their replacement. The rows
+  // stay for one reason. A session already running on one when its run was
+  // moved, and a ledger written before the move, are billed at what that model
+  // actually cost; without the row the prefix match below would bill
+  // `claude-opus-5` at Opus 5.5's lower rate, which is under-charging, the one
+  // direction this table exists to never go. Fable 5.1 is also the top tier
+  // the fallback in `priceFor` charges.
+  "claude-fable-5-1": { in: 10, out: 50 },
+  "claude-fable-5": { in: 10, out: 50 },
+  "claude-opus-5": { in: 5, out: 25 },
+  "claude-sonnet-5": { in: 3, out: 15 },
+  "claude-haiku-4-5-20251001": { in: 1, out: 5 },
   "gemini-3.6-flash": { in: 1.5, out: 7.5 },
   "gemini-3.7-flash": { in: 1.5, out: 7.5 },
-  "gemini-3.8-flash": { in: 1.5, out: 7.5 },
 };
 
 const CACHE_READ_MULT = 0.1;

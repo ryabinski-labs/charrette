@@ -18,7 +18,7 @@ import { Store } from "./store.js";
 const usage = (over: Partial<Parameters<Store["recordUsage"]>[0]>) => ({
   runId: "run1",
   sessionId: "s1",
-  model: "claude-sonnet-5",
+  model: "claude-sonnet-5-5",
   inputTokens: 1,
   outputTokens: 1,
   cacheReadTokens: 0,
@@ -38,7 +38,7 @@ describe("a ledger written before the attribution columns existed", () => {
       inputTokens INTEGER NOT NULL, outputTokens INTEGER NOT NULL,
       cacheReadTokens INTEGER NOT NULL, cacheWriteTokens INTEGER NOT NULL,
       costUsd REAL NOT NULL, ts INTEGER NOT NULL)`);
-    old.exec("INSERT INTO ledger (runId, taskId, sessionId, model, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, costUsd, ts) VALUES ('run1','t1','s0','claude-opus-5',1,1,0,0,9.5,1)");
+    old.exec("INSERT INTO ledger (runId, taskId, sessionId, model, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, costUsd, ts) VALUES ('run1','t1','s0','claude-opus-5-5',1,1,0,0,9.5,1)");
     old.close();
 
     const store = new Store(dbPath);
@@ -72,8 +72,8 @@ describe("what a task cost, and on which tier", () => {
 
   it("reads two worker models on one task as an escalation", () => {
     const store = new Store(":memory:");
-    store.recordUsage(usage({ taskId: "t1", role: "worker", tier: "light", model: "claude-haiku-4-5-20251001", costUsd: 1 }));
-    store.recordUsage(usage({ taskId: "t1", role: "worker", tier: "light", model: "claude-sonnet-5", costUsd: 3 }));
+    store.recordUsage(usage({ taskId: "t1", role: "worker", tier: "light", model: "claude-haiku-5-5", costUsd: 1 }));
+    store.recordUsage(usage({ taskId: "t1", role: "worker", tier: "light", model: "claude-sonnet-5-5", costUsd: 3 }));
 
     const [row] = store.taskSpend("run1");
     expect(row).toMatchObject({ escalated: true, tier: "light", workerUsd: 4 });
@@ -92,8 +92,8 @@ describe("what a task cost, and on which tier", () => {
     // including the standard-model session it escalated into. Re-labelling it
     // `standard` afterwards would quietly move that bill off the experiment.
     const store = new Store(":memory:");
-    store.recordUsage(usage({ taskId: "t1", role: "worker", tier: "light", model: "claude-haiku-4-5-20251001", costUsd: 1 }));
-    store.recordUsage(usage({ taskId: "t1", role: "worker", tier: "light", model: "claude-sonnet-5", costUsd: 6 }));
+    store.recordUsage(usage({ taskId: "t1", role: "worker", tier: "light", model: "claude-haiku-5-5", costUsd: 1 }));
+    store.recordUsage(usage({ taskId: "t1", role: "worker", tier: "light", model: "claude-sonnet-5-5", costUsd: 6 }));
 
     expect(store.taskSpend("run1")[0]!.tier).toBe("light");
   });

@@ -58,10 +58,10 @@ describe("what a dead session cost", () => {
   function session(store: Store, id: string, state: string): void {
     store.db
       .prepare("INSERT INTO sessions (id, runId, taskId, role, model, state, startedAt) VALUES (?,?,?,?,?,?,?)")
-      .run(id, "run-1", "task-a", "qa", "claude-sonnet-5", state, 1);
+      .run(id, "run-1", "task-a", "qa", "claude-sonnet-5-5", state, 1);
   }
   const bill = (store: Store, sessionId: string, costUsd: number) =>
-    store.recordUsage({ runId: "run-1", taskId: "task-a", sessionId, model: "claude-sonnet-5", inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd });
+    store.recordUsage({ runId: "run-1", taskId: "task-a", sessionId, model: "claude-sonnet-5-5", inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd });
 
   it("bills a session the previous process left running, from the ledger", () => {
     // sweepDeadSessions used to flip these to 'interrupted' and nothing else,

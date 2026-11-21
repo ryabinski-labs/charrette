@@ -286,7 +286,7 @@ describe("what intake writes back", () => {
     const { store: s } = withRun();
     s.db
       .prepare("INSERT INTO sessions (id, runId, taskId, role, model, state, startedAt) VALUES (?,?,?,?,?,?,?)")
-      .run("sess-1", "run1", null, "planner", "claude-opus-5", "running", 1);
+      .run("sess-1", "run1", null, "planner", "claude-opus-5-5", "running", 1);
 
     expect(s.listSessions("run1")).toMatchObject([{ id: "sess-1", role: "planner", state: "running" }]);
   });

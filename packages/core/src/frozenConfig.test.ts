@@ -19,8 +19,8 @@ import { Store } from "./store.js";
  * key, so every one of them was affected.
  */
 
-const HAIKU = "claude-haiku-4-5-20251001";
-const SONNET = "claude-sonnet-5";
+const HAIKU = "claude-haiku-5-5";
+const SONNET = "claude-sonnet-5-5";
 
 /** A store on disk, so it can be closed and reopened the way a resume does. */
 function onDisk(): { dbPath: string; cleanup: () => void } {
@@ -182,12 +182,12 @@ describe("a run created today", () => {
  *
  * `workerLight` was a key that did not exist yet, so an old config was merely
  * *incomplete*. Pinning `reviewer` to Google made every old config *invalid*:
- * they all hold `reviewer: "claude-opus-5"`, which `ModelRouting` now refuses,
+ * they all hold `reviewer: "claude-opus-5-5"`, which `ModelRouting` now refuses,
  * and `getRun` re-parses on every read. Without the migration the failure is not
  * "this run will not resume" but "this run cannot be read at all" — no ledger,
  * no postmortem, no dashboard row, for every run ever recorded.
  */
-const OPUS = "claude-opus-5";
+const OPUS = "claude-opus-5-5";
 /* What the migration pins to: today's default, whatever that is. Written as the
    schema's own answer rather than as a literal because this file is about the
    migration, not about which Gemini is current — a literal here turns every
@@ -314,14 +314,14 @@ describe("a run created before the reviewer was pinned to Google", () => {
 
   it("moves a run frozen on a superseded Gemini onto the reviewer default", () => {
     // The case the vendor comparison could not see, and the one an operator
-    // actually hits. `gemini-3.6-flash` and today's default are the same vendor,
+    // actually hits. `gemini-3.8-flash` and today's default are the same vendor,
     // so a run frozen on 3.6 kept it through every resume and the only way onto
     // the current reviewer was to retype `--model reviewer=…` on every resume
     // line for the rest of that run's life. A plain `charrette resume` picks it up
     // now — which is the whole point of the migration, and was true of the
     // Anthropic→Google move only by accident of the vendor changing too.
     const { dbPath, cleanup } = onDisk();
-    const runId = runFromBeforeTheReviewerPin(dbPath, "gemini-3.6-flash");
+    const runId = runFromBeforeTheReviewerPin(dbPath, "gemini-3.8-flash");
 
     expect(new Store(dbPath).getRun(runId)!.config.models.reviewer).toBe(GEMINI);
     cleanup();
@@ -470,6 +470,66 @@ describe("a run created before the interface and heavy rungs existed", () => {
     expect(models.workerUi).toBe(OPUS_UI);
     expect(models.workerHeavy).toBe(FABLE);
     store.db.close();
+    cleanup();
+  });
+});
+
+describe("a run frozen on a model that has since been retired", () => {
+  /** A run whose stored table names retired models, as one created before the retirement would. */
+  function runOnRetiredModels(dbPath: string): string {
+    const store = new Store(dbPath);
+    store.createRun({
+      id: "run-retired",
+      repoPath: "/tmp/x",
+      assignment: "a",
+      state: "EXECUTING",
+      prdPath: null,
+      planHash: null,
+      integrationBranch: "charrette/run-retired",
+      config: RunConfig.parse({}),
+    });
+    const row = store.db.prepare("SELECT config FROM runs WHERE id = ?").get("run-retired") as { config: string };
+    const stored = JSON.parse(row.config) as { models: Record<string, string> };
+    stored.models.workerUi = "claude-opus-5";
+    stored.models.planner = "claude-fable-5-1";
+    store.db.prepare("UPDATE runs SET config = ? WHERE id = ?").run(JSON.stringify(stored), "run-retired");
+    store.db.close();
+    return "run-retired";
+  }
+
+  it("moves to the replacement at open, in the row itself, and says what moved", () => {
+    const { dbPath, cleanup } = onDisk();
+    const runId = runOnRetiredModels(dbPath);
+    const store = new Store(dbPath);
+    expect(store.getRun(runId)!.config.models.workerUi).toBe("claude-opus-5-5");
+    const row = store.db.prepare("SELECT config FROM runs WHERE id = ?").get(runId) as { config: string };
+    const models = (JSON.parse(row.config) as { models: Record<string, string> }).models;
+    expect(models.workerUi).toBe("claude-opus-5-5");
+    expect(models.planner).toBe("claude-fable-5-2");
+    expect(store.retiredAtOpen(runId)).toEqual([
+      { role: "planner", from: "claude-fable-5-1", to: "claude-fable-5-2" },
+      { role: "workerUi", from: "claude-opus-5", to: "claude-opus-5-5" },
+    ]);
+    store.db.close();
+
+    // The next open finds nothing left to move.
+    const again = new Store(dbPath);
+    expect(again.retiredAtOpen(runId)).toEqual([]);
+    again.db.close();
+    cleanup();
+  });
+
+  it("skips a row it cannot read or that has no routing table", () => {
+    const { dbPath, cleanup } = onDisk();
+    const runId = runOnRetiredModels(dbPath);
+    const seed = new Store(dbPath);
+    seed.db.prepare("UPDATE runs SET config = ? WHERE id = ?").run("{not json", runId);
+    seed.db.close();
+    expect(new Store(dbPath).retiredAtOpen(runId)).toEqual([]);
+    const fix = new Store(dbPath);
+    fix.db.prepare("UPDATE runs SET config = ? WHERE id = ?").run(JSON.stringify({ models: null }), runId);
+    fix.db.close();
+    expect(new Store(dbPath).retiredAtOpen(runId)).toEqual([]);
     cleanup();
   });
 });

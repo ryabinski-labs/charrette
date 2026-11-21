@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { CharretteEvent, RunConfig, RunSpec, RunState, type Runbook, RunbookShape, TaskState, RUN_TRANSITIONS, TASK_TRANSITIONS, modelId } from "@charrette/shared";
+import { CharretteEvent, RunConfig, RunSpec, RunState, type Runbook, RunbookShape, TaskState, RUN_TRANSITIONS, TASK_TRANSITIONS, modelId, retiredMoves, type RetiredMove } from "@charrette/shared";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS runs (
@@ -260,6 +260,18 @@ export class InvalidTransition extends Error {}
  * the event row and the materialized-state update in one transaction (PRD §11.1).
  */
 export class Store {
+  /** What `retireOldModels` moved when this store opened, by run id. */
+  private readonly retired = new Map<string, RetiredMove[]>();
+
+  /**
+   * The roles this run had on a retired model, moved to its replacement when
+   * the store opened. Empty when nothing moved. `charrette resume` prints it,
+   * so an operator sees the change once rather than finding it in the ledger.
+   */
+  retiredAtOpen(runId: string): RetiredMove[] {
+    return this.retired.get(runId) ?? [];
+  }
+
   releaseContract(id: string): { sourceSha256: string; source: string; spec: RunSpec; runId: string } | null {
     const row = this.db.prepare("SELECT sourceSha256, source, spec, runId FROM release_contracts WHERE id = ?").get(id) as
       { sourceSha256: string; source: string; spec: string; runId: string } | undefined;
@@ -366,6 +378,40 @@ export class Store {
     this.freezeLightTier();
     this.freezeWorkerTiers();
     this.freezeReviewer();
+    this.retireOldModels();
+  }
+
+  /**
+   * Rewrite every recorded run's routing table off retired models.
+   *
+   * `RunConfig` already reads a retired id as its replacement, so a run would
+   * dispatch on the current model without this. The rewrite is what makes the
+   * row say so: the stored table is what the dashboard, the postmortem and
+   * `patchRunConfig` start from, and a row that still names `claude-opus-5`
+   * while every session runs Opus 5.5 is a record nobody can trust. Runs after
+   * `freezeWorkerTiers` and `freezeLightTier`, which copy the worker's model
+   * into rungs a row lacks, so a copied retired id is moved too.
+   *
+   * Idempotent: a replacement is never itself retired.
+   */
+  private retireOldModels(): void {
+    const rows = this.db.prepare("SELECT id, config FROM runs").all() as { id: string; config: string }[];
+    const patch = this.db.prepare("UPDATE runs SET config = ? WHERE id = ?");
+    for (const row of rows) {
+      let config: { models?: Record<string, unknown> };
+      try {
+        config = JSON.parse(row.config) as { models?: Record<string, unknown> };
+      } catch {
+        continue;
+      }
+      const models = config?.models;
+      if (!models || typeof models !== "object") continue;
+      const moves = retiredMoves(models);
+      if (!moves.length) continue;
+      for (const { role, to } of moves) models[role] = to;
+      patch.run(JSON.stringify(config), row.id);
+      this.retired.set(row.id, moves);
+    }
   }
 
   /**

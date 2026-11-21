@@ -31,10 +31,10 @@ afterEach(() => {
   for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-const SONNET = "claude-sonnet-5";
-const HAIKU = "claude-haiku-4-5-20251001";
-const OPUS = "claude-opus-5";
-const FABLE = "claude-fable-5-1";
+const SONNET = "claude-sonnet-5-5";
+const HAIKU = "claude-haiku-5-5";
+const OPUS = "claude-opus-5-5";
+const FABLE = "claude-fable-5-2";
 
 /**
  * The model table these tests drive the ladder on, stated explicitly rather

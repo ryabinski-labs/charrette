@@ -32,7 +32,7 @@ function task(overrides: Partial<TaskRow> = {}): TaskRow {
 
 function checkpoint(store: Store, sessionId: string, digest: string, role = "worker", runId = "run1", taskId = "child"): void {
   store.db.prepare("INSERT OR IGNORE INTO sessions (id,runId,taskId,role,model,state,startedAt) VALUES (?,?,?,?,?,'done',0)")
-    .run(sessionId, runId, taskId, role, "claude-sonnet-5");
+    .run(sessionId, runId, taskId, role, "claude-sonnet-5-5");
   store.appendEvent({ type: "agent.checkpoint", runId, taskId, sessionId, digest, turn: 20, questions: [], ts: 0 });
 }
 

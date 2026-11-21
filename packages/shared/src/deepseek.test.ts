@@ -27,9 +27,9 @@ describe("REQ-001 — a run config that omits the worker models defaults worker 
   });
 
   it("lets a run override the DeepSeek default without touching the rest", () => {
-    const models = RunConfig.parse({ models: { worker: "claude-sonnet-5" } }).models;
+    const models = RunConfig.parse({ models: { worker: "claude-sonnet-5-5" } }).models;
 
-    expect(models.worker).toBe("claude-sonnet-5");
+    expect(models.worker).toBe("claude-sonnet-5-5");
     expect(models.workerLight).toBe("deepseek-flash");
   });
 });

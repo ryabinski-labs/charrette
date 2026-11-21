@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { sourceDigest, deliveryConfigProblems } from "@charrette/core";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_CHECK_TIMEOUT_MINUTES, ModelRoutingShape, RunConfig, SubscriptionConfig, statePaths } from "@charrette/shared";
+import { DEFAULT_CHECK_TIMEOUT_MINUTES, ModelRoutingShape, RunConfig, SubscriptionConfig, retireModels, retiredMoves, statePaths, type RetiredMove } from "@charrette/shared";
 import { AgentPool, Bus, GateHandler, BridgedIntake, IntakeBridge, GitHubAdapter, RunController, Store, accountEnv, agentBinaryFiles, assembleReport, checkMemoryBanner, detectToolbelt, ensureIgnored, charretteBuild, missingKeys, newerModelBanner, originSlug, postmortem, renderPostmortem, reportPath, pinsInPlay, runLockHolder, skillPinBanner, standaloneReport, repoUnusable, wasMerged } from "@charrette/core";
 import { Dashboard } from "@charrette/dashboard";
 import { promptForNewCap, watchBudgetCommands } from "./budget.js";
@@ -589,6 +589,8 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
       : `intake     off — planning directly from the assignment`
   );
 
+  const requestedModels = { ...file.models, ...modelOverrides(opts.model) };
+  banner.push(...retiredBanner(retiredMoves(requestedModels), via ? `update ${via} or the --model flag` : "update the --model flag"));
   const config = parseRunConfig({
     maxParallelWorkers: file.maxParallelWorkers,
     qaIterationCap: file.qaIterationCap,
@@ -599,7 +601,7 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
     usageLimitWaitMinutes: file.usageLimitWaitMinutes,
     // The flag wins over the file: it is the thing you reach for when the run
     // in front of you needs to get cheaper right now.
-    models: { ...file.models, ...modelOverrides(opts.model) },
+    models: requestedModels,
     budget: { runCapUsd },
     // The subscriptions this run may spend, and which one it starts on. The
     // flag wins over the file for the same reason `--model` does: it is what
@@ -681,6 +683,16 @@ const collect = (value: string, previous: string[]) => [...previous, value];
  * nothing would leave the operator watching an expensive run they thought they
  * had just made cheap, which is the exact situation this flag exists for.
  */
+/**
+ * One line per retired model a routing table named, saying what runs instead
+ * and, via `fix`, where the old id came from. Empty when nothing was retired.
+ */
+export function retiredBanner(moves: RetiredMove[], fix: string): string[] {
+  if (!moves.length) return [];
+  const list = moves.map((m) => `${m.role} ${m.from}→${m.to}`).join(" · ");
+  return [`retired    ${list}   (${fix})`];
+}
+
 export function modelOverrides(pairs: string[] = []): Record<string, string> {
   const roles = Object.keys(ModelRoutingShape.shape);
   const out: Record<string, string> = {};
@@ -956,7 +968,13 @@ export function buildProgram(): Command {
       // The pinned roles hold here too: `patchRunConfig` re-parses the whole
       // config, so a judge cannot be moved off Anthropic by the back door.
       if (existing) {
-        const wanted = { ...file.models, ...modelOverrides(opts.model) };
+        // Read through the retirement list first: a file still naming
+        // `claude-opus-5` would otherwise "re-route" the run to the model it is
+        // already on, every resume, and print that it had.
+        const requested = { ...file.models, ...modelOverrides(opts.model) };
+        const retiredHere = retiredBanner(retiredMoves(requested), `update ${CONFIG_FILENAME} or the --model flag`);
+        if (retiredHere.length) process.stdout.write(`${retiredHere.join("\n")}\n`);
+        const wanted = retireModels(requested) as Record<string, string>;
         const changed = Object.entries(wanted).filter(([role, model]) => model !== existing.config.models[role as keyof typeof existing.config.models]);
         if (changed.length) {
           const models = { ...existing.config.models, ...Object.fromEntries(changed) };
@@ -1043,6 +1061,8 @@ export function buildProgram(): Command {
       // that `charrette run` prints above them, "in none of those directories"
       // would name nothing.
       if (resumed) {
+        const frozen = retiredBanner(store.retiredAtOpen(runId), "this run's frozen models, now moved for good");
+        if (frozen.length) process.stdout.write(`${frozen.join("\n")}\n`);
         const pinned = skillPinBanner(resumed.config.skillsDirs, pinsInPlay(resumed.config));
         if (pinned.length) process.stdout.write(`skills     ${resumed.config.skillsDirs.join(" · ")}\n${pinned.join("\n")}\n`);
         // A resumed run can be weeks old, which is when a newer model is most

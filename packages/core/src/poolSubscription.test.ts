@@ -61,7 +61,7 @@ let pool: AgentPool;
 const SPEC: AgentSpec = {
   runId: "run1",
   role: "worker",
-  model: "claude-opus-5",
+  model: "claude-opus-5-5",
   systemPrompt: "you are a worker",
   prompt: "build the thing",
   cwd: "/tmp/worktree",
@@ -369,14 +369,14 @@ describe("reading the plan before the run spends anything", () => {
   it("asks the control channel and normalises what comes back", async () => {
     probe({ rate_limits: { seven_day: { utilization: 82, resets_at: "2026-08-18T11:59:59+00:00" } } });
 
-    await expect(pool.readSubscription("claude-opus-5")).resolves.toEqual([
+    await expect(pool.readSubscription("claude-opus-5-5")).resolves.toEqual([
       { window: "seven_day", percent: 82, resetsAt: Date.parse("2026-08-18T11:59:59+00:00") },
     ]);
   });
 
   it("never sends the session a prompt, so the check costs no tokens", async () => {
     probe({ rate_limits: {} });
-    await pool.readSubscription("claude-opus-5");
+    await pool.readSubscription("claude-opus-5-5");
     const arg = queryMock.mock.calls[0]![0] as { prompt: AsyncIterable<unknown>; options: { abortController: AbortController } };
     // The prompt stream is held open and silent, and closed by the abort the
     // probe fires on its way out — so nothing is ever yielded to the model.
@@ -388,7 +388,7 @@ describe("reading the plan before the run spends anything", () => {
     pool.configureSubscription({ name: "work", env: { CLAUDE_CODE_OAUTH_TOKEN: "oat-work" } });
     probe({ rate_limits: {} });
 
-    await pool.readSubscription("claude-opus-5");
+    await pool.readSubscription("claude-opus-5-5");
 
     expect(envs()[0]).toMatchObject({ CLAUDE_CODE_OAUTH_TOKEN: "oat-work" });
   });
@@ -398,7 +398,7 @@ describe("reading the plan before the run spends anything", () => {
     // a subprocess that will not start. None of those is a reason a run cannot
     // begin — they are reasons it begins without the check.
     probe(null, { throws: true });
-    await expect(pool.readSubscription("claude-opus-5")).resolves.toEqual([]);
+    await expect(pool.readSubscription("claude-opus-5-5")).resolves.toEqual([]);
   });
 
   it("closes the probe even when closing it is what fails", async () => {
@@ -412,7 +412,7 @@ describe("reading the plan before the run spends anything", () => {
       usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => ({ rate_limits: { seven_day: { utilization: 12, resets_at: null } } }),
     });
 
-    await expect(pool.readSubscription("claude-opus-5")).resolves.toEqual([{ window: "seven_day", percent: 12, resetsAt: null }]);
+    await expect(pool.readSubscription("claude-opus-5-5")).resolves.toEqual([{ window: "seven_day", percent: 12, resetsAt: null }]);
   });
 
   it("gives up rather than hanging the start of the run", async () => {
@@ -421,6 +421,6 @@ describe("reading the plan before the run spends anything", () => {
     const iterator = { async next() { return { done: true, value: undefined }; }, async return() { return { done: true, value: undefined }; } };
     queryMock.mockReturnValue({ ...iterator, usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: () => new Promise(() => undefined) });
 
-    await expect(pool.readSubscription("claude-opus-5")).resolves.toEqual([]);
+    await expect(pool.readSubscription("claude-opus-5-5")).resolves.toEqual([]);
   });
 });

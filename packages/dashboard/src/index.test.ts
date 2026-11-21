@@ -1294,10 +1294,10 @@ describe("live model routing", () => {
     const seen: Array<[string, string, string]> = [];
     wire(dash, (runId, role, model) => {
       seen.push([runId, role, model]);
-      return `${role} re-routed: claude-sonnet-5 → ${model}. The next one to start uses it.`;
+      return `${role} re-routed: claude-sonnet-5-5 → ${model}. The next one to start uses it.`;
     });
-    expect((await post({ role: "worker", model: "claude-haiku-4-5-20251001" })).status).toBe(200);
-    expect(seen).toEqual([["r1", "worker", "claude-haiku-4-5-20251001"]]);
+    expect((await post({ role: "worker", model: "claude-haiku-5-5" })).status).toBe(200);
+    expect(seen).toEqual([["r1", "worker", "claude-haiku-5-5"]]);
   });
 
   /**
@@ -1308,7 +1308,7 @@ describe("live model routing", () => {
   it("passes a pinned-role refusal back as a 400 with the controller's words", async () => {
     const { dash, post } = await withDash();
     wire(dash, () => "qa may not be routed below the judging floor");
-    const res = await post({ role: "qa", model: "claude-haiku-4-5-20251001" });
+    const res = await post({ role: "qa", model: "claude-haiku-5-5" });
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toContain("judging floor");
   });
@@ -1320,7 +1320,7 @@ describe("live model routing", () => {
       calls++;
       return "worker re-routed: a → b";
     });
-    expect((await post({ model: "claude-opus-5" })).status).toBe(400);
+    expect((await post({ model: "claude-opus-5-5" })).status).toBe(400);
     expect((await post({ role: "worker", model: "  " })).status).toBe(400);
     expect((await post({ role: "worker" })).status).toBe(400);
     expect(calls).toBe(0);
@@ -1328,7 +1328,7 @@ describe("live model routing", () => {
 
   it("refuses until the dashboard is wired to a controller", async () => {
     const { post } = await withDash();
-    expect((await post({ role: "worker", model: "claude-opus-5" })).status).toBe(503);
+    expect((await post({ role: "worker", model: "claude-opus-5-5" })).status).toBe(503);
   });
 
   it("rejects an unauthenticated re-route", async () => {
@@ -1336,7 +1336,7 @@ describe("live model routing", () => {
     const res = await fetch(new URL("/api/runs/r1/models", url), {
       method: "POST",
       headers: { "content-type": "application/json", connection: "close" },
-      body: JSON.stringify({ role: "worker", model: "claude-opus-5" }),
+      body: JSON.stringify({ role: "worker", model: "claude-opus-5-5" }),
     });
     expect(res.status).toBe(401);
   });
@@ -1355,7 +1355,7 @@ describe("live model routing", () => {
         origin: "https://evil.example",
         connection: "close",
       },
-      body: JSON.stringify({ role: "worker", model: "claude-opus-5" }),
+      body: JSON.stringify({ role: "worker", model: "claude-opus-5-5" }),
     });
     expect(res.status).toBe(403);
   });

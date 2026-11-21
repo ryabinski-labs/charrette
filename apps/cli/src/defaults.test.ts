@@ -149,7 +149,7 @@ describe("loadFileConfig", () => {
 
   it("keeps the defaults out of every section the file leaves alone", () => {
     const declared = {
-      models: { qa: "claude-sonnet-5" },
+      models: { qa: "claude-sonnet-5-5" },
       budget: { runCapUsd: 12 },
       subscription: { active: "personal" },
       planGate: { decidedBy: "operator" },

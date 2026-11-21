@@ -932,7 +932,7 @@ in the same family, with the `--model` flag and the `charrette.config.json`
 line that would switch it:
 
 ```
-newer      claude-sonnet-5-5 is newer than claude-sonnet-5 (qa). To switch: --model qa=claude-sonnet-5-5, or "models": { "qa": "claude-sonnet-5-5" } in charrette.config.json.
+newer      claude-sonnet-6 is newer than claude-sonnet-5-5 (qa). To switch: --model qa=claude-sonnet-6, or "models": { "qa": "claude-sonnet-6" } in charrette.config.json.
 ```
 
 It only recommends; nothing is switched for you. It stays within a family
@@ -946,6 +946,35 @@ installed Agent SDK's model table is used. Google and OpenAI are asked with
 their keys, and DeepSeek is skipped because its ids carry no version. Each
 request has four seconds, and a vendor that fails or times out just gives no
 recommendation. Set `CHARRETTE_MODEL_CHECK=0` to skip the check.
+
+#### Retired models
+
+Older models are retired, and charrette never runs one. Each is replaced by the
+current model from the same vendor and tier:
+
+| Retired | Runs as |
+|---|---|
+| `claude-fable-5`, `claude-fable-5-1` | `claude-fable-5-2` |
+| `claude-opus-5` | `claude-opus-5-5` |
+| `claude-sonnet-5` | `claude-sonnet-5-5` |
+| `claude-haiku-4-5`, `claude-haiku-4-5-20251001` | `claude-haiku-5-5` |
+| `gemini-3.6-flash`, `gemini-3.7-flash` | `gemini-3.8-flash` |
+
+The replacement applies everywhere a model is set: `charrette.config.json`,
+`--model`, the dashboard, and the models a run recorded when it started. An
+existing run is moved the next time anything opens its database, so a run
+started on `claude-opus-5` picks up `claude-opus-5-5` at its next
+`charrette resume`. A session that was already running keeps its model until
+it ends. `run` and `resume` print a `retired` line naming each role that
+moved, and the dashboard no longer offers retired models. The list is
+`RETIRED_MODELS` in `packages/shared/src/retired.ts`.
+
+```
+retired    workerUi claude-opus-5→claude-opus-5-5   (this run's frozen models, now moved for good)
+```
+
+The price table keeps rows for retired models, so a session that was already
+running on one when its run moved is billed at what it cost.
 
 #### Changing it mid-run
 

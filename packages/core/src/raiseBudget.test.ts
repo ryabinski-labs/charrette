@@ -60,7 +60,7 @@ describe("raiseBudget", () => {
   it("refuses a run cap at or below what has already been spent", () => {
     const { controller, store } = build();
     makeRun(store);
-    store.recordUsage({ runId: "run1", sessionId: "s1", model: "claude-sonnet-5", inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 40 });
+    store.recordUsage({ runId: "run1", sessionId: "s1", model: "claude-sonnet-5-5", inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 40 });
 
     const result = controller.raiseBudget("run1", 40);
 

@@ -14,7 +14,7 @@ const TASK = { id: "t1", title: "T", spec: "s", acceptanceCriteria: ["it works"]
 
 describe("pricing a model nobody has priced", () => {
   it("prices a known model exactly", () => {
-    expect(priceFor("claude-opus-5")).toEqual(expect.objectContaining({ in: expect.any(Number), out: expect.any(Number) }));
+    expect(priceFor("claude-opus-5-5")).toEqual(expect.objectContaining({ in: expect.any(Number), out: expect.any(Number) }));
   });
 
   it("matches a dated variant against its family", () => {
@@ -53,8 +53,8 @@ describe("pricing a model nobody has priced", () => {
   });
 
   it("charges cache reads and writes at their own rates", () => {
-    const plain = costUsd("claude-opus-5", { inputTokens: 1000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 });
-    const cached = costUsd("claude-opus-5", { inputTokens: 0, outputTokens: 0, cacheReadTokens: 1000, cacheWriteTokens: 0 });
+    const plain = costUsd("claude-opus-5-5", { inputTokens: 1000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 });
+    const cached = costUsd("claude-opus-5-5", { inputTokens: 0, outputTokens: 0, cacheReadTokens: 1000, cacheWriteTokens: 0 });
 
     expect(cached).toBeGreaterThan(0);
     expect(cached).toBeLessThan(plain);

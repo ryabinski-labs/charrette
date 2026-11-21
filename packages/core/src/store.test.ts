@@ -76,8 +76,8 @@ describe("Store run lifecycle", () => {
   it("ledger sums drive budget checks", () => {
     const store = makeStore();
     makeRun(store);
-    store.recordUsage({ runId: "run1", taskId: "a", sessionId: "s1", model: "claude-sonnet-5", inputTokens: 1000, outputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 1.5 });
-    store.recordUsage({ runId: "run1", sessionId: "s2", model: "claude-opus-5", inputTokens: 1000, outputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 2.5 });
+    store.recordUsage({ runId: "run1", taskId: "a", sessionId: "s1", model: "claude-sonnet-5-5", inputTokens: 1000, outputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 1.5 });
+    store.recordUsage({ runId: "run1", sessionId: "s2", model: "claude-opus-5-5", inputTokens: 1000, outputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 2.5 });
     expect(store.spentUsd("run1")).toBeCloseTo(4.0);
     expect(store.spentUsd("run1", "a")).toBeCloseTo(1.5);
   });
@@ -185,8 +185,8 @@ describe("live event delivery", () => {
 
 describe("costUsd", () => {
   it("prices sonnet with cache discounts", () => {
-    const cost = costUsd("claude-sonnet-5", { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 1_000_000, cacheWriteTokens: 0 });
-    expect(cost).toBeCloseTo(3 + 0.3);
+    const cost = costUsd("claude-sonnet-5-5", { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 1_000_000, cacheWriteTokens: 0 });
+    expect(cost).toBeCloseTo(2 + 0.2);
   });
 
   it("prices unknown models at the top tier, never under", () => {
@@ -366,7 +366,7 @@ describe("what previous runs in this repository cost", () => {
     qaIterations: 0, respawns: 0, assignedSkills: [], errorSummary: null, touchedPaths: [] as string[], completionProbe: "", estimatedSize: size,
   });
   const spend = (store: Store, runId: string, usd: number) =>
-    store.recordUsage({ runId, sessionId: `s-${runId}-${usd}`, model: "claude-sonnet-5", inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: usd });
+    store.recordUsage({ runId, sessionId: `s-${runId}-${usd}`, model: "claude-sonnet-5-5", inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: usd });
 
   it("weighs what merged against what was spent, per run", () => {
     const store = makeStore();

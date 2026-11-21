@@ -170,23 +170,23 @@ describe("what reaches the interface tier", () => {
 
 describe("which model a decision buys", () => {
   const models = {
-    worker: "claude-sonnet-5",
-    workerLight: "claude-haiku-4-5-20251001",
-    workerUi: "claude-opus-5",
-    workerHeavy: "claude-fable-5-1",
+    worker: "claude-sonnet-5-5",
+    workerLight: "claude-haiku-5-5",
+    workerUi: "claude-opus-5-5",
+    workerHeavy: "claude-fable-5-2",
   };
 
   it("sends an eligible task to the light model", () => {
-    expect(workerModelFor(eligible, models).model).toBe("claude-haiku-4-5-20251001");
+    expect(workerModelFor(eligible, models).model).toBe("claude-haiku-5-5");
   });
 
   it("sends everything else to the standard model", () => {
-    expect(workerModelFor({ ...eligible, estimatedSize: "L" }, models).model).toBe("claude-sonnet-5");
+    expect(workerModelFor({ ...eligible, estimatedSize: "L" }, models).model).toBe("claude-sonnet-5-5");
   });
 
   it("sends interface work to the design model and the hardest work to the top", () => {
-    expect(workerModelFor({ ...eligible, title: "Restyle the settings page" }, models).model).toBe("claude-opus-5");
-    expect(workerModelFor({ ...eligible, id: "ci-fix-2-1", estimatedSize: "M" }, models).model).toBe("claude-fable-5-1");
+    expect(workerModelFor({ ...eligible, title: "Restyle the settings page" }, models).model).toBe("claude-opus-5-5");
+    expect(workerModelFor({ ...eligible, id: "ci-fix-2-1", estimatedSize: "M" }, models).model).toBe("claude-fable-5-2");
   });
 
   it("maps every rung, and the standard one by default", () => {
@@ -200,10 +200,10 @@ describe("which model a decision buys", () => {
     // How an operator switches the experiment off. The rule still runs and
     // still reports what it would have done, so the measurement survives the
     // decision not to spend on it.
-    const inert = { ...models, workerLight: "claude-sonnet-5" };
+    const inert = { ...models, workerLight: "claude-sonnet-5-5" };
     const out = workerModelFor(eligible, inert);
 
-    expect(out.model).toBe("claude-sonnet-5");
+    expect(out.model).toBe("claude-sonnet-5-5");
     expect(out.decision.tier).toBe("light");
   });
 });
