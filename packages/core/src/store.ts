@@ -1,5 +1,12 @@
 import { DatabaseSync } from "node:sqlite";
-import { CharretteEvent, RunConfig, RunSpec, RunState, type Runbook, RunbookShape, TaskState, RUN_TRANSITIONS, TASK_TRANSITIONS, modelId, retiredMoves, settleEfforts, type RetiredMove } from "@charrette/shared";
+import { CharretteEvent, RunConfig, RunSpec, RunState, type Runbook, RunbookShape, TaskState, RUN_TRANSITIONS, TASK_TRANSITIONS, retiredMoves, routingViolations, settleEfforts, type RetiredMove } from "@charrette/shared";
+
+/**
+ * What these roles defaulted to before Gemini 4. A run recorded then stays on
+ * it: see `freezeGeminiRoles` and `freezeReviewer`.
+ */
+const PRE_GEMINI_4_DEFAULT = "gemini-3.8-flash";
+const PRE_GEMINI_4_ROLES = ["planner", "workerHeavy", "reviewer", "pm", "spec"] as const;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS runs (
@@ -384,6 +391,7 @@ export class Store {
         if (!have.has(name)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${decl}`);
       }
     }
+    this.freezeGeminiRoles();
     this.freezeLightTier();
     this.freezeWorkerTiers();
     this.freezeReviewer();
@@ -527,52 +535,67 @@ export class Store {
   }
 
   /**
-   * Move every recorded run's `reviewer` onto the model the role currently
-   * defaults to, so runs created before a reviewer change stay readable and stay
-   * current.
+   * Keep runs recorded before the Gemini 4 defaults on `gemini-3.8-flash`.
    *
-   * It began as a vendor migration — runs recorded before `reviewer` was pinned
-   * to Google hold `claude-opus-5`, which `RunConfig` now refuses — and it
-   * compared vendors, which is what a vendor migration needs. That left the
-   * ordinary case out. `gemini-3.6-flash` and `gemini-3.8-flash` are the same
-   * vendor, so a run frozen on 3.6 kept it through every `charrette resume`, and
-   * the only way onto the current default was to type
-   * `--model reviewer=gemini-3.8-flash` on every resume line for the rest of that
-   * run's life. Comparing the *model* is what the operator meant by "resume
-   * picks up the new reviewer", and it subsumes the vendor case: a model on the
-   * wrong vendor is never the current default either.
+   * `getRun` re-parses the stored config, so a role the row does not name takes
+   * today's default. For `planner`, `pm` and `spec` that would now move a parked
+   * run onto a different model, at twice the price for two of them, having
+   * agreed to nothing. A row with no routing table at all read every role from
+   * the defaults, so it gets the whole table as it stood.
    *
-   * The trade-off, stated plainly because it is a real one: a reviewer this run
-   * was deliberately put on is now reverted at the next open, not preserved.
-   * Nothing on the row can tell a default frozen at creation from a choice
-   * somebody made, and of the two readings this is the one the operator asked
-   * for. A deliberate choice still has a home that survives — `models.reviewer`
-   * in charrette.config.json, or `--model` on the resume line — because `charrette
-   * resume` applies both *after* the store opens, so either wins over this.
+   * `workerHeavy` and `reviewer` are absent-key cases too, and are settled by
+   * `freezeWorkerTiers` and `freezeReviewer`. Every run recorded from here on
+   * names all its roles, so this only ever touches older rows.
+   */
+  private freezeGeminiRoles(): void {
+    const rows = this.db.prepare("SELECT id, config FROM runs").all() as { id: string; config: string }[];
+    const patch = this.db.prepare("UPDATE runs SET config = ? WHERE id = ?");
+    for (const row of rows) {
+      let config: { models?: Record<string, unknown> } | null;
+      try {
+        config = JSON.parse(row.config) as { models?: Record<string, unknown> } | null;
+      } catch {
+        continue;
+      }
+      if (!config || typeof config !== "object") continue;
+      if (config.models === undefined) {
+        const frozen = Object.fromEntries(PRE_GEMINI_4_ROLES.map((role) => [role, PRE_GEMINI_4_DEFAULT]));
+        config.models = { ...RunConfig.parse({}).models, ...frozen };
+        patch.run(JSON.stringify(config), row.id);
+        continue;
+      }
+      const models = config.models;
+      if (!models || typeof models !== "object") continue;
+      let touched = false;
+      for (const role of ["planner", "pm", "spec"] as const) {
+        if (role in models) continue;
+        models[role] = PRE_GEMINI_4_DEFAULT;
+        touched = true;
+      }
+      if (touched) patch.run(JSON.stringify(config), row.id);
+    }
+  }
+
+  /**
+   * Keep every recorded run's `reviewer` readable without moving it.
    *
-   * This is not the same problem `freezeLightTier` solves, and the difference is
-   * worth stating because the two look alike. That one exists because an
-   * *absent* key silently takes today's default; this one exists because a
-   * *present* one — `reviewer: "claude-opus-5"`, which every run before the pin
-   * recorded — is now a value `RunConfig` refuses. `getRun` re-parses the stored
-   * config on every read, so without this those runs would not merely refuse to
-   * resume, they would throw on every read: no ledger, no postmortem, no
-   * dashboard row. A migration that stops old data being *readable* is worse
-   * than the policy it enforces.
+   * Runs recorded before `reviewer` was pinned to Google hold `claude-opus-5`,
+   * which `RunConfig` now refuses. `getRun` re-parses the stored config on every
+   * read, so without this those runs would throw on every read: no ledger, no
+   * postmortem, no dashboard row. A reviewer the config refuses, or a row that
+   * names none, is written as `gemini-3.8-flash`, the default those runs were
+   * last moved to.
    *
-   * The rewrite is deliberate rather than reluctant. A parked run picked up
-   * after the switch reviews on a different model than its earlier pit stops
-   * did, which is a real discontinuity — but the reviewer's output is advisory
-   * prose read at a checkpoint, not a threshold anything downstream compares
-   * against, so the discontinuity costs a differently-worded review and nothing
-   * else. Contrast `workerLight`, where the equivalent silent swap would change
-   * which model writes the code.
+   * A reviewer the config accepts is left alone. This used to rewrite every row
+   * to the current default, so changing the default would have moved every
+   * existing run's reviewer at its next open, and a reviewer chosen with
+   * `--model` would have been reverted. A run keeps the routing it was frozen
+   * with; `--model reviewer=…` on a resume is how to change it. Retired ids pass
+   * through here and are moved, with a banner, by `retireOldModels`.
    *
-   * Idempotent by construction: it only touches rows whose reviewer is not
-   * already the current default, and it writes that default.
+   * Idempotent: what it writes is a reviewer it would keep.
    */
   private freezeReviewer(): void {
-    const wanted = RunConfig.parse({}).models.reviewer;
     const rows = this.db.prepare("SELECT id, config FROM runs").all() as { id: string; config: string }[];
     const patch = this.db.prepare("UPDATE runs SET config = ? WHERE id = ?");
     for (const row of rows) {
@@ -590,12 +613,8 @@ export class Store {
       // Absent counts too. A config old enough to predate the role would
       // otherwise read as the new default without saying so, which is the
       // failure `freezeLightTier` documents.
-      //
-      // Compared by `modelId`, so the two spellings of one model —
-      // `gemini-3.8-flash` and `google/gemini-3.8-flash` — are one model here
-      // and a run written with the prefix is not rewritten every open.
-      if (typeof current === "string" && modelId(current) === modelId(wanted)) continue;
-      models.reviewer = wanted;
+      if (typeof current === "string" && routingViolations({ reviewer: current }).length === 0) continue;
+      models.reviewer = PRE_GEMINI_4_DEFAULT;
       patch.run(JSON.stringify(config), row.id);
     }
   }

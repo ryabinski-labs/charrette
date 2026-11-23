@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { RunConfig } from "@charrette/shared";
-import { costUsd } from "./budget.js";
+import { costUsd, priceFor } from "./budget.js";
 import { budgetFor } from "./compact.js";
 import { tierModel, workerModelFor } from "./modelTier.js";
 import {
@@ -192,7 +192,16 @@ describe("REQ-006 — UI and heavy tasks keep their own tier models", () => {
   });
 
   it("SC-006-b a heavy task stays on the heavy tier model", () => {
-    expect(tierModel("heavy", RunConfig.parse({}).models)).toBe("gemini-3.8-flash");
+    expect(tierModel("heavy", RunConfig.parse({}).models)).toBe("gemini-4-neon");
+  });
+
+  it("climbs from a Hydrogen worker to a dearer, stronger model rather than sideways", () => {
+    const models = RunConfig.parse({ models: { worker: "gemini-4-hydrogen" } }).models;
+    const heavy = tierModel("heavy", models);
+
+    expect(heavy).toBe("gemini-4-neon");
+    expect(priceFor(heavy).in).toBeGreaterThan(priceFor(models.worker).in);
+    expect(priceFor(heavy).out).toBeGreaterThan(priceFor(models.worker).out);
   });
 
   it("sends an interface task to the UI rung even when the regular worker is DeepSeek", () => {

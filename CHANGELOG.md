@@ -7,6 +7,28 @@ on. Before then, minor versions may break things.
 
 ## [Unreleased]
 
+### Changed
+
+- **New runs default to Gemini 4 instead of Gemini 3.8 Flash**, following
+  [Google's model guide](https://aistudio.google.com/docs/choosing-a-model).
+  `planner`, `spec` and `workerHeavy` move to `gemini-4-neon`. `reviewer` and
+  `pm` move to `gemini-4-hydrogen`. `gemini-4-carbon` stays a manual choice.
+  - **Existing runs are unaffected.** A recorded run keeps its models through
+    every resume, including a run whose stored config leaves a role out.
+    Resuming no longer moves a valid `reviewer` to the current default.
+  - **To keep the old model,** name it in `charrette.config.json`, for example
+    `"models": { "planner": "gemini-3.8-flash" }`. It is not retired and stays
+    in the dashboard.
+  - **Cost.** Per million tokens, Neon is $3/$15 against 3.8 Flash's standing
+    $1.50/$7.50, so `planner`, `spec` and `workerHeavy` cost twice as much for
+    the same tokens. Hydrogen is the same price as that standing rate. Google
+    is charging $0.75/$3.75 for 3.8 Flash until 31 December 2026, so until then
+    the bill for the same tokens is 4x on Neon and 2x on Hydrogen.
+  - **Key.** Neon needs Google's paid API tier. On a free-tier key, point
+    `planner`, `spec` and `workerHeavy` at `gemini-4-hydrogen`.
+  - **Effort.** A level set on `gemini-3.8-flash` no longer reaches these roles
+    by default. Set it on the Gemini 4 model instead.
+
 ### Added
 
 - **Demo view in the dashboard.** Every file a pit stop's demo wrote can now be

@@ -137,8 +137,8 @@ export const PINNED_ROLES: Record<string, { provider: Provider; why: string }> =
  * already passed the vendor check, which is what makes a bare family word
  * enough to go on: within Anthropic "haiku" names the small tier and has since
  * the first one, and within Gemini "lite" does the same. Note that this is why
- * the floor is `lite` and not `flash` — Flash is the mid tier Gemini actually
- * ships a judging-capable model in, and `models.reviewer` points at one.
+ * the floor is `lite` and not `flash` — Flash is a judging-capable mid tier, and
+ * a run may keep `models.reviewer` on one. The default is Gemini 4 Hydrogen.
  *
  * The cost of being wrong here is asymmetric in the same direction as
  * modelTier.ts: a refusal the operator disagrees with is a one-line config

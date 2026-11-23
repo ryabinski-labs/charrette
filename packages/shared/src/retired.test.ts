@@ -47,6 +47,12 @@ describe("retired models", () => {
     expect(retireModels(list)).toBe(list);
   });
 
+  it("does not retire 3.8 Flash, so a config naming it keeps it", () => {
+    expect(RETIRED_MODELS).not.toHaveProperty(["gemini-3.8-flash"]);
+    const roles = { planner: "gemini-3.8-flash", spec: "gemini-3.8-flash", workerHeavy: "gemini-3.8-flash", reviewer: "gemini-3.8-flash", pm: "gemini-3.8-flash" };
+    expect(RunConfig.parse({ models: roles }).models).toMatchObject(roles);
+  });
+
   it("is applied wherever a run config is parsed", () => {
     const config = RunConfig.parse({ models: { workerUi: "claude-opus-5", qa: "claude-sonnet-5", reviewer: "gemini-3.7-flash" } });
     expect(config.models.workerUi).toBe("claude-opus-5-5");
