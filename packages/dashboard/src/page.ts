@@ -12,6 +12,7 @@
  * innerHTML — agent output and repository contents are untrusted input here.
  */
 import { MODEL_EFFORTS, PINNED_ROLES, VENDOR_NAME, routingViolations } from "@charrette/shared";
+import { DEMO_BUTTON_HTML, DEMO_CSS, DEMO_JS, DEMO_PITSTOP_HTML, DEMO_VIEWER_HTML, DEMO_VIEW_HTML } from "./demoView.js";
 
 /**
  * What the model dropdowns offer.
@@ -533,6 +534,7 @@ export const PAGE_HTML = `<!doctype html>
        nested inside a scrolling page — two scrollbars to read one paragraph. */
     details pre { max-height:none; }
   }
+${DEMO_CSS}
 </style>
 </head>
 <body>
@@ -544,6 +546,7 @@ export const PAGE_HTML = `<!doctype html>
        first one stops every agent in the run and an operator reaching for
        "Notify me" should not be able to do that by missing. -->
   <button id="pause" class="ghost" hidden>Pause</button>
+  ${DEMO_BUTTON_HTML}
   <!-- Left of the spend, because the order the operator reads them in is the
        order the question comes in: how close is this, and what is it costing. -->
   <div class="imeter" id="intentmeter" hidden>
@@ -588,6 +591,7 @@ export const PAGE_HTML = `<!doctype html>
 
 <section id="pitstop" aria-labelledby="pitstop-h">
   <h2 id="pitstop-h">Pit stop &mdash; here is what exists so far</h2>
+  ${DEMO_PITSTOP_HTML}
   <div id="pitstop-report" class="report"></div>
   <textarea id="pitstop-feedback" rows="3" aria-label="What you want changed"
             placeholder="What should change? (goes to every task that has not run yet)"></textarea>
@@ -713,7 +717,9 @@ export const PAGE_HTML = `<!doctype html>
     <div id="log" role="log" aria-label="Live agent activity" tabindex="0"></div>
   </div>
 </div>
+${DEMO_VIEW_HTML}
 </main>
+${DEMO_VIEWER_HTML}
 
 <script>
 const token = location.hash.slice(1);
@@ -2782,6 +2788,7 @@ async function refreshState() {
   if (ps && ps.number !== pitStopShown) {
     pitStopShown = ps.number;
     renderReport($("pitstop-report"), ps.markdown);
+    dmPitStop(ps);
     notify("Pit stop " + ps.number, ps.reason + " \\u2014 come and look", "pit stop");
   }
   const bg = data.budgetGate;
@@ -2813,6 +2820,7 @@ async function refreshState() {
   if (!sg) subShown = null;
   renderHeader(); renderIntent(); renderNow(); renderFeedback(); renderSummon(); renderPause(); renderPaused(); renderBoard(); renderPrs(); renderRunInfo();
   for (const run of runs) stream(run.id);
+  dmTick();
 }
 
 async function stream(runId) {
@@ -3009,6 +3017,7 @@ document.addEventListener("keydown", (e) => {
   if (pauseArmed) { disarmPause(); renderPause(); }
   if (taskQuery) { $("tasksearch").value = ""; runSearch(""); }
 });
+${DEMO_JS}
 refresh();
 setInterval(refresh, 5000);
 setInterval(renderNow, 1000);   // keep the elapsed clocks moving between refreshes

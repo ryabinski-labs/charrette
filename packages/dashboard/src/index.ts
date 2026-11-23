@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import Fastify from "fastify";
 import { Bus, BudgetGate, GateHandler, IntakeBridge, IntentPosture, PitStop, PitStopDecision, Store, SubscriptionChoice, SubscriptionGate, TaskGate, intentPosture, originSlug } from "@charrette/core";
+import { registerDemoRoutes } from "./demoArtifacts.js";
 import { PAGE_HTML } from "./page.js";
 
 export interface DashboardOptions {
@@ -555,6 +556,15 @@ export class Dashboard implements GateHandler {
         return reply.code(409).send({ error: "no open intake question" });
       }
       return { ok: true, question: open.question };
+    });
+
+    registerDemoRoutes(app, {
+      store: this.store,
+      token: this.token,
+      authed: (req) => this.authed(req),
+      originOk: (req) => this.originOk(req),
+      drivenHere: () => this.feedbackSink !== null,
+      openStop: () => this.pitStopPayload?.number ?? null,
     });
 
     const port = await this.bind();

@@ -9,6 +9,12 @@ on. Before then, minor versions may break things.
 
 ### Added
 
+- **Demo view in the dashboard.** Every file a pit stop's demo wrote can now be
+  opened from the page, while the demo runs and afterwards. Browse by stop,
+  filter, search and page through images, video, reports, JSON, CSV, logs and
+  text. The open pit stop links to its evidence, and each file its report cites
+  opens in the viewer. A running demo shows its last action, new files as they
+  land, and a plain warning after ten quiet minutes.
 - **Effort per model.** `"effort": { "gemini-4-neon": "high" }` in
   `charrette.config.json`, `--effort model=level` on `run` and `resume`, or the
   effort control beside each role in the dashboard. The setting belongs to the
@@ -17,6 +23,14 @@ on. Before then, minor versions may break things.
   take is refused when the config is read, with the valid levels named. Nothing
   is set by default, and a model with no setting is sent exactly what it was
   before. See [Effort per model](docs/OPERATIONS.md#effort-per-model).
+
+### Security
+
+- **Demo files are served masked and inert.** The new read-only routes use the
+  dashboard's token and origin checks, stay inside the stop directory through
+  symlinks, and mask credentials on the server for view, new tab and download
+  alike. HTML and SVG are only ever sent as plain text. Pixels in screenshots
+  cannot be masked.
 
 ### Fixed
 
