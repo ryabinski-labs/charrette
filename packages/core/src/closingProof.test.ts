@@ -1102,6 +1102,54 @@ describe("requirements nothing is building any more", () => {
     expect(store.getRun(runId)!.state).toBe("BLOCKED");
   });
 
+  /**
+   * Run 614e06d5: "continue" at the closing stop blocked the run, and every
+   * resume re-read the same proof, skipped the stop because one had already
+   * opened over these verdicts, and blocked again — no way back to work. A
+   * resume is the operator coming back to act, so the closing stop opens again.
+   */
+  it("opens the closing stop again when the operator resumes a blocked run", async () => {
+    const dir = repo();
+    const stops: PitStop[] = [];
+    const { pool } = rolePool(
+      specified("exit 0", {
+        spec: specJson({
+          requirements: [
+            { id: "REQ-001", text: "a card charge succeeds", priority: "P0", blockedBy: [] },
+            { id: "REQ-002", text: "a receipt is emailed", priority: "P0", blockedBy: [] },
+          ],
+          scenarios: [
+            { id: "SC-001", requirement: "REQ-001", title: "charges a card", level: "unit", priority: "P0", oracle: "o", testRef: "", blocked: false },
+            { id: "SC-002", requirement: "REQ-002", title: "emails a receipt", level: "unit", priority: "P0", oracle: "o", testRef: "", blocked: false },
+          ],
+        }),
+        demo: () => DEMO_OK,
+        reviewer: () => REVIEW_OK,
+      })
+    );
+    const { controller, store } = build({
+      repoPath: dir,
+      pool,
+      gates: {
+        async resolvePitStop(stop) {
+          stops.push(stop);
+          return { action: "continue", feedback: "" };
+        },
+      },
+    });
+
+    await controller.startRun("build a checkout", RunConfig.parse({ ...BASE, pitStop: { every: { usd: 1000 } } }), operator());
+    const runId = store.listRuns()[0]!.id;
+    expect(store.getRun(runId)!.state).toBe("BLOCKED");
+    const before = stops.length;
+
+    await controller.resume(runId);
+
+    expect(stops.length).toBe(before + 1);
+    expect(stops.at(-1)!.reason).toContain("never claimed by any task: REQ-002");
+    expect(store.getRun(runId)!.state).toBe("BLOCKED");
+  });
+
   it("never writes off a requirement on silence", async () => {
     const dir = repo();
     const { pool } = rolePool(

@@ -921,11 +921,23 @@ ${unchecked.map((u) => `- ${u}`).join("\n")}
 Judge only those items against the operator's intent, in this tree. Everything the previous pass settled stands; do not re-derive it. Then give your verdict on the run as a whole, taking the previous pass's findings as given: PASS if these items are delivered too, FAIL with gaps for whichever are not, or UNKNOWN again — with a shorter list — if the budget runs out before you reach the end of this list.`;
 }
 
-export function validatorPrompt(assignment: string, prd: string, taskLines: string, diffStat: string, checks: string[] = [], requirements: { id: string; text: string; priority: string }[] = []): string {
+export function validatorPrompt(
+  assignment: string,
+  prd: string,
+  taskLines: string,
+  diffStat: string,
+  checks: string[] = [],
+  requirements: { id: string; text: string; priority: string }[] = [],
+  decisions: { stop: number; action: string; feedback: string }[] = []
+): string {
   return `The operator's original intent:
 ${assignment}
 
 ${
+  decisions.length
+    ? `What the operator decided at pit stops after that intent was written. Where one of these changes something above, the later decision is the intent — judge the tree against it, not against what it replaced:\n${decisions.map((d) => `- stop ${d.stop} (${d.action}): ${d.feedback.slice(0, 1500)}`).join("\n")}\n\n`
+    : ""
+}${
   requirements.length
     ? `The specification derived from that intent before any code was written — these, and the intent above, are what "in scope" means; nothing the repository says about its own scope changes them:\n${requirements.map((r) => `- ${r.id} [${r.priority}] ${r.text}`).join("\n")}\n\n`
     : ""

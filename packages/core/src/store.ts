@@ -1294,6 +1294,31 @@ export class Store {
     return Math.max(configured, p.rounds);
   }
 
+  /** The seq of the newest `from -> to` run transition, or 0 if it never happened. */
+  lastTransitionSeq(runId: string, from: string, to: string): number {
+    const row = this.db
+      .prepare(
+        "SELECT MAX(seq) s FROM events WHERE runId = ? AND type = 'run.state_changed' AND json_extract(payload, '$.from') = ? AND json_extract(payload, '$.to') = ?"
+      )
+      .get(runId, from, to) as { s: number | null };
+    return row.s ?? 0;
+  }
+
+  /**
+   * Pit-stop answers the operator gave in words, oldest first. Answers from a
+   * deciding skill are left out: they steer the run, but they are not the
+   * operator changing what they asked for.
+   */
+  operatorPitStopDecisions(runId: string): { stop: number; action: string; feedback: string }[] {
+    const rows = this.db
+      .prepare("SELECT payload FROM events WHERE runId = ? AND type = 'run.pitstop_resolved' ORDER BY seq")
+      .all(runId) as { payload: string }[];
+    return rows
+      .map((r) => JSON.parse(r.payload) as { stop: number; action: string; feedback?: string; decidedBy?: string })
+      .filter((p) => (p.decidedBy ?? "operator") === "operator" && (p.feedback ?? "").trim())
+      .map((p) => ({ stop: p.stop, action: p.action, feedback: (p.feedback ?? "").trim() }));
+  }
+
   lastEventSeq(runId: string, type: string): number {
     const row = this.db.prepare("SELECT MAX(seq) s FROM events WHERE runId = ? AND type = ?").get(runId, type) as { s: number | null };
     return row.s ?? 0;

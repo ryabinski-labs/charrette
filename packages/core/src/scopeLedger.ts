@@ -50,7 +50,16 @@ export type ScopeStatus =
   /** Nothing live claims it, and nobody was asked. */
   | "dropped"
   /** No task ever claimed it, in any state. */
-  | "unclaimed";
+  | "unclaimed"
+  /**
+   * The specification gave it no scenario, so no task *could* claim it: a task
+   * claims a requirement only through one of its scenarios. Reported, never
+   * held on — holding a run over a claim nothing can make is a gate no answer
+   * opens (run 614e06d5 sat BLOCKED on REQ-FASTAPI-BACKEND, a backend its own
+   * live check had just driven end to end). The intent check is handed every
+   * requirement and is what judges these.
+   */
+  | "unspecified";
 
 export interface ScopeEntry {
   id: string;
@@ -71,6 +80,8 @@ export interface ScopeLedger {
   dropped: ScopeEntry[];
   /** Requirements no task ever claimed. Also nobody's decision, and visible at the plan gate too. */
   unclaimed: ScopeEntry[];
+  /** Requirements the specification gave no scenario, which nothing can claim. */
+  unspecified: ScopeEntry[];
 }
 
 const LIVE: TaskState[] = ["PENDING", "READY", "WORKING", "QA", "QA_FAILED", "ACCEPTED"];
@@ -110,7 +121,11 @@ export function scopeLedger(spec: RunSpec, tasks: ScopedTask[], writeOffs: Write
     // are put to the operator at the closing stop, and one that could be
     // accepted but not recorded would hold the run for ever however many times
     // it was answered.
-    const status: ScopeStatus = !mine.length
+    const status: ScopeStatus = !scenarios.length
+      ? answered.has(r.id)
+        ? "written-off"
+        : "unspecified"
+      : !mine.length
       ? answered.has(r.id)
         ? "written-off"
         : "unclaimed"
@@ -137,6 +152,7 @@ export function scopeLedger(spec: RunSpec, tasks: ScopedTask[], writeOffs: Write
     writtenOff: entries.filter((e) => e.status === "written-off").length,
     dropped: entries.filter((e) => e.status === "dropped"),
     unclaimed: entries.filter((e) => e.status === "unclaimed"),
+    unspecified: entries.filter((e) => e.status === "unspecified"),
   };
 }
 

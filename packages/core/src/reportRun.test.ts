@@ -556,8 +556,10 @@ describe("what the specification proves, on the finished page", () => {
     expect(scope.shipped).toBe(1);
     expect(scope.writtenOff).toEqual([{ id: "REQ-002", text: "refund a charge", answer: "next run" }]);
     expect(scope.dropped).toEqual([]);
-    // REQ-003 is a nice-to-have nobody claimed: reported, never a hold.
-    expect(scope.unclaimed).toEqual([{ id: "REQ-003", text: "export a report" }]);
+    // REQ-003 has no scenario, so nothing could claim it: reported as
+    // unspecified rather than unclaimed, and never a hold.
+    expect(scope.unclaimed).toEqual([]);
+    expect(scope.unspecified).toEqual([{ id: "REQ-003", text: "export a report" }]);
   });
 
   it("names what a dropped requirement was last seen doing", () => {

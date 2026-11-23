@@ -100,7 +100,33 @@ describe("reconciling requirements rather than tasks", () => {
 
   it("has an empty ledger for a specification with no requirements", () => {
     const l = scopeLedger(RunSpec.parse({ feature: "f" }), [task("a", "MERGED", [])]);
-    expect(l).toMatchObject({ entries: [], shipped: 0, writtenOff: 0, dropped: [], unclaimed: [] });
+    expect(l).toMatchObject({ entries: [], shipped: 0, writtenOff: 0, dropped: [], unclaimed: [], unspecified: [] });
+  });
+
+  /**
+   * Run 614e06d5 held BLOCKED on REQ-FASTAPI-BACKEND, a requirement its
+   * specification gave no scenario — so no task could ever claim it, however
+   * much of it merged, and no pit-stop answer could open the gate.
+   */
+  it("calls a requirement with no scenario unspecified, not unclaimed, and never holds the run on it", () => {
+    const s = spec({
+      requirements: [
+        { id: "REQ-1", text: "take payment", priority: "P0" },
+        { id: "REQ-API", text: "a backend", priority: "P1" },
+      ],
+      scenarios: [{ id: "SC-1", requirement: "REQ-1", priority: "P0", level: "unit", oracle: "o" }],
+    });
+    const l = scopeLedger(s, [task("a", "MERGED", ["SC-1"])]);
+    expect(statuses(l)).toMatchObject({ "REQ-1": "shipped", "REQ-API": "unspecified" });
+    expect(l.unclaimed).toEqual([]);
+    expect(l.unspecified.map((e) => e.id)).toEqual(["REQ-API"]);
+    expect(scopeUnmet(l)).toEqual([]);
+  });
+
+  it("still records a write-off against a requirement with no scenario", () => {
+    const s = spec({ scenarios: [] });
+    const l = scopeLedger(s, [], [{ requirementId: "REQ-2", answer: "not this run", decidedBy: "operator" }]);
+    expect(statuses(l)).toMatchObject({ "REQ-1": "unspecified", "REQ-2": "written-off" });
   });
 });
 
@@ -134,7 +160,7 @@ describe("what the closing gate says about scope", () => {
     const many = RunSpec.parse({
       feature: "f",
       requirements: Array.from({ length: 6 }, (_, i) => ({ id: `REQ-${i + 1}`, text: `thing ${i + 1}`, priority: "P0" })),
-      scenarios: [],
+      scenarios: Array.from({ length: 6 }, (_, i) => ({ id: `SC-${i + 1}`, requirement: `REQ-${i + 1}`, priority: "P0", level: "unit", oracle: "o" })),
     });
     expect(scopeUnmet(scopeLedger(many, []))[0]).toContain("+2 more");
   });
