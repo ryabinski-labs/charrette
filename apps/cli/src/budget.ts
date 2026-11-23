@@ -82,5 +82,10 @@ export function watchBudgetCommands(
     }
   };
   process.stdin.on("data", onData);
-  return () => process.stdin.off("data", onData);
+  return () => {
+    process.stdin.off("data", onData);
+    // Removing the listener does not stop the read: a TTY left flowing holds the
+    // event loop, and the process sits idle after its final report until Ctrl-C.
+    process.stdin.pause();
+  };
 }

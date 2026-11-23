@@ -21,7 +21,7 @@ import {
 } from "./defaults.js";
 import { TerminalChat } from "./chat.js";
 import { armCrashLog } from "./crashlog.js";
-import { clearDashboard, liveDashboardUrl, recordDashboard, recordedDashboard } from "./dashboardLink.js";
+import { liveDashboardUrl, recordDashboard, recordedDashboard, retireDashboard } from "./dashboardLink.js";
 import { notifyBanner, notifyDone, notifyStopped, notifyTarget, sendPush, sendTestNotice, watchPush, type NotifyTarget } from "./notify.js";
 import { mailBanner, mailTarget, watchGateMail } from "./gateMail.js";
 import { collectVersion, formatVersion } from "./version.js";
@@ -83,10 +83,12 @@ export function makeDashboardFactory(want: boolean, port: number | undefined, re
     },
     // Guarded the same way `connect` is: a caller is free not to wire
     // `gateOverride` into anything, and then there is no server to stop.
+    // Retired rather than deleted: the URL has to outlive this process for a
+    // paused run to come back at it, and only this process's own record changes.
     stop: async () => {
       if (dash) {
         await dash.stop();
-        clearDashboard(repoPath);
+        retireDashboard(repoPath);
       }
     },
   };
@@ -963,6 +965,9 @@ export function buildProgram(): Command {
       if (!runId) {
         let pick: ReturnType<typeof store.listRuns>[number] | undefined;
         for (const r of store.listRuns()) {
+          // Before `resumable`, which asks GitHub and writes to a run that may
+          // be somebody else's to write to.
+          if (!["ABORTED", "DONE"].includes(r.state)) controller.assertNotHeld(r.id);
           if (await resumable(r.id, r.state)) {
             pick = r;
             break;
@@ -975,6 +980,9 @@ export function buildProgram(): Command {
         runId = pick.id;
         process.stdout.write(`Resuming run ${runId} [${pick.state}] — ${pick.assignment.slice(0, 80).replace(/\n.*/s, "")}\n`);
       }
+      // A run another process is driving is refused here, before this one
+      // patches its config, starts a dashboard, or touches its link record.
+      controller.assertNotHeld(runId);
       const existing = store.getRun(runId);
       if (existing && !(await resumable(runId, existing.state))) {
         process.stdout.write(`Run ${runId} already finished (${existing.state}); there is nothing to resume.\n`);
@@ -1184,7 +1192,16 @@ export function buildProgram(): Command {
         const newer = await newerModelBanner(resumed.config.models);
         if (newer.length) process.stdout.write(`${newer.join("\n")}\n`);
       }
-      const url = await dash.start();
+      // Taken before the dashboard starts, so losing a race with another resume
+      // is refused with nothing started and nothing recorded.
+      const releaseRun = controller.holdRun(runId);
+      let url: string | null;
+      try {
+        url = await dash.start();
+      } catch (e) {
+        releaseRun();
+        throw e;
+      }
       if (url) process.stdout.write(`Dashboard: ${url}\n(keep the fragment — it is your auth token)\n`);
       process.stdout.write("Type 'budget run <usd>' any time to raise the cap before it's hit.\n");
       // Only a run interrupted mid-conversation needs the terminal back: opening
@@ -1215,6 +1232,7 @@ export function buildProgram(): Command {
         stopBudgetWatch();
         chat?.close();
         await dash.stop();
+        releaseRun();
       }
     });
 
@@ -1504,7 +1522,10 @@ export function buildProgram(): Command {
       // same store, and the event log outlives the process that wrote it.
       const repo = resolveRepoRoot(opts.repo);
       const { store, bus } = makeController(repo);
-      const dash = new Dashboard(store, bus, { port: opts.port === undefined ? undefined : port(opts.port), includeFinished: true });
+      // The URL a paused run left on record is the tab the operator has open.
+      // Reusing it keeps that tab working here, and keeps it for the next resume.
+      const prior = recordedDashboard(repo);
+      const dash = new Dashboard(store, bus, { port: opts.port === undefined ? undefined : port(opts.port), preferPort: prior?.port, token: prior?.token, includeFinished: true });
       const url = await dash.start();
       recordDashboard(repo, url);
       process.stdout.write(`\ndashboard  ${url}   (the fragment is your auth token)\n\nRead-only: no run is executing, so gates and feedback have nothing to reach.\nCtrl-C to stop.\n`);
@@ -1521,7 +1542,7 @@ export function buildProgram(): Command {
         for (const s of signals) process.on(s, done);
       });
       await dash.stop();
-      clearDashboard(repo);
+      retireDashboard(repo);
       process.stdout.write("dashboard stopped.\n");
     });
 

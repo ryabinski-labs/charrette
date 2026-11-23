@@ -159,6 +159,42 @@ function build(opts: {
 
 const ROLES = { planner: planner(twoEpicPlan), worker, qa: () => QA_PASS, validator: () => INTENT_PASS, demo: demoOk, reviewer: () => REVIEW_OK };
 
+describe("what the operator decided at an earlier stop", () => {
+  const WORDS = "Meta comes in by CSV import, not the live API.";
+
+  it("reaches the demo, the reviewers and QA at everything after it", async () => {
+    const dir = repo();
+    const { pool, specs } = rolePool(ROLES);
+    const { controller, stops } = build({
+      repoPath: dir,
+      pool,
+      decide: (stop) => (stop.number === 1 ? { action: "redirect", feedback: WORDS } : { action: "continue", feedback: "" }),
+    });
+
+    await controller.startRun("build a thing", RunConfig.parse(BASE));
+
+    expect(stops.length).toBe(2);
+    const carried = (role: string) => specs.filter((s) => s.role === role).map((s) => s.prompt.includes(WORDS));
+    // The first of each ran before the operator had said anything.
+    expect(carried("demo")).toEqual([false, true]);
+    expect(carried("reviewer")).toEqual([false, false, true, true]);
+    expect(carried("qa")).toEqual([false, true]);
+  });
+
+  it("reaches the product-manager decider", async () => {
+    vi.spyOn(Store.prototype, "operatorPitStopDecisions").mockReturnValue([{ stop: 16, action: "redirect", feedback: WORDS }]);
+    const dir = repo();
+    const { pool, specs } = rolePool({ ...ROLES, pm: () => '```json\n{"action":"continue","why":"on track","feedback":""}\n```' });
+    const { controller } = build({ repoPath: dir, pool });
+
+    await controller.startRun("build a thing", RunConfig.parse({ ...BASE, pitStop: { decidedBy: "product-manager" } }));
+
+    const decider = specs.find((s) => s.role === "pm")!;
+    expect(decider.prompt).toContain("SUPERSEDE the brief");
+    expect(decider.prompt).toContain(WORDS);
+  });
+});
+
 describe("stopping at an epic boundary", () => {
   it("shows the operator the product running, and what it could not reach", async () => {
     const dir = repo();

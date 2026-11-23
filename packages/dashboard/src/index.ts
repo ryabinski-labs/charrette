@@ -3,6 +3,7 @@ import Fastify from "fastify";
 import { Bus, BudgetGate, GateHandler, IntakeBridge, IntentPosture, PitStop, PitStopDecision, Store, SubscriptionChoice, SubscriptionGate, TaskGate, intentPosture, originSlug } from "@charrette/core";
 import { registerDemoRoutes } from "./demoArtifacts.js";
 import { PAGE_HTML } from "./page.js";
+import { environmentSecrets, payloadMasker } from "./redact.js";
 
 export interface DashboardOptions {
   /** Bind exactly this port. Omitted, the dashboard takes the first free one. */
@@ -57,6 +58,8 @@ export interface FeedbackSink {
 const DEFAULT_PORT = 4777;
 /** How far above the default to look for a free port before giving up. */
 const PORT_SCAN = 32;
+/** How long a closing event stream gets to deliver its last frames. */
+const STREAM_END_MS = 1_000;
 
 /**
  * Runs that will never move again on their own. The CLI stops the dashboard as
@@ -141,6 +144,9 @@ export class Dashboard implements GateHandler {
    */
   private intake: IntakeBridge | null = null;
 
+  /** One closer per open event stream; see `stop`. */
+  private streams = new Set<() => Promise<void>>();
+
   constructor(private store: Store, private bus: Bus, private opts: DashboardOptions = {}) {
     this.token = opts.token ?? randomBytes(16).toString("hex");
   }
@@ -169,6 +175,11 @@ export class Dashboard implements GateHandler {
 
   async start(): Promise<string> {
     const app = this.app;
+    // Applied to what leaves over the wire and nothing else: the database keeps
+    // the record as it happened. Agents' commands carry values like
+    // `AWS_SECRET_ACCESS_KEY=...` inline, and the feed and the pit stop report
+    // are read on screens that get shared.
+    const masked = payloadMasker([this.token, ...environmentSecrets(process.env)]);
 
     // An action that takes no body still gets posted with a JSON content type,
     // because that is what every other call on this page sends and the header is
@@ -219,7 +230,7 @@ export class Dashboard implements GateHandler {
           githubRepo: await githubSlug(run.config.githubRepo, run.repoPath),
         }))
       );
-      return {
+      return masked({
         runs,
         planGate: this.planPayload,
         budgetGate: this.budgetPayload,
@@ -230,7 +241,7 @@ export class Dashboard implements GateHandler {
         // because to anything watching this run that is exactly what it is: the
         // run is stopped until somebody answers.
         intake: this.intake?.pending() ?? null,
-      };
+      });
     });
 
     app.get("/api/runs/:id/events", async (req, reply) => {
@@ -251,13 +262,18 @@ export class Dashboard implements GateHandler {
       // a slow browser neither loses events nor buffers the entire run in RAM.
       let pending = true;
       let blocked = false;
-      const flushNow = () => {
-        if (blocked || !pending) return;
+      let nextPage: NodeJS.Immediate | undefined;
+      // One page per turn of the event loop unless told otherwise. Masking makes
+      // a page cost real time, and this loop is shared with the run: replaying
+      // a long history in one go would stall every agent while a tab reconnects.
+      let ended = false;
+      const flushNow = (whole = false) => {
+        if (ended || blocked || !pending) return;
         for (;;) {
           const batch = this.store.eventsSince(runId, after, 500);
           for (const { seq, event } of batch) {
             after = seq;
-            if (!reply.raw.write(`id: ${seq}\ndata: ${JSON.stringify(event)}\n\n`)) {
+            if (!reply.raw.write(`id: ${seq}\ndata: ${JSON.stringify(masked(event))}\n\n`)) {
               blocked = true;
               return;
             }
@@ -266,20 +282,44 @@ export class Dashboard implements GateHandler {
             pending = false;
             return;
           }
+          if (!whole) {
+            clearImmediate(nextPage);
+            nextPage = setImmediate(() => flushNow());
+            return;
+          }
         }
       };
       const drain = () => { blocked = false; flushNow(); };
       reply.raw.on("drain", drain);
-      const flush = setInterval(flushNow, 100);
+      const flush = setInterval(() => flushNow(), 100);
+      const endStream = () =>
+        new Promise<void>((done) => {
+          clearImmediate(nextPage);
+          flushNow(true);
+          // Before anything can write again: the socket's next `drain` would
+          // otherwise be a write after end, which destroys the response.
+          ended = true;
+          // Waited for, because `app.close()` destroys a connection whose
+          // response has ended even with its last frames still queued. Bounded,
+          // because a tab that has stopped reading never lets it finish.
+          const giveUp = setTimeout(done, STREAM_END_MS);
+          reply.raw.end(() => {
+            clearTimeout(giveUp);
+            done();
+          });
+        });
+      this.streams.add(endStream);
       const unsubscribe = this.bus.subscribe(({ event }) => {
         if (event.runId !== runId) return;
         pending = true;
         // The run ending is the one event the operator most needs and the one most
         // likely to be lost: the CLI tears the dashboard down within milliseconds of
         // it, well inside the coalescing window. Push it out synchronously.
-        if (event.type === "run.state_changed" && TERMINAL_RUN_STATES.has(event.to)) flushNow();
+        if (event.type === "run.state_changed" && TERMINAL_RUN_STATES.has(event.to)) flushNow(true);
       });
       req.raw.on("close", () => {
+        this.streams.delete(endStream);
+        clearImmediate(nextPage);
         clearInterval(flush);
         reply.raw.off("drain", drain);
         unsubscribe();
@@ -630,7 +670,13 @@ export class Dashboard implements GateHandler {
     );
   }
 
+  /**
+   * Ends every open event stream first. `app.close()` waits for connections to
+   * finish and an event stream never does, so one open browser tab kept the
+   * process alive, idle, after its final report until someone pressed Ctrl-C.
+   */
   async stop(): Promise<void> {
+    await Promise.all([...this.streams].map((end) => end()));
     await this.app.close();
   }
 

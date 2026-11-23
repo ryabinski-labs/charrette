@@ -1,9 +1,9 @@
 import { createServer, type Server } from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { clearDashboard, liveDashboardUrl, recordDashboard, recordedDashboard } from "./dashboardLink.js";
+import { clearDashboard, liveDashboardUrl, recordDashboard, recordedDashboard, retireDashboard } from "./dashboardLink.js";
 
 const made: string[] = [];
 const servers: Server[] = [];
@@ -137,6 +137,115 @@ describe("finding a dashboard that is actually up", () => {
     const { url } = await fakeDashboard();
     recordDashboard(dir, url.replace(/#.*$/, "#staleandwrong"));
     expect(await liveDashboardUrl(dir)).toBeNull();
+  });
+});
+
+/**
+ * One record, belonging to whoever is named in it. Run 614e06d5's live record
+ * was overwritten and then deleted by a second `resume` on its way to being
+ * refused. pid 1 stands in for "another process, alive": it always exists and
+ * is never this one.
+ */
+describe("a record that belongs to another live process", () => {
+  const file = (dir: string) => path.join(dir, ".charrette", "dashboard.json");
+  const theirs = { url: "http://127.0.0.1:4777/#theirtoken", pid: 1 };
+  const write = (dir: string, record: unknown) => writeFileSync(file(dir), `${JSON.stringify(record)}\n`);
+  const read = (dir: string) => JSON.parse(readFileSync(file(dir), "utf8"));
+
+  it("is not overwritten", () => {
+    const dir = repo();
+    write(dir, theirs);
+    recordDashboard(dir, "http://127.0.0.1:4778/#minetoken");
+    expect(read(dir)).toEqual(theirs);
+  });
+
+  it("is not cleared", () => {
+    const dir = repo();
+    write(dir, theirs);
+    clearDashboard(dir);
+    expect(read(dir)).toEqual(theirs);
+  });
+
+  it("is not retired", () => {
+    const dir = repo();
+    write(dir, theirs);
+    retireDashboard(dir);
+    expect(read(dir)).toEqual(theirs);
+  });
+
+  it("does not hand its token to a resume", () => {
+    const dir = repo();
+    write(dir, theirs);
+    expect(recordedDashboard(dir)).toBeNull();
+  });
+
+  it("survives a slow answer, because a busy run is not a dead one", async () => {
+    const dir = repo();
+    const server = createServer(() => undefined);
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as { port: number };
+    const record = { url: `http://127.0.0.1:${port}/#token`, pid: 1 };
+    write(dir, record);
+
+    expect(await liveDashboardUrl(dir)).toBeNull();
+
+    expect(read(dir)).toEqual(record);
+    server.closeAllConnections();
+  });
+});
+
+describe("pausing and coming back at the same URL", () => {
+  const file = (dir: string) => path.join(dir, ".charrette", "dashboard.json");
+  const URL_ON_RECORD = "http://127.0.0.1:4791/#0123456789abcdef0123456789abcdef";
+
+  it("keeps the port and the token after this process's dashboard stops", () => {
+    const dir = repo();
+    recordDashboard(dir, URL_ON_RECORD);
+
+    retireDashboard(dir);
+
+    expect(recordedDashboard(dir)).toEqual({ port: 4791, token: "0123456789abcdef0123456789abcdef" });
+  });
+
+  it("says nothing is serving it, without forgetting it, when `status` or `pause` asks", async () => {
+    const dir = repo();
+    recordDashboard(dir, URL_ON_RECORD);
+    retireDashboard(dir);
+
+    expect(await liveDashboardUrl(dir)).toBeNull();
+
+    expect(existsSync(file(dir))).toBe(true);
+    expect(recordedDashboard(dir)).not.toBeNull();
+  });
+
+  it("is taken over by the next process to serve it", () => {
+    const dir = repo();
+    recordDashboard(dir, URL_ON_RECORD);
+    retireDashboard(dir);
+
+    recordDashboard(dir, URL_ON_RECORD);
+
+    expect(JSON.parse(readFileSync(file(dir), "utf8"))).toEqual({ url: URL_ON_RECORD, pid: process.pid });
+  });
+
+  it("has nothing to retire when no record exists", () => {
+    const dir = repo();
+    expect(() => retireDashboard(dir)).not.toThrow();
+    expect(existsSync(file(dir))).toBe(false);
+  });
+
+  it("does not mind a record it can no longer rewrite", () => {
+    const dir = repo();
+    recordDashboard(dir, URL_ON_RECORD);
+    const real = file(dir);
+    const before = readFileSync(real, "utf8");
+    chmodSync(real, 0o400);
+    expect(() => retireDashboard(dir)).not.toThrow();
+    chmodSync(real, 0o600);
+    // Root ignores the mode bits, so only that it did not throw is portable.
+    expect(readFileSync(real, "utf8").length).toBeGreaterThan(0);
+    expect(before).toContain(URL_ON_RECORD);
   });
 });
 

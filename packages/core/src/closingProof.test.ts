@@ -534,6 +534,16 @@ describe("the live-exercise gate", () => {
     expect(logs(events)).toContainEqual(expect.stringContaining("live exercise: all 3 step(s) worked"));
   });
 
+  it("tells the live agent what the operator decided at a pit stop", async () => {
+    vi.spyOn(Store.prototype, "operatorPitStopDecisions").mockReturnValue([{ stop: 4, action: "redirect", feedback: "Payments use the local stand-in." }]);
+    const { pool, specs } = rolePool(exercised(() => liveOk()));
+    const { controller } = build({ repoPath: repo(), pool });
+
+    await controller.startRun("build a checkout", RunConfig.parse(LIVE_BASE), operator());
+
+    expect(specs.find((s) => s.role === "live")!.prompt).toContain("- stop 4 (redirect): Payments use the local stand-in.");
+  });
+
   it("carries the playbook the operator pinned to the live role", async () => {
     const dir = repo();
     // The live agent is the one role with no lens of its own — it matches on

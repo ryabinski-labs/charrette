@@ -53,9 +53,38 @@ on. Before then, minor versions may break things.
   symlinks, and mask credentials on the server for view, new tab and download
   alike. HTML and SVG are only ever sent as plain text. Pixels in screenshots
   cannot be masked.
+- **The activity feed and pit stop reports are masked too.** Everything the event
+  stream and `/api/state` send now goes through the same server-side masking, so
+  a command with `AWS_SECRET_ACCESS_KEY=...` inline no longer reaches the page.
+  The database still holds the original. The masking rules also lost two ways a
+  long line could stall or crash the process driving the run.
+- **Demo and live agents have a standing rule against real third-party systems.**
+  No real API calls with real credentials, no minting or reading credentials
+  (`gcloud` tokens, the Keychain), no changes to a real account. A step that needs
+  one is reported as unverified.
 
 ### Fixed
 
+- **A command that starts a background server no longer hangs for 30 minutes.**
+  The Bash tool on non-Anthropic sessions waited for its output pipes to close,
+  and a backgrounded server holds them open. It now returns when the shell exits,
+  after a short drain, and the server keeps running.
+- **Pit stop decisions reach every agent that judges the work.** Reviewers, the
+  pit stop decider, the demo and live agents, QA, the advisor, the production
+  validator and the validator's second pass now get them, marked as superseding
+  the brief. Reviewers had been calling the operator's own decision scope drift.
+- **A run keeps pushing after its pull request exists.** A merged CI fix used to
+  stay local while the CI loop waited for it. The wait now also reads the checks
+  of the commit it pushed rather than the one before.
+- **A draft on the run's branch is taken over.** Whoever opened it, and however
+  many times the run restarted, it gets the final description and is marked ready
+  unless something on the record still holds it.
+- **A refused `charrette resume` leaves the live run alone.** It used to start a
+  dashboard and delete the live run's `dashboard.json` before exiting on the lock.
+- **Pausing and resuming keeps the same dashboard URL,** as documented. The record
+  was being deleted on the way out, so the token changed.
+- **The process exits after a pause.** An open browser tab and the terminal's
+  stdin each kept it alive, idle, until Ctrl-C.
 - **The dashboard's model list offers Gemini 4 Carbon, Neon and Hydrogen, and
   no longer offers Haiku.** All three now have prices per million tokens:
   Carbon $4/$20 (its standing rate from 1 December 2026), Neon $3/$15, Hydrogen

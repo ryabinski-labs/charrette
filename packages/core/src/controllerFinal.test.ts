@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { RunConfig } from "@charrette/shared";
 import type { CharretteEvent } from "@charrette/shared";
 import { Bus } from "./bus.js";
@@ -214,6 +214,22 @@ describe("following a deploy the repo cannot report on", () => {
     // Unknown deployment evidence cannot establish that this change is live.
     expect(store.prodVerdict(runId)).toBeNull();
     expect(store.getRun(runId)!.state).toBe("VERIFYING");
+  });
+
+  it("tells the production validator what the operator decided at a pit stop", async () => {
+    const decisions = vi.spyOn(Store.prototype, "operatorPitStopDecisions").mockReturnValue([{ stop: 7, action: "redirect", feedback: "Meta stays on CSV import." }]);
+    const dir = repo(true);
+    const { adapter } = gh({ pulls: MERGED_PR, checks: { listForRef: async () => ({ data: [{ name: "deploy", status: "completed", conclusion: "success" }] }) } });
+    const { pool, specs } = rolePool({
+      planner: planner(["task-a"]), worker, qa: () => QA_PASS, validator: () => INTENT_PASS,
+      prod: () => '```json\n{"verdict":"PASS","findings":[],"summary":"ok"}\n```',
+    });
+    const { controller } = build({ repoPath: dir, pool, github: adapter });
+
+    await controller.startRun("build a thing", RunConfig.parse({ ...BASE, prodUrl: "https://app.example.com" }));
+    decisions.mockRestore();
+
+    expect(specs.find((s) => s.role === "prod")!.prompt).toContain("- stop 7 (redirect): Meta stays on CSV import.");
   });
 
   it("counts production findings, and says unstated when there are none", async () => {

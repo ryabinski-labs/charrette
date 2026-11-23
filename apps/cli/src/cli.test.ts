@@ -31,6 +31,8 @@ const h = vi.hoisted(() => {
     // recorded call stops compiling even while the test passes.
     startRun: vi.fn(async (_assignment: string, _config: unknown, _intake?: unknown) => "run-1"),
     resume: vi.fn(async () => undefined),
+    assertNotHeld: vi.fn((_runId: string) => undefined),
+    holdRun: vi.fn((_runId: string) => () => undefined as void),
     outcome: vi.fn(() => ({
       prs: [] as { number: number; title: string }[],
       parked: [] as unknown[],
@@ -65,7 +67,7 @@ const h = vi.hoisted(() => {
     dashboardArgs: [] as unknown[][],
     liveDashboardUrlMock: vi.fn(async () => null as string | null),
     recordDashboardMock: vi.fn(),
-    clearDashboardMock: vi.fn(),
+    retireDashboardMock: vi.fn(),
     // Null = no dashboard was recorded for this repo, which is every test that
     // is not about resuming onto the operator's existing tab.
     recordedDashboardMock: vi.fn((): { port: number; token: string } | null => null),
@@ -258,7 +260,7 @@ vi.mock("node:readline/promises", () => ({ createInterface: h.createInterfaceMoc
 vi.mock("./dashboardLink.js", () => ({
   liveDashboardUrl: h.liveDashboardUrlMock,
   recordDashboard: h.recordDashboardMock,
-  clearDashboard: h.clearDashboardMock,
+  retireDashboard: h.retireDashboardMock,
   recordedDashboard: h.recordedDashboardMock,
 }));
 
@@ -350,6 +352,7 @@ beforeEach(() => {
   h.storeMethods.prodVerdict.mockReturnValue(null);
   h.controllerMethods.startRun.mockResolvedValue("run-1");
   h.controllerMethods.resume.mockResolvedValue(undefined);
+  h.controllerMethods.holdRun.mockReturnValue(() => undefined);
   h.controllerMethods.outcome.mockReturnValue({ ...RUN_OUTCOME });
   h.controllerMethods.regroupPrs.mockResolvedValue(null);
   h.controllerMethods.hasRecoverableWork.mockReturnValue(false);
@@ -420,7 +423,7 @@ beforeEach(() => {
   h.runLockHolderMock.mockReset().mockReturnValue(null);
   h.liveDashboardUrlMock.mockReset().mockResolvedValue(null);
   h.recordDashboardMock.mockReset();
-  h.clearDashboardMock.mockReset();
+  h.retireDashboardMock.mockReset();
   h.recordedDashboardMock.mockReset();
   h.recordedDashboardMock.mockReturnValue(null);
   h.armCrashLogMock.mockReset();
@@ -3061,7 +3064,98 @@ describe("the dashboard factory", () => {
 
     await expect(dash.stop()).resolves.toBeUndefined();
     expect(h.DashboardMock).not.toHaveBeenCalled();
-    expect(h.clearDashboardMock).not.toHaveBeenCalled();
+    expect(h.retireDashboardMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the record for the next resume when its server stops, rather than deleting it", async () => {
+    const dash = makeDashboardFactory(true, undefined, "/repo", true);
+    dash.gateOverride!({} as never, {} as never);
+
+    await dash.stop();
+
+    expect(h.dashboardMethods.stop).toHaveBeenCalled();
+    expect(h.retireDashboardMock).toHaveBeenCalledWith("/repo");
+  });
+});
+
+/**
+ * Run 614e06d5: a second `charrette resume` on a live run started a dashboard on
+ * the next port, overwrote and then cleared the live run's record, and only then
+ * exited on the lock. `charrette pause` said nothing was running and the next
+ * restart minted a new token, breaking the operator's open tab.
+ */
+describe("a resume refused because another process is driving the run", () => {
+  const refusal = Object.assign(new Error("run run-1 is already being driven by charrette pid 4242"), { name: "RunLocked" });
+  const live = { id: "run-1", state: "EXECUTING", assignment: "a", config: { models: {}, deterministicChecks: [] } };
+
+  it("starts no dashboard, records nothing and patches nothing when named", async () => {
+    h.storeMethods.getRun.mockReturnValue(live);
+    h.controllerMethods.assertNotHeld.mockImplementationOnce(() => {
+      throw refusal;
+    });
+
+    await expect(cli("resume", "run-1", "--repo", "/repo")).rejects.toThrow(/already being driven/);
+
+    expect(h.dashboardMethods.start).not.toHaveBeenCalled();
+    expect(h.recordDashboardMock).not.toHaveBeenCalled();
+    expect(h.retireDashboardMock).not.toHaveBeenCalled();
+    expect(h.storeMethods.patchRunConfig).not.toHaveBeenCalled();
+    expect(h.controllerMethods.resume).not.toHaveBeenCalled();
+  });
+
+  it("refuses before asking GitHub about a run it picked for itself", async () => {
+    h.storeMethods.listRuns.mockReturnValue([{ ...live, state: "PR_REVIEW" }]);
+    h.controllerMethods.assertNotHeld.mockImplementationOnce(() => {
+      throw refusal;
+    });
+
+    await expect(cli("resume", "--repo", "/repo")).rejects.toThrow(/already being driven/);
+
+    expect(h.controllerMethods.refreshCiStatus).not.toHaveBeenCalled();
+    expect(h.dashboardMethods.start).not.toHaveBeenCalled();
+  });
+
+  it("does not ask about a finished run while looking for one to resume", async () => {
+    h.storeMethods.listRuns.mockReturnValue([{ ...live, id: "run-done", state: "DONE" }]);
+
+    await cli("resume", "--repo", "/repo");
+
+    expect(h.controllerMethods.assertNotHeld).not.toHaveBeenCalled();
+  });
+
+  it("takes the lock before the dashboard, so losing the race also records nothing", async () => {
+    h.storeMethods.getRun.mockReturnValue(live);
+    h.controllerMethods.holdRun.mockImplementationOnce(() => {
+      throw refusal;
+    });
+
+    await expect(cli("resume", "run-1", "--repo", "/repo")).rejects.toThrow(/already being driven/);
+
+    expect(h.dashboardMethods.start).not.toHaveBeenCalled();
+    expect(h.recordDashboardMock).not.toHaveBeenCalled();
+  });
+
+  it("releases the lock once the run is over", async () => {
+    const release = vi.fn();
+    h.controllerMethods.holdRun.mockReturnValueOnce(release);
+    h.storeMethods.getRun.mockReturnValue(live);
+
+    await cli("resume", "run-1", "--repo", "/repo");
+
+    expect(h.controllerMethods.resume).toHaveBeenCalled();
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases the lock when the dashboard cannot start", async () => {
+    const release = vi.fn();
+    h.controllerMethods.holdRun.mockReturnValueOnce(release);
+    h.storeMethods.getRun.mockReturnValue(live);
+    h.dashboardMethods.start.mockRejectedValueOnce(new Error("dashboard port 5000 is already in use"));
+
+    await expect(cli("resume", "run-1", "--repo", "/repo")).rejects.toThrow(/already in use/);
+
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(h.controllerMethods.resume).not.toHaveBeenCalled();
   });
 });
 

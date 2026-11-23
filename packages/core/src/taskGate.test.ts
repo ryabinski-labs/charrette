@@ -257,6 +257,33 @@ describe("the task-escalation gate", () => {
     expect(workerPrompts[1]).toContain("REFUTED");
   });
 
+  it("tells the advisor what the operator decided at a pit stop", async () => {
+    vi.spyOn(Store.prototype, "operatorPitStopDecisions").mockReturnValue([{ stop: 2, action: "redirect", feedback: "Keep the CSV import." }]);
+    let planning = 0;
+    const advisorPrompts: string[] = [];
+    const pool = {
+      async run(spec: AgentSpec): Promise<AgentResult> {
+        let resultText = '{"verdict":"PASS","summary":"n/a"}';
+        if (spec.role === "planner") resultText = planning++ === 0 ? DOCS : DAG;
+        else if (spec.role === "worker") {
+          writeFileSync(path.join(spec.cwd, "feature.txt"), `attempt ${Math.random()}\n`);
+          gitIn(spec.cwd, "add", "-A");
+          gitIn(spec.cwd, "commit", "-m", "wip");
+          resultText = "worker done";
+        } else if (spec.role === "qa") resultText = '{"verdict":"FAIL","reasons":["still wrong"],"mustFix":["fix it"]}';
+        else if (spec.role === "advisor") {
+          advisorPrompts.push(spec.prompt);
+          resultText = '```json\n{"recommendation":"keep going"}\n```';
+        }
+        return { sessionId: `s${Math.random()}`, resultText, costUsd: 0, turns: 1, outcome: "done" };
+      },
+    } as unknown as AgentPool;
+
+    await run(gates(async () => null), pool);
+
+    expect(advisorPrompts[0]).toContain("- stop 2 (redirect): Keep the CSV import.");
+  });
+
   it("leaves the answer alone when the advisor checked nothing", async () => {
     // No bare "What the advisor checked" heading over an empty list: the draft
     // is what the operator sends, and a heading with nothing under it reads as

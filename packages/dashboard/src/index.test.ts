@@ -77,8 +77,16 @@ describe("port selection", () => {
     // than read it.
     for (let attempt = 1; ; attempt++) {
       // A free base port, then squat on it exactly as a running charrette would.
-      const base = await freeAdjacentBase();
-      held.push(await occupy(base));
+      // The same race one step earlier: a parallel worker's dashboard can take
+      // the port between the probe releasing it and this squatting on it.
+      let base: number;
+      try {
+        base = await freeAdjacentBase();
+        held.push(await occupy(base));
+      } catch (e) {
+        if (attempt >= 5) throw e;
+        continue;
+      }
 
       const second = dashboard();
       started.push(second);

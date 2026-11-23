@@ -586,6 +586,50 @@ ${text}
 This comes from the human supervising the run. It overrides anything in your original instructions that contradicts it. Incorporate it and continue; your final message must still follow the output format your instructions specify.`;
 }
 
+/** A pit stop answer the operator gave in their own words. */
+export type OperatorDecision = { stop: number; action: string; feedback: string };
+
+/** The most of any one decision an agent is shown, and of all of them together. */
+const OPERATOR_DECISION_MAX = 1_500;
+export const OPERATOR_DECISIONS_BUDGET = 6_000;
+
+/**
+ * What the operator decided at pit stops, for every agent that judges the work
+ * or drives the product.
+ *
+ * Only the intent validator used to get these. At stops 16 and 19 of run
+ * 614e06d5 the reviewers called the operator's own decision (Meta by CSV import
+ * instead of live) "scope drift" and asked whether they had approved it, and the
+ * product-manager decider then read those reviews. An agent holding only the
+ * brief is right to flag a departure from it, so the fix is to hand it the
+ * decision, marked as the thing that outranks the brief.
+ *
+ * Budgeted newest-first and printed oldest-first, as `priorDecisionsBlock` is:
+ * a later decision replaces an earlier one, so the oldest is what gets cut.
+ */
+export function operatorDecisionsBlock(decisions: OperatorDecision[], budget = OPERATOR_DECISIONS_BUDGET): string {
+  if (!decisions.length) return "";
+  let left = budget;
+  const lines: string[] = [];
+  for (let i = decisions.length - 1; i >= 0; i--) {
+    const d = decisions[i]!;
+    const shown = d.feedback.slice(0, Math.min(OPERATOR_DECISION_MAX, left));
+    left -= shown.length;
+    const cut = d.feedback.length - shown.length;
+    lines.unshift(`- stop ${d.stop} (${d.action}): ${shown}${cut ? ` […${cut} more characters]` : ""}`);
+  }
+  return `What the operator decided at pit stops, after the brief was written. These SUPERSEDE the brief and the PRD wherever they differ, and the later decision wins over the earlier one. Work that follows one of them is what the operator asked for: do not call it scope drift or a deviation, and do not ask whether they approved it. This is them approving it.\n${lines.join("\n")}\n\n`;
+}
+
+/**
+ * The standing rule for the two agents that run the product on this machine.
+ *
+ * The machine is the operator's, and it is logged in. In run 614e06d5 real
+ * Google auth was wired and `gcloud` had an active login, so the only thing that
+ * kept the live check on a local stand-in was the agent's own choice.
+ */
+const NO_REAL_THIRD_PARTIES = `- NEVER call a real third-party API with real credentials, NEVER mint or read real credentials, and NEVER change anything in a real account. That holds even when the product is wired to the real service and this machine is logged in to it. Do not run \`gcloud auth print-access-token\` or \`gcloud auth application-default\`, do not read the macOS Keychain (\`security find-*\`), and do not read \`~/.config/gcloud\`, \`~/.aws\`, browser profiles or any other credential store. Use the product's own stand-ins: its sandbox or test mode, a mock server, a local emulator, fixtures, seeded data. A step that can only be exercised against the real service is not run. Report it as UNVERIFIED, name the service, and say what would settle it.`;
+
 export function qaSystemPrompt(toolbelt = "", skills = ""): string {
   return `You are an adversarial QA agent. A worker claims a task is complete. Verify it against each acceptance criterion by reading the diff and running the tests. Write additional tests for uncovered acceptance criteria and commit them under the tests directory.
 
@@ -661,9 +705,10 @@ export function qaTaskPrompt(
    * the repo can still deploy what it declares (deployCapability.ts).
    */
   planNotes = "",
-  passedChecks: string[] = []
+  passedChecks: string[] = [],
+  decisions: OperatorDecision[] = []
 ): string {
-  return `Task under review: ${task.title}
+  return `${operatorDecisionsBlock(decisions)}Task under review: ${task.title}
 
 Acceptance criteria:
 ${task.acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n")}
@@ -794,8 +839,8 @@ Otherwise leave it false and answer. A task you send back to a person is a task 
  * one that reasons about it: in run 40da9337 the fact it needed was
  * `npx tsx scripts/testRun.ts <file>`, which nothing ever told it.
  */
-export function advisorPrompt(task: TaskRow, why: string, checks: string[] = [], repeats = 0): string {
-  return `The stuck task: ${task.title}
+export function advisorPrompt(task: TaskRow, why: string, checks: string[] = [], repeats = 0, decisions: OperatorDecision[] = []): string {
+  return `${operatorDecisionsBlock(decisions)}The stuck task: ${task.title}
 
 Its spec:
 ${task.spec.slice(0, 2000)}
@@ -911,8 +956,8 @@ Reply with exactly one JSON object in the same \`\`\`json fence, in one of the t
  * run deliver the intent" — that half was answered — and a validator handed
  * only the remainder can spend its entire budget on it.
  */
-export function validatorNarrowedPrompt(unchecked: string[], summary: string): string {
-  return `A previous validation pass over this same tree ran out of turns and answered UNKNOWN. What it did manage to establish:
+export function validatorNarrowedPrompt(unchecked: string[], summary: string, decisions: OperatorDecision[] = []): string {
+  return `${operatorDecisionsBlock(decisions)}A previous validation pass over this same tree ran out of turns and answered UNKNOWN. What it did manage to establish:
 ${summary || "(no summary)"}
 
 What it did NOT check — this is your whole job:
@@ -969,11 +1014,11 @@ PASS is permitted only after checking every required capability. Missing credent
 Each finding must name what the intent asked for, what production actually does instead, and the exact observation that shows it.`;
 }
 
-export function prodValidatorPrompt(assignment: string, prd: string, url: string, taskLines: string): string {
+export function prodValidatorPrompt(assignment: string, prd: string, url: string, taskLines: string, decisions: OperatorDecision[] = []): string {
   return `The operator's original intent:
 ${assignment}
 
-${prd ? `The PRD the plan was built from:\n${prd.slice(0, 8000)}\n\n` : ""}What was built and merged:
+${operatorDecisionsBlock(decisions)}${prd ? `The PRD the plan was built from:\n${prd.slice(0, 8000)}\n\n` : ""}What was built and merged:
 ${taskLines}
 
 The live system: ${url}
@@ -1010,6 +1055,7 @@ Rules:
 - Demo ${repoDir} and nothing else. ${artifactsDir} is an output path that sits under a DIFFERENT checkout of this same project — the operator's own, parked on whatever branch they last used and missing merged work. Write evidence there by its full path; never read the product from it, and never \`cd\`, \`ls\`, \`cat\`, \`git\` or \`cargo\` your way into any other checkout on this machine. A file that is absent there but present here is not a gap, and reporting it as one sends the run to rebuild something it already merged.
 - Do not modify the repository. You may create scratch files under ${artifactsDir} and install dependencies, but the working tree must be clean of source changes when you finish — the operator's diff is not yours to touch. Anything you do change there will be discarded.
 - NEVER deploy, provision or destroy infrastructure, and never touch anything outside this machine. Local only.
+${NO_REAL_THIRD_PARTIES} In this report that means \`couldNotReach\`.
 - Stop when you have enough to show, not when you have exhausted the product. You have a turn ceiling and the run is paying for you.
 ${toolbelt}${skills}
 
@@ -1060,7 +1106,7 @@ You are told nothing about how the run went, and that is deliberate: you cannot 
 Procedure:
 1. Find out how this repository starts. Its README, its quickstart, its compose file, its Makefile, its dev script, its install docs. **Use the repository's own documented way**, and say which document you followed. If the documented way does not work, that is a finding — try to get it running anyway, and report both: what the docs say, and what you actually had to do.
 2. Start it. Install, build, migrate, seed — whatever a new user would have to do. A missing dependency you can install is not a reason to give up.
-3. Drive the critical path below, step by step, in order, as a user would: real entry point, real storage, real external call, real output. A passing unit test is not a step. A curl against a mock is not a step.
+3. Drive the critical path below, step by step, in order, as a user would: real entry point, real storage, real output, and the product's own stand-in wherever it reaches a third-party service. A passing unit test is not a step. A curl against a mock you wrote to replace the product is not a step.
 4. Capture evidence into ${artifactsDir} (it already exists) as you go: a screenshot for anything rendered, the saved request and response for anything served, the command and its output for anything CLI. Name each file for what it shows.
 5. LOOK AT EVERY SCREENSHOT with Read before you list it. A capture that is one flat colour is a failed capture, not a picture of the product: wait for the page to paint (\`--wait-for-timeout=3000\`), stay on chromium devices or a plain \`--viewport-size=WIDTH,HEIGHT\`. The charrette opens every image you list and strikes the blank ones.
 6. Stop at the first step you cannot complete. Report it as \`broken\` with what you saw — the error, the status code, the empty screen — and mark the rest \`not-reached\`. Do not skip ahead to a later step that happens to work: the path is a sequence, and a product whose third step is broken does not work, however well its fourth one does.
@@ -1069,7 +1115,8 @@ Rules:
 - Report what you observed. "The handler looks correct" is not an observation; "POST /charge returned 500 with 'no such column: idempotency_key'" is.
 - Exercise ${repoDir} and nothing else. Never read the product from another checkout on this machine.
 - Do not modify the repository. You may install dependencies and write scratch files under ${artifactsDir}; the working tree must be clean of source changes when you finish, and anything you change there is discarded.
-- NEVER deploy, provision or destroy anything outside this machine. Local only. Use test credentials and sandbox modes where the product offers them; if a step needs a real account or a secret you do not have, that step is \`broken\` with the reason, not a step you quietly skip.
+- NEVER deploy, provision or destroy anything outside this machine. Local only. Use test credentials and sandbox modes where the product offers them.
+${NO_REAL_THIRD_PARTIES} In this report that step is \`not-reached\`, its \`observed\` starts with "UNVERIFIED:", and it is named in \`couldNotReach\`. It is never a step you quietly skip, and never one you mark \`worked\`.
 - You have a turn ceiling and the run is paying for you. Getting it started and driving as far as you can is worth more than a perfect report of nothing.
 ${toolbelt}${skills}
 
@@ -1090,11 +1137,11 @@ Your FINAL message must be exactly one JSON object inside a \`\`\`json fence:
 Falling short honestly is the job. A report that says "it starts, step 1 and 2 work, step 3 returns 500, here is the response" is worth everything; one that says the path works because the code appears to support it is worth less than nothing, because the run will report itself finished on it.`;
 }
 
-export function livePrompt(assignment: string, pathName: string, steps: string[]): string {
+export function livePrompt(assignment: string, pathName: string, steps: string[], decisions: OperatorDecision[] = []): string {
   return `What the operator asked for:
 ${assignment}
 
-The critical path — the shortest sequence a real user performs that makes this product worth having. It was written from the brief before any code existed, and it is what you are here to drive:
+${operatorDecisionsBlock(decisions)}The critical path — the shortest sequence a real user performs that makes this product worth having. It was written from the brief before any code existed, and it is what you are here to drive:
 ${pathName ? `**${pathName}**\n` : ""}${steps.map((s, i) => `${i + 1}. ${s}`).join("\n")}
 
 Find how the repository starts, start it, and drive those steps in order. Report what you observed at each one.`;
@@ -1121,11 +1168,11 @@ Anything you still cannot produce, drop from artifacts and say so in couldNotRea
 Reply with the complete report JSON again, in the same shape, with every step result you established the first time unchanged.`;
 }
 
-export function demoPrompt(assignment: string, mergedLines: string, upcomingLines: string, question = ""): string {
+export function demoPrompt(assignment: string, mergedLines: string, upcomingLines: string, question = "", decisions: OperatorDecision[] = []): string {
   return `What the operator asked for:
 ${assignment}
 
-What has merged so far — this is what you are demoing:
+${operatorDecisionsBlock(decisions)}What has merged so far — this is what you are demoing:
 ${mergedLines}
 
 ${upcomingLines ? `Not built yet, so do not go looking for it:\n${upcomingLines}\n\n` : ""}${
@@ -1203,14 +1250,15 @@ export function reviewerPrompt(
   prd: string,
   demoReport: string,
   taskLines: string,
-  upcomingLines: string
+  upcomingLines: string,
+  decisions: OperatorDecision[] = []
 ): string {
   return `Your lens: ${lens}
 
 What the operator asked for:
 ${assignment}
 
-${prd ? `The PRD:\n${prd.slice(0, 6000)}\n\n` : ""}What the demo agent found when it ran the product:
+${operatorDecisionsBlock(decisions)}${prd ? `The PRD:\n${prd.slice(0, 6000)}\n\n` : ""}What the demo agent found when it ran the product:
 ${demoReport}
 
 Read the \`coverage\` block in that report before you weigh anything else in it. The demo declared which journeys it meant to drive and the charrette compared that against what it actually reached: \`demonstrated\` means it got through all of them with proof that survived inspection, \`partial\` means it fell short, \`inconclusive\` means this demo established nothing either way. Your confidence is capped by that number. On a partial or inconclusive demo, say plainly which of your findings are about the product and which are about not having seen enough of it — "the onboarding is unfinished" and "nobody drove the onboarding" are different findings, and only one of them is about the run drifting.
@@ -1356,12 +1404,13 @@ export function pitStopDeciderPrompt(
   report: string,
   capLine: string,
   priorDecisions = "",
-  question = ""
+  question = "",
+  decisions: OperatorDecision[] = []
 ): string {
   return `What the operator asked for:
 ${assignment}
 
-${prd ? `The PRD it was planned from:\n${prd.slice(0, 6000)}\n\n` : ""}The pit stop report — the demo, every reviewer's verdict, what has merged, what is still to be built, and what it has cost:
+${operatorDecisionsBlock(decisions)}${prd ? `The PRD it was planned from:\n${prd.slice(0, 6000)}\n\n` : ""}The pit stop report — the demo, every reviewer's verdict, what has merged, what is still to be built, and what it has cost:
 
 ${report}
 
