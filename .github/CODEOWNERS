@@ -2,23 +2,23 @@
 # green checks. Everything else merges on checks alone — see MAINTAINERS.md.
 
 # Default owner for anything not matched below.
-*                           @ryabinski-labs
+*                           @cigan1
 
 # Release, CI and supply chain.
-/.github/                   @ryabinski-labs
-/build.sh                   @ryabinski-labs
-/pnpm-lock.yaml             @ryabinski-labs
-/package.json               @ryabinski-labs
+/.github/                   @cigan1
+/build.sh                   @cigan1
+/pnpm-lock.yaml             @cigan1
+/package.json               @cigan1
 
 # Security policy and governance.
-/SECURITY.md                @ryabinski-labs
-/LICENSE                    @ryabinski-labs
-/MAINTAINERS.md             @ryabinski-labs
-/CODE_OF_CONDUCT.md         @ryabinski-labs
+/SECURITY.md                @cigan1
+/LICENSE                    @cigan1
+/MAINTAINERS.md             @cigan1
+/CODE_OF_CONDUCT.md         @cigan1
 
 # The boundaries SECURITY.md claims the project holds.
-/packages/core/src/isolation.ts      @ryabinski-labs
-/packages/core/src/infraGuard.ts     @ryabinski-labs
-/packages/core/src/worktreeGuard.ts  @ryabinski-labs
-/packages/core/src/runLock.ts        @ryabinski-labs
-/packages/dashboard/src/index.ts     @ryabinski-labs
+/packages/core/src/isolation.ts      @cigan1
+/packages/core/src/infraGuard.ts     @cigan1
+/packages/core/src/worktreeGuard.ts  @cigan1
+/packages/core/src/runLock.ts        @cigan1
+/packages/dashboard/src/index.ts     @cigan1
