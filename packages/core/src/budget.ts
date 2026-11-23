@@ -59,6 +59,15 @@ export const PRICES: Record<string, { in: number; out: number }> = {
   // under-charging on New Year's Day — for the one model every pit stop of every
   // run spends — which is the direction this table exists to never go.
   "gemini-3.8-flash": { in: 1.5, out: 7.5 },
+  // Gemini 4, Standard tier (aistudio.google.com/docs/pricing, read 2026-11-23).
+  // Carbon carries its standing rate: Google charges $2/$10 through 30 Nov 2026
+  // and $4/$20 from 1 Dec. Google lists cache reads at 0.05x input on all three;
+  // `CACHE_READ_MULT` books them at 0.1x, the over-charging side. Until these
+  // rows existed the models fell to the top-tier fallback and were booked at
+  // $10/$50: run 614e06d5 showed $23.96 of Hydrogen for about $3.60 of work.
+  "gemini-4-carbon": { in: 4, out: 20 },
+  "gemini-4-neon": { in: 3, out: 15 },
+  "gemini-4-hydrogen": { in: 1.5, out: 7.5 },
   // Retired models (RETIRED_MODELS in @charrette/shared). No run dispatches
   // these any more: every config reads them as their replacement. The rows
   // stay for one reason. A session already running on one when its run was

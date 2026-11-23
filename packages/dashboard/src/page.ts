@@ -33,12 +33,14 @@ export const MODEL_CHOICES = [
   "claude-fable-5-2",
   "claude-opus-5-5",
   "claude-sonnet-5-5",
-  "claude-haiku-5-5",
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-5.6-luna",
-  "gemini-3.5-flash-lite",
+  "gemini-4-carbon",
+  "gemini-4-neon",
+  "gemini-4-hydrogen",
   "gemini-3.8-flash",
+  "gemini-3.5-flash-lite",
   "deepseek-flash",
 ];
 
