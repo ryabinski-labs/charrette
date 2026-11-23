@@ -33,7 +33,10 @@ Anything that breaks the boundaries the project claims to hold:
 
 - Secrets reaching agent context, prompts, logs, the event store, or GitHub.
 - A push or merge outside `charrette/<runId>/*`. The orchestrator has no code
-  path that merges a pull request; one would be a finding.
+  path that merges a pull request; one would be a finding. The one push
+  outside that namespace is documented: when origin has no base branch at
+  all, charrette creates it with a create-only lease. A push that updates,
+  moves or deletes an existing base branch would be a finding.
 - Dashboard authentication and authorization: it binds loopback only, and every
   state-changing endpoint requires a bearer token plus `Origin`/`Host`
   validation. A bypass of any of those is a finding.

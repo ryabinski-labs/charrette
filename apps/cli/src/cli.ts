@@ -569,6 +569,16 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
         ? `prs        one rollup PR for the whole run   (${file.prMode ? via : "default"})`
         : `prs        one PR per task   (${via})`
     );
+    // When the work reaches GitHub, which is a different question from how it
+    // is grouped. Run 614e06d5 built for hours with the operator's repository
+    // empty the whole time, and nothing on this screen said that was the plan.
+    if ((file.prMode ?? "single") === "single") {
+      banner.push(
+        (file.publish ?? "progress") === "progress"
+          ? `publish    pushed after every merge, as a draft PR until the run is proven   (${file.publish ? via : "default"})`
+          : `publish    nothing pushed until the run is proven   (${via})`
+      );
+    }
   }
 
   const toolbelt = detectToolbelt(file.externalTools);
@@ -622,6 +632,7 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
     // Persist the resolved slug so the dashboard can link issues and PRs on a resume.
     githubRepo: github.slug ?? file.githubRepo,
     prMode: file.prMode,
+    publish: file.publish,
     deterministicChecks: checks,
     deterministicCheckTimeoutMinutes: file.deterministicCheckTimeoutMinutes,
     waitForChecks: file.waitForChecks,
@@ -947,6 +958,13 @@ export function buildProgram(): Command {
       if (existing && file.prMode && file.prMode !== existing.config.prMode) {
         store.patchRunConfig(runId, { prMode: file.prMode });
         process.stdout.write(`PR mode updated from ${CONFIG_FILENAME}: ${file.prMode}\n`);
+      }
+      // A run from before progress publishing parses as "progress", which is
+      // the point: the run that prompted it was already hours in. An operator
+      // who wants the old shape back on a run in flight says so in the file.
+      if (existing && file.publish && file.publish !== existing.config.publish) {
+        store.patchRunConfig(runId, { publish: file.publish });
+        process.stdout.write(`Publishing updated from ${CONFIG_FILENAME}: ${file.publish}\n`);
       }
       // Runs started before parallel dispatch existed carry a cap of 1 forever.
       // The scheduler reads the cap when it starts executing, so patching here —

@@ -240,11 +240,18 @@ describe("opening the component PR", () => {
     const { adapter, prs, prBodies } = fakeGitHub(() => ({ number: 9, url: "u" }));
     const { store, runId } = await build(adapter);
 
-    expect(prs).toEqual([{ head: `charrette/${runId}/main`, base: "release" }]);
+    // Both calls are for the one rollup: the progress draft opened when the task
+    // merged (`publish: "progress"`, the default), then the end of the run
+    // adopting that same pull request and rewriting it.
+    expect(prs).toEqual([
+      { head: `charrette/${runId}/main`, base: "release" },
+      { head: `charrette/${runId}/main`, base: "release" },
+    ]);
+    expect(prBodies[0]).toContain("This run is still in progress. Do not merge this pull request yet.");
     expect(store.getTask(runId, "task-a")!.prNumber).toBe(9);
     // The reviewer sees what shipped and what the validator thought of it.
-    expect(prBodies[0]).toContain("- A (QA iterations:");
-    expect(prBodies[0]).toContain("Intent check: **PASS**");
+    expect(prBodies[1]).toContain("- A (QA iterations:");
+    expect(prBodies[1]).toContain("Intent check: **PASS**");
   });
 
   it("records the base branch on the run, so a resume opens PRs against the same one", async () => {

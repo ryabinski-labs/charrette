@@ -74,7 +74,7 @@ differently on purpose. A run whose task list has emptied but which **cannot
 prove itself** — its acceptance suite is red or has no opinion, its intent check
 came back FAIL or UNKNOWN or never finished, **the critical path did not work when
 an agent drove it**, or nothing merged at all — does not
-enter `PR_REVIEW`. It enters **`BLOCKED`**, opens no pull request, and puts the
+enter `PR_REVIEW`. It enters **`BLOCKED`**, opens no pull request for review (a progress draft stays a draft), and puts the
 unmet list in the transition reason, the closing line, the dashboard notification
 and a `run.closing_proof` event. `PR_REVIEW` asks you to review; `BLOCKED` asks
 you for help. Fix what it names and `charrette resume` re-enters the gates.
@@ -236,6 +236,27 @@ charrette has not finished judging. With `holdUntilProven: false` a FAIL verdict
 does not withhold the PR in review mode — human review is where
 a gap it could not close belongs — but it is printed first, above it, and the PR
 is held as a draft.
+
+The work itself does not wait that long. By default (`"publish": "progress"`)
+the integration branch is pushed after every task merges, and the same rollup
+PR is open from the first merge as a **draft** whose description says the run
+is still in progress and must not be merged. It is the pull request described
+above in an earlier state: when the run has proved itself, charrette rewrites
+its description and marks it ready. Until then nothing that gates on "the
+run's pull request" (the CI hold, the closing gates, `status`, verification)
+counts it. Pushes are coalesced and the description is refreshed at most every
+five minutes. A failed push or a GitHub refusal is one line on the feed and
+never undoes a merge. A repository that does not allow drafts gets no progress
+PR, only the pushes. If you close the draft, the run does not open another one.
+`"publish": "end"` restores the older shape, where nothing reaches GitHub
+before the run has judged itself.
+
+At start and on every `charrette resume`, a run with GitHub configured checks
+that origin has its base branch. A new GitHub repository with no commits does
+not, and a pull request cannot open into a branch that does not exist, so the
+run creates it from your local one. The push is create-only and never moves an
+existing branch. If it fails (no credentials, offline), the feed says so and
+gives the command to run.
 
 Production mode refuses disabled proof, execution-evidence, live, or CI gates. It
 continues past PR review and reaches `DONE` only with deployed-revision and
@@ -854,6 +875,7 @@ Run configuration is a zod-validated `RunConfig`
 | `deterministicChecks` | auto-detected | `--check`, `--no-checks` | ✅ | shell strings, run via `sh -c` in the worktree |
 | `githubRepo` | `gh repo view` in the target repo | — | ✅ | `CHARRETTE_GITHUB_REPO` takes precedence when set |
 | `prMode` | `single` | — | ✅ | `single` = one rollup PR for the whole run; `per-task` = one PR per task (they overlap — task branches stack on the integration branch) |
+| `publish` | `progress` | — | ✅ | with `prMode: "single"`: `progress` pushes the integration branch after every merge and keeps the rollup open as a draft that says the run is still in progress and must not be merged, until the run proves itself and the draft is rewritten and marked ready; `end` pushes and opens nothing until then. A resume applies a changed value to the run in flight. |
 | `externalTools` | everything detected on PATH | — | ✅ | allowlist of CLIs named to worker/QA agents (`gh`, `aws`, `podman`, `docker`, `adb`, `emulator`, `xcrun`, `maestro`); `[]` advertises none |
 | *(not in RunConfig)* `dashboard` | `true` | `--dashboard`, `--no-dashboard` | ✅ | CLI-only concern |
 | *(not in RunConfig)* `dashboardPort` | first free port from `4777` | `--port` | ✅ | pin it per repo when you want a stable bookmark |
@@ -1137,8 +1159,15 @@ Git objects in the **target repo**:
 | `charrette/<runId>/main` | integration branch, cut from `HEAD` at run start; every accepted task merges here |
 | `charrette/<runId>/<taskId>` | one branch per task, cut from the integration branch *at dispatch time* |
 
-Both are pushed to `origin` when GitHub is configured; nothing else ever is
-(SEC-5). Each component PR is opened **from** its task branch **into the branch
+These are pushed to `origin` when GitHub is configured, never with force
+(SEC-5). The integration branch is pushed after every merge (with `publish:
+"progress"`, the default) and again when the pull request opens. One narrow
+exception: if origin has no branch named `baseBranch` at all, charrette
+**creates** it from your local one, at run start or on resume, with
+`git push --force-with-lease=refs/heads/<base>: origin <base>:refs/heads/<base>`.
+The empty lease means "only if absent", so git itself refuses the push if the
+branch exists. Charrette never updates, moves or deletes a base branch.
+Nothing else is ever pushed. Each component PR is opened **from** its task branch **into the branch
 the run started from** — not into the integration branch, which already contains
 the task by the time the PR is opened and would leave the PR empty. The branch is
 recorded as `baseBranch` in the run's config, so a resume targets the same one
@@ -1993,7 +2022,7 @@ What *is* enforced today:
 
 | Control | Guarantee |
 |---|---|
-| Push allowlist | only `charrette/<runId>/*` refs are ever pushed |
+| Push allowlist | only `charrette/<runId>/*` refs are ever pushed, never forced; the one exception creates a base branch origin lacks, create-only, and never updates one |
 | No merge path | the charrette cannot merge a PR; the code does not exist |
 | Secret isolation | tokens live in the CLI process; never in prompts or agent context |
 | Setting isolation | `settingSources: []` — your Claude Code config never reaches workers |
@@ -2145,7 +2174,7 @@ exactly what is unmet, in this vocabulary:
   and never ran, which a resume fixes.
 - *nothing merged, so there is nothing to review* — see the next entry; the
   usual cause is a foundation task parking.
-A run in `BLOCKED` opened no pull request on purpose. `charrette resume` re-enters
+A run in `BLOCKED` opened no pull request for review on purpose; if it published progress, its draft stays a draft and still says not to merge it. `charrette resume` re-enters
 the gates; `holdUntilProven: false` in the config turns the hold off.
 
 **The run ended in `PR_REVIEW` but there are no pull requests**

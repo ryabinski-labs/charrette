@@ -162,7 +162,9 @@ async function build(
   // enough to prove the retry happened without paying for the wait.
   controller.githubRetryMs = 1;
   tune?.(controller);
-  const runId = await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], checkTimeoutMinutes: 1, deployTimeoutMinutes: 1, ...over }));
+  // `publish: "end"`: these count the pushes and pull-request writes the hold
+  // makes, and a progress draft opened mid-run would add one to every count.
+  const runId = await controller.startRun("do a thing", RunConfig.parse({ deterministicChecks: [], checkTimeoutMinutes: 1, deployTimeoutMinutes: 1, publish: "end", ...over }));
   return { store, bus, runId, logs, controller };
 }
 

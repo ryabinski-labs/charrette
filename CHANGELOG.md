@@ -38,6 +38,36 @@ on. Before then, minor versions may break things.
 
 ### Changed
 
+- **A run now publishes as it goes.** With the default `prMode: "single"`,
+  charrette pushes `charrette/<runId>/main` after every task merges and keeps a
+  draft rollup pull request open on it. The draft's description says the run
+  is still in progress and must not be merged. When the run has been
+  validated, charrette rewrites that same pull request with the final task list
+  and verdicts and marks it ready, as before. Until then no gate counts the
+  draft as the run's pull request. A run built ~97 commits over many hours
+  while the operator's GitHub repository stayed empty, because nothing was
+  pushed before the end. Pushes are coalesced, so a burst of merges costs one
+  or two pushes, and the description is refreshed at most every five minutes.
+  A failed push or a GitHub refusal is one `agent.log` line and never touches
+  the merge. On a repository that does not allow draft pull requests, no
+  progress PR is opened; the branch is still pushed. If someone closes the
+  draft, charrette does not open another one. To keep the old behaviour, where
+  nothing is pushed until the run has judged itself, set this in
+  `charrette.config.json` (a resume applies it to a run in flight):
+
+  ```json
+  { "publish": "end" }
+  ```
+
+- **A missing base branch is created on origin.** If origin has no
+  `baseBranch` (for example, a new GitHub repository with no commits), the run
+  pushes the local one at start and on every `charrette resume`. Before, the
+  run built everything and then could not open its pull request, because the
+  base did not exist and charrette only pushes `charrette/<runId>/*`. The push
+  is create-only (`--force-with-lease=refs/heads/<base>:`), so charrette never
+  moves or overwrites a base branch that already exists. This is the one
+  documented exception to SEC-5. If the push fails (no credentials, offline),
+  the run says so and carries on.
 - **Old models are retired.** Claude Fable 5 and 5.1, Opus 5, Sonnet 5,
   Haiku 4.5, and Gemini 3.6 and 3.7 Flash now run as their current
   replacement from the same vendor and tier: Fable 5.2, Opus 5.5, Sonnet 5.5,

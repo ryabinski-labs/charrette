@@ -79,7 +79,7 @@ Pre-release walking skeleton (v0.0 per the PRD phasing) plus the v0.1 dashboard 
 - ✅ `charrette postmortem` — why a run produced what it produced: questions nobody answered, verdicts and whether they were heeded, tasks that could pass without anything leaving the process, spend by how sessions died, and which charrette build each session ran under — because a fix built while a run is executing never reaches it
 - ✅ Skills discovery: lexical SKILL.md matching with SHA-256 provenance (also exposed as a stdio MCP server)
 - ✅ Localhost dashboard: live activity feed (what each agent is reading, editing, running), task board, cost meter, gate approval (127.0.0.1-only, bearer token, Origin/Host checks)
-- ✅ A run ends when the product is proven, not when the task list empties: the acceptance suite green, the intent check PASS (it can also answer UNKNOWN, and an abstention is not a pass), and an agent having started the finished product from a clean checkout and driven the critical path the brief was turned into before any code existed. Anything short of that parks the run in `BLOCKED` with what is unmet on the record, opens no pull request, and re-enters the gates on `charrette resume`
+- ✅ A run ends when the product is proven, not when the task list empties: the acceptance suite green, the intent check PASS (it can also answer UNKNOWN, and an abstention is not a pass), and an agent having started the finished product from a clean checkout and driven the critical path the brief was turned into before any code existed. Anything short of that parks the run in `BLOCKED` with what is unmet on the record, opens no pull request for review, and re-enters the gates on `charrette resume`
 - ✅ Pit stops: after every epic the run stops, a demo agent starts the half-built product and drives it, three named reviewers judge it, and you keep going, redirect the unbuilt tasks, re-plan them, or stop — [docs/PITSTOP.md](./docs/PITSTOP.md)
 - ✅ Parallel workers over the DAG, held apart by the planner's `touchedPaths` so two of them do not edit one file into a merge conflict
 - ⬜ Plan editing UI, OS sandboxing, semantic skill matching — see PRD §7
@@ -231,7 +231,7 @@ Full configuration reference, recovery playbook, and troubleshooting: [docs/OPER
 
 ## Security model (v0 summary)
 
-Secrets never enter agent context; pushes are confined to `charrette/<runId>/*` branches; the charrette has no code path that merges PRs; the dashboard binds loopback only and every state-changing endpoint requires a bearer token plus Origin/Host validation. Full threat model and requirements: PRD §12. Until OS sandboxing lands (PRD v1.0): **run repos you trust**.
+Secrets never enter agent context; pushes are confined to `charrette/<runId>/*` branches and never forced (the one exception creates a base branch origin does not have, create-only); the charrette has no code path that merges PRs; the dashboard binds loopback only and every state-changing endpoint requires a bearer token plus Origin/Host validation. Full threat model and requirements: PRD §12. Until OS sandboxing lands (PRD v1.0): **run repos you trust**.
 
 ## License
 

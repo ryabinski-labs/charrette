@@ -46,9 +46,9 @@ export function ensureIgnored(repoPath: string, entry: string): boolean {
 /** Serialize mutating git ops in the main repo — parallel worktree ops corrupt via git's global locks. */
 let mainRepoLock: Promise<unknown> = Promise.resolve();
 
-export async function git(cwd: string, args: string[], opts: { serialize?: boolean } = {}): Promise<string> {
+export async function git(cwd: string, args: string[], opts: { serialize?: boolean; env?: NodeJS.ProcessEnv } = {}): Promise<string> {
   const run = async () => {
-    const { stdout } = await execFileP("git", args, { cwd, maxBuffer: 16 * 1024 * 1024 });
+    const { stdout } = await execFileP("git", args, { cwd, maxBuffer: 16 * 1024 * 1024, env: opts.env && { ...process.env, ...opts.env } });
     return stdout.trim();
   };
   if (!opts.serialize) return run();
@@ -61,9 +61,10 @@ export async function git(cwd: string, args: string[], opts: { serialize?: boole
  * Push one of the run's own branches, and explain a rejection instead of
  * relaying git's.
  *
- * The charrette only ever pushes `charrette/<runId>/*` (SEC-5), and it treats those
- * as append-only, so a plain push is expected to fast-forward and nothing is
- * ever forced. That held until a human opened a pull request *into* a run's
+ * The charrette only ever pushes `charrette/<runId>/*` (SEC-5) — the one
+ * exception, creating a missing base branch, is `ensureBaseOnOrigin` — and it
+ * treats those as append-only, so a plain push is expected to fast-forward and
+ * nothing is ever forced. That held until a human opened a pull request *into* a run's
  * integration branch and merged it: origin moved ahead of the local branch, and
  * every subsequent push was rejected as non-fast-forward. Run 3ae58e02 reported
  * `merged locally, but the pull request could not be opened: Command failed:
@@ -97,6 +98,57 @@ export async function pushRunBranch(repoPath: string, branch: string): Promise<v
         `then \`charrette resume\` opens the pull request.`
     );
   }
+}
+
+/** What `ensureBaseOnOrigin` found, and did about it. */
+export type BaseOnOrigin =
+  | { state: "no-remote" }
+  | { state: "present" }
+  | { state: "created" }
+  | { state: "failed"; step: "check" | "push"; error: string };
+
+/**
+ * Make sure origin has the branch the run's pull request will target — by
+ * creating it if it is missing, and never by any other means.
+ *
+ * This is the one push outside `charrette/<runId>/*`, and it is a narrow
+ * exception to SEC-5 rather than a widening of it: charrette may *create* a
+ * base branch origin does not have, and it never updates, moves or deletes
+ * one. Run 614e06d5 is why it exists. It was pointed at a GitHub repository
+ * with no commits at all, merged ~97 commits over many hours, and then could
+ * not open its pull request, because the PR's base, `main`, did not exist on
+ * origin and SEC-5 forbade the only push that would have made it.
+ *
+ * Create-only is enforced by git, not by the check in front of it: the lease
+ * `refs/heads/<base>:` with an empty expected value means "only if origin has
+ * no such ref", so a base branch someone pushed between the `ls-remote` and
+ * this push is refused rather than overwritten. A refusal reads as `failed`,
+ * which is the honest answer — the caller says what happened and carries on.
+ *
+ * `GIT_TERMINAL_PROMPT=0` because this runs before the run has spent anything
+ * and nobody may be at the terminal: missing credentials must fail, not wait.
+ */
+export async function ensureBaseOnOrigin(repoPath: string, base: string): Promise<BaseOnOrigin> {
+  const remote = await git(repoPath, ["remote", "get-url", "origin"]).catch(() => "");
+  if (!remote) return { state: "no-remote" };
+  const env = { GIT_TERMINAL_PROMPT: "0" };
+  const ref = `refs/heads/${base}`;
+  let heads: string;
+  try {
+    // The full ref as the pattern, and an exact match on the answer:
+    // `ls-remote` matches patterns by their tail, so `main` alone would also
+    // match `refs/heads/feature/main`.
+    heads = await git(repoPath, ["ls-remote", "--heads", "origin", ref], { env });
+  } catch (e) {
+    return { state: "failed", step: "check", error: String(e) };
+  }
+  if (heads.split("\n").some((line) => line.endsWith(`\t${ref}`))) return { state: "present" };
+  try {
+    await git(repoPath, ["push", `--force-with-lease=${ref}:`, "origin", `${ref}:${ref}`], { serialize: true, env });
+  } catch (e) {
+    return { state: "failed", step: "push", error: String(e) };
+  }
+  return { state: "created" };
 }
 
 /**

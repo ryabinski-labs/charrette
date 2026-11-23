@@ -1435,6 +1435,8 @@ describe("resuming a blocked run", () => {
 });
 
 describe("what the pull request says with the hold off", () => {
+  // Each case reads the body the end of the run writes, so these runs publish
+  // only then (`publish: "end"`); the progress draft has its own tests.
   /** A GitHub that records what was opened. */
   function gh() {
     const adapter = new GitHubAdapter("token", "acme/widgets");
@@ -1490,7 +1492,7 @@ describe("what the pull request says with the hold off", () => {
     );
     const { controller, store } = build({ repoPath: dir, pool, github: adapter });
 
-    await controller.startRun("build a checkout", RunConfig.parse({ ...LIVE_BASE, live: { fixRounds: 0 }, holdUntilProven: false }), operator());
+    await controller.startRun("build a checkout", RunConfig.parse({ ...LIVE_BASE, publish: "end", live: { fixRounds: 0 }, holdUntilProven: false }), operator());
 
     const runId = store.listRuns()[0]!.id;
     expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
@@ -1510,7 +1512,7 @@ describe("what the pull request says with the hold off", () => {
     const { pool } = rolePool(specified("exit 0"));
     const { controller, store } = build({ repoPath: dir, pool, github: adapter });
 
-    await controller.startRun("build a checkout", RunConfig.parse({ ...LIVE_BASE, holdUntilProven: false }), operator());
+    await controller.startRun("build a checkout", RunConfig.parse({ ...LIVE_BASE, publish: "end", holdUntilProven: false }), operator());
 
     expect(store.getRun(store.listRuns()[0]!.id)!.state).toBe("PR_REVIEW");
     expect(created[0]!.draft).toBe(true);
@@ -1534,7 +1536,7 @@ describe("what the pull request says with the hold off", () => {
     const { pool } = rolePool(specified("exit 0", { spec: specJson({ criticalPath: { name: "take a payment", steps: ["pay"] } }), live: () => worked }));
     const { controller, store } = build({ repoPath: dir, pool, github: adapter });
 
-    await controller.startRun("build a checkout", RunConfig.parse(LIVE_BASE), operator());
+    await controller.startRun("build a checkout", RunConfig.parse({ ...LIVE_BASE, publish: "end" }), operator());
 
     expect(created[0]!.draft).toBe(false);
     // The path is named, so the body says which one worked.
@@ -1561,7 +1563,7 @@ describe("what the pull request says with the hold off", () => {
     const { pool } = rolePool(specified("exit 0", { spec: specJson({ criticalPath: { name: "", steps: ["pay"] } }), live: () => worked }));
     const { controller, store } = build({ repoPath: dir, pool, github: adapter });
 
-    await controller.startRun("build a checkout", RunConfig.parse(LIVE_BASE), operator());
+    await controller.startRun("build a checkout", RunConfig.parse({ ...LIVE_BASE, publish: "end" }), operator());
 
     const runId = store.listRuns()[0]!.id;
     expect(created[0]!.body).toContain("Live exercise: **the critical path works** — all 1 step(s) worked, with 1 piece(s) of surviving proof.");
@@ -1579,7 +1581,7 @@ describe("what the pull request says with the hold off", () => {
     });
     const { controller, store } = build({ repoPath: dir, pool, github: adapter });
 
-    const runId = await controller.startRun("build a thing", RunConfig.parse({ ...BASE, spec: { enabled: false }, holdUntilProven: false }));
+    const runId = await controller.startRun("build a thing", RunConfig.parse({ ...BASE, publish: "end", spec: { enabled: false }, holdUntilProven: false }));
 
     expect(store.getRun(runId)!.state).toBe("PR_REVIEW");
     expect(created).toHaveLength(1);

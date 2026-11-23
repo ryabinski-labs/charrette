@@ -348,7 +348,7 @@ export class GitHubAdapter {
     base: string,
     title: string,
     body: string,
-    opts?: { draft?: boolean }
+    opts?: { draft?: boolean; draftOnly?: boolean }
   ): Promise<PrRef | null> {
     if (!this.octokit) return null;
     // Bounded once, here, so both paths below send a body GitHub will take.
@@ -380,7 +380,7 @@ export class GitHubAdapter {
     // holds anything the base lacks is GitHub's call: try to create, and let
     // the "no commits between" 422 say otherwise.
     try {
-      const created = await this.createPR(runId, taskId, head, base, title, fitted, opts?.draft ?? false);
+      const created = await this.createPR(runId, taskId, head, base, title, fitted, opts?.draft ?? false, opts?.draftOnly ?? false);
       return { ...created, fresh: true };
     } catch (e) {
       if (isNoCommitsError(e)) {
@@ -392,7 +392,7 @@ export class GitHubAdapter {
       // it by any counting. A description is worth retrying for; it is not
       // worth the pull request, which is what throwing here spends.
       if (isBodyTooLongError(e)) {
-        const created = await this.createPR(runId, taskId, head, base, title, fitPrBody(fitted, runId, MAX_PR_BODY / 2), opts?.draft ?? false);
+        const created = await this.createPR(runId, taskId, head, base, title, fitPrBody(fitted, runId, MAX_PR_BODY / 2), opts?.draft ?? false, opts?.draftOnly ?? false);
         return { ...created, fresh: true };
       }
       throw e;
@@ -436,7 +436,7 @@ export class GitHubAdapter {
     await this.octokit!.rest.pulls.update({ owner: this.owner, repo: this.repo, pull_number: prNumber, body: next }).catch(() => undefined);
   }
 
-  private async createPR(runId: string, taskId: string, head: string, base: string, title: string, body: string, draft: boolean): Promise<PrRef> {
+  private async createPR(runId: string, taskId: string, head: string, base: string, title: string, body: string, draft: boolean, draftOnly = false): Promise<PrRef> {
     try {
       const res = await this.octokit!.rest.pulls.create({
         owner: this.owner,
@@ -451,7 +451,11 @@ export class GitHubAdapter {
     } catch (e) {
       // Free-plan private repos reject drafts outright. An open PR beats no PR;
       // the mid-run merge hazard the draft guards against is the rarer failure.
-      if (draft && isDraftUnsupportedError(e)) return this.createPR(runId, taskId, head, base, title, body, false);
+      // Except when the caller says the draft *is* the point: a progress PR
+      // opened while the run is still building exists only to be looked at,
+      // and a mergeable one would invite exactly the half-a-run merge the
+      // draft is there to refuse. That caller gets the refusal instead.
+      if (draft && !draftOnly && isDraftUnsupportedError(e)) return this.createPR(runId, taskId, head, base, title, body, false);
       throw e;
     }
   }

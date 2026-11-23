@@ -31,8 +31,8 @@ import { BudgetExceeded } from "./budget.js";
 import { seedWorktreeDeps } from "./deps.js";
 import { coChangeIndex, coChangeNote } from "./coChange.js";
 import { nextDispatch } from "./dispatchOrder.js";
-import { git, pushRunBranch, repoFileList, WorktreeManager } from "./git.js";
-import { GitHubAdapter, type PrChecks, type PrRef } from "./github.js";
+import { ensureBaseOnOrigin, git, pushRunBranch, repoFileList, WorktreeManager } from "./git.js";
+import { GitHubAdapter, isDraftUnsupportedError, type PrChecks, type PrRef } from "./github.js";
 import { unsatisfiableCriteria } from "./infraGuard.js";
 import { skeletonShortfall } from "./skeleton.js";
 import { gatingRequirement, replanDrops, scopeLedger, scopeUnmet, type ScopeLedger } from "./scopeLedger.js";
@@ -971,6 +971,21 @@ const BudgetDecisionJson = z.object({
   why: z.string().default(""),
 });
 
+/** Where one run's progress publishing stands; see `queueProgressPublish`. */
+interface ProgressPublish {
+  /** The pass in flight, or the last one. */
+  chain: Promise<void>;
+  /** A merge landed since the running pass started; it goes round again. */
+  dirty: boolean;
+  running: boolean;
+  /** When GitHub last confirmed the draft, for the refresh throttle. */
+  prAt: number;
+  /** The draft this process opened or adopted. */
+  prNumber?: number;
+  /** No more progress PRs for this run: drafts unsupported, or a human closed or merged ours. Pushes go on. */
+  stopped: boolean;
+}
+
 export class RunController {
   private wt: WorktreeManager;
 
@@ -1041,6 +1056,9 @@ export class RunController {
     // — the first thing this run does is the first thing a missing pin can
     // spoil.
     this.preflightSkillPins(runId);
+    // Before intake, for the same reason: a base branch origin lacks is the
+    // one thing guaranteed to fail the run's last step, and this is free.
+    await this.publishBaseBranch(runId);
     const ui = this.intakeUi(runId, assignment, intake);
     if (ui) await this.intake(runId, assignment, ui);
     await this.drive(runId);
@@ -1512,6 +1530,8 @@ export class RunController {
       // the operator moved their skills directory, has a different answer.
       this.preflightSkillPins(runId);
       await this.backfillBaseBranch(runId);
+      // After the backfill, which is what gives an old run a base to check.
+      await this.publishBaseBranch(runId);
       // A run the green hold paused — CI red with the rounds spent, no CI at
       // all, a base it could not catch — is being resumed by the one person
       // who can grant what it was waiting for. Remembered here because the
@@ -1572,6 +1592,47 @@ export class RunController {
     if (!run || run.config.baseBranch) return;
     const branch = await this.currentBranch();
     if (branch) this.store.patchRunConfig(runId, { baseBranch: branch });
+  }
+
+  /**
+   * Make sure origin has the branch this run's pull request targets, before
+   * anything is spent on building it.
+   *
+   * Run 614e06d5 was pointed at a GitHub repository with no commits, built ~97
+   * commits over many hours, and failed at the very last step: GitHub will not
+   * open a pull request into a base that does not exist, and SEC-5 kept
+   * charrette from pushing anything outside `charrette/<runId>/*`. So nothing
+   * ever created `main` on origin, and the operator's repository stayed empty.
+   *
+   * The fix is the one narrow exception `ensureBaseOnOrigin` documents: a
+   * missing base branch is created, create-only. An existing one is never
+   * touched. Asked on `startRun` and on every `resume`, so a run started before
+   * this existed gets it on its next resume.
+   *
+   * Never fatal. No credentials, no network, a protection rule — each is one
+   * line on the feed saying what is wrong and what to run, and the run carries
+   * on: the work is still worth building, and publishing it is the step that
+   * waits on the fix.
+   */
+  private async publishBaseBranch(runId: string): Promise<void> {
+    const run = this.store.getRun(runId);
+    if (!run || !this.github.enabled || !run.config.baseBranch) return;
+    const base = run.config.baseBranch;
+    const found = await ensureBaseOnOrigin(this.repoPath, base);
+    if (found.state === "no-remote" || found.state === "present") return;
+    this.bus.publish({
+      type: "agent.log",
+      runId,
+      sessionId: "integrator",
+      text:
+        found.state === "created"
+          ? `origin had no \`${base}\` branch, so the run's pull request would have had nothing to target — pushed the local \`${base}\` to create it. ` +
+            `Create-only: charrette never updates or moves a base branch that already exists on origin.`
+          : `could not ${found.step === "check" ? "ask origin whether it has" : "create"} the base branch \`${base}\`: ${found.error.slice(0, 300)}\n` +
+            `The run carries on, but its pull request cannot open until origin has \`${base}\`. Fix the credentials or network and \`charrette resume\`, ` +
+            `or push it yourself: git push origin ${base}`,
+      ts: Date.now(),
+    });
   }
 
   /**
@@ -3311,7 +3372,9 @@ export class RunController {
 
   /**
    * Open the pull requests for everything merged — after validation, so no PR
-   * exists before the run has been judged against the operator's intent. Each
+   * is offered for review before the run has been judged against the
+   * operator's intent. (A progress draft may already exist; `openRunPr` adopts
+   * it, rewrites it and flips it ready — see `queueProgressPublish`.) Each
    * task is attempted independently: a GitHub failure on one must not orphan
    * the rest, and never undoes a local merge.
    */
@@ -4147,6 +4210,10 @@ export class RunController {
    * judged; each task is still reviewable as its own `--no-ff` merge commit.
    */
   private async openRunPr(runId: string): Promise<PrRef | null> {
+    // A progress pass still in flight would otherwise race this one to create
+    // the same pull request. Settled first, the draft it opened is simply the
+    // PR `ensurePR` finds and adopts below.
+    await this.settleProgress(runId);
     const run = this.store.getRun(runId)!;
     const base = run.config.baseBranch;
     if (!this.github.enabled) return null;
@@ -4302,11 +4369,7 @@ export class RunController {
         ? ["", `Continues ${shipped.map((n) => `#${n}`).join(", ")} — this PR carries only the commits merged into the run after that one shipped.`]
         : []),
     ].join("\n");
-    // The PRD heading is a written title; the assignment's first line is whatever
-    // the operator typed mid-bug. Prefer the former, and never cut mid-word.
-    const heading = /^#\s*(?:PRD\s*[—–:-]\s*)?(.+)$/m.exec(this.planPrd(runId))?.[1]?.trim();
-    const raw = heading || run.assignment.split("\n")[0]!.trim();
-    const title = raw.length <= 80 ? raw : `${raw.slice(0, 79).replace(/\s+\S*$/, "")}…`;
+    const title = this.runPrTitle(runId);
     // `regroupPrs` can run while tasks are still executing. A PR a human can
     // merge before the run finishes ships half a run and strands the rest
     // (marrymath #89), so until every task is terminal the rollup is a draft;
@@ -5875,8 +5938,10 @@ export class RunController {
       }
       // Nothing left to dispatch: let the queued issue updates land before this
       // returns or throws, or a budget stop ends the process with the tracker
-      // still claiming every task is untouched.
+      // still claiming every task is untouched. The progress push likewise: a
+      // run that stops here should leave origin holding what it merged.
       await this.issueSync;
+      await this.settleProgress(runId);
       // A pause is the one run-wide stop that is not a failure and asks the
       // operator for nothing, so it returns rather than throws: there is no gate
       // to open and no cap to raise, and the caller parks the run and stops.
@@ -8419,11 +8484,12 @@ export class RunController {
       ts: Date.now(),
     });
     this.queueIssueSync(runId, taskId);
+    this.queueProgressPublish(runId);
   }
 
   /**
-   * Continuous integration: merge on accept (PRD §11.1 Integrator); PRs wait for
-   * openPrs. Reports a conflict rather than parking on it — the caller decides
+   * Continuous integration: merge on accept (PRD §11.1 Integrator); the run's
+   * pull request waits for openPrs, with only a progress draft before it. Reports a conflict rather than parking on it — the caller decides
    * whether the worker gets a go at it first.
    */
   private async integrate(runId: string, taskId: string): Promise<{ ok: true } | { ok: false; empty: true } | { ok: false; conflicts: string[] }> {
@@ -8461,10 +8527,15 @@ export class RunController {
     /* v8 ignore start */
     this.bus.publish({ type: "git.merged", runId, taskId, branch: task.branch ?? "", sha: merge.sha, ts: Date.now() });
     /* v8 ignore stop */
-    // The PR is NOT opened here. Merging is continuous; publishing waits until
-    // the whole run has been validated against the operator's intent (openPrs),
-    // so no reviewer ever sees a PR the charrette has not finished judging.
+    // Merging is continuous, and with `publish: "progress"` (the default) so is
+    // pushing: the integration branch goes to origin and a *draft* rollup PR
+    // says the run is still going and must not be merged. That draft is not the
+    // run's publication — no task points at it, so no gate reads it — and the
+    // final one still waits until the whole run has been validated against the
+    // operator's intent (openPrs), which rewrites it and flips it ready.
+    // Queued, never awaited: a push or a GitHub call must not hold up a merge.
     void run;
+    this.queueProgressPublish(runId);
     return { ok: true };
   }
 
@@ -8494,6 +8565,133 @@ export class RunController {
           ts: Date.now(),
         });
       });
+  }
+
+  /**
+   * How long the progress PR may go without its description being rewritten
+   * while merges keep landing. The push itself happens on every pass — that is
+   * what moves the PR's commits — so this only bounds the GitHub API calls a
+   * burst of merges would otherwise make one each. Tests shorten it.
+   */
+  progressPrRefreshMs = 5 * 60_000;
+
+  /** Per run: the progress pass in flight, whether a merge landed behind it, and what GitHub last said. */
+  private progress = new Map<string, ProgressPublish>();
+
+  /**
+   * Publish the run as it goes: push the integration branch, and keep a draft
+   * rollup PR open on it.
+   *
+   * Run 614e06d5 merged ~97 commits over many hours while the operator's GitHub
+   * repository stayed completely empty, because nothing was pushed until the
+   * run had finished judging itself. The judging still happens before anything
+   * is offered for review; what changes is that the work is visible while it
+   * happens, and survives the laptop it was built on.
+   *
+   * Coalesced, not queued one per merge: a merge that lands while a pass is in
+   * flight marks the run dirty and the running pass goes round once more, so a
+   * burst of ten merges costs two pushes, not ten. Never awaited by the merge
+   * that triggered it, and never throws — a failed push or a GitHub refusal is
+   * one line on the feed and the task stays merged.
+   *
+   * Only in `prMode: "single"` with `publish: "progress"`, and only until the
+   * run has a real pull request (`rollupPr`): from then on `openRunPr` and the
+   * CI hold own it, and a progress pass rewriting its description would undo
+   * what they wrote.
+   */
+  private queueProgressPublish(runId: string): void {
+    const run = this.store.getRun(runId)!;
+    if (!this.github.enabled || run.config.prMode !== "single" || run.config.publish !== "progress" || !run.config.baseBranch) return;
+    let p = this.progress.get(runId);
+    if (!p) {
+      p = { chain: Promise.resolve(), dirty: false, running: false, prAt: Number.NEGATIVE_INFINITY, stopped: false };
+      this.progress.set(runId, p);
+    }
+    p.dirty = true;
+    if (p.running) return;
+    p.running = true;
+    const state = p;
+    state.chain = (async () => {
+      while (state.dirty) {
+        state.dirty = false;
+        await this.publishProgress(runId, state);
+      }
+      state.running = false;
+    })();
+  }
+
+  /** Wait for any progress pass in flight, so nothing races the final publish or outlives the run's work. */
+  private async settleProgress(runId: string): Promise<void> {
+    await this.progress.get(runId)?.chain;
+  }
+
+  /** One progress pass. Swallows every failure into the feed; see `queueProgressPublish`. */
+  private async publishProgress(runId: string, p: ProgressPublish): Promise<void> {
+    const say = (text: string) => this.bus.publish({ type: "agent.log", runId, sessionId: "integrator", text, ts: Date.now() });
+    if (this.rollupPr(runId) !== undefined) return;
+    const run = this.store.getRun(runId)!;
+    const branch = this.wt.integrationBranch(runId);
+    const base = run.config.baseBranch;
+    try {
+      // SEC-5: the run's own integration branch, never forced.
+      await pushRunBranch(this.repoPath, branch);
+    } catch (e) {
+      say(`could not push ${branch} to show progress; the merge stands and the run carries on: ${String(e).slice(0, 300)}`);
+      return;
+    }
+    if (p.stopped || Date.now() - p.prAt < this.progressPrRefreshMs) return;
+    if (p.prNumber !== undefined) {
+      // A human who closed the draft, or marked it ready and merged it, has
+      // taken it out of this method's hands. Opening another one every few
+      // minutes would argue with them.
+      const now = await this.github.prState(p.prNumber);
+      if (now === "closed" || now === "merged") {
+        p.stopped = true;
+        say(`progress PR #${p.prNumber} was ${now} by hand, so no other is opened; ${branch} is still pushed as tasks merge, and the run's pull request opens when it ends.`);
+        return;
+      }
+    }
+    const merged = this.store.listTasks(runId).filter((t) => t.state === "MERGED");
+    const MAX_LISTED = 40;
+    const body = [
+      "**This run is still in progress. Do not merge this pull request yet.**",
+      "",
+      `charrette is building it on \`${branch}\` and pushes here after every task merges, so the work is visible while the run goes on. ` +
+        `${merged.length} task${merged.length === 1 ? "" : "s"} merged so far:`,
+      "",
+      ...merged.slice(0, MAX_LISTED).map((t) => `- ${t.title}`),
+      ...(merged.length > MAX_LISTED ? [`- …and ${merged.length - MAX_LISTED} more`] : []),
+      "",
+      "It is a draft on purpose: merging part of a run ships half of it. When every task is done and the run has been validated against " +
+        "the assignment, charrette rewrites this description with the verdict and marks it ready for review. Merge is always human.",
+    ].join("\n");
+    try {
+      const pr = await this.github.ensurePR(runId, "run", branch, base, this.runPrTitle(runId), body, { draft: true, draftOnly: true });
+      if (!pr) return;
+      p.prAt = Date.now();
+      p.prNumber = pr.number;
+      if (pr.fresh) say(`opened draft PR #${pr.number} to show the run's progress — it says the run is still going and must not be merged: ${pr.url}`);
+    } catch (e) {
+      if (isDraftUnsupportedError(e)) {
+        // Asked once. A repository that refuses drafts refuses them every time,
+        // and a ready PR mid-run is the half-a-run merge waiting to happen.
+        p.stopped = true;
+        say(`${branch} is pushed, but no progress PR was opened: this repository does not allow draft pull requests, and a mergeable one mid-run invites merging half a run. The pull request opens when the run ends.`);
+        return;
+      }
+      say(`pushed ${branch}, but the progress PR could not be opened or updated; the run carries on: ${String(e).slice(0, 300)}`);
+    }
+  }
+
+  /**
+   * The rollup PR's title: the PRD heading when there is one — a written title —
+   * over the assignment's first line, which is whatever the operator typed
+   * mid-bug. Never cut mid-word.
+   */
+  private runPrTitle(runId: string): string {
+    const heading = /^#\s*(?:PRD\s*[—–:-]\s*)?(.+)$/m.exec(this.planPrd(runId))?.[1]?.trim();
+    const raw = heading || this.store.getRun(runId)!.assignment.split("\n")[0]!.trim();
+    return raw.length <= 80 ? raw : `${raw.slice(0, 79).replace(/\s+\S*$/, "")}…`;
   }
 
   /**
