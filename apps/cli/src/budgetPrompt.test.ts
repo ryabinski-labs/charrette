@@ -113,6 +113,20 @@ describe("watchBudgetCommands", () => {
     Object.defineProperty(process.stdin, "isTTY", { value: undefined, configurable: true });
   });
 
+  it("lets go of the terminal when it stops, so the process can exit after its report", () => {
+    // Removing a `data` listener leaves a TTY flowing, and a flowing TTY holds
+    // the event loop: run 614e06d5 sat idle after a pause until Ctrl-C.
+    const tty = fakeTty();
+    const pause = vi.spyOn(process.stdin, "pause").mockReturnValue(process.stdin);
+    const stop = watchBudgetCommands({ raiseBudget: vi.fn() } as unknown as RunController, () => "run1");
+
+    stop();
+
+    expect(process.stdin.off).toHaveBeenCalledWith("data", expect.any(Function));
+    expect(pause).toHaveBeenCalledTimes(1);
+    tty.stop();
+  });
+
   it("does nothing outside a real terminal", () => {
     Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true });
     const onSpy = vi.spyOn(process.stdin, "on");

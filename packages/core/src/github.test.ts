@@ -6,7 +6,7 @@ import { GitHubAdapter, MAX_PR_BODY, fitPrBody, isBodyTooLongError, isDraftUnsup
  * markPrReady / prState touch are stubbed; anything else throws on access.
  */
 function stubbed(overrides: {
-  list?: { state: string; number: number; html_url: string; body?: string | null }[];
+  list?: { state: string; draft?: boolean; number: number; html_url: string; body?: string | null }[];
   createError?: unknown;
   /** Fails the first create only — for testing a retry that has to succeed. */
   createErrorOnce?: unknown;
@@ -107,6 +107,34 @@ describe("ensurePR after the branch outlived its PR", () => {
       list: [{ state: "open", number: 334, html_url: "u334", body: "I rewrote this summary myself." }],
     });
     await adapter.ensurePR("r", "run", "head", "main", "t", "generated body");
+    expect(calls.updated).toHaveLength(0);
+  });
+
+  it("takes over a draft it did not open when the run publishes itself", async () => {
+    // PR #27 of run 614e06d5 kept its "do not merge" text through PR_REVIEW.
+    const { adapter, calls } = stubbed({
+      list: [{ state: "open", draft: true, number: 27, html_url: "u27", body: "Do not merge this yet." }],
+    });
+    await adapter.ensurePR("r", "run", "head", "main", "t", "the final body", { adoptDraft: true });
+    expect(calls.updated).toHaveLength(1);
+    expect(calls.updated[0]!.body).toContain("the final body");
+    expect(calls.updated[0]!.body).toContain("<!-- charrette-run:r/pr-run -->");
+    expect(calls.updated[0]!.body).not.toContain("Do not merge");
+  });
+
+  it("does not take over a pull request someone has marked ready", async () => {
+    const { adapter, calls } = stubbed({
+      list: [{ state: "open", draft: false, number: 27, html_url: "u27", body: "My own summary." }],
+    });
+    await adapter.ensurePR("r", "run", "head", "main", "t", "the final body", { adoptDraft: true });
+    expect(calls.updated).toHaveLength(0);
+  });
+
+  it("does not take over someone's draft on a progress pass", async () => {
+    const { adapter, calls } = stubbed({
+      list: [{ state: "open", draft: true, number: 27, html_url: "u27", body: "My own notes." }],
+    });
+    await adapter.ensurePR("r", "run", "head", "main", "t", "progress body", { draft: true, draftOnly: true });
     expect(calls.updated).toHaveLength(0);
   });
 

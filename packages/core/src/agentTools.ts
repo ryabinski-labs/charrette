@@ -1,6 +1,8 @@
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { readFile, readdir, stat, writeFile, mkdir } from "node:fs/promises";
+import type { Socket } from "node:net";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import type { Readable } from "node:stream";
 import { BASH_TIMEOUT_MS } from "./limits.js";
 import { denialReason, infraMutation } from "./infraGuard.js";
 
@@ -83,15 +85,133 @@ export function exitCode(err: unknown): number {
   return typeof code === "number" ? code : 1;
 }
 
-const defaultExec: ExecFn = (command, { cwd, env, timeoutMs, signal }) =>
-  new Promise((done) => {
-    execFile(
-      "bash",
-      ["-lc", command],
-      { cwd, env, timeout: timeoutMs, signal, maxBuffer: 16 * 1024 * 1024, encoding: "utf8" },
-      (err, stdout, stderr) => done({ stdout: String(stdout), stderr: String(stderr), code: exitCode(err) })
-    );
+/** The bounds on one shell command's output. A parameter so a test need not produce 16 MB. */
+export interface ShellLimits {
+  /** Characters kept per stream. Past it a running command is killed, as `maxBuffer` always did. */
+  maxBuffer: number;
+  /** After the shell exits, output this long quiet means there is no more of it. */
+  quietMs: number;
+  /** After the shell exits, the longest anything may hold the call open. */
+  drainMs: number;
+}
+
+const SHELL_LIMITS: ShellLimits = { maxBuffer: 16 * 1024 * 1024, quietMs: 100, drainMs: 2_000 };
+
+/**
+ * Run a command in a login shell and return when *the shell* is done.
+ *
+ * This was `execFile`, whose callback waits for stdio to close rather than for
+ * the process to exit. A descendant inherits those pipes, so
+ * `cd x && nohup python server.py > log 2>&1 & sleep 6; cat log` never closed
+ * them: the `cd x && nohup ...` list runs in a backgrounded subshell that keeps
+ * the tool's stdout while only its child writes to the log. The shell exited in
+ * seconds and the call sat there until the 30-minute timeout, about an hour at
+ * each of several pit stops in run 614e06d5.
+ *
+ * So the shell's exit ends the call, after a short drain for what it wrote just
+ * before exiting. The pipes are then kept open and read to nowhere rather than
+ * closed: a background server still writing to them would otherwise take a
+ * SIGPIPE on its next log line and die, and demos depend on it staying up. They
+ * are unref'd so they never hold this process open.
+ *
+ * A timeout, an overflow or an abort is different: the command is being stopped,
+ * so the pipes are destroyed, as `execFile` did.
+ */
+export function runShell(
+  command: string,
+  { cwd, env, timeoutMs, signal }: { cwd: string; env: Record<string, string>; timeoutMs: number; signal: AbortSignal },
+  limits: ShellLimits = SHELL_LIMITS
+): Promise<{ stdout: string; stderr: string; code: number | null }> {
+  return new Promise((done) => {
+    const child = spawn("bash", ["-lc", command], { cwd, env, signal, stdio: "pipe" });
+    // Both are absent when the spawn itself failed for want of file descriptors.
+    const pipes = [child.stdout, child.stderr].filter(Boolean) as Readable[];
+    const text = ["", ""];
+    let received = 0;
+    let exited = false;
+    let stopped = false;
+    let settled = false;
+    let status = 1;
+    let timer: NodeJS.Timeout | undefined;
+    let immediate: NodeJS.Immediate | undefined;
+
+    const finish = (code: number) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      clearTimeout(timer);
+      clearImmediate(immediate);
+      for (const pipe of pipes) {
+        pipe.removeAllListeners("data");
+        if (stopped) pipe.destroy();
+        else (pipe as Socket).resume().unref();
+      }
+      done({ stdout: text[0]!, stderr: text[1]!, code });
+    };
+
+    /** Kill the shell. If it ignores the signal the call still ends, a moment later. */
+    const stop = () => {
+      stopped = true;
+      clearTimeout(deadline);
+      for (const pipe of pipes) pipe.destroy();
+      child.kill();
+      timer = setTimeout(() => finish(1), limits.drainMs);
+    };
+
+    /**
+     * Wait for the output already in the pipe. The check runs from `setImmediate`
+     * because timers fire before I/O: after a stalled event loop a bare timer
+     * would see "nothing arrived" with the shell's last lines still unread.
+     */
+    const drain = () => {
+      const started = Date.now();
+      let seen = received;
+      const check = () => {
+        immediate = setImmediate(() => {
+          if (received === seen || Date.now() - started >= limits.drainMs) return finish(status);
+          seen = received;
+          timer = setTimeout(check, limits.quietMs);
+        });
+      };
+      timer = setTimeout(check, limits.quietMs);
+    };
+
+    const deadline = setTimeout(stop, timeoutMs);
+
+    pipes.forEach((pipe, i) => {
+      pipe.setEncoding("utf8");
+      // A reset on a pipe a background process still holds is not this call's
+      // failure, and an `error` with no listener would take the whole run down.
+      /* v8 ignore start -- a local pipe has no portable way to be made to fail. */
+      pipe.on("error", () => undefined);
+      /* v8 ignore stop */
+      pipe.on("data", (chunk: string) => {
+        received += chunk.length;
+        const room = limits.maxBuffer - text[i]!.length;
+        text[i] += chunk.slice(0, room);
+        if (chunk.length <= room) return;
+        // With the shell gone, whatever is overflowing is a background process
+        // nobody asked this call to kill.
+        if (exited) finish(status);
+        else stop();
+      });
+    });
+
+    child.on("error", (err) => {
+      stopped = true;
+      finish(exitCode(err));
+    });
+    child.on("exit", (code) => {
+      exited = true;
+      // A signal leaves no code, and a command that was killed did not succeed.
+      status = stopped ? 1 : (code ?? 1);
+      if (!stopped) drain();
+    });
+    child.on("close", () => finish(status));
   });
+}
+
+const defaultExec: ExecFn = (command, opts) => runShell(command, opts);
 
 /**
  * Run one shell command for an agent, with the infrastructure guard in front
@@ -129,8 +249,8 @@ export async function runBash(command: string, ctx: ToolContext): Promise<string
     cwd: ctx.cwd,
     env: ctx.env,
     // The SDK transport raises this ceiling because a backgrounded command kills
-    // its session; here nothing is backgrounded, but a test suite still needs
-    // longer than a default two minutes, so the same bound applies.
+    // its session. Here a command's own `&` is fine (see `runShell`), but a test
+    // suite still needs longer than a default two minutes, so the same bound applies.
     timeoutMs: BASH_TIMEOUT_MS,
     signal: ctx.signal,
   });

@@ -1,8 +1,156 @@
 import { describe, expect, it } from "vitest";
-import { MASK, environmentSecrets, harvestSecrets, isSecretName, maskSecrets } from "./redact.js";
+import { MASK, environmentSecrets, harvestSecrets, isSecretName, maskSecrets, payloadMasker } from "./redact.js";
 
 // Assembled at runtime so no literal here reads as a credential to a scanner.
 const fake = (head: string, tail: string, n = 40) => head + tail + "x1".repeat(n / 2);
+
+describe("masking a whole payload", () => {
+  const SECRET = fake("wJalr", "XUtnFEMI");
+  const mask = payloadMasker();
+
+  it("masks a command inside a tool call and keeps the summary parseable", () => {
+    const event = {
+      type: "agent.tool_use",
+      runId: "r1",
+      sessionId: "s1",
+      tool: "Bash",
+      summary: JSON.stringify({ command: `cd app && AWS_SECRET_ACCESS_KEY=${SECRET} aws s3 ls`, description: 'says "hello"' }),
+      ts: 5,
+    };
+
+    const out = mask(event);
+
+    expect(JSON.stringify(out)).not.toContain(SECRET);
+    const parsed = JSON.parse(out.summary) as { command: string; description: string };
+    expect(parsed.command).toBe(`cd app && AWS_SECRET_ACCESS_KEY=${MASK} aws s3 ls`);
+    expect(parsed.description).toBe('says "hello"');
+  });
+
+  it("does not let an escaped quote in a value break the JSON around it", () => {
+    const summary = JSON.stringify({ command: `TOKEN=ab"cd${SECRET} run` });
+    expect(() => JSON.parse(mask({ summary }).summary)).not.toThrow();
+  });
+
+  it("leaves a JSON string with nothing to mask byte for byte", () => {
+    const summary = '{ "file_path":  "/repo/src/key.ts" }';
+    expect(mask({ summary }).summary).toBe(summary);
+  });
+
+  it("masks a truncated tool call, which is not JSON any more", () => {
+    const out = mask({ summary: `{"command":"API_TOKEN=${SECRET} curl` });
+    expect(out.summary).not.toContain(SECRET);
+  });
+
+  it("masks pit stop markdown", () => {
+    const out = mask({ pitStop: { markdown: `## Report\n\nRan \`DB_PASSWORD=${SECRET} npm start\` and it worked.` } });
+    expect(out.pitStop.markdown).toContain(`DB_PASSWORD=${MASK}`);
+    expect(out.pitStop.markdown).not.toContain(SECRET);
+  });
+
+  it("keeps every key, array, number, boolean and null where it was", () => {
+    const value = { a: [1, true, null, { b: 2.5 }], inputTokens: 900, costUsd: 1.25, done: false, none: null, text: "plain words" };
+    expect(mask(value)).toEqual(value);
+  });
+
+  it("leaves the fields the page routes on alone, even when they look like a secret", () => {
+    const id = "sk-abcdefghijklmnopqrstuv";
+    const value = { id, runId: id, taskId: id, sessionId: id, type: "agent.log", state: "MERGED", model: "claude-opus-5-5" };
+    expect(mask(value)).toEqual(value);
+  });
+
+  it("masks by the key a value sits under, and keeps the shape below it", () => {
+    const out = mask({ credentials: { user: "someone", tokens: ["one-long-value", ""], retries: 3, on: true }, password: "hunter2", api_key: 12345 });
+    expect(out).toEqual({ credentials: { user: MASK, tokens: [MASK, ""], retries: 3, on: true }, password: MASK, api_key: 12345 });
+  });
+
+  it("leaves an inert value under a secret name", () => {
+    expect(mask({ token: "null", secret: true })).toEqual({ token: "null", secret: true });
+  });
+
+  it("removes a known value with no name beside it", () => {
+    const value = "plainvalue-with-no-hint-99";
+    expect(payloadMasker([value])({ text: `the log said ${value} here` }).text).toBe(`the log said ${MASK} here`);
+  });
+
+  it("does not modify what it was given", () => {
+    const input = { text: `TOKEN=${SECRET}`, nested: { password: "hunter2" } };
+    const copy = JSON.parse(JSON.stringify(input));
+    mask(input);
+    expect(input).toEqual(copy);
+  });
+
+  it("gives the same answer from its cache", () => {
+    const m = payloadMasker();
+    const text = `TOKEN=${SECRET}`;
+    expect(m({ text }).text).toBe(m({ text }).text);
+    expect(m({ text }).text).toBe(`TOKEN=${MASK}`);
+  });
+
+  it("does not remember strings without limit", () => {
+    const m = payloadMasker();
+    for (let i = 0; i < 5_100; i++) expect(m({ text: `TOKEN=value-${i}` }).text).toBe(`TOKEN=${MASK}`);
+  });
+
+  it("masks a string too long to be worth caching", () => {
+    const text = `TOKEN=${SECRET} ${"word ".repeat(2_000)}`;
+    expect(mask({ text }).text).not.toContain(SECRET);
+  });
+
+  it.each([
+    ["a bearer header", (s: string) => `Authorization: Bearer ${s}`],
+    ["basic auth", () => `Basic ${"QWxhZGRpbjpvcGVuc2VzYW1l"}`],
+    ["a GitHub token", () => fake("gh", "p_")],
+    ["a fine-grained GitHub token", () => fake("github_", "pat_")],
+    ["an OpenAI-shaped key", () => fake("sk", "-")],
+    ["a Stripe key", () => fake("sk_", "live_")],
+    ["a webhook secret", () => fake("whsec", "_")],
+    ["a Slack token", () => fake("xoxb", "-")],
+    ["an AWS key id", () => `AKIA${"ABCDEFGHIJKLMNOP"}`],
+    ["a Google key", () => fake("AIza", "Sy")],
+    ["a Google access token", () => fake("ya29", ".a")],
+    ["a GitLab token", () => fake("glpat", "-")],
+    ["an npm token", () => fake("npm", "_")],
+    ["a Hugging Face token", () => fake("hf", "_")],
+    ["a SendGrid key", () => `SG.${"a".repeat(20)}.${"b".repeat(20)}`],
+    ["a JWT", () => `eyJ${"a".repeat(10)}.${"b".repeat(10)}.${"c".repeat(10)}`],
+    ["URL credentials", () => "postgres://admin:s3cretvalue@db.internal/app"],
+    ["a private key", () => ["BEGIN", "END"].map((edge) => `-----${edge} RSA PRIVATE ${"KEY"}-----`).join("\nabc\n")],
+    ["a flag", () => "--password hunter2value"],
+  ])("does not let the fast path skip %s", (_name, make) => {
+    const text = `ran it with ${make(SECRET)} today`;
+    expect(payloadMasker()({ text }).text).toBe(maskSecrets(text).text);
+    expect(maskSecrets(text).masked).toBeGreaterThan(0);
+  });
+
+  /**
+   * The event stream is masked on the same event loop that drives the run, and
+   * agent output is whatever an agent printed. A rule that goes quadratic on a
+   * long line stalls every session; the recursion overflowed the stack outright.
+   */
+  it.each([
+    ["a long run of spaces", "password: x" + " ".repeat(400_000) + "y"],
+    ["chained pairs", "a=".repeat(200_000)],
+    ["a long dashed word", "--" + "a-".repeat(200_000)],
+    ["a long dotted word", "a.".repeat(200_000)],
+  ])("stays fast and does not throw on %s", (_name, text) => {
+    const started = performance.now();
+    expect(() => maskSecrets(text)).not.toThrow();
+    expect(performance.now() - started).toBeLessThan(1_500);
+  });
+
+  it("masks the rest of a pair chain too deep to follow", () => {
+    const text = `${"a=".repeat(20)}hunter2value`;
+    expect(maskSecrets(text).text).not.toContain("hunter2value");
+  });
+
+  it("keeps a trailing comma and blanks outside the mask on a colon line", () => {
+    expect(maskSecrets("password: hunter2value,   ").text).toBe(`password: ${MASK},   `);
+  });
+
+  it("reads a lone comma as no value at all", () => {
+    expect(maskSecrets("password: ,").text).toBe("password: ,");
+  });
+});
 
 describe("isSecretName", () => {
   it.each([

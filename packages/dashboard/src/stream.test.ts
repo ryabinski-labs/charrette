@@ -565,4 +565,142 @@ describe("the event stream", () => {
     expect(frames[600]).toContain('"text":"line 599"');
     expect(frames[601]).toContain('"to":"PR_REVIEW"');
   });
+
+  /**
+   * Run 614e06d5, after a pause: final report printed, lock released, port
+   * closed, and the process alive with nothing to do until Ctrl-C, because
+   * `app.close()` waits for connections and the operator's tab held one open.
+   */
+  it("stops with a browser tab still attached, sending what was left first", async () => {
+    const store = new Store(":memory:");
+    const bus = new Bus(store);
+    const dash = new Dashboard(store, bus);
+    const url = await dash.start();
+    makeRun(store);
+    const res = await tailing(url, dash, bus, cursor(store), () => {
+      bus.publish({ type: "agent.log", runId: "r1", sessionId: "s", text: "the last line", ts: 1 });
+    });
+
+    const stopped = await Promise.race([dash.stop().then(() => "stopped"), new Promise((r) => setTimeout(() => r("still waiting"), 3_000))]);
+
+    expect(stopped).toBe("stopped");
+    const frames = await readFrames(res, 2, 1_000);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toContain("the last line");
+  });
+
+  it("replays a history longer than a page, in order, without losing any", async () => {
+    const { dash, url, store, bus } = await serving();
+    makeRun(store);
+    for (let i = 0; i < 1_200; i++) bus.publish({ type: "agent.log", runId: "r1", sessionId: "s", text: `line ${i}`, ts: i });
+
+    const res = await fetch(new URL("/api/runs/r1/events", url), { headers: auth(dash) });
+    const frames = await readFrames(res, 1_201);
+
+    expect(frames).toHaveLength(1_201);
+    expect(frames[1_200]).toContain('"text":"line 1199"');
+  });
+
+  it("ends cleanly when stopped part-way through a long replay", async () => {
+    const store = new Store(":memory:");
+    const bus = new Bus(store);
+    const dash = new Dashboard(store, bus);
+    const url = await dash.start();
+    makeRun(store);
+    for (let i = 0; i < 1_200; i++) bus.publish({ type: "agent.log", runId: "r1", sessionId: "s", text: `line ${i}`, ts: i });
+
+    const pending = fetch(new URL("/api/runs/r1/events", url), { headers: auth(dash) });
+    const before = bus.subscribers;
+    while (bus.subscribers === before) await new Promise((r) => setImmediate(r));
+    await dash.stop();
+    const frames = await readFrames(await pending, 1_300, 2_000);
+
+    // A socket that is behind keeps what it was already sent, whole and in
+    // order; the next process replays the rest from the cursor.
+    expect(frames.length).toBeGreaterThan(0);
+    frames.forEach((f, i) => {
+      if (i) expect(f).toContain(`"text":"line ${i - 1}"`);
+    });
+  });
+});
+
+/**
+ * The feed and the pit stop report carry what agents typed, and agents type
+ * `AWS_SECRET_ACCESS_KEY=...` inline. Masked on the way out; the database keeps
+ * the record as it happened.
+ */
+describe("stopping with a tab that has stopped reading", () => {
+  it("gives up on it after a moment rather than waiting forever", async () => {
+    const store = new Store(":memory:");
+    const bus = new Bus(store);
+    const dash = new Dashboard(store, bus);
+    const url = await dash.start();
+    makeRun(store);
+    // More than the kernel will buffer for a socket nobody is reading.
+    const line = "x".repeat(200_000);
+    for (let i = 0; i < 100; i++) bus.publish({ type: "agent.log", runId: "r1", sessionId: "s", text: line, ts: i });
+    const before = bus.subscribers;
+    const sock = connect(Number(new URL(url).port), "127.0.0.1");
+    sock.on("error", () => undefined);
+    sock.pause();
+    sock.write(`GET /api/runs/r1/events HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer ${dash.token}\r\n\r\n`);
+    while (bus.subscribers === before) await new Promise((r) => setTimeout(r, 5));
+
+    const started = Date.now();
+    await dash.stop();
+
+    expect(Date.now() - started).toBeLessThan(4_000);
+    sock.destroy();
+  }, 15_000);
+});
+
+describe("what leaves the dashboard is masked", () => {
+  // Assembled at runtime so no literal here reads as a credential to a scanner.
+  const SECRET = ["wJalrXUtnFEMI", "K7MDENG", "bPxRfiCYEXAMPLEKEY"].join("/");
+  const command = `cd app && AWS_SECRET_ACCESS_KEY=${SECRET} aws s3 ls`;
+
+  it("masks the event stream, keeps tool calls parseable, and leaves the database alone", async () => {
+    const { dash, url, store, bus } = await serving();
+    makeRun(store);
+    bus.publish({ type: "agent.tool_use", runId: "r1", sessionId: "s", tool: "Bash", summary: JSON.stringify({ command }), ts: 1 });
+    bus.publish({ type: "agent.log", runId: "r1", sessionId: "s", text: `ran ${command}`, ts: 2 });
+
+    const res = await fetch(new URL("/api/runs/r1/events", url), { headers: auth(dash) });
+    const frames = await readFrames(res, 3);
+
+    expect(frames).toHaveLength(3);
+    expect(frames.join("\n")).not.toContain(SECRET);
+    const tool = JSON.parse(frames[1]!.split("data: ")[1]!) as { type: string; tool: string; summary: string };
+    expect(tool).toMatchObject({ type: "agent.tool_use", tool: "Bash" });
+    expect((JSON.parse(tool.summary) as { command: string }).command).toBe("cd app && AWS_SECRET_ACCESS_KEY=<masked> aws s3 ls");
+    // The record is untouched.
+    expect(JSON.stringify(store.eventsSince("r1", 0, 10))).toContain(SECRET);
+  });
+
+  it("masks /api/state, the pit stop report included, and leaves the live gate as it was", async () => {
+    const { dash, url, store } = await serving();
+    makeRun(store);
+    const stop = { number: 1, markdown: `# Pit stop\n\nThe demo ran \`${command}\`.` } as unknown as Parameters<Dashboard["resolvePitStop"]>[0];
+    void dash.resolvePitStop(stop);
+
+    const res = await fetch(new URL("/api/state", url), { headers: auth(dash) });
+    const text = await res.text();
+
+    expect(text).not.toContain(SECRET);
+    const state = JSON.parse(text) as { runs: { id: string }[]; pitStop: { number: number; markdown: string } };
+    expect(state.runs[0]!.id).toBe("r1");
+    expect(state.pitStop.number).toBe(1);
+    expect(state.pitStop.markdown).toContain("AWS_SECRET_ACCESS_KEY=<masked>");
+    expect(stop.markdown).toContain(SECRET);
+  });
+
+  it("masks this dashboard's own token if an agent echoes it", async () => {
+    const { dash, url, store, bus } = await serving();
+    makeRun(store);
+    bus.publish({ type: "agent.log", runId: "r1", sessionId: "s", text: `the link was ${dash.token}`, ts: 1 });
+
+    const frames = await readFrames(await fetch(new URL("/api/runs/r1/events", url), { headers: auth(dash) }), 2);
+
+    expect(frames.join("\n")).not.toContain(dash.token);
+  });
 });

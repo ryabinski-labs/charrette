@@ -348,7 +348,13 @@ export class GitHubAdapter {
     base: string,
     title: string,
     body: string,
-    opts?: { draft?: boolean; draftOnly?: boolean }
+    /**
+     * `adoptDraft` is the run publishing itself: an open *draft* on this head
+     * gets the run's description whoever opened it, because a draft is by
+     * definition not finished and its old text may say "do not merge". A PR
+     * someone has marked ready keeps the marker rule below.
+     */
+    opts?: { draft?: boolean; draftOnly?: boolean; adoptDraft?: boolean }
   ): Promise<PrRef | null> {
     if (!this.octokit) return null;
     // Bounded once, here, so both paths below send a body GitHub will take.
@@ -369,7 +375,7 @@ export class GitHubAdapter {
     });
     const open = prior.data.find((p) => p.state === "open");
     if (open) {
-      await this.refreshPrBody(runId, taskId, open.number, open.body ?? "", fitted);
+      await this.refreshPrBody(runId, taskId, open.number, open.body ?? "", fitted, Boolean(opts?.adoptDraft && open.draft));
       return { number: open.number, url: open.html_url };
     }
 
@@ -418,9 +424,9 @@ export class GitHubAdapter {
    * drops it, and their prose outranks ours. The title is left alone for the
    * same reason — nothing about it goes stale the way the task list does.
    */
-  private async refreshPrBody(runId: string, taskId: string, prNumber: number, current: string, body: string): Promise<void> {
+  private async refreshPrBody(runId: string, taskId: string, prNumber: number, current: string, body: string, adopt = false): Promise<void> {
     const marker = this.marker(runId, `pr-${taskId}`);
-    if (!current.includes(marker)) return;
+    if (!adopt && !current.includes(marker)) return;
     const next = `${body}\n\n${marker}`;
     if (current === next) return;
     // A refused body write is not a pull request that failed to open. Until this

@@ -251,6 +251,16 @@ PR, only the pushes. If you close the draft, the run does not open another one.
 `"publish": "end"` restores the older shape, where nothing reaches GitHub
 before the run has judged itself.
 
+Once the run's pull request exists, merges keep being pushed, so a CI fix reaches
+CI, and the wait that follows reads the checks of the commit it just pushed
+rather than the one before it. Pushes are never forced. Only the progress
+description stops being refreshed. An open **draft** on the run's branch is
+rewritten when the run publishes and on every `charrette resume`, whoever opened
+it, and is marked ready unless something on the record still holds it: a FAIL or
+UNKNOWN verdict, a broken critical path, criteria QA could not verify, or a
+conflict with the base. A held draft says which. A pull request someone has
+already marked ready keeps its description if they wrote their own.
+
 At start and on every `charrette resume`, a run with GitHub configured checks
 that origin has its base branch. A new GitHub repository with no commits does
 not, and a pull request cannot open into a branch that does not exist, so the
@@ -1351,6 +1361,12 @@ else sits in a fixed sidebar.
   they land, and after ten minutes with no activity it says so. Credential
   values in text are masked on the server for view, new tab and download. Text
   inside a screenshot cannot be masked, so treat images as sensitive.
+- **Masking everywhere else.** The activity feed, tool-call summaries, pit stop
+  reports and every other field the page loads are masked on the server too, so
+  `AWS_SECRET_ACCESS_KEY=...` in an agent's command arrives as
+  `AWS_SECRET_ACCESS_KEY=<masked>`. The database keeps the original, so anyone
+  with the `.charrette/` directory can still read it. An answer box prefilled
+  from masked text sends `<masked>`, so retype a value an agent really needs.
 - **Ask the PM…** — under the feedback box, the one control that can open a pit
   stop on your say-so rather than at a boundary the plan crossed. Type the
   question first (it will not arm without one), then confirm: the demo agent
@@ -2012,7 +2028,14 @@ What happens:
 - The dashboard **comes back at the same URL**, port and token both — the tab
   you left open is the tab you return to. Reload it after the resume. If
   something else has taken that port in the meantime, the resume still happens,
-  on the next free one.
+  on the next free one. The address stays in `.charrette/dashboard.json`, marked
+  as stopped, for as long as nothing is serving it.
+- Once the run has parked, the process prints its report, closes the dashboard
+  (ending the event stream of any tab still open) and exits.
+
+A `charrette resume` on a run another process is driving is refused before it
+changes anything: no dashboard starts, the run's config is not patched, and the
+live run's `dashboard.json` is left alone.
 
 What is lost is exactly what an agent had in its head and had not committed —
 the current turn, not the current task. Pausing costs at most one turn per
@@ -2091,6 +2114,25 @@ and sweeps the whole run's worktree tree at start and resume. The sweep kills on
 processes whose working directory is inside the run's worktrees *and* which have
 no controlling terminal, so **a shell you opened yourself in a worktree is left
 alone** — but a script you started from that shell and detached is not.
+
+**A command that starts a server returns when its shell exits.** On non-Anthropic
+sessions, `nohup server > log 2>&1 &` no longer holds the Bash call open until the
+30-minute timeout. The call returns after a short drain of output and the server
+keeps running until the end-of-session sweep above.
+
+**Demo and live agents stay off real third-party systems.** Both are told never to
+call a real third-party API with real credentials, never to mint or read
+credentials (`gcloud` tokens, the Keychain), and never to change a real account,
+even when the product is wired to the real service and this machine is logged in.
+They use the product's stand-ins and report anything else as unverified. On the
+live check an unverified step counts as not reached, so the critical path reads as
+not proven. Like the toolbelt rules below, this is a prompt-level rule, not a
+sandbox.
+
+**Your pit stop decisions outrank the brief.** What you decide at a pit stop, in
+your own words, is handed to the reviewers, the pit stop decider, the demo and live
+agents, QA, the advisor and the validators, marked as superseding the brief. Work
+that follows one of your decisions is not reported as scope drift.
 
 **Workers inherit your PATH, and therefore your CLIs.** `gh`, `aws`, `podman`,
 `adb`, `emulator`, `xcrun` and `maestro` are detected at run start and named in

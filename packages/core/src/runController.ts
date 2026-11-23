@@ -47,7 +47,7 @@ import { deliveryConfigProblems, deploymentProblems, deployedRevision, productio
 import { changedFiles } from "./reportRun.js";
 import { answerBy, answerText, runIntake, type IntakeUi } from "./intake.js";
 import { AgentIntake } from "./intakeDecider.js";
-import { acquireRunLock, type RunLock } from "./runLock.js";
+import { acquireRunLock, lockPathFor, RunLocked, runLockHolder, type RunLock } from "./runLock.js";
 import { composeDown, isolationBlock, isolationEnv, taskIsolation } from "./isolation.js";
 import { knownFlakySignatures, observeChecks, observeFlakySignatures } from "./memory.js";
 import { workerCheckpoint, workerContext } from "./taskContext.js";
@@ -2591,7 +2591,7 @@ export class RunController {
           text: `the intent check could not reach ${verdict.unchecked.length} item(s) inside its turn budget; asking once more about only those`,
           ts: Date.now(),
         });
-        const second = await this.pool.run({ ...common, prompt: validatorNarrowedPrompt(verdict.unchecked, verdict.summary), maxTurns: INTENT_NARROWED_TURNS });
+        const second = await this.pool.run({ ...common, prompt: validatorNarrowedPrompt(verdict.unchecked, verdict.summary, decisions), maxTurns: INTENT_NARROWED_TURNS });
         verdict = await this.oneVerdict(runId, common, second);
         this.publishIntent(runId, verdict);
       }
@@ -3353,6 +3353,11 @@ export class RunController {
     if (!redCi && !notMerging) return { call: "proceed" };
     const state = await (this.github.prState?.(prNumber) ?? Promise.resolve(null));
     if (state === "merged" || state === "closed") return { call: "proceed" };
+    // A fix merged by a process that died before pushing it is a commit CI has
+    // never seen, and asking about the old head would spend a round on it.
+    await this.pushIntegration(runId).catch((e: unknown) => {
+      this.bus.publish({ type: "agent.log", runId, sessionId: "integrator", text: `could not push ${this.wt.integrationBranch(runId)} before re-checking CI: ${String(e).slice(0, 300)}`, ts: Date.now() });
+    });
     // The recheck is work, and PR_REVIEW is the one working moment the
     // dashboard cannot see: `listOpenRuns` excludes it by design, because a
     // run that ends there has ended. A resume that re-asks GitHub about a red
@@ -3722,7 +3727,7 @@ export class RunController {
         model: run.config.models.prod,
         systemPrompt: prodValidatorSystemPrompt(toolbeltBlock(detectToolbelt(run.config.externalTools)), skillsBlock(skills), run.config.delivery.productionTestScope),
         skills: skills.map((s) => s.name),
-        prompt: prodValidatorPrompt(run.assignment, this.planPrd(runId), url, taskLines) +
+        prompt: prodValidatorPrompt(run.assignment, this.planPrd(runId), url, taskLines, this.store.operatorPitStopDecisions(runId)) +
           (run.config.delivery.mode === "production" ? `\nFrozen release specification (check every required capability, including deployment topology and operational criteria):\n${JSON.stringify(this.store.runSpec(runId))}` : ""),
         cwd: this.repoPath,
         // Production is read through the network, not through the checkout, and
@@ -3800,12 +3805,28 @@ export class RunController {
     read: (ref: T) => Promise<PrChecks | null>,
     ref: T,
     timeoutMinutes: number,
-    expect?: { seen: Map<string, number>; label: string; seed?: { sha: string; names: string[] }; sha?: string }
+    expect?: { seen: Map<string, number>; label: string; seed?: { sha: string; names: string[] }; sha?: string; pushed?: string; pushedUntil?: number }
   ): Promise<(PrChecks & { missing?: string[] }) | null> {
     let saidShort = false;
+    let saidBehind = false;
     const ask = async (): Promise<(PrChecks & { missing?: string[] }) | null> => {
       const c = await read(ref).catch((error) => { if (stopsTheRun(error)) throw error; return null; });
       if (!c || !expect) return c;
+      // A verdict on the commit before the one just pushed says nothing about
+      // the fix, and a red one would spend another fix round on a fixed tree.
+      if (await this.behindPush(c.sha, expect.pushed, expect.pushedUntil)) {
+        if (!saidBehind) {
+          saidBehind = true;
+          this.bus.publish({
+            type: "agent.log",
+            runId,
+            sessionId: "integrator",
+            text: `GitHub still shows ${c.sha!.slice(0, 7)} as the head of ${expect.label}, older than the ${expect.pushed!.slice(0, 7)} just pushed — waiting for its checks rather than reading the old commit's`,
+            ts: Date.now(),
+          });
+        }
+        return { ...c, state: "pending", failing: [] };
+      }
       if (c.sha !== expect.sha) {
         expect.seen.clear();
         expect.sha = c.sha;
@@ -3854,6 +3875,36 @@ export class RunController {
   }
 
   /**
+   * How long GitHub gets to show a commit this process pushed as the pull
+   * request's head. A bound, because someone can move the branch back on GitHub,
+   * and then waiting for this commit would never end. Tests shorten it.
+   */
+  pushedHeadSettleMs = 2 * 60_000;
+
+  /** Per run: the integration commit this process last pushed. */
+  private pushedHeads = new Map<string, string>();
+
+  /**
+   * Push the run's integration branch, and remember which commit went. Read
+   * before the push: a merge landing during it must not be recorded as pushed.
+   */
+  private async pushIntegration(runId: string): Promise<void> {
+    const branch = this.wt.integrationBranch(runId);
+    const head = await git(this.repoPath, ["rev-parse", "--verify", `refs/heads/${branch}`]).catch(() => "");
+    await pushRunBranch(this.repoPath, branch);
+    this.pushedHeads.set(runId, head);
+  }
+
+  /** Whether a reading is about a strict ancestor of the commit just pushed. */
+  private async behindPush(sha: string | undefined, pushed: string | undefined, until = 0): Promise<boolean> {
+    if (!sha || !pushed || sha === pushed || Date.now() >= until) return false;
+    return git(this.repoPath, ["merge-base", "--is-ancestor", sha, pushed]).then(
+      () => true,
+      () => false
+    );
+  }
+
+  /**
    * Wait for the repo's own CI on the pull request, and record what it said.
    *
    * `deterministicChecks` prove one task's worktree was green in isolation. They
@@ -3886,7 +3937,7 @@ export class RunController {
     const record = this.store.ciStatus(runId);
     const seed = record?.prNumber === prNumber && record.sha ? { sha: record.sha, names: record.names } : undefined;
     // One object for the whole wait, so what one round saw holds the next.
-    const expect = { seen, label: `#${prNumber}`, seed };
+    const expect = { seen, label: `#${prNumber}`, seed, pushed: this.pushedHeads.get(runId), pushedUntil: Date.now() + this.pushedHeadSettleMs };
     const settle = () =>
       this.settleChecks(runId, (n: number) => this.github.prChecks?.(n) ?? Promise.resolve(null), prNumber, run.config.checkTimeoutMinutes, expect);
     let checks = await settle();
@@ -4106,16 +4157,24 @@ export class RunController {
     if (run.state !== "PR_REVIEW" || !this.github.enabled) return;
     const prNumber = this.rollupPr(runId);
     if (prNumber === undefined) return;
-    if (this.store.mergeStatus(runId)?.state === "mergeable") return;
     // Whatever the charrette last thought, a pull request a human has already
     // dealt with is not this method's business.
     const state = await (this.github.prState?.(prNumber) ?? Promise.resolve(null));
     if (state === "merged" || state === "closed") return;
+    // A branch known to merge has nothing to reconcile, unless its pull request
+    // is still a draft. PR #27 of run 614e06d5 sat in review with every gate
+    // green, as a draft, saying "do not merge". Only GitHub knows it is a draft
+    // after a restart, and `openRunPr` is what rewrites it and decides whether
+    // anything still holds it.
+    const merges = this.store.mergeStatus(runId)?.state === "mergeable";
+    if (merges && state !== "draft") return;
     this.bus.publish({
       type: "agent.log",
       runId,
       sessionId: "integrator",
-      text: `#${prNumber} is open and not known to merge into ${run.config.baseBranch} — reconciling the branch with the base before anything waits on a human merging it`,
+      text: merges
+        ? `#${prNumber} is still a draft — rewriting its description and marking it ready unless something on the record holds it`
+        : `#${prNumber} is open and not known to merge into ${run.config.baseBranch} — reconciling the branch with the base before anything waits on a human merging it`,
       ts: Date.now(),
     });
     await this.openPrs(runId);
@@ -4236,7 +4295,7 @@ export class RunController {
     const merge = await this.reconcileWithBase(runId, base);
 
     // SEC-5: only the charrette/<runId>/* namespace is ever pushed.
-    await pushRunBranch(this.repoPath, this.wt.integrationBranch(runId));
+    await this.pushIntegration(runId);
 
     // Some of this run's work may have shipped already: an eager human can merge
     // the rollup while tasks are still executing. Those merged PRs are named in
@@ -4443,7 +4502,10 @@ export class RunController {
      */
     const neverRan = Boolean(live) && live!.verdict !== "worked";
     const draft = stillWorking || intentFailed || neverRan || unsettled.length > 0 || cannotMerge;
-    const pr = await this.github.ensurePR(runId, "run", this.wt.integrationBranch(runId), base, title, body, { draft });
+    // `adoptDraft`: whoever opened a draft on this head, and whichever process
+    // that was, this is now the run's description of it. GitHub is what is
+    // asked, because nothing this process remembers survives a restart.
+    const pr = await this.github.ensurePR(runId, "run", this.wt.integrationBranch(runId), base, title, body, { draft, adoptDraft: true });
     if (!pr) {
       this.bus.publish({
         type: "agent.log",
@@ -4454,7 +4516,20 @@ export class RunController {
       });
       return null;
     }
-    if (!draft) await this.github.markPrReady?.(runId, "run", pr.number, title, body);
+    if (!draft) {
+      // The pull request exists whether or not it could be flipped, so a refusal
+      // here must not read as "could not be opened" and lose the tasks' link to
+      // it. A resume sees the draft and tries again (`republishUnmergeable`).
+      await this.github.markPrReady?.(runId, "run", pr.number, title, body)?.catch((e: unknown) => {
+        this.bus.publish({
+          type: "agent.log",
+          runId,
+          sessionId: "integrator",
+          text: `#${pr.number} is open but could not be marked ready for review, so it is still a draft: ${String(e).slice(0, 300)}`,
+          ts: Date.now(),
+        });
+      });
+    }
     if (pr.fresh && shipped.length) {
       this.bus.publish({
         type: "agent.log",
@@ -5005,7 +5080,7 @@ export class RunController {
         model: run.config.models.advisor,
         systemPrompt: advisorSystemPrompt("", decider, skillsBlock(skills), probe, repeats, criteria),
         skills: skills.map((s) => s.name),
-        prompt: advisorPrompt(task, why, run.config.deterministicChecks, repeats),
+        prompt: advisorPrompt(task, why, run.config.deterministicChecks, repeats, this.store.operatorPitStopDecisions(runId)),
         cwd: task.worktreePath ?? this.repoPath,
         disallowedTools: ["Write", "Edit", "NotebookEdit", "WebSearch"],
         maxTurns: 30,
@@ -6540,7 +6615,7 @@ export class RunController {
       };
       const result = await this.pool.run({
         ...common,
-        prompt: livePrompt(run.assignment, spec.criticalPath.name, steps),
+        prompt: livePrompt(run.assignment, spec.criticalPath.name, steps, this.store.operatorPitStopDecisions(runId)),
         maxTurns: run.config.live.maxTurns,
         // The product stays up for the evidence re-ask below; the sweep runs
         // from this method's `finally` instead.
@@ -6727,7 +6802,7 @@ export class RunController {
       };
       const result = await this.pool.run({
         ...common,
-        prompt: demoPrompt(run.assignment, mergedLines, upcomingLines, question),
+        prompt: demoPrompt(run.assignment, mergedLines, upcomingLines, question, this.store.operatorPitStopDecisions(runId)),
         maxTurns: run.config.pitStop.demoMaxTurns,
         // The product stays up between the two attempts below — re-capturing a
         // blank screenshot against a torn-down stack is not a retry, it is a
@@ -6922,7 +6997,7 @@ export class RunController {
           model: run.config.models.reviewer,
           systemPrompt: reviewerSystemPrompt(lens, toolbeltBlock(detectToolbelt(run.config.externalTools)), skillsBlock(skills)),
           skills: skills.map((s) => s.name),
-          prompt: reviewerPrompt(lens, run.assignment, prd, demoText, taskLines, upcomingLines),
+          prompt: reviewerPrompt(lens, run.assignment, prd, demoText, taskLines, upcomingLines, this.store.operatorPitStopDecisions(runId)),
           cwd: wtPath,
           disallowedTools: ["Write", "Edit", "NotebookEdit", "WebSearch"],
           maxTurns: 30,
@@ -7061,7 +7136,8 @@ export class RunController {
           stop.markdown,
           `The run has spent $${stop.spentUsd.toFixed(2)} of its $${cap.toFixed(2)} cap and the whole plan projects to about $${stop.projectedUsd.toFixed(2)}.\n\n`,
           priorDecisionsBlock(this.store.pitStopDecisions(runId)),
-          question
+          question,
+          this.store.operatorPitStopDecisions(runId)
         ),
         cwd: await this.wt.ensureIntegrationWorktree(runId).catch(() => this.repoPath),
         disallowedTools: ["Write", "Edit", "NotebookEdit"],
@@ -8327,7 +8403,8 @@ export class RunController {
             // A probe can mutate files, services or the environment. Without
             // a complete fingerprint, its effects invalidate reuse of earlier
             // check results even when the probe itself returned zero.
-            probeCommand ? [] : run.config.deterministicChecks.filter((command) => !checks.failures.some((failure) => failure.command === command))
+            probeCommand ? [] : run.config.deterministicChecks.filter((command) => !checks.failures.some((failure) => failure.command === command)),
+            this.store.operatorPitStopDecisions(runId)
           ),
           cwd: wt.path,
           disallowedTools: ["WebSearch"],
@@ -8614,10 +8691,10 @@ export class RunController {
    * that triggered it, and never throws — a failed push or a GitHub refusal is
    * one line on the feed and the task stays merged.
    *
-   * Only in `prMode: "single"` with `publish: "progress"`, and only until the
-   * run has a real pull request (`rollupPr`): from then on `openRunPr` and the
-   * CI hold own it, and a progress pass rewriting its description would undo
-   * what they wrote.
+   * Only in `prMode: "single"` with `publish: "progress"`. Once the run has a
+   * real pull request (`rollupPr`) the push goes on and the draft refresh stops:
+   * `openRunPr` and the CI hold own the description, and a progress pass would
+   * undo what they wrote, but a CI fix that is not pushed is a fix CI never sees.
    */
   private queueProgressPublish(runId: string): void {
     const run = this.store.getRun(runId)!;
@@ -8648,17 +8725,17 @@ export class RunController {
   /** One progress pass. Swallows every failure into the feed; see `queueProgressPublish`. */
   private async publishProgress(runId: string, p: ProgressPublish): Promise<void> {
     const say = (text: string) => this.bus.publish({ type: "agent.log", runId, sessionId: "integrator", text, ts: Date.now() });
-    if (this.rollupPr(runId) !== undefined) return;
     const run = this.store.getRun(runId)!;
     const branch = this.wt.integrationBranch(runId);
     const base = run.config.baseBranch;
     try {
       // SEC-5: the run's own integration branch, never forced.
-      await pushRunBranch(this.repoPath, branch);
+      await this.pushIntegration(runId);
     } catch (e) {
       say(`could not push ${branch} to show progress; the merge stands and the run carries on: ${String(e).slice(0, 300)}`);
       return;
     }
+    if (this.rollupPr(runId) !== undefined) return;
     if (p.stopped || Date.now() - p.prAt < this.progressPrRefreshMs) return;
     if (p.prNumber !== undefined) {
       // A human who closed the draft, or marked it ready and merged it, has
@@ -8885,6 +8962,27 @@ export class RunController {
 
   /** Runs this controller is holding; see `lockRun`. */
   private readonly locks = new Map<string, RunLock>();
+
+  /**
+   * Refuse, with `RunLocked`, if another live charrette is driving this run.
+   *
+   * Read-only, so a command can ask before it changes anything. A second
+   * `charrette resume` used to find out only inside `resume()`, after it had
+   * patched the run's config and started a dashboard over the live one's record.
+   */
+  assertNotHeld(runId: string): void {
+    const dir = statePaths(this.repoPath).dir;
+    const holder = runLockHolder(dir, runId);
+    if (holder && holder.pid !== process.pid) throw new RunLocked(holder, lockPathFor(dir, runId));
+  }
+
+  /**
+   * Take the run's lock ahead of `resume`, for a caller with something to set up
+   * that only the run's driver may set up. `resume` then re-enters it.
+   */
+  holdRun(runId: string): () => void {
+    return this.lockRun(runId);
+  }
 
   /**
    * Stop the run at the next message of every session, and leave it resumable.
