@@ -11,7 +11,7 @@
  * Rendering rule: every dynamic string reaches the DOM through textContent, never
  * innerHTML — agent output and repository contents are untrusted input here.
  */
-import { PINNED_ROLES, VENDOR_NAME, routingViolations } from "@charrette/shared";
+import { MODEL_EFFORTS, PINNED_ROLES, VENDOR_NAME, routingViolations } from "@charrette/shared";
 import { DEMO_BUTTON_HTML, DEMO_CSS, DEMO_JS, DEMO_PITSTOP_HTML, DEMO_VIEWER_HTML, DEMO_VIEW_HTML } from "./demoView.js";
 
 /**

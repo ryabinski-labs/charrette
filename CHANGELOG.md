@@ -15,6 +15,14 @@ on. Before then, minor versions may break things.
   text. The open pit stop links to its evidence, and each file its report cites
   opens in the viewer. A running demo shows its last action, new files as they
   land, and a plain warning after ten quiet minutes.
+- **Effort per model.** `"effort": { "gemini-4-neon": "high" }` in
+  `charrette.config.json`, `--effort model=level` on `run` and `resume`, or the
+  effort control beside each role in the dashboard. The setting belongs to the
+  model, so it reaches every role on that model, and a session already running
+  keeps its level. Each vendor gets its own parameter. A level the model does not
+  take is refused when the config is read, with the valid levels named. Nothing
+  is set by default, and a model with no setting is sent exactly what it was
+  before. See [Effort per model](docs/OPERATIONS.md#effort-per-model).
 
 ### Security
 
