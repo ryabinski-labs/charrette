@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { CharretteEvent, RunConfig, RunSpec, RunState, type Runbook, RunbookShape, TaskState, RUN_TRANSITIONS, TASK_TRANSITIONS, modelId, retiredMoves, type RetiredMove } from "@charrette/shared";
+import { CharretteEvent, RunConfig, RunSpec, RunState, type Runbook, RunbookShape, TaskState, RUN_TRANSITIONS, TASK_TRANSITIONS, modelId, retiredMoves, settleEfforts, type RetiredMove } from "@charrette/shared";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS runs (
@@ -262,6 +262,7 @@ export class InvalidTransition extends Error {}
 export class Store {
   /** What `retireOldModels` moved when this store opened, by run id. */
   private readonly retired = new Map<string, RetiredMove[]>();
+  private readonly effortDropped = new Map<string, string[]>();
 
   /**
    * The roles this run had on a retired model, moved to its replacement when
@@ -270,6 +271,14 @@ export class Store {
    */
   retiredAtOpen(runId: string): RetiredMove[] {
     return this.retired.get(runId) ?? [];
+  }
+
+  /**
+   * Effort settings this run had that today's table no longer accepts, dropped
+   * when the store opened. `charrette resume` prints them.
+   */
+  effortDroppedAtOpen(runId: string): string[] {
+    return this.effortDropped.get(runId) ?? [];
   }
 
   releaseContract(id: string): { sourceSha256: string; source: string; spec: RunSpec; runId: string } | null {
@@ -379,6 +388,34 @@ export class Store {
     this.freezeWorkerTiers();
     this.freezeReviewer();
     this.retireOldModels();
+    this.settleRecordedEfforts();
+  }
+
+  /**
+   * Bring every recorded run's effort block in line with today's table.
+   *
+   * `getRun` re-parses the config on every read and `EffortConfig` refuses a
+   * level the model does not take, so a level withdrawn after a run started
+   * would make that run unreadable rather than merely different. See
+   * `settleEfforts`. Idempotent: what it writes is what it would keep.
+   */
+  private settleRecordedEfforts(): void {
+    const rows = this.db.prepare("SELECT id, config FROM runs").all() as { id: string; config: string }[];
+    const patch = this.db.prepare("UPDATE runs SET config = ? WHERE id = ?");
+    for (const row of rows) {
+      let config: { effort?: unknown };
+      try {
+        config = JSON.parse(row.config) as { effort?: unknown };
+      } catch {
+        continue;
+      }
+      if (config?.effort === undefined) continue;
+      const { effort, dropped } = settleEfforts(config.effort);
+      if (JSON.stringify(effort) === JSON.stringify(config.effort)) continue;
+      config.effort = effort;
+      patch.run(JSON.stringify(config), row.id);
+      if (dropped.length) this.effortDropped.set(row.id, dropped);
+    }
   }
 
   /**

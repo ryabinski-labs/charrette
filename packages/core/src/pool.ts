@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { query, type HookInput, type HookJSONOutput, type Options, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import { AgentRole, providerFor, type AgentEnvConfig } from "@charrette/shared";
+import { AgentRole, effortFor, providerFor, type AgentEnvConfig, type EffortLevel } from "@charrette/shared";
 import { buildAgentEnv } from "./agentEnv.js";
 import { checkpointDue, checkpointPrompt, describeQuestions, isCheckpointOnly, parseCheckpoint, DEFAULT_EVERY } from "./checkpoint.js";
 import { toolLoop, unsupportedSpec, type PromptSource } from "./toolLoop.js";
@@ -228,6 +228,12 @@ export interface AgentSpec {
    * fixes. Passed to the session as CLAUDE_CODE_MAX_OUTPUT_TOKENS.
    */
   maxOutputTokens?: number;
+  /**
+   * The level this session runs at. Set by `AgentPool.run` from the run's
+   * `effort` table, once per session, so every role gets it from one place and
+   * a session keeps its level across a usage-limit wait or an account switch.
+   */
+  effort?: EffortLevel;
   /**
    * Extra environment for the session and everything it spawns — the per-task
    * compose project and port block (see isolation.ts). Merged over the inherited
@@ -697,6 +703,7 @@ export class AgentPool {
    */
   async run(spec: AgentSpec): Promise<AgentResult> {
     const sessionId = spec.sessionId ?? randomUUID();
+    spec = { ...spec, effort: effortFor(this.store.getRun(spec.runId)?.config.effort, spec.model) };
     let budget = this.limitWaitBudgetMs(spec.runId);
     let waits = 0;
     /** The conversation the next attempt re-attaches to, when there is one. */
@@ -876,6 +883,8 @@ export class AgentPool {
     }).env;
     const options: Options = {
       model: spec.model,
+      // Absent unless the operator set one: the SDK then uses the model's default.
+      ...(spec.effort ? { effort: spec.effort as NonNullable<Options["effort"]> } : {}),
       cwd: spec.cwd,
       systemPrompt: spec.systemPrompt,
       maxTurns: turnCap,
@@ -925,6 +934,9 @@ export class AgentPool {
         BASH_DEFAULT_TIMEOUT_MS: String(BASH_TIMEOUT_MS),
         BASH_MAX_TIMEOUT_MS: String(BASH_TIMEOUT_MS),
         ...(spec.maxOutputTokens ? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(spec.maxOutputTokens) } : {}),
+        // An operator can allowlist this variable through `agentEnv`, and the CLI
+        // reads it as well as the flag. The run's setting is the one that counts.
+        ...(spec.effort ? { CLAUDE_CODE_EFFORT_LEVEL: spec.effort } : {}),
       },
     };
 

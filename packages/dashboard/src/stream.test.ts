@@ -14,6 +14,7 @@ const otherSink = {
   requestPitStop: () => "pit stop requested",
   cancelPitStop: () => "pit stop cancelled",
   rerouteModel: () => "worker: a \u2192 b",
+  setModelEffort: () => ({ ok: true, message: "effort set" }),
   pauseRun: () => "pausing",
 };
 

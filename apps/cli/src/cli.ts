@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { sourceDigest, deliveryConfigProblems } from "@charrette/core";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_CHECK_TIMEOUT_MINUTES, ModelRoutingShape, RunConfig, SubscriptionConfig, retireModels, retiredMoves, statePaths, type RetiredMove } from "@charrette/shared";
+import { DEFAULT_CHECK_TIMEOUT_MINUTES, EffortConfig, ModelRoutingShape, RunConfig, effortKey, effortLevels, effortProblem, mergeEfforts, SubscriptionConfig, retireModels, retiredMoves, statePaths, type RetiredMove } from "@charrette/shared";
 import { AgentPool, Bus, GateHandler, BridgedIntake, IntakeBridge, GitHubAdapter, RunController, Store, accountEnv, agentBinaryFiles, agentEnvBanner, assembleReport, checkMemoryBanner, detectToolbelt, ensureIgnored, charretteBuild, missingKeys, newerModelBanner, originSlug, postmortem, renderPostmortem, reportPath, pinsInPlay, runLockHolder, skillPinBanner, standaloneReport, repoUnusable, summarizeAgentEnv, wasMerged } from "@charrette/core";
 import { Dashboard } from "@charrette/dashboard";
 import { promptForNewCap, watchBudgetCommands } from "./budget.js";
@@ -398,6 +398,8 @@ interface RunOpts {
   port?: string;
   chat?: boolean;
   model?: string[];
+  /** Repeated `model=level` pairs. */
+  effort?: string[];
   /** Which configured Claude subscription this run spends; `""` is the ambient login. */
   account?: string;
   /** A skill that answers the intake agent in the operator's place. */
@@ -614,6 +616,8 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
     // The flag wins over the file: it is the thing you reach for when the run
     // in front of you needs to get cheaper right now.
     models: requestedModels,
+    // By model, and the flag wins over the file, as it does for `--model`.
+    effort: mergeEfforts(fileEfforts(file.effort), effortOverrides(opts.effort)),
     // What this run's sessions may see. A typo in an entry is rejected by the
     // schema here, before the run exists.
     agentEnv: file.agentEnv,
@@ -678,6 +682,8 @@ function resolveRun(cmd: Command, opts: RunOpts, assignment: string | undefined)
     banner.push(`models     ${moved.map(([role, model]) => `${role}→${model}`).join(" · ")}   (pinned roles stay with their vendor)`);
   }
 
+  banner.push(...effortBanner(config.effort));
+
   // What every session this run spawns may see. Printed before the first
   // intake turn, because that is already an agent with a shell.
   banner.push(...agentEnvBanner(summarizeAgentEnv(process.env, config.agentEnv)));
@@ -715,6 +721,39 @@ export function retiredBanner(moves: RetiredMove[], fix: string): string[] {
   if (!moves.length) return [];
   const list = moves.map((m) => `${m.role} ${m.from}→${m.to}`).join(" · ");
   return [`retired    ${list}   (${fix})`];
+}
+
+/**
+ * Parse repeated `--effort model=level` pairs. `default` returns that model to
+ * its vendor's default. A level the model does not take stops here, naming the
+ * ones it does, rather than as a 400 from whichever role reaches it first.
+ */
+export function effortOverrides(pairs: string[] = []): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const pair of pairs) {
+    const eq = pair.indexOf("=");
+    const model = eq < 0 ? "" : pair.slice(0, eq).trim();
+    const level = eq < 0 ? "" : pair.slice(eq + 1).trim();
+    if (!model || !level) throw new Error(`--effort expects model=level, got "${pair}"`);
+    const problem = level === "default" && effortLevels(model).length ? null : effortProblem(model, level);
+    if (problem) throw new Error(`--effort: ${problem}`);
+    out[effortKey(model)] = level;
+  }
+  return out;
+}
+
+/** The file's `effort` block, checked, with a one-line refusal. */
+function fileEfforts(raw: Record<string, string> | undefined): Record<string, string> {
+  const parsed = EffortConfig.safeParse(raw ?? {});
+  if (parsed.success) return parsed.data;
+  throw new Error(`effort: ${parsed.error.issues.map((i) => i.message).join(" ")}`);
+}
+
+/** The active efforts, for the banner. Nothing when none is set. */
+export function effortBanner(effort: Record<string, string> = {}): string[] {
+  const set = Object.entries(effort);
+  if (!set.length) return [];
+  return [`effort     ${set.map(([model, level]) => `${model}=${level}`).join(" · ")}   (each applies to every role on that model)`];
 }
 
 export function modelOverrides(pairs: string[] = []): Record<string, string> {
@@ -781,6 +820,7 @@ export function buildProgram(): Command {
       "let a skill answer the intake agent in your place, so the run can start unattended (default: operator)"
     )
     .option("-m, --model <role=model>", "route one role to a model, e.g. worker=gpt-5.6-terra; repeatable", collect, [])
+    .option("--effort <model=level>", "how hard one model thinks, for every role on it, e.g. gemini-4-neon=high; repeatable", collect, [])
     .option("--account <name>", "spend a named Claude subscription from subscription.accounts (default: the account you are logged into)")
     .action(async (assignment: string | undefined, opts: RunOpts, cmd: Command) => {
       if (opts.prd) {
@@ -882,8 +922,9 @@ export function buildProgram(): Command {
     .option("--no-dashboard", "run headless; resolve gates in this terminal")
     .option("--port <n>", "pin the dashboard port (default: the first free port from 4777)")
     .option("-m, --model <role=model>", "re-route one role for the rest of the run, e.g. worker=gpt-5.6-terra; repeatable", collect, [])
+    .option("--effort <model=level>", "change one model's effort for the rest of the run, e.g. gemini-4-neon=high, or =default to clear it; repeatable", collect, [])
     .option("--account <name>", "continue on a different Claude subscription, by the name it has in subscription.accounts")
-    .action(async (runIdArg: string | undefined, opts: { repo: string; dashboard?: boolean; port?: string; model?: string[]; account?: string }, cmd: Command) => {
+    .action(async (runIdArg: string | undefined, opts: { repo: string; dashboard?: boolean; port?: string; model?: string[]; effort?: string[]; account?: string }, cmd: Command) => {
       const repo = resolveRepoRoot(opts.repo);
       if (await repoBlocked(repo)) return;
       // A bad URL refuses here, as it does in `run`, before a resumed run
@@ -1049,6 +1090,19 @@ export function buildProgram(): Command {
           }
         }
       }
+      // Effort, the same way: the file and then the flag over what the run has,
+      // for sessions started from now on. Only the models named change.
+      if (existing) {
+        const was: Record<string, string> = existing.config.effort ?? {};
+        const effort = mergeEfforts(mergeEfforts(was, fileEfforts(file.effort)), effortOverrides(opts.effort));
+        const changed = [...new Set([...Object.keys(was), ...Object.keys(effort)])].filter((m) => was[m] !== effort[m]);
+        if (changed.length) {
+          store.patchRunConfig(runId, { effort: EffortConfig.parse(effort) });
+          for (const m of changed) {
+            process.stdout.write(`${m} effort for the rest of the run: ${was[m] ?? "default"} → ${effort[m] ?? "default"}\n`);
+          }
+        }
+      }
       // Which subscription the rest of the run spends.
       //
       // The accounts come from the file and the choice from the command line,
@@ -1119,6 +1173,10 @@ export function buildProgram(): Command {
       if (resumed) {
         const frozen = retiredBanner(store.retiredAtOpen(runId), "this run's frozen models, now moved for good");
         if (frozen.length) process.stdout.write(`${frozen.join("\n")}\n`);
+        const droppedEfforts = store.effortDroppedAtOpen(runId);
+        if (droppedEfforts.length) process.stdout.write(`effort     dropped ${droppedEfforts.join(" · ")}   (no longer supported, so the vendor's default applies)\n`);
+        const efforts = effortBanner(resumed.config.effort);
+        if (efforts.length) process.stdout.write(`${efforts.join("\n")}\n`);
         const pinned = skillPinBanner(resumed.config.skillsDirs, pinsInPlay(resumed.config));
         if (pinned.length) process.stdout.write(`skills     ${resumed.config.skillsDirs.join(" · ")}\n${pinned.join("\n")}\n`);
         // A resumed run can be weeks old, which is when a newer model is most

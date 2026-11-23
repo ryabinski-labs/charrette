@@ -34,12 +34,14 @@ export const MODEL_CHOICES = [
   "claude-fable-5-2",
   "claude-opus-5-5",
   "claude-sonnet-5-5",
-  "claude-haiku-5-5",
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-5.6-luna",
-  "gemini-3.5-flash-lite",
+  "gemini-4-carbon",
+  "gemini-4-neon",
+  "gemini-4-hydrogen",
   "gemini-3.8-flash",
+  "gemini-3.5-flash-lite",
   "deepseek-flash",
 ];
 
@@ -497,6 +499,14 @@ export const PAGE_HTML = `<!doctype html>
   #models .row .lock { color:var(--faint); margin-left:auto; font-size:.7rem; }
   #models .row select { background:var(--sunken); color:var(--fg); border:1px solid var(--line);
                         border-radius:4px; padding:.1rem .2rem; font:inherit; font-size:.74rem; }
+  /* The effort control takes its own line under the model it belongs to, in the
+     model's column, so it cannot be read as part of the next role. */
+  #models .row { flex-wrap:wrap; row-gap:.15rem; padding:.25rem 0; }
+  #models .effort { display:flex; flex-wrap:wrap; flex-basis:100%; gap:.3rem; align-items:baseline;
+                    margin-left:7.1rem; color:var(--faint); font-size:.7rem; }
+  @media (max-width:420px) { #models .effort { margin-left:0; } }
+  #models .effort select { min-height:24px; }
+  #models .effort select:focus-visible { outline:2px solid var(--blue); outline-offset:1px; }
   #models .said { display:block; color:var(--dim); font-size:.72rem; margin:.1rem 0 .25rem 7.1rem; }
   #models .said.bad { color:var(--red); }
   #models .locked { border-top:1px solid var(--line); margin-top:.35rem; padding-top:.3rem; }
@@ -722,6 +732,8 @@ const PINNED = ${JSON.stringify(PINNED_CHOICES)};
    typeable from memory, and a typo surfaces as a spawn failure minutes later,
    in the log, a long way from the cause. */
 const MODEL_CHOICES = ${JSON.stringify(MODEL_CHOICES)};
+/* The effort levels each model takes, from the table the server validates with. */
+const MODEL_EFFORTS = ${JSON.stringify(MODEL_EFFORTS)};
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => {
   const n = document.createElement(tag);
@@ -1732,6 +1744,62 @@ async function saveModel(run, role, model) {
 
 let modelSig = "";
 
+/* What the server said about the last effort change, by run and role. */
+const effortSaid = {};
+/* Bumped on every answer, so a refusal redraws the row back to the stored level. */
+let effortRev = 0;
+/* The control to put focus back on after the redraw a change causes. */
+let effortFocus = "";
+
+const effortKeyOf = (model) => model.replace(/^(anthropic|openai|google|deepseek)[\\/:]/i, "");
+
+async function saveEffort(run, role, model, level) {
+  const key = run.id + "/" + role;
+  effortFocus = key;
+  try {
+    const res = await fetch("/api/runs/" + encodeURIComponent(run.id) + "/effort", {
+      method: "POST",
+      headers: Object.assign({ "content-type": "application/json" }, headers),
+      body: JSON.stringify({ model: effortKeyOf(model), level: level }),
+    });
+    const body = await res.json().catch(() => ({}));
+    effortSaid[key] = { text: res.ok ? body.message : body.error || "could not change effort", ok: res.ok, model: effortKeyOf(model) };
+  } catch {
+    effortSaid[key] = { text: "could not reach the server", ok: false, model: effortKeyOf(model) };
+  }
+  effortRev++;
+  refresh();
+}
+
+/* The effort control for a role's current model, or nothing if it has none.
+   The setting belongs to the model, so the label names every role it reaches. */
+function effortControl(run, role) {
+  const models = run.config.models;
+  const key = effortKeyOf(models[role]);
+  const levels = Object.hasOwn(MODEL_EFFORTS, key) ? MODEL_EFFORTS[key] : [];
+  if (!levels.length) return null;
+  const sharing = Object.keys(models).filter((r) => effortKeyOf(models[r]) === key);
+  const wrap = el("label", "effort", sharing.length > 1 ? "effort \u00b7 " + sharing.length + " roles" : "effort");
+  const sel = el("select");
+  const reach = "Changing it changes every role on this model: " + sharing.join(", ") + ".";
+  sel.setAttribute("aria-label", "Effort for " + key + ". " + reach);
+  sel.title = reach;
+  for (const level of ["default"].concat(levels)) {
+    const o = el("option", null, level);
+    o.value = level;
+    sel.append(o);
+  }
+  const current = (run.config.effort || {})[key] || "default";
+  sel.value = current;
+  sel.addEventListener("change", () => { if (sel.value !== current) saveEffort(run, role, models[role], sel.value); });
+  if (effortFocus === run.id + "/" + role) {
+    effortFocus = "";
+    queueMicrotask(() => sel.focus());
+  }
+  wrap.append(sel);
+  return wrap;
+}
+
 /**
  * The run's model-per-role table, editable for the rest of the run.
  *
@@ -1759,6 +1827,7 @@ function renderModels(run, box) {
   });
   d.append(el("summary", null, "Models \\u00b7 " + roles.length + " roles" + (changed ? " \\u00b7 " + changed + " changed" : "")));
   d.append(el("small", "note", "affects agents started from now on"));
+  d.append(el("small", "note", "effort is set per model: changing it changes every role on that model"));
 
   const row = (role) => {
     const pin = PINNED[role];
@@ -1789,10 +1858,15 @@ function renderModels(run, box) {
       r.append(val);
     }
     if (pin) r.append(el("span", "lock", pin.vendor + " only"));
+    const effort = effortControl(run, role);
+    if (effort) r.append(effort);
     return r;
   };
   const said = (into, role) => {
     if (modelSaid[role]) into.append(el("small", "said" + (modelSaid[role].ok ? "" : " bad"), modelSaid[role].text));
+    const effort = effortSaid[run.id + "/" + role];
+    // About the model the role was on then. Once it moves, the sentence is stale.
+    if (effort && effort.model === effortKeyOf(models[role])) into.append(el("small", "said" + (effort.ok ? "" : " bad"), effort.text));
   };
 
   for (const role of roles) {
@@ -2356,6 +2430,7 @@ function renderRunInfo() {
     // Without them a re-route saves and the row still shows the old model until
     // some unrelated fact happens to change.
     JSON.stringify(run.config.models), editingRole, modelSig,
+    JSON.stringify(run.config.effort), effortRev,
   ].join("\\u0000")).join("\\u0001");
   if (sig === runInfoSig) { tickRunAges(); return; }
   runInfoSig = sig;

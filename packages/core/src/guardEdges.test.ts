@@ -36,6 +36,9 @@ describe("pricing a model nobody has priced", () => {
     expect(priceFor("gpt-5.6-sol")).toEqual({ in: 5, out: 30 });
     expect(priceFor("gpt-5.6-luna")).toEqual({ in: 0.2, out: 1.2 });
     expect(priceFor("gemini-3.5-flash-lite")).toEqual({ in: 0.3, out: 2.5 });
+    expect(priceFor("gemini-4-carbon")).toEqual({ in: 4, out: 20 });
+    expect(priceFor("gemini-4-neon")).toEqual({ in: 3, out: 15 });
+    expect(priceFor("gemini-4-hydrogen")).toEqual({ in: 1.5, out: 7.5 });
   });
 
   it("prices a model the same whether or not the config spells out its provider", () => {

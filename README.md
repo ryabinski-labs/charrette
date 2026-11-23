@@ -111,7 +111,9 @@ your own attention, against the repo rather than against the task count.
   `charrette resume` changes it for the rest of a run already in flight. `qa`,
   `prod` and `intake` stay on Anthropic and `reviewer` stays on Google, though
   each can move to another model of its vendor; see
-  [Using other providers](docs/OPERATIONS.md#using-other-providers)
+  [Using other providers](docs/OPERATIONS.md#using-other-providers). How hard
+  each model thinks is set per model with `--effort model=level`; see
+  [Effort per model](docs/OPERATIONS.md#effort-per-model)
 - Any of these may go in a `.env` file in the directory you run `charrette` from
   (not the repository being built — a task spec can write to that one). An
   exported variable wins over the file

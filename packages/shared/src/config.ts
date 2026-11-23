@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { DeliveryConfig } from "./delivery.js";
+import { EffortConfig } from "./effort.js";
 import { routingViolations } from "./providers.js";
 import { retireModels } from "./retired.js";
 
@@ -892,6 +893,12 @@ export const RunConfig = z.object({
    */
   usageLimitWaitMinutes: z.number().int().min(0).max(7 * 24 * 60).default(360),
   models: ModelRouting.prefault({}),
+  /**
+   * How hard each model thinks, keyed by model rather than by role: one setting
+   * reaches every role on that model. Empty sends nothing, so each vendor stays
+   * on its own default. See `MODEL_EFFORTS` for the levels each model takes.
+   */
+  effort: EffortConfig.prefault({}),
   /** What every agent session may see; see `AgentEnvConfig`. */
   agentEnv: AgentEnvConfig.prefault({}),
   budget: Budget.prefault({}),

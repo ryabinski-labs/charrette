@@ -1,4 +1,4 @@
-import { providerFor } from "@charrette/shared";
+import { providerFor, type EffortLevel } from "@charrette/shared";
 import { toolsFor, unsupportedTools, type LocalTool, type ToolContext } from "./agentTools.js";
 import { parseCheckpoint } from "./checkpoint.js";
 import { budgetFor, compact, fold } from "./compact.js";
@@ -40,6 +40,8 @@ export interface ToolLoopSpec {
   mcpServers?: unknown;
   maxTurns?: number;
   maxOutputTokens?: number;
+  /** The level this session runs at, already checked against the model. */
+  effort?: EffortLevel;
 }
 
 export interface ToolLoopOptions {
@@ -187,6 +189,7 @@ export async function* toolLoop(opts: ToolLoopOptions): AsyncGenerator<Record<st
         messages,
         tools,
         maxOutputTokens: spec.maxOutputTokens,
+        effort: spec.effort,
         signal,
       });
       turns++;
@@ -202,7 +205,7 @@ export async function* toolLoop(opts: ToolLoopOptions): AsyncGenerator<Record<st
       // exactly as it left. Google signs the reasoning behind a part; DeepSeek
       // returns the chain of thought separately and rejects the next tool turn
       // if it does not come back.
-      messages.push({ role: "assistant", text: turn.text, toolCalls: turn.toolCalls, signature: turn.signature, reasoning: turn.reasoning });
+      messages.push({ role: "assistant", text: turn.text, toolCalls: turn.toolCalls, signature: turn.signature, reasoning: turn.reasoning, items: turn.items });
 
       // The agent just wrote an account of its own work, so the material that
       // account was derived from can go. This is the only place the charrette
@@ -261,7 +264,7 @@ export async function* toolLoop(opts: ToolLoopOptions): AsyncGenerator<Record<st
         // session that did all the work finally says what it found.
         const wrapNote = fit();
         if (wrapNote) yield wrapNote;
-        const last = await client({ model: spec.model, system: spec.systemPrompt, messages, tools: [], maxOutputTokens: spec.maxOutputTokens, signal });
+        const last = await client({ model: spec.model, system: spec.systemPrompt, messages, tools: [], maxOutputTokens: spec.maxOutputTokens, effort: spec.effort, signal });
         turns++;
         add(sinceResult, last.usage);
         yield { type: "assistant", session_id: sessionId, message: { content: last.text ? [{ type: "text", text: last.text }] : [], usage: sdkUsage(last.usage) } };

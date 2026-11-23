@@ -26,6 +26,12 @@ on. Before then, minor versions may break things.
 
 ### Fixed
 
+- **The dashboard's model list offers Gemini 4 Carbon, Neon and Hydrogen, and
+  no longer offers Haiku.** All three now have prices per million tokens:
+  Carbon $4/$20 (its standing rate from 1 December 2026), Neon $3/$15, Hydrogen
+  $1.50/$7.50. Without a price they were booked at the $10/$50 top-tier
+  fallback, so a run on Hydrogen showed about six times its real cost. Haiku
+  still works if a config names it for a role that allows it.
 - **A blocked run can always get back to work.** Three closing-gate bugs
   together held run 614e06d5 BLOCKED with every pit-stop answer leading back
   to the same block:
