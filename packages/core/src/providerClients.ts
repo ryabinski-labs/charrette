@@ -1,4 +1,6 @@
-import { modelId, providerFor, type Provider } from "@charrette/shared";
+import { request as httpRequest, type OutgoingHttpHeaders } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { modelId, providerFor, type EffortLevel, type Provider } from "@charrette/shared";
 import type { LocalTool } from "./agentTools.js";
 
 /**
@@ -34,7 +36,7 @@ export interface ToolCall {
 
 export type LoopMessage =
   | { role: "user"; text: string }
-  | { role: "assistant"; text: string; toolCalls: ToolCall[]; signature?: string; reasoning?: string }
+  | { role: "assistant"; text: string; toolCalls: ToolCall[]; signature?: string; reasoning?: string; items?: unknown[] }
   | { role: "tool"; callId: string; name: string; text: string };
 
 export interface Usage {
@@ -61,6 +63,11 @@ export interface ProviderTurn {
    * the transcript text.
    */
   reasoning?: string;
+  /**
+   * OpenAI's Responses output, verbatim. Its reasoning items must go back with
+   * the tool results they led to, in order, so the turn is replayed as issued.
+   */
+  items?: unknown[];
 }
 
 export interface TurnRequest {
@@ -69,6 +76,8 @@ export interface TurnRequest {
   messages: LoopMessage[];
   tools: LocalTool[];
   maxOutputTokens?: number;
+  /** The session's level, already checked against `MODEL_EFFORTS`. Absent sends nothing. */
+  effort?: EffortLevel;
   signal: AbortSignal;
 }
 
@@ -118,6 +127,39 @@ export function missingKeys(models: Record<string, string>, env: NodeJS.ProcessE
   }
   return [...affected].map(([provider, roles]) => `${keyVarFor(provider)} is not set, but ${roles.join(" and ")} ${roles.length === 1 ? "is" : "are"} routed to ${provider}.`);
 }
+
+/** The runtime's own `fetch`, captured so an injected or stubbed one is never replaced. */
+const nativeFetch = globalThis.fetch;
+
+/**
+ * A POST with no limit on how long the vendor may take to start answering.
+ *
+ * These requests are not streamed, so no header arrives until the whole turn has
+ * been generated, and Node's `fetch` gives up after five minutes of that
+ * (measured: `UND_ERR_HEADERS_TIMEOUT` at 301s). A long `xhigh` or `max` turn
+ * would die there with the vendor still billing it, and the respawn would pay
+ * for the same thinking again. The bound that remains is the pool's stall
+ * watchdog, which aborts through `signal`.
+ */
+export const patientFetch: Fetch = (input, init = {}) =>
+  new Promise((resolve, reject) => {
+    const url = new URL(String(input));
+    const send = { "http:": httpRequest, "https:": httpsRequest }[url.protocol]!;
+    const req = send(url, { method: init.method, headers: init.headers as OutgoingHttpHeaders, signal: init.signal ?? undefined }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("error", reject);
+      res.on("end", () => {
+        const body = Buffer.concat(chunks);
+        resolve(new Response(body.length ? body : null, { status: res.statusCode, statusText: res.statusMessage }));
+      });
+    });
+    req.on("error", reject);
+    req.end(init.body as string);
+  });
+
+/** The transport for one turn: only a session with a level set leaves `fetch`. */
+const fetchFor = (req: TurnRequest, fetchImpl: Fetch): Fetch => (req.effort && fetchImpl === nativeFetch ? patientFetch : fetchImpl);
 
 /** Waits between attempts. Injected in tests, `setTimeout` in production. */
 export type Sleep = (ms: number) => Promise<void>;
@@ -207,6 +249,11 @@ export function openaiClient(
   const provider = wire.provider ?? "openai";
   const maxTokensField = wire.maxTokensField ?? "max_completion_tokens";
   return async (req) => {
+    // GPT-5.6 is reported to refuse function tools with a reasoning effort on
+    // Chat Completions (community.openai.com/t/1386454; OpenAI support pointed to
+    // Responses and confirmed no fix as of September 2026). So a session with a
+    // level set goes to the Responses API. Without one the request is unchanged.
+    if (provider === "openai" && req.effort) return responsesTurn(apiKey, fetchFor(req, fetchImpl), baseUrl, sleep, req);
     const messages: Record<string, unknown>[] = [{ role: "system", content: req.system }];
     for (const m of req.messages) {
       if (m.role === "user") messages.push({ role: "user", content: m.text });
@@ -227,7 +274,7 @@ export function openaiClient(
     }
 
     const body = await post(
-      fetchImpl,
+      fetchFor(req, fetchImpl),
       `${baseUrl}/chat/completions`,
       {
         method: "POST",
@@ -240,6 +287,7 @@ export function openaiClient(
             ? { tools: req.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } })) }
             : {}),
           ...(req.maxOutputTokens ? { [maxTokensField]: req.maxOutputTokens } : {}),
+          ...(provider === "deepseek" && req.effort ? { reasoning_effort: req.effort } : {}),
         }),
       },
       provider,
@@ -272,6 +320,93 @@ export function openaiClient(
       },
     };
   };
+}
+
+/**
+ * One turn on OpenAI's Responses API, the endpoint OpenAI points to for function
+ * tools with a reasoning effort on GPT-5.6.
+ *
+ * `store: false` keeps the data handling Chat Completions had, where a Response
+ * would otherwise be retained for 30 days. `strict: false` keeps the tool schemas
+ * meaning what they mean on Chat Completions.
+ */
+async function responsesTurn(apiKey: string, fetchImpl: Fetch, baseUrl: string, sleep: Sleep, req: TurnRequest): Promise<ProviderTurn> {
+  const input: unknown[] = [];
+  for (const m of req.messages) {
+    if (m.role === "user") input.push({ role: "user", content: m.text });
+    else if (m.role === "assistant") {
+      // Only a checkpoint digest has no items: it is the charrette's own text.
+      if (m.items) input.push(...m.items);
+      else input.push({ role: "assistant", content: m.text });
+    } else input.push({ type: "function_call_output", call_id: m.callId, output: m.text });
+  }
+
+  const body = (await post(
+    fetchImpl,
+    `${baseUrl}/responses`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+      signal: req.signal,
+      body: JSON.stringify({
+        model: modelId(req.model),
+        instructions: req.system,
+        input,
+        store: false,
+        include: ["reasoning.encrypted_content"],
+        reasoning: { effort: req.effort },
+        ...(req.tools.length
+          ? { tools: req.tools.map((t) => ({ type: "function", name: t.name, description: t.description, parameters: t.parameters, strict: false })) }
+          : {}),
+        ...(req.maxOutputTokens ? { max_output_tokens: req.maxOutputTokens } : {}),
+      }),
+    },
+    "openai",
+    sleep
+  )) as { status?: unknown; error?: { code?: unknown; message?: unknown } | null; output?: unknown; usage?: Record<string, unknown> };
+
+  // A failed Response is an HTTP 200. Left unread it would look like an empty
+  // answer. A rate limit keeps the envelope `usageLimitOf` waits out.
+  if (body.status === "failed") {
+    const code = String(body.error?.code ?? "unknown");
+    throw new Error(`openai API ${code === "rate_limit_exceeded" ? "429" : "failed"} ${code}: ${String(body.error?.message ?? "the response failed")}`);
+  }
+
+  const output = (Array.isArray(body.output) ? body.output : []) as Record<string, unknown>[];
+  let text = "";
+  const toolCalls: ToolCall[] = [];
+  for (const [i, item] of output.entries()) {
+    if (item.type === "message" && Array.isArray(item.content)) {
+      for (const part of item.content as Record<string, unknown>[]) {
+        if (part.type === "output_text" && typeof part.text === "string") text += part.text;
+      }
+    } else if (item.type === "function_call") {
+      toolCalls.push({
+        id: typeof item.call_id === "string" ? item.call_id : `call_${i}`,
+        name: typeof item.name === "string" ? item.name : "",
+        input: parseArgs(item.arguments),
+      });
+    }
+  }
+
+  const usage = body.usage ?? {};
+  const cached = toNumber((usage.input_tokens_details as { cached_tokens?: unknown } | undefined)?.cached_tokens);
+  const turnUsage: Usage = {
+    // As on Chat Completions: input includes the cached tokens, and output
+    // already includes the reasoning tokens.
+    inputTokens: Math.max(0, toNumber(usage.input_tokens) - cached),
+    outputTokens: toNumber(usage.output_tokens),
+    cacheReadTokens: cached,
+    cacheWriteTokens: 0,
+  };
+
+  // Cut off at the output ceiling. A half-written call cannot be run, and the
+  // reasoning before it cannot be replayed without it, so only the prose stands,
+  // as it does for a truncated Chat Completions reply.
+  if (body.status === "incomplete") {
+    return { text, toolCalls: [], usage: turnUsage, items: text ? [{ role: "assistant", content: text }] : [] };
+  }
+  return { text, toolCalls, usage: turnUsage, items: output };
 }
 
 /**
@@ -336,7 +471,7 @@ export function googleClient(
     }
 
     const body = await post(
-      fetchImpl,
+      fetchFor(req, fetchImpl),
       `${baseUrl}/models/${encodeURIComponent(modelId(req.model))}:generateContent`,
       {
         method: "POST",
@@ -348,7 +483,14 @@ export function googleClient(
           ...(req.tools.length
             ? { tools: [{ functionDeclarations: req.tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters })) }] }
             : {}),
-          ...(req.maxOutputTokens ? { generationConfig: { maxOutputTokens: req.maxOutputTokens } } : {}),
+          ...(req.maxOutputTokens || req.effort
+            ? {
+                generationConfig: {
+                  ...(req.maxOutputTokens ? { maxOutputTokens: req.maxOutputTokens } : {}),
+                  ...(req.effort ? { thinkingConfig: { thinkingLevel: req.effort } } : {}),
+                },
+              }
+            : {}),
         }),
       },
       "google",

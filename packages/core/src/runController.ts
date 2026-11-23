@@ -17,7 +17,12 @@ import {
   TaskState,
   blockingQuestions,
   briefToAssignment,
+  EffortConfig,
+  effortKey,
+  effortLevels,
+  effortProblem,
   gating,
+  mergeEfforts,
   hasCriticalPath,
   providerFor,
   validatePlanDag,
@@ -9278,6 +9283,38 @@ export class RunController {
         ? `. ${live.length} ${role} session${live.length === 1 ? "" : "s"} already running stay${live.length === 1 ? "s" : ""} on ${was} until ${live.length === 1 ? "it finishes" : "they finish"}.`
         : ". The next one to start uses it.")
     );
+  }
+
+  /**
+   * Set one model's effort for the rest of the run, for every role on it.
+   *
+   * Only sessions spawned after this: a running session keeps its level, as it
+   * keeps its model. `default` removes the setting, so the vendor's own default
+   * applies and nothing is sent.
+   */
+  setModelEffort(runId: string, model: string, level: string): { ok: boolean; message: string } {
+    const run = this.store.getRun(runId);
+    if (!run) return { ok: false, message: `no run ${runId}` };
+    const key = effortKey(model.trim());
+    const wanted = level.trim();
+    const problem = wanted === "default" && effortLevels(key).length ? null : effortProblem(key, wanted);
+    if (problem) return { ok: false, message: problem };
+    const was = run.config.effort[key] ?? "default";
+    if (was === wanted) return { ok: true, message: `${key} is already at ${wanted}` };
+    try {
+      this.store.patchRunConfig(runId, { effort: EffortConfig.parse(mergeEfforts(run.config.effort, { [key]: wanted })) });
+    } catch (e) {
+      return { ok: false, message: String(e).slice(0, 300) };
+    }
+    this.bus.publish({ type: "agent.log", runId, sessionId: "integrator", text: `${key} effort for the rest of the run: ${was} → ${wanted}`, ts: Date.now() });
+    const roles = Object.entries(run.config.models).filter(([, m]) => effortKey(m) === key).map(([role]) => role);
+    const live = this.store.listSessions(runId).filter((s) => s.state === "running" && effortKey(s.model) === key).length;
+    return {
+      ok: true,
+      message:
+        `${key} effort: ${was} → ${wanted}, for ${roles.length ? roles.join(", ") : "any role moved to it"}. ` +
+        (live ? `${live} session${live === 1 ? "" : "s"} already running keep${live === 1 ? "s" : ""} ${was}.` : "The next session uses it."),
+    };
   }
 
   /**

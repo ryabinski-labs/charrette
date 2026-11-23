@@ -20,6 +20,7 @@ const h = vi.hoisted(() => {
   amendCriteria: vi.fn(),
     patchRunConfig: vi.fn(),
     retiredAtOpen: vi.fn(() => [] as { role: string; from: string; to: string }[]),
+  effortDroppedAtOpen: vi.fn(() => [] as string[]),
     spentUsd: vi.fn(() => 0),
     deployStatus: vi.fn(() => null as unknown),
     prodVerdict: vi.fn(() => null as unknown),
@@ -262,7 +263,7 @@ vi.mock("./dashboardLink.js", () => ({
 }));
 
 import type { GateHandler } from "@charrette/core";
-import { buildProgram, makeDashboardFactory, modelOverrides, parseRunConfig } from "./cli.js";
+import { buildProgram, effortBanner, effortOverrides, makeDashboardFactory, modelOverrides, parseRunConfig } from "./cli.js";
 
 let out: string[];
 
@@ -341,6 +342,7 @@ beforeEach(() => {
   h.storeMethods.listRuns.mockReturnValue([]);
   h.storeMethods.getRun.mockReturnValue(undefined);
   h.storeMethods.retiredAtOpen.mockReturnValue([]);
+  h.storeMethods.effortDroppedAtOpen.mockReturnValue([]);
   h.storeMethods.listTasks.mockReturnValue([]);
   h.storeMethods.getTask.mockReturnValue(undefined);
   h.storeMethods.spentUsd.mockReturnValue(0);
@@ -3821,5 +3823,98 @@ describe("retired models", () => {
 
     expect(h.storeMethods.retiredAtOpen).toHaveBeenCalledWith("run-1");
     expect(printed()).toContain("retired    workerUi claude-opus-5→claude-opus-5-5   (this run's frozen models, now moved for good)");
+  });
+});
+
+/**
+ * `--effort model=level`. Keyed by model, so one flag reaches every role on that
+ * model, and refused here rather than as a 400 from whichever role gets there.
+ */
+describe("--effort", () => {
+  const existing = (config: Record<string, unknown>) => {
+    h.storeMethods.getRun.mockReturnValue({ id: "run-1", state: "EXECUTING", config: { deterministicChecks: [], models: {}, ...config } });
+    h.storeMethods.listRuns.mockReturnValue([{ id: "run-1", state: "EXECUTING", assignment: "a" }]);
+  };
+  const started = () => h.controllerMethods.startRun.mock.calls[0]![1] as { effort: Record<string, string> };
+
+  it("reaches the run's config and its banner, and sets nothing unless asked", async () => {
+    await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard", "--effort", "gemini-4-neon=xhigh", "--effort", "claude-opus-5-5=max");
+    expect(started().effort).toEqual({ "gemini-4-neon": "xhigh", "claude-opus-5-5": "max" });
+    expect(printed()).toContain("effort     gemini-4-neon=xhigh · claude-opus-5-5=max   (each applies to every role on that model)");
+  });
+
+  it("prints no effort line and stores nothing by default", async () => {
+    await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard");
+    expect(started().effort).toEqual({});
+    expect(printed()).not.toContain("effort  ");
+  });
+
+  it("lets the flag win over the file, and `default` clear what the file set", async () => {
+    h.loadFileConfigMock.mockReturnValue({ config: { effort: { "gemini-4-neon": "low", "gpt-5.6-terra": "high" } }, path: "/repo/charrette.config.json" });
+    await cli("run", "build a thing", "--repo", "/repo", "--no-dashboard", "--effort", "gemini-4-neon=high", "--effort", "gpt-5.6-terra=default");
+    expect(started().effort).toEqual({ "gemini-4-neon": "high" });
+  });
+
+  it("reads a retired model as its replacement", () => {
+    expect(effortOverrides(["claude-opus-5=xhigh"])).toEqual({ "claude-opus-5-5": "xhigh" });
+  });
+
+  it("refuses a level the model does not take, naming the ones it does", () => {
+    expect(() => effortOverrides(["gemini-4-carbon=xhigh"])).toThrow('--effort: gemini-4-carbon does not support effort "xhigh"; use one of: low, medium, high.');
+  });
+
+  it("refuses a model with no effort setting, even to clear it", () => {
+    expect(() => effortOverrides(["some-model=high"])).toThrow("--effort: some-model has no effort setting.");
+    expect(() => effortOverrides(["some-model=default"])).toThrow("--effort: some-model has no effort setting.");
+  });
+
+  it("rejects a malformed pair", () => {
+    for (const pair of ["gemini-4-neon", "=high", "gemini-4-neon="]) {
+      expect(() => effortOverrides([pair])).toThrow(/expects model=level/);
+    }
+    expect(effortOverrides()).toEqual({});
+  });
+
+  it("refuses a bad level in the file before the run exists", async () => {
+    h.loadFileConfigMock.mockReturnValue({ config: { effort: { "deepseek-flash": "medium" } }, path: "/repo/charrette.config.json" });
+    await expect(cli("run", "build a thing", "--repo", "/repo", "--no-dashboard")).rejects.toThrow('effort: deepseek-flash does not support effort "medium"; use one of: low, high, max.');
+    expect(h.controllerMethods.startRun).not.toHaveBeenCalled();
+  });
+
+  it("changes a resumed run for the sessions still to start, and says what moved", async () => {
+    existing({ effort: { "gemini-4-neon": "low", "gpt-5.6-terra": "high" } });
+    h.loadFileConfigMock.mockReturnValue({ config: {}, path: "/repo/charrette.config.json" });
+    await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard", "--effort", "gemini-4-neon=xhigh", "--effort", "gpt-5.6-terra=default");
+    expect(h.storeMethods.patchRunConfig).toHaveBeenCalledWith("run-1", { effort: { "gemini-4-neon": "xhigh" } });
+    expect(printed()).toContain("gemini-4-neon effort for the rest of the run: low → xhigh");
+    expect(printed()).toContain("gpt-5.6-terra effort for the rest of the run: high → default");
+  });
+
+  it("says when a resume sets a level the run did not have", async () => {
+    existing({});
+    h.loadFileConfigMock.mockReturnValue({ config: { effort: { "gemini-4-neon": "high" } }, path: "/repo/charrette.config.json" });
+    await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
+    expect(h.storeMethods.patchRunConfig).toHaveBeenCalledWith("run-1", { effort: { "gemini-4-neon": "high" } });
+    expect(printed()).toContain("gemini-4-neon effort for the rest of the run: default → high");
+  });
+
+  it("does not touch a resumed run when nothing changed, whatever order the keys are in", async () => {
+    existing({ effort: { "gemini-4-neon": "high", "gpt-5.6-terra": "low" } });
+    h.loadFileConfigMock.mockReturnValue({ config: { effort: { "gpt-5.6-terra": "low", "gemini-4-neon": "high" } }, path: "/repo/charrette.config.json" });
+    await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
+    expect(h.storeMethods.patchRunConfig).not.toHaveBeenCalledWith("run-1", { effort: expect.anything() });
+  });
+
+  it("shows a resumed run's active efforts, and any the store had to drop", async () => {
+    existing({ effort: { "gemini-4-neon": "high" } });
+    h.storeMethods.effortDroppedAtOpen.mockReturnValue(["gemini-3.6-flash=minimal"]);
+    await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
+    expect(printed()).toContain("effort     gemini-4-neon=high");
+    expect(printed()).toContain("effort     dropped gemini-3.6-flash=minimal   (no longer supported, so the vendor's default applies)");
+  });
+
+  it("has nothing to say about an empty table", () => {
+    expect(effortBanner()).toEqual([]);
+    expect(effortBanner({})).toEqual([]);
   });
 });

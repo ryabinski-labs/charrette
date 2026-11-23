@@ -578,6 +578,7 @@ pass it and the charrette takes it as final.
 | `--port <n>` | first free port from `4777` | pin the dashboard port; a pinned port that is busy is an error rather than a silent move |
 | `--chat` / `--no-chat` | on when no assignment is given | interview you with an intake agent before planning |
 | `--account <name>` | the account you are logged into | spend a named Claude subscription from `subscription.accounts` ([§12.1](#121-subscription-limits)) |
+| `--effort <model=level>` | none | how hard one model thinks, for every role on it; repeatable ([Effort per model](#effort-per-model)) |
 
 Exit leaves the run in a resumable state whatever happens.
 
@@ -640,7 +641,9 @@ exactly where it stopped. Tasks already `MERGED` are skipped, and nothing alread
 paid for is paid for again. Takes the same `--dashboard` / `--no-dashboard` flags
 as `run`, plus `--account <name>` to continue on a different Claude subscription
 ([§12.1](#121-subscription-limits)) — the reason a run parked in `LIMIT_HOLD`
-usually gets resumed at all.
+usually gets resumed at all. `--effort model=level` changes one model's effort for
+the sessions still to start, and `--effort model=default` clears it
+([Effort per model](#effort-per-model)).
 
 A *finished* run still resumes when it has recoverable work. Each `NEEDS_HUMAN`
 task opens its escalation gate now — the same gate, so `taskGate.decidedBy`
@@ -850,6 +853,7 @@ Run configuration is a zod-validated `RunConfig`
 | `models.reviewer` | `gemini-3.8-flash` | — | ✅ | judges the demo through one named lens; this is the judgment a pit stop exists to buy. **Google only, above Lite** — held off the family that wrote the code so its errors are uncorrelated with the ones already in the diff |
 | `models.pm` | `gemini-3.8-flash` | — | ✅ | every decision a skill makes instead of you: what the run does next at a pit stop, whether a failing plan goes back to the planner, and whether a cap that was reached is raised. The only agent whose output redirects the remaining work, re-plans it, or spends money on its own; point it at `claude-fable-5-2` for the most careful reading. |
 | `models.spec` | `gemini-3.8-flash` | — | ✅ | writes the specification every downstream check is judged against, once per run, from a brief nobody has built against yet — the hardest reading task in the run. Point it at `claude-fable-5-2` when the brief is long or ambiguous. |
+| `effort` | `{}` | `--effort model=level` | ✅ | how hard each model thinks, keyed by **model**, not role: `{"gemini-4-neon":"high"}`. An unset model is sent nothing. See [Effort per model](#effort-per-model). |
 | `pitStop.every` | `"epic"` | — | ✅ | when the run stops to show you what it built: `"epic"`, `"never"`, `{"tasks":5}`, `{"usd":100}`, `{"minutes":90}` — see [PITSTOP.md](./PITSTOP.md) |
 | `pitStop.reviewers` | `product-manager`, `critical-challenger`, `qa-agent`, `ui-ux-cx-engineer` | — | ✅ | one short session per lens, by skill name; max 4, `[]` for none. This is the pit stop's price. |
 | `pitStop.reviewFirstPass` | `2` | — | ✅ | how many lenses read the demo before the charrette decides whether the rest are worth buying. The remaining ones are bought only when the first pass suggests there is something to find — any lens not `on-track`, any disagreement, a lens that did not finish, or an INCONCLUSIVE demo. `0` runs them all every time. Which lenses were skipped, and why, is printed with the report. |
@@ -999,6 +1003,59 @@ retired    workerUi claude-opus-5→claude-opus-5-5   (this run's frozen models,
 
 The price table keeps rows for retired models, so a session that was already
 running on one when its run moved is billed at what it cost.
+
+#### Effort per model
+
+Effort sets how much a model reasons before it answers. It is set per **model**,
+so one setting reaches every role routed to that model:
+
+```json
+{ "effort": { "gemini-4-neon": "high", "claude-opus-5-5": "xhigh", "gpt-5.6-terra": "medium" } }
+```
+
+```bash
+charrette run --effort gemini-4-neon=high --effort claude-opus-5-5=xhigh
+charrette resume --effort gemini-4-neon=low --effort gpt-5.6-terra=default
+```
+
+Nothing is set by default. A model with no setting is sent no effort parameter,
+so it runs at its vendor's default and costs what it did before.
+
+| Model | Levels | Sent as |
+|---|---|---|
+| `claude-fable-5-2`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5` | `low` `medium` `high` `xhigh` `max` | the Agent SDK's `effort` option |
+| `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | `none` `low` `medium` `high` `xhigh` `max` | `reasoning.effort`, on the Responses API |
+| `gemini-4-neon`, `gemini-4-hydrogen` | `low` `medium` `high` `xhigh` | `generationConfig.thinkingConfig.thinkingLevel` |
+| `gemini-4-carbon`, `gemini-3.8-flash` | `low` `medium` `high` | the same |
+| `gemini-3.5-flash-lite` | `minimal` `low` `medium` `high` | the same |
+| `deepseek-flash` | `low` `high` `max` | `reasoning_effort` |
+
+A level the model does not take stops the run before it starts, with the valid
+levels named. DeepSeek's API also accepts `medium` and `xhigh` but runs them as
+`high`, so they are refused here rather than shown as something they are not. A
+retired model id reads as its replacement, and takes the replacement's levels.
+
+Setting a level on an OpenAI model moves that model's sessions from Chat
+Completions to the Responses API, because GPT-5.6 is reported to refuse function
+tools with a reasoning effort on Chat Completions. With no level set, OpenAI
+sessions stay on Chat Completions.
+
+The dashboard shows an effort control beside each role, listing only what that
+role's model takes. Because the setting belongs to the model, changing it on one
+row changes every row on that model, and the control says how many roles share
+it. A session already running keeps the level it started with, including across
+a usage-limit wait, and the next session uses the new one. As with `models`, a
+value in `charrette.config.json` is applied again on `resume`, so a level changed
+in the dashboard is overwritten if the file names that model too.
+
+**Cost.** Higher effort spends more output tokens, and the ledger books what each
+vendor reports, thinking included, so spend and caps stay correct. The plan's
+pre-run estimate does not know about effort: it is built from what earlier runs
+in the repository cost, so it reads low the first time you raise effort there.
+Set the cap with that in mind. Thinking also counts against a message's output
+ceiling, so a planner at `xhigh` or `max` has less room for the plan in one
+message. The planner retries a cut-off message, but only a limited number of
+times.
 
 #### Changing it mid-run
 

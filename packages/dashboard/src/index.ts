@@ -50,6 +50,7 @@ export interface FeedbackSink {
   pauseRun(runId: string): string;
   cancelPitStop(runId: string): string;
   rerouteModel(runId: string, role: string, model: string): string;
+  setModelEffort(runId: string, model: string, level: string): { ok: boolean; message: string };
 }
 
 const DEFAULT_PORT = 4777;
@@ -425,6 +426,21 @@ export class Dashboard implements GateHandler {
       // arrow; everything else it returns is an operator-facing refusal.
       if (!message.includes(" → ")) return reply.code(400).send({ error: message });
       return { ok: true, message };
+    });
+
+    // Set one model's effort, for every role on it. The controller checks the
+    // level against the model; `default` clears it.
+    app.post("/api/runs/:id/effort", async (req, reply) => {
+      if (!this.authed(req)) return reply.code(401).send();
+      if (!this.originOk(req)) return reply.code(403).send();
+      if (!this.feedbackSink) return reply.code(503).send({ error: "not wired up in this mode" });
+      const body = (req.body ?? {}) as { model?: unknown; level?: unknown };
+      if (typeof body.model !== "string" || !body.model.trim() || typeof body.level !== "string" || !body.level.trim()) {
+        return reply.code(400).send({ error: "model and level are required" });
+      }
+      const out = this.feedbackSink.setModelEffort((req.params as { id: string }).id, body.model, body.level);
+      if (!out.ok) return reply.code(400).send({ error: out.message });
+      return { ok: true, message: out.message };
     });
 
     app.post("/api/gates/task", async (req, reply) => {

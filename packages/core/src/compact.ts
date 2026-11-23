@@ -68,6 +68,9 @@ const TAIL = 400;
 
 export function messageChars(m: LoopMessage): number {
   if (m.role === "assistant") {
+    // OpenAI's output items hold the prose, the calls and the encrypted
+    // reasoning, and they are what goes back on the wire.
+    if (m.items) return JSON.stringify(m.items).length;
     // The chain of thought DeepSeek requires back is part of every later
     // request, so it is part of what has to fit. Counting only the prose and
     // the tool calls would let a session sail past the budget on the one field
