@@ -1316,7 +1316,7 @@ export class Store {
     return rows
       .map((r) => JSON.parse(r.payload) as { stop: number; action: string; feedback?: string; decidedBy?: string })
       .filter((p) => (p.decidedBy ?? "operator") === "operator" && (p.feedback ?? "").trim())
-      .map((p) => ({ stop: p.stop, action: p.action, feedback: (p.feedback ?? "").trim() }));
+      .map((p) => ({ stop: p.stop, action: p.action, feedback: p.feedback!.trim() }));
   }
 
   lastEventSeq(runId: string, type: string): number {

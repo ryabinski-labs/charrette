@@ -265,7 +265,13 @@ describe("operator decisions and transitions the closing gate reads", () => {
     resolved({ stop: 1, action: "continue", feedback: "", decidedBy: "operator" }, 1);
     resolved({ stop: 2, action: "redirect", feedback: "pm words", decidedBy: "product-manager" }, 2);
     resolved({ stop: 3, action: "replan", feedback: " Meta by CSV ", decidedBy: "operator" }, 3);
-    expect(s.operatorPitStopDecisions("run1")).toEqual([{ stop: 3, action: "replan", feedback: "Meta by CSV" }]);
+    // Written before either field existed: no decider means the operator, no feedback means nothing said.
+    resolved({ stop: 4, action: "continue" }, 4);
+    resolved({ stop: 5, action: "redirect", feedback: "keep it local" }, 5);
+    expect(s.operatorPitStopDecisions("run1")).toEqual([
+      { stop: 3, action: "replan", feedback: "Meta by CSV" },
+      { stop: 5, action: "redirect", feedback: "keep it local" },
+    ]);
   });
 
   it("finds the newest transition between two named states", () => {

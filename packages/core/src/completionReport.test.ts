@@ -88,6 +88,13 @@ describe("what became of what you asked for", () => {
     expect(html).not.toContain("Never claimed by any task:");
   });
 
+  it("lists a requirement with no scenario as judged only by the intent check", () => {
+    const html = renderCompletionReport(report({ scope: scope({ unspecified: [{ id: "REQ-API", text: "a backend" }] }) }));
+    expect(html).toContain("No scenario in the specification, so judged only by the intent check:");
+    expect(html).toContain("REQ-API — a backend");
+    expect(renderCompletionReport(report({ scope: scope({ unspecified: [] }) }))).not.toContain("No scenario in the specification");
+  });
+
   it("omits the provenance of a dropped requirement no task ever touched", () => {
     const html = renderCompletionReport(report({ scope: scope({ dropped: [{ id: "REQ-9", text: "a thing", why: "" }] }) }));
     expect(html).toContain("REQ-9 — a thing");
