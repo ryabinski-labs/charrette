@@ -1258,6 +1258,20 @@ else sits in a fixed sidebar.
   review, and hunting for it across thirty task cards is not that. When there are
   none it says so — and once the run is over, "none" is the answer, not a
   loading state.
+- **Demo** — the header button opens everything a pit stop's demo wrote to
+  `.charrette/<run>/pitstops/<n>/`; it reads *Demo running* while one is in
+  flight. Pick a stop (newest first), filter by type, search by name, and open
+  any file: images, video, rendered reports, JSON, CSV tables, logs and text.
+  HTML and SVG appear as source and are never rendered. A binary file gets a
+  details card and a download, unless it may hold keys or credentials, in which
+  case the download is withheld and the card says why. An open pit stop offers
+  **View demo artifacts (N)**, and files cited in its report are links; closing
+  the viewer returns you to the decision with your typed feedback intact. The
+  viewer's address is `?stop=15&file=live/x.png`, so it can be reloaded and
+  Back closes it. While a demo runs you see its last action and new files as
+  they land, and after ten minutes with no activity it says so. Credential
+  values in text are masked on the server for view, new tab and download. Text
+  inside a screenshot cannot be masked, so treat images as sensitive.
 - **Ask the PM…** — under the feedback box, the one control that can open a pit
   stop on your say-so rather than at a boundary the plan crossed. Type the
   question first (it will not arm without one), then confirm: the demo agent
