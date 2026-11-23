@@ -65,7 +65,7 @@ export const DEMO_CSS = String.raw`
   .dm-thumb { display:flex; flex-direction:column; overflow:hidden; }
   .dm-pic { display:flex; align-items:center; justify-content:center; aspect-ratio:16/10; background:var(--bg); overflow:hidden;
             color:var(--dim); font-size:.7rem; text-align:center; padding:0; }
-  .dm-pic img { width:100%; height:100%; object-fit:cover; object-position:top; display:block; }
+  .dm-pic img { width:100%; height:100%; object-fit:contain; object-position:center; display:block; }
   .dm-thumb .dm-name { padding:.3rem .45rem; font-size:.72rem; }
   .dm-list { display:flex; flex-direction:column; gap:.25rem; }
   .dm-row { display:flex; align-items:center; gap:.55rem; padding:.34rem .55rem; font-size:.8rem; width:100%; }
