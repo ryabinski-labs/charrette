@@ -1239,6 +1239,22 @@ export const RunConfig = z.object({
    * "per-task" keeps the one-PR-per-task behaviour.
    */
   prMode: z.enum(["single", "per-task"]).default("single"),
+  /**
+   * When merged work reaches GitHub, in `prMode: "single"`.
+   *
+   * "progress" (default) pushes the integration branch after every task merge
+   * and keeps a draft rollup PR open whose description says the run is still
+   * going and must not be merged. Run 614e06d5 merged ~97 commits over many
+   * hours and the operator's GitHub repository stayed empty the whole time,
+   * because nothing was pushed until the run had judged itself. The draft is
+   * the same pull request the end of the run publishes: it rewrites the
+   * description and flips it ready then, and nothing that gates on "the run's
+   * pull request" counts it before that.
+   *
+   * "end" keeps the older shape: nothing is pushed or opened until the run
+   * has been validated.
+   */
+  publish: z.enum(["progress", "end"]).default("progress"),
   deterministicChecks: z.array(z.string()).default([]),
   /**
    * How long any one deterministic check may run before the charrette kills it.

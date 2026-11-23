@@ -158,7 +158,9 @@ const BASE = { deterministicChecks: [] as string[], waitForChecks: false, skillF
 // The pull-request body cases open a PR over a FAIL or an unanswered intent
 // check, which the closing gate no longer allows — so those run with the hold
 // off. What the hold does is closingProof.test.ts's subject.
-const UNHELD = { ...BASE, holdUntilProven: false };
+// These read the body the end of the run writes, so the run publishes only
+// then; the progress draft that would otherwise come first has its own tests.
+const UNHELD = { ...BASE, holdUntilProven: false, publish: "end" as const };
 
 describe("a budget stop reaching each stage that must let it through", () => {
   /**

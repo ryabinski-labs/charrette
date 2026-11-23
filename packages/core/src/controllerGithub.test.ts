@@ -69,6 +69,7 @@ function fakeGithub(opts: { noCommits?: boolean } = {}): FakeGh {
   const adapter = new GitHubAdapter("token", "acme/widgets");
   const state: FakeGh = { adapter, comments: [], closed: [], prsCreated: 0, issueThread: [] };
   let nextIssue = 100;
+  const open: { number: number; html_url: string; state: string; head: string; body: string }[] = [];
   (adapter as unknown as { octokit: unknown }).octokit = {
     rest: {
       issues: {
@@ -89,8 +90,10 @@ function fakeGithub(opts: { noCommits?: boolean } = {}): FakeGh {
         },
       },
       pulls: {
-        list: async () => ({ data: [] }),
-        create: async () => {
+        // Lists what this fake opened, as GitHub would, so a pull request opened
+        // early (the progress draft) is the one a later `ensurePR` adopts.
+        list: async (args: { head: string }) => ({ data: open.filter((p) => `acme:${p.head}` === args.head) }),
+        create: async (args: { head: string; body: string; draft?: boolean }) => {
           if (opts.noCommits) {
             throw Object.assign(new Error("Validation Failed"), {
               status: 422,
@@ -98,7 +101,9 @@ function fakeGithub(opts: { noCommits?: boolean } = {}): FakeGh {
             });
           }
           state.prsCreated++;
-          return { data: { number: 50 + state.prsCreated, html_url: `https://example.invalid/pull/${50 + state.prsCreated}` } };
+          const number = 50 + state.prsCreated;
+          open.push({ number, html_url: `https://example.invalid/pull/${number}`, state: "open", head: args.head, body: args.body });
+          return { data: { number, html_url: `https://example.invalid/pull/${number}` } };
         },
         get: async () => ({ data: { state: "open", draft: false, merged_at: null, head: { sha: "abc" } } }),
         update: async () => ({ data: {} }),

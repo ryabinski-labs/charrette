@@ -777,6 +777,30 @@ describe("charrette run — resolving what the run will actually do", () => {
     await cli("run", "x", "--repo", "/repo", "--no-dashboard");
 
     expect(printed()).toContain("prs        one PR per task   (charrette.config.json)");
+    // Per-task mode publishes at the end whatever `publish` says, so it is not offered.
+    expect(printed()).not.toContain("publish    ");
+  });
+
+  it("says the run publishes as it goes, by default", async () => {
+    await cli("run", "x", "--repo", "/repo", "--no-dashboard");
+
+    expect(printed()).toContain("publish    pushed after every merge, as a draft PR until the run is proven   (default)");
+  });
+
+  it("credits the config file for progress publishing it asks for", async () => {
+    h.loadFileConfigMock.mockReturnValue({ config: { publish: "progress" }, path: "/repo/charrette.config.json" });
+
+    await cli("run", "x", "--repo", "/repo", "--no-dashboard");
+
+    expect(printed()).toContain("publish    pushed after every merge, as a draft PR until the run is proven   (charrette.config.json)");
+  });
+
+  it("says nothing is pushed until the end when the config asks for that", async () => {
+    h.loadFileConfigMock.mockReturnValue({ config: { publish: "end" }, path: "/repo/charrette.config.json" });
+
+    await cli("run", "x", "--repo", "/repo", "--no-dashboard");
+
+    expect(printed()).toContain("publish    nothing pushed until the run is proven   (charrette.config.json)");
   });
 
   it("warns that other open runs in this repo are invisible to this one", async () => {
@@ -2097,6 +2121,16 @@ describe("charrette resume — settings the operator changed since the run start
 
     expect(h.storeMethods.patchRunConfig).toHaveBeenCalledWith("run-1", { prMode: "single" });
     expect(printed()).toContain("PR mode updated from charrette.config.json: single");
+  });
+
+  it("updates when the run publishes", async () => {
+    existing({ publish: "progress" });
+    h.loadFileConfigMock.mockReturnValue({ config: { publish: "end" }, path: "/repo/charrette.config.json" });
+
+    await cli("resume", "run-1", "--repo", "/repo", "--no-dashboard");
+
+    expect(h.storeMethods.patchRunConfig).toHaveBeenCalledWith("run-1", { publish: "end" });
+    expect(printed()).toContain("Publishing updated from charrette.config.json: end");
   });
 
   it("raises the parallel worker cap on a run that predates parallel dispatch", async () => {

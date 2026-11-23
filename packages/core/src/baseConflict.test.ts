@@ -189,7 +189,8 @@ async function build(github: GitHubAdapter, agents: AgentPool, repo: string, ove
   const runId = await controller.startRun(
     "do a thing",
     // `holdUntilProven` is off too: nothing here answers the validator, and what the closing gate does with that is closingProof.test.ts's subject.
-    RunConfig.parse({ deterministicChecks: [], checkTimeoutMinutes: 1, deployTimeoutMinutes: 1, holdUntilGreen: false, holdUntilProven: false, ...(over.baseBranch ? { baseBranch: over.baseBranch } : {}) })
+    // `publish: "end"` so the pull request these read is the one the end of the run opens, not the progress draft.
+    RunConfig.parse({ deterministicChecks: [], checkTimeoutMinutes: 1, deployTimeoutMinutes: 1, holdUntilGreen: false, holdUntilProven: false, publish: "end", ...(over.baseBranch ? { baseBranch: over.baseBranch } : {}) })
   );
   return { store, bus, runId, logs, controller };
 }

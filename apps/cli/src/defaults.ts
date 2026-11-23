@@ -488,6 +488,7 @@ export const FileConfig = z
     roleSkills: z.record(z.string(), z.array(z.string())).optional(),
     githubRepo: z.string().optional(),
     prMode: z.enum(["single", "per-task"]).optional(),
+    publish: z.enum(["progress", "end"]).optional(),
     deterministicChecks: z.array(z.string()).optional(),
     /** Ceiling on any one deterministic check. Distinct from `checkTimeoutMinutes`, which is how long to wait on the repo's own CI. */
     deterministicCheckTimeoutMinutes: z.number().positive().max(240).optional(),
