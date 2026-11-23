@@ -1532,7 +1532,12 @@ describe("the models the dropdown offers", () => {
   });
 
   it("offers the newest Claude generation first", () => {
-    expect(MODEL_CHOICES.slice(0, 4)).toEqual(["claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]);
+    expect(MODEL_CHOICES.slice(0, 3)).toEqual(["claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5"]);
+  });
+
+  it("offers all of Gemini 4 and no Haiku", () => {
+    expect(MODEL_CHOICES).toEqual(expect.arrayContaining(["gemini-4-carbon", "gemini-4-neon", "gemini-4-hydrogen"]));
+    expect(MODEL_CHOICES.filter((m) => /haiku/i.test(m))).toEqual([]);
   });
 
   /**
@@ -1551,6 +1556,6 @@ describe("the models the dropdown offers", () => {
     });
     expect(PINNED_CHOICES.intake!.models).toEqual(PINNED_CHOICES.qa!.models);
     expect(PINNED_CHOICES.prod!.models).toEqual(PINNED_CHOICES.qa!.models);
-    expect(PINNED_CHOICES.reviewer).toEqual({ vendor: "Google", models: ["gemini-3.8-flash"] });
+    expect(PINNED_CHOICES.reviewer).toEqual({ vendor: "Google", models: ["gemini-4-carbon", "gemini-4-neon", "gemini-4-hydrogen", "gemini-3.8-flash"] });
   });
 });

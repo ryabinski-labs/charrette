@@ -548,3 +548,76 @@ describe("re-routing a role while the run is going", () => {
     expect(controller.rerouteModel("r1", "worker", "claude-haiku-5-5")).toContain("database is locked");
   });
 });
+
+describe("setting a model's effort while the run is going", () => {
+  const withRun = (config: Record<string, unknown> = {}) => {
+    const { pool } = rolePool({});
+    const built = build(repo(), pool);
+    built.store.createRun({
+      id: "r1", repoPath: "/repo", assignment: "a", state: "EXECUTING",
+      prdPath: null, planHash: null, integrationBranch: "charrette/r1",
+      config: RunConfig.parse({ models: { worker: "gemini-4-neon", demo: "gemini-4-neon", advisor: "deepseek-flash" }, ...config }),
+    });
+    return built;
+  };
+  const running = (store: Store, id: string, model: string) =>
+    store.db
+      .prepare("INSERT INTO sessions (id, runId, taskId, role, model, state, startedAt) VALUES (?,?,?,?,?,?,?)")
+      .run(id, "r1", `task-${id}`, "worker", model, "running", Date.now());
+
+  it("sets it for the model and names every role that reaches", () => {
+    const { controller, store } = withRun();
+    expect(controller.setModelEffort("r1", "gemini-4-neon", "xhigh")).toEqual({
+      ok: true,
+      message: "gemini-4-neon effort: default → xhigh, for worker, demo. The next session uses it.",
+    });
+    expect(store.getRun("r1")!.config.effort).toEqual({ "gemini-4-neon": "xhigh" });
+  });
+
+  it("says when no role is on the model yet", () => {
+    const { controller } = withRun();
+    expect(controller.setModelEffort("r1", "gpt-5.6-luna", "low").message).toContain("for any role moved to it.");
+  });
+
+  it("clears it with `default`, so nothing is sent", () => {
+    const { controller, store } = withRun({ effort: { "gemini-4-neon": "high" } });
+    expect(controller.setModelEffort("r1", "gemini-4-neon", "default").ok).toBe(true);
+    expect(store.getRun("r1")!.config.effort).toEqual({});
+  });
+
+  it("says nothing changed when the model is already there", () => {
+    const { controller } = withRun({ effort: { "gemini-4-neon": "high" } });
+    expect(controller.setModelEffort("r1", "gemini-4-neon", "high")).toEqual({ ok: true, message: "gemini-4-neon is already at high" });
+  });
+
+  it("refuses a level the model does not take, and changes nothing", () => {
+    const { controller, store } = withRun();
+    const out = controller.setModelEffort("r1", "deepseek-flash", "medium");
+    expect(out).toEqual({ ok: false, message: 'deepseek-flash does not support effort "medium"; use one of: low, high, max.' });
+    expect(store.getRun("r1")!.config.effort).toEqual({});
+  });
+
+  it("refuses a model with no effort setting, and a run it has never heard of", () => {
+    const { controller } = withRun();
+    expect(controller.setModelEffort("r1", "mystery-model", "default")).toEqual({ ok: false, message: "mystery-model has no effort setting." });
+    expect(controller.setModelEffort("nope", "gemini-4-neon", "high")).toEqual({ ok: false, message: "no run nope" });
+  });
+
+  it("names the sessions already running, which keep their level", () => {
+    const { controller, store } = withRun();
+    running(store, "s1", "gemini-4-neon");
+    expect(controller.setModelEffort("r1", "gemini-4-neon", "low").message).toContain("1 session already running keeps default.");
+    running(store, "s2", "gemini-4-neon");
+    expect(controller.setModelEffort("r1", "gemini-4-neon", "high").message).toContain("2 sessions already running keep low.");
+  });
+
+  it("reports a failure to write the config rather than throwing at the operator", () => {
+    const { controller, store } = withRun();
+    store.patchRunConfig = () => {
+      throw new Error("database is locked");
+    };
+    const out = controller.setModelEffort("r1", "gemini-4-neon", "low");
+    expect(out.ok).toBe(false);
+    expect(out.message).toContain("database is locked");
+  });
+});

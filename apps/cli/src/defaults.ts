@@ -408,6 +408,8 @@ export const FileConfig = z
         skillsmith: z.string().optional(),
       })
       .optional(),
+    /** How hard each model thinks, keyed by model. Checked by `EffortConfig`. */
+    effort: z.record(z.string(), z.string()).optional(),
     budget: z
       .object({
         runCapUsd: z.number().positive().optional(),
