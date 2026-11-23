@@ -170,7 +170,14 @@ describe("the pit stop a FAIL verdict opens", () => {
     expect(stops).toEqual([]);
   });
 
-  it("is not re-opened by a resume that re-enters integration", async () => {
+  /**
+   * It used to stay shut, to spare the operator a question they had answered.
+   * But "continue" over an unproven run blocks it, and with the stop shut a
+   * resume re-reads the same proof and blocks again — run 614e06d5 had no way
+   * back to work at all. Resuming a blocked run is the operator coming back to
+   * act, and the closing stop is the only place they can.
+   */
+  it("is re-opened by a resume of the run it blocked, and only once per resume", async () => {
     const dir = repo();
     const { pool } = rolePool({
       planner: plannerSaying(),
@@ -185,9 +192,9 @@ describe("the pit stop a FAIL verdict opens", () => {
     const runId = await controller.startRun("build a thing", RunConfig.parse({ ...BASE, intentFixRounds: 0 }));
     await controller.resume(runId);
 
-    // The verdict has already been shown and answered; re-asking would be the
-    // charrette nagging about a decision the operator already made.
-    expect(stops.length).toBe(1);
+    expect(stops.length).toBe(2);
+    // Nothing changed between the two, so the second is still about the same FAIL.
+    expect(stops[1]!.reason).toBe(stops[0]!.reason);
   });
 
   it("parks the run when the operator wants to think about the gap", async () => {

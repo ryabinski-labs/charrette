@@ -256,3 +256,32 @@ describe("lastUnsummonedPitStopSeq", () => {
     expect(s.lastUnsummonedPitStopSeq("run1")).toBeGreaterThan(0);
   });
 });
+
+describe("operator decisions and transitions the closing gate reads", () => {
+  it("lists the operator's worded pit-stop answers, and leaves out a skill's and empty ones", () => {
+    const s = store();
+    const resolved = (p: Record<string, unknown>, ts: number) =>
+      s.db.prepare("INSERT INTO events (runId, type, payload, ts) VALUES (?,?,?,?)").run("run1", "run.pitstop_resolved", JSON.stringify(p), ts);
+    resolved({ stop: 1, action: "continue", feedback: "", decidedBy: "operator" }, 1);
+    resolved({ stop: 2, action: "redirect", feedback: "pm words", decidedBy: "product-manager" }, 2);
+    resolved({ stop: 3, action: "replan", feedback: " Meta by CSV ", decidedBy: "operator" }, 3);
+    // Written before either field existed: no decider means the operator, no feedback means nothing said.
+    resolved({ stop: 4, action: "continue" }, 4);
+    resolved({ stop: 5, action: "redirect", feedback: "keep it local" }, 5);
+    expect(s.operatorPitStopDecisions("run1")).toEqual([
+      { stop: 3, action: "replan", feedback: "Meta by CSV" },
+      { stop: 5, action: "redirect", feedback: "keep it local" },
+    ]);
+  });
+
+  it("finds the newest transition between two named states", () => {
+    const s = store();
+    const changed = (from: string, to: string, ts: number) =>
+      Number(s.db.prepare("INSERT INTO events (runId, type, payload, ts) VALUES (?,?,?,?)").run("run1", "run.state_changed", JSON.stringify({ from, to, reason: "r" }), ts).lastInsertRowid);
+    expect(s.lastTransitionSeq("run1", "BLOCKED", "INTEGRATING")).toBe(0);
+    changed("INTEGRATING", "BLOCKED", 1);
+    const reopened = changed("BLOCKED", "INTEGRATING", 2);
+    changed("INTEGRATING", "BLOCKED", 3);
+    expect(s.lastTransitionSeq("run1", "BLOCKED", "INTEGRATING")).toBe(reopened);
+  });
+});

@@ -2494,6 +2494,10 @@ export class RunController {
       // from the brief before any code existed. Handed over so that a scope the
       // repository wrote for itself afterwards has something older to lose to.
       const requirements = (this.store.runSpec(runId)?.requirements ?? []).map((r) => ({ id: r.id, text: r.text, priority: r.priority }));
+      // What the operator decided after the brief. Without it the validator
+      // judges the tree against a decision the operator has since reversed, and
+      // fails the run for doing what it was told at a pit stop.
+      const decisions = this.store.operatorPitStopDecisions(runId);
       const common = {
         runId,
         role: "validator" as const,
@@ -2505,7 +2509,7 @@ export class RunController {
       };
       const first = await this.pool.run({
         ...common,
-        prompt: validatorPrompt(run.assignment, this.planPrd(runId), taskLines, diffStat.slice(0, 3000), run.config.deterministicChecks, requirements),
+        prompt: validatorPrompt(run.assignment, this.planPrd(runId), taskLines, diffStat.slice(0, 3000), run.config.deterministicChecks, requirements, decisions),
         maxTurns: INTENT_TURNS,
       });
       let verdict = await this.oneVerdict(runId, common, first);
@@ -6207,7 +6211,7 @@ export class RunController {
    */
   private runScope(runId: string): ScopeLedger {
     const spec = this.store.runSpec(runId);
-    if (!spec) return { entries: [], shipped: 0, writtenOff: 0, dropped: [], unclaimed: [] };
+    if (!spec) return { entries: [], shipped: 0, writtenOff: 0, dropped: [], unclaimed: [], unspecified: [] };
     const tasks = this.store.listTasks(runId).map((t) => ({
       id: t.id,
       title: t.title,
@@ -6309,7 +6313,18 @@ export class RunController {
     // answer, not the verdict — and letting that suppress the closing stop would
     // break the one guarantee this pit stop exists to keep (PITSTOP.md S6:
     // "runs whose closing report is the first sight of a FAIL verdict → 0").
-    const shown = Math.max(this.store.lastEventSeq(runId, "run.intent_verdict"), this.store.lastEventSeq(runId, "run.acceptance_verdict"));
+    //
+    // An operator reopening a blocked run counts as not yet shown, too. Without
+    // that, a resume re-reads the same unmet proof, skips the stop because one
+    // already opened over these verdicts, and blocks again — so "continue" at
+    // the last stop leaves the run with no way back to work (run 614e06d5,
+    // stops 10, 12 and 14). They resumed because they mean to act on it, and
+    // the closing stop is the only place they can.
+    const shown = Math.max(
+      this.store.lastEventSeq(runId, "run.intent_verdict"),
+      this.store.lastEventSeq(runId, "run.acceptance_verdict"),
+      this.store.lastTransitionSeq(runId, "BLOCKED", "INTEGRATING")
+    );
     if (this.store.lastUnsummonedPitStopSeq(runId) > shown) return "proceed";
     // This is the pit stop that repeats: "back to work" returns the run to the
     // same gate on a tree it has already judged, and one proof per pass means

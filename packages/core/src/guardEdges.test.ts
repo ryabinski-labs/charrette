@@ -273,6 +273,11 @@ describe("prompts that change shape with what they are given", () => {
   it("shows the validator the PRD when there is one, and copes when there is not", () => {
     expect(validatorPrompt("build it", "# The PRD", "- t1 merged", "1 file changed")).toContain("# The PRD");
     expect(validatorPrompt("build it", "", "- t1 merged", "1 file changed")).not.toContain("The PRD the plan was built from");
+    // A decision taken at a pit stop outranks the brief it changed (run 614e06d5: Meta moved from live to CSV).
+    const decided = validatorPrompt("Meta live", "", "- t1 merged", "1 file changed", [], [], [{ stop: 15, action: "replan", feedback: "Meta by CSV import" }]);
+    expect(decided).toContain("stop 15 (replan): Meta by CSV import");
+    expect(decided).toContain("the later decision is the intent");
+    expect(validatorPrompt("build it", "", "- t1 merged", "1 file changed")).not.toContain("decided at pit stops");
   });
 
   it("shows the production check the PRD when there is one, and copes when there is not", () => {

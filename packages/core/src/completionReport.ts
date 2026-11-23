@@ -75,6 +75,8 @@ export interface CompletionReport {
     writtenOff: { id: string; text: string; answer: string }[];
     dropped: { id: string; text: string; why: string }[];
     unclaimed: { id: string; text: string }[];
+    /** Requirements the specification gave no scenario, so no task could claim them. */
+    unspecified?: { id: string; text: string }[];
   } | null;
   live: {
     verdict: "worked" | "broken" | "not-run";
@@ -636,7 +638,8 @@ ${
          </div>
          ${report.scope.writtenOff.length ? `<p>Written off:</p>${list(report.scope.writtenOff.map((r) => `${r.id} — ${r.text} — your answer: ${r.answer}`))}` : ""}
          ${report.scope.dropped.length ? `<p class="bad">Dropped without a decision:</p>${list(report.scope.dropped.map((r) => `${r.id} — ${r.text}${r.why ? ` — last seen: ${r.why}` : ""}`))}` : ""}
-         ${report.scope.unclaimed.length ? `<p>Never claimed by any task:</p>${list(report.scope.unclaimed.map((r) => `${r.id} — ${r.text}`))}` : ""}`
+         ${report.scope.unclaimed.length ? `<p>Never claimed by any task:</p>${list(report.scope.unclaimed.map((r) => `${r.id} — ${r.text}`))}` : ""}
+         ${report.scope.unspecified?.length ? `<p>No scenario in the specification, so judged only by the intent check:</p>${list(report.scope.unspecified.map((r) => `${r.id} — ${r.text}`))}` : ""}`
       )
     : ""
 }
