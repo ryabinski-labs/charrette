@@ -188,11 +188,10 @@ describe("a run created today", () => {
  * no postmortem, no dashboard row, for every run ever recorded.
  */
 const OPUS = "claude-opus-5-5";
-/* What the migration pins to: today's default, whatever that is. Written as the
-   schema's own answer rather than as a literal because this file is about the
-   migration, not about which Gemini is current — a literal here turns every
-   reviewer upgrade into four unrelated test failures. */
-const GEMINI = RunConfig.parse({}).models.reviewer;
+/* What the migration writes when a row's reviewer has to change. A literal, and
+   deliberately not the schema's default: following the default is what would
+   move every recorded run the day the default changed. */
+const GEMINI = "gemini-3.8-flash";
 
 /** Writes a run whose stored config names a reviewer today's schema refuses. */
 function runFromBeforeTheReviewerPin(dbPath: string, reviewer: string | null = OPUS): string {
@@ -312,16 +311,30 @@ describe("a run created before the reviewer was pinned to Google", () => {
     cleanup();
   });
 
-  it("moves a run frozen on a superseded Gemini onto the reviewer default", () => {
-    // The case the vendor comparison could not see, and the one an operator
-    // actually hits. `gemini-3.8-flash` and today's default are the same vendor,
-    // so a run frozen on 3.6 kept it through every resume and the only way onto
-    // the current reviewer was to retype `--model reviewer=…` on every resume
-    // line for the rest of that run's life. A plain `charrette resume` picks it up
-    // now — which is the whole point of the migration, and was true of the
-    // Anthropic→Google move only by accident of the vendor changing too.
+  it.each(["gemini-3.8-flash", "gemini-4-neon", "gemini-4-carbon"])("keeps a run on %s when the default is something else", (reviewer) => {
+    // A resume must not change who judges a run. This migration used to rewrite
+    // every row to the current default, so the Gemini 4 default would have
+    // moved every recorded run's reviewer the next time anything opened it.
     const { dbPath, cleanup } = onDisk();
-    const runId = runFromBeforeTheReviewerPin(dbPath, "gemini-3.8-flash");
+    const runId = runFromBeforeTheReviewerPin(dbPath, reviewer);
+
+    expect(new Store(dbPath).getRun(runId)!.config.models.reviewer).toBe(reviewer);
+    cleanup();
+  });
+
+  it("moves a retired Gemini reviewer to its replacement, and reports the move", () => {
+    const { dbPath, cleanup } = onDisk();
+    const runId = runFromBeforeTheReviewerPin(dbPath, "gemini-3.6-flash");
+
+    const store = new Store(dbPath);
+    expect(store.getRun(runId)!.config.models.reviewer).toBe("gemini-3.8-flash");
+    expect(store.retiredAtOpen(runId)).toContainEqual({ role: "reviewer", from: "gemini-3.6-flash", to: "gemini-3.8-flash" });
+    cleanup();
+  });
+
+  it("does not let a recorded reviewer sit below the judging floor", () => {
+    const { dbPath, cleanup } = onDisk();
+    const runId = runFromBeforeTheReviewerPin(dbPath, "gemini-3.5-flash-lite");
 
     expect(new Store(dbPath).getRun(runId)!.config.models.reviewer).toBe(GEMINI);
     cleanup();
@@ -426,7 +439,7 @@ describe("a run created before the interface and heavy rungs existed", () => {
     cleanup();
   });
 
-  it("steps over a config it cannot read, or one with no model table", () => {
+  it("steps over a config it cannot read, and freezes one with no model table", () => {
     const { dbPath, cleanup } = onDisk();
     const runId = runFromBeforeTheWorkerTiers(dbPath);
     const raw = new Store(dbPath);
@@ -447,7 +460,14 @@ describe("a run created before the interface and heavy rungs existed", () => {
     // The constructor runs the migration; a throw here would take every run.
     const store = new Store(dbPath);
     expect((store.db.prepare("SELECT config FROM runs WHERE id = ?").get(runId) as { config: string }).config).toBe("{not json");
-    expect(JSON.parse((store.db.prepare("SELECT config FROM runs WHERE id = ?").get("run-no-models") as { config: string }).config)).toEqual({ budget: { runCapUsd: 1 } });
+    const frozen = JSON.parse((store.db.prepare("SELECT config FROM runs WHERE id = ?").get("run-no-models") as { config: string }).config) as {
+      budget: unknown;
+      models: Record<string, string>;
+    };
+    expect(frozen.budget).toEqual({ runCapUsd: 1 });
+    // It read every role from the defaults, so it keeps what those were.
+    expect(frozen.models.workerHeavy).toBe(GEMINI);
+    expect(frozen.models.workerUi).toBe(OPUS_UI);
     store.db.close();
     cleanup();
   });
@@ -530,6 +550,114 @@ describe("a run frozen on a model that has since been retired", () => {
     fix.db.prepare("UPDATE runs SET config = ? WHERE id = ?").run(JSON.stringify({ models: null }), runId);
     fix.db.close();
     expect(new Store(dbPath).retiredAtOpen(runId)).toEqual([]);
+    cleanup();
+  });
+});
+
+/**
+ * The Gemini 4 defaults, which must reach new runs and no recorded one.
+ *
+ * `planner`, `pm` and `spec` can be absent from an old row, and an absent key
+ * reads as today's default, so a parked run would come back on a different model
+ * at up to twice the price.
+ */
+describe("a run recorded before the Gemini 4 defaults", () => {
+  const MOVED = ["planner", "workerHeavy", "reviewer", "pm", "spec"] as const;
+
+  /** Writes a run, then replaces its stored config with whatever `edit` returns. */
+  function recorded(dbPath: string, edit: (stored: { models: Record<string, string> }) => unknown): string {
+    const store = new Store(dbPath);
+    store.createRun({
+      id: "run-flash",
+      repoPath: "/tmp/x",
+      assignment: "a",
+      state: "PLANNING",
+      prdPath: null,
+      planHash: null,
+      integrationBranch: "charrette/run-flash",
+      config: RunConfig.parse({}),
+    });
+    const row = store.db.prepare("SELECT config FROM runs WHERE id = ?").get("run-flash") as { config: string };
+    const next = edit(JSON.parse(row.config) as { models: Record<string, string> });
+    store.db.prepare("UPDATE runs SET config = ? WHERE id = ?").run(JSON.stringify(next), "run-flash");
+    store.db.close();
+    return "run-flash";
+  }
+
+  const rawConfig = (store: Store, id: string) => (store.db.prepare("SELECT config FROM runs WHERE id = ?").get(id) as { config: string }).config;
+
+  it("keeps all five roles on 3.8 Flash through a reopen", () => {
+    const { dbPath, cleanup } = onDisk();
+    const runId = recorded(dbPath, (stored) => {
+      for (const role of MOVED) stored.models[role] = GEMINI;
+      return stored;
+    });
+
+    new Store(dbPath).db.close();
+    const store = new Store(dbPath);
+    const models = store.getRun(runId)!.config.models;
+    for (const role of MOVED) expect(models[role]).toBe(GEMINI);
+    store.db.close();
+    cleanup();
+  });
+
+  it("stamps 3.8 Flash on the roles an old row left out, rather than the new default", () => {
+    const { dbPath, cleanup } = onDisk();
+    const runId = recorded(dbPath, (stored) => {
+      for (const role of ["planner", "pm", "spec"]) delete stored.models[role];
+      return stored;
+    });
+
+    const store = new Store(dbPath);
+    const models = store.getRun(runId)!.config.models;
+    expect([models.planner, models.pm, models.spec]).toEqual([GEMINI, GEMINI, GEMINI]);
+    const once = rawConfig(store, runId);
+    store.db.close();
+    const again = new Store(dbPath);
+    expect(rawConfig(again, runId)).toBe(once);
+    again.db.close();
+    cleanup();
+  });
+
+  it("keeps a row with no routing table on the whole table it was reading", () => {
+    const { dbPath, cleanup } = onDisk();
+    const runId = recorded(dbPath, () => ({ budget: { runCapUsd: 1 } }));
+
+    const store = new Store(dbPath);
+    const models = store.getRun(runId)!.config.models;
+    for (const role of MOVED) expect(models[role]).toBe(GEMINI);
+    expect(models.worker).toBe(RunConfig.parse({}).models.worker);
+    expect(models.workerUi).toBe(OPUS_UI);
+    const once = rawConfig(store, runId);
+    store.db.close();
+    const again = new Store(dbPath);
+    expect(rawConfig(again, runId)).toBe(once);
+    again.db.close();
+    cleanup();
+  });
+
+  it.each([["null"], ["5"], ['{"models":null}'], ['{"models":"x"}']])("steps over the unusable config %s", (config) => {
+    const { dbPath, cleanup } = onDisk();
+    const runId = recorded(dbPath, (stored) => stored);
+    const raw = new Store(dbPath);
+    raw.db.prepare("UPDATE runs SET config = ? WHERE id = ?").run(config, runId);
+    raw.db.close();
+
+    const store = new Store(dbPath);
+    expect(rawConfig(store, runId)).toBe(config);
+    store.db.close();
+    cleanup();
+  });
+
+  it("leaves a run created today on the Gemini 4 defaults", () => {
+    const { dbPath, cleanup } = onDisk();
+    const runId = recorded(dbPath, (stored) => stored);
+
+    const store = new Store(dbPath);
+    const models = store.getRun(runId)!.config.models;
+    expect([models.planner, models.spec, models.workerHeavy]).toEqual(["gemini-4-neon", "gemini-4-neon", "gemini-4-neon"]);
+    expect([models.reviewer, models.pm]).toEqual(["gemini-4-hydrogen", "gemini-4-hydrogen"]);
+    store.db.close();
     cleanup();
   });
 });

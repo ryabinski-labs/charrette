@@ -48,7 +48,8 @@ export const PRICES: Record<string, { in: number; out: number }> = {
   // row would under-charge silently, where an absent one is caught by the
   // top-tier fallback below and merely stops the run early.
   "gemini-3.5-flash-lite": { in: 0.3, out: 2.5 },
-  // `models.reviewer` runs here. Flat, unlike the Pro tiers: Google prices Pro
+  // The default for five roles until Gemini 4, and still what runs recorded
+  // then are frozen on. Flat, unlike the Pro tiers: Google prices Pro
   // in two bands by prompt size and this table holds one rate per model, so a
   // Pro row would have to carry the >200k band to stay on the over-charging
   // side. Flash has no such band.
@@ -56,8 +57,8 @@ export const PRICES: Record<string, { in: number; out: number }> = {
   // Every Flash row carries the *standing* rate, not the one being charged today:
   // Google lists $0.75/$3.75 on each of them through 31 Dec 2026 and $1.50/$7.50
   // from 1 Jan 2027. A table holding the promotional half would silently start
-  // under-charging on New Year's Day — for the one model every pit stop of every
-  // run spends — which is the direction this table exists to never go.
+  // under-charging on New Year's Day, which is the direction this table exists
+  // to never go.
   "gemini-3.8-flash": { in: 1.5, out: 7.5 },
   // Gemini 4, Standard tier (aistudio.google.com/docs/pricing, read 2026-11-23).
   // Carbon carries its standing rate: Google charges $2/$10 through 30 Nov 2026

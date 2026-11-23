@@ -97,11 +97,13 @@ your own attention, against the repo rather than against the task count.
   `CLAUDE_CODE_OAUTH_TOKEN` (Claude Pro/Max — run `claude setup-token`) or
   `ANTHROPIC_API_KEY`
 - Optional: `GITHUB_TOKEN` (fine-grained, single repo: contents/issues/PRs write) + `CHARRETTE_GITHUB_REPO=owner/repo`
-- `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) — **required**, not optional. The
-  planner, the specification, the pit-stop PM and the escalation ceiling default
-  to `gemini-3.8-flash`, and the pit stop's `reviewer` is pinned to Gemini so
-  that the agent judging the work is not from the family that wrote it; a run
-  refuses to start without the key
+- `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) — **required**, not optional, and on
+  Google's **paid API tier** for the default routing, because Gemini 4 Neon is
+  not on the free tier. The planner, the specification and the escalation
+  ceiling default to `gemini-4-neon`. The pit-stop PM defaults to
+  `gemini-4-hydrogen`, and so does the pit stop's `reviewer`, which is pinned to
+  Gemini so that the agent judging the work is not from the family that wrote
+  it. A run refuses to start without the key
 - `DEEPSEEK_API_KEY` — **required**, not optional. The build and tool-driving
   roles (`worker`, `workerLight`, `integrator`, `advisor`, `demo`, `live`,
   `repair`, `skillsmith`) default to `deepseek-flash`; a run refuses to start

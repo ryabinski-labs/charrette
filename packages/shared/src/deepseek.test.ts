@@ -23,7 +23,7 @@ describe("REQ-001 — a run config that omits the worker models defaults worker 
     const models = RunConfig.parse({}).models;
 
     expect(models.workerUi).toBe("claude-opus-5-5");
-    expect(models.workerHeavy).toBe("gemini-3.8-flash");
+    expect(models.workerHeavy).toBe("gemini-4-neon");
   });
 
   it("lets a run override the DeepSeek default without touching the rest", () => {

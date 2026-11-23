@@ -569,7 +569,7 @@ describe("setting a model's effort while the run is going", () => {
     const { controller, store } = withRun();
     expect(controller.setModelEffort("r1", "gemini-4-neon", "xhigh")).toEqual({
       ok: true,
-      message: "gemini-4-neon effort: default → xhigh, for worker, demo. The next session uses it.",
+      message: "gemini-4-neon effort: default → xhigh, for planner, worker, workerHeavy, demo, spec. The next session uses it.",
     });
     expect(store.getRun("r1")!.config.effort).toEqual({ "gemini-4-neon": "xhigh" });
   });

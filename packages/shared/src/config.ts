@@ -63,9 +63,14 @@ export type AgentEnvConfig = z.infer<typeof AgentEnvConfig>;
  *   `reasoning_content`. The unversioned `deepseek-flash` id is deliberate:
  *   DeepSeek serves the current checkpoint behind it, and the dated names are
  *   legacy aliases.
- * - **Gemini 3.8 Flash** ($1.50/$7.50, the standing rate) runs the roles that
- *   read a lot and decide: the planner, the specification, the pit-stop PM and
- *   the escalation ceiling. It is also the pinned pit-stop reviewer.
+ * - **Gemini 4 Neon** ($3/$15) runs planning and complex work: the planner, the
+ *   specification and the escalation ceiling. Google's model guide names it for
+ *   multi-file refactoring and repository-wide debugging.
+ * - **Gemini 4 Hydrogen** ($1.50/$7.50) runs the everyday Gemini roles: the
+ *   pit-stop PM and the pinned pit-stop reviewer. The same guide names it as the
+ *   upgrade from 3.8 Flash.
+ * - **Gemini 4 Carbon** is a manual choice for the hardest checks, and no role
+ *   defaults to it. `gemini-3.8-flash` stays selectable and is not retired.
  * - **Claude Opus 5.5 and Sonnet 5.5** stay on the roles `PINNED_ROLES` holds
  *   to Anthropic (intake, QA, prod) and on interface work, where the feedback
  *   loop is a design playbook in and a screenshot-reading grader out.
@@ -76,7 +81,8 @@ export type AgentEnvConfig = z.infer<typeof AgentEnvConfig>;
  * briefing with every continuation (runController.ts).
  */
 const DEEPSEEK = "deepseek-flash";
-const GEMINI = "gemini-3.8-flash";
+const NEON = "gemini-4-neon";
+const HYDROGEN = "gemini-4-hydrogen";
 const OPUS = "claude-opus-5-5";
 const SONNET = "claude-sonnet-5-5";
 
@@ -90,7 +96,7 @@ export const ModelRoutingShape = z.object({
    * under-recognised the work, built anyway. Point it at `claude-fable-5-2` when
    * a run is large enough that the plan is where the risk is.
    */
-  planner: z.string().default(GEMINI),
+  planner: z.string().default(NEON),
   worker: z.string().default(DEEPSEEK),
   /**
    * The worker model for tasks the light-tier rule admits. See modelTier.ts for
@@ -135,13 +141,14 @@ export const ModelRoutingShape = z.object({
    * green. A task *climbs* here after `heavyTierAfterRejections` iterations
    * were sent back, whatever tier it started on.
    *
-   * Gemini by default, which makes the ladder a change of vendor rather than of
-   * price: a task DeepSeek keeps failing is handed to a different model family
-   * with a different set of blind spots. Point it at `claude-fable-5-2` for the
+   * Gemini 4 Neon by default, which makes the ladder a change of vendor as well
+   * as a step up: a task DeepSeek keeps failing is handed to a different model
+   * family with a different set of blind spots, and a worker moved to Hydrogen
+   * still climbs to a stronger model. Point it at `claude-fable-5-2` for the
    * most capable model the charrette can drive. Set it to `models.worker` to
    * switch the tier off without losing the measurement.
    */
-  workerHeavy: z.string().default(GEMINI),
+  workerHeavy: z.string().default(NEON),
   /** Decides whether a task merges. Pinned to Anthropic, above the Haiku floor. */
   qa: z.string().default(SONNET),
   /**
@@ -211,14 +218,14 @@ export const ModelRoutingShape = z.object({
    * to raise the one the pit stop exists to buy. Pinned, not merely defaulted —
    * see `PINNED_ROLES` in providers.ts.
    */
-  reviewer: z.string().default(GEMINI),
+  reviewer: z.string().default(HYDROGEN),
   /**
    * Decides what the run does next at a pit stop, having read the demo and
    * every reviewer. It is the only agent in the charrette whose output redirects
    * or re-plans the remaining work on its own; point it at `claude-fable-5-2`
    * for the most careful reading of that decision.
    */
-  pm: z.string().default(GEMINI),
+  pm: z.string().default(HYDROGEN),
   /**
    * Writes a playbook when a task matched nothing in the operator's skill
    * collection (`skillForge`). The blast radius is the thing to watch: a skill
@@ -234,7 +241,7 @@ export const ModelRoutingShape = z.object({
    * hardest reading task in the run. Point it at `claude-fable-5-2` when the
    * brief is long or ambiguous.
    */
-  spec: z.string().default(GEMINI),
+  spec: z.string().default(NEON),
 });
 
 /**

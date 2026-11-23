@@ -191,11 +191,11 @@ describe("the run config refuses a routing it cannot honour", () => {
     // PINNED_ROLES for why a same-family reviewer is the failure mode.
     expect(ModelRouting.parse({})).toEqual({
       intake: "claude-opus-5-5",
-      planner: "gemini-3.8-flash",
+      planner: "gemini-4-neon",
       worker: "deepseek-flash",
       workerLight: "deepseek-flash",
       workerUi: "claude-opus-5-5",
-      workerHeavy: "gemini-3.8-flash",
+      workerHeavy: "gemini-4-neon",
       qa: "claude-sonnet-5-5",
       integrator: "deepseek-flash",
       advisor: "deepseek-flash",
@@ -203,10 +203,10 @@ describe("the run config refuses a routing it cannot honour", () => {
       demo: "deepseek-flash",
       live: "deepseek-flash",
       repair: "deepseek-flash",
-      reviewer: "gemini-3.8-flash",
-      pm: "gemini-3.8-flash",
+      reviewer: "gemini-4-hydrogen",
+      pm: "gemini-4-hydrogen",
       skillsmith: "deepseek-flash",
-      spec: "gemini-3.8-flash",
+      spec: "gemini-4-neon",
     });
   });
 });
