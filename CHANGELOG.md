@@ -7,6 +7,21 @@ on. Before then, minor versions may break things.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A blocked run can always get back to work.** Three closing-gate bugs
+  together held run 614e06d5 BLOCKED with every pit-stop answer leading back
+  to the same block:
+  - A requirement the specification gave no scenario is now `unspecified`
+    rather than `unclaimed`. Tasks claim requirements only through scenarios,
+    so it could never be claimed and the gate could never open. It is still
+    reported and still judged by the intent check.
+  - Resuming a BLOCKED run opens the closing pit stop again, so the operator
+    can redirect or re-plan. Before, the resume re-checked the gates, skipped
+    the stop because one had already been shown, and blocked again.
+  - The intent check now sees the operator's worded pit-stop decisions and
+    judges the tree against them, not against the brief they replaced.
+
 ### Security
 
 - **Agents no longer inherit every key charrette holds.** A session is built

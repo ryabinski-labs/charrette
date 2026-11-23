@@ -131,6 +131,7 @@ function scopeOf(store: Store, runId: string): CompletionReport["scope"] {
     writtenOff: ledger.entries.filter((e) => e.status === "written-off").map((e) => ({ id: e.id, text: e.text, answer: e.answer })),
     dropped: ledger.dropped.map((e) => ({ id: e.id, text: e.text, why: e.claimants.map((c) => `${c.id} ${c.state}${c.why ? ` (${c.why})` : ""}`).join("; ") })),
     unclaimed: ledger.unclaimed.map((e) => ({ id: e.id, text: e.text })),
+    unspecified: ledger.unspecified.map((e) => ({ id: e.id, text: e.text })),
   };
 }
 
